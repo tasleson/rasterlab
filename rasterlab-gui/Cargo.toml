@@ -16,6 +16,7 @@ eframe       = { workspace = true }
 egui         = { workspace = true }
 serde_json   = { workspace = true }
 anyhow       = { workspace = true }
+rayon        = { workspace = true }
 
 # Native file dialogs (open/save)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

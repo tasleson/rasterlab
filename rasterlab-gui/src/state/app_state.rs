@@ -4,7 +4,7 @@ use egui::Context;
 use rasterlab_core::{
     formats::FormatRegistry,
     ops::{BlackAndWhiteOp, CropOp, HistogramData, RotateOp, SharpenOp},
-    pipeline::{EditEntry, EditPipeline},
+    pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
     Image,
@@ -16,7 +16,8 @@ use rasterlab_core::{
 
 enum BgMessage {
     ImageLoaded { path: std::path::PathBuf, image: Image },
-    RenderComplete(Arc<Image>),
+    /// Render finished; histogram was also computed in the same thread.
+    RenderComplete(Arc<Image>, HistogramData),
     Error(String),
 }
 
@@ -94,8 +95,8 @@ impl AppState {
                     // Kick off initial render
                     self.request_render();
                 }
-                BgMessage::RenderComplete(img) => {
-                    self.histogram = Some(HistogramData::compute(&img));
+                BgMessage::RenderComplete(img, hist) => {
+                    self.histogram = Some(hist);
                     self.rendered  = Some(img);
                     self.loading   = false;
                     self.status    = "Ready".into();
@@ -245,10 +246,9 @@ impl AppState {
             .name("rasterlab-render".into())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let result = render_in_thread(source, ops_json);
-                let msg = match result {
-                    Ok(img)  => BgMessage::RenderComplete(Arc::new(img)),
-                    Err(e)   => BgMessage::Error(e),
+                let msg = match render_in_thread(source, ops_json) {
+                    Ok((img, hist)) => BgMessage::RenderComplete(Arc::new(img), hist),
+                    Err(e)          => BgMessage::Error(e),
                 };
                 let _ = tx.send(msg);
                 ctx.request_repaint();
@@ -271,18 +271,20 @@ impl AppState {
 fn render_in_thread(
     source:   Arc<Image>,
     ops_json: Vec<serde_json::Value>,
-) -> Result<Image, String> {
+) -> Result<(Image, HistogramData), String> {
     let mut current = source.deep_clone();
 
     for json_val in ops_json {
         // Deserialise operation (only parameters, no pixel data)
-        let entry: EditEntry = serde_json::from_value(json_val)
+        let op: Box<dyn Operation> = serde_json::from_value(json_val)
             .map_err(|e| format!("Deserialise op: {}", e))?;
 
-        current = entry.operation
+        current = op
             .apply(&current)
-            .map_err(|e| format!("Op '{}' failed: {}", entry.operation.name(), e))?;
+            .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?;
     }
 
-    Ok(current)
+    // Compute histogram in this thread so the main thread never does heavy work.
+    let hist = HistogramData::compute(&current);
+    Ok((current, hist))
 }

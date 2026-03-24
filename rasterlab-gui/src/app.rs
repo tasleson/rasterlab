@@ -13,9 +13,9 @@ pub struct RasterLabApp {
 }
 
 impl RasterLabApp {
-    pub fn new(_cc: &eframe::CreationContext) -> Self {
+    pub fn new(cc: &eframe::CreationContext) -> Self {
         Self {
-            state:  AppState::new(),
+            state:  AppState::new(cc.egui_ctx.clone()),
             canvas: CanvasState::default(),
         }
     }
@@ -69,6 +69,9 @@ impl RasterLabApp {
 
 impl eframe::App for RasterLabApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Drain background thread results (file load, render complete, errors)
+        self.state.poll_background();
+
         self.handle_keyboard(ctx);
 
         // ── Menu bar ─────────────────────────────────────────────────────
@@ -112,6 +115,9 @@ impl eframe::App for RasterLabApp {
         // ── Status bar ───────────────────────────────────────────────────
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                if self.state.loading {
+                    ui.spinner();
+                }
                 ui.label(&self.state.status);
 
                 if let Some(img) = &self.state.rendered {

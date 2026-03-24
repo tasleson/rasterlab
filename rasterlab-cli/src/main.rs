@@ -57,6 +57,12 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    // Rayon worker threads default to 8 MiB — insufficient for image processing.
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(32 * 1024 * 1024)
+        .build_global()
+        .expect("failed to build rayon thread pool");
+
     let cli = Cli::parse();
     match cli.command {
         Commands::Process(args) => commands::process::run(args),
