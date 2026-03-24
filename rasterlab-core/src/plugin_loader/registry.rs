@@ -58,10 +58,9 @@ impl PluginRegistry {
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let is_plugin = matches!(ext, "so" | "dylib" | "dll");
-            if is_plugin
-                && let Err(e) = self.load_plugin(&path) {
-                    errors.push((path, e));
-                }
+            if is_plugin && let Err(e) = self.load_plugin(&path) {
+                errors.push((path, e));
+            }
         }
         errors
     }

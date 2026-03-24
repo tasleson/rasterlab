@@ -40,9 +40,10 @@ pub fn detect_format(data: &[u8], hint_path: Option<&Path>) -> Option<String> {
         if let Some(ext) = hint_path
             .and_then(|p| p.extension())
             .and_then(|e| e.to_str())
-            && ext.eq_ignore_ascii_case("nef") {
-                return Some("nef".into());
-            }
+            && ext.eq_ignore_ascii_case("nef")
+        {
+            return Some("nef".into());
+        }
         return Some("tiff".into());
     }
 

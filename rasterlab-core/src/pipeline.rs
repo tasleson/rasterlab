@@ -165,9 +165,10 @@ impl EditPipeline {
     pub fn render(&mut self) -> RasterResult<Arc<Image>> {
         // Cache hit
         if let Some((c, ref img)) = self.cache
-            && c == self.cursor {
-                return Ok(Arc::clone(img));
-            }
+            && c == self.cursor
+        {
+            return Ok(Arc::clone(img));
+        }
 
         let mut current = self.source.deep_clone();
         for entry in &self.ops[..self.cursor] {
@@ -276,8 +277,9 @@ impl EditPipeline {
 
     fn invalidate_cache_from(&mut self, from_index: usize) {
         if let Some((cached_cursor, _)) = self.cache
-            && cached_cursor > from_index {
-                self.cache = None;
-            }
+            && cached_cursor > from_index
+        {
+            self.cache = None;
+        }
     }
 }
