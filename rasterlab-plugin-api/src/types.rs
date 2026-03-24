@@ -24,11 +24,11 @@ pub enum CPixelFormat {
 /// `data` must point to `width * height * 4` bytes when `format == Rgba8`.
 #[repr(C)]
 pub struct CImage {
-    pub width:  u32,
+    pub width: u32,
     pub height: u32,
     pub format: CPixelFormat,
     /// Pointer to pixel bytes.  Owned by whoever allocated it.
-    pub data:   *mut u8,
+    pub data: *mut u8,
     /// Byte length of the `data` buffer (`width * height * bytes_per_pixel`).
     pub data_len: usize,
 }
@@ -37,11 +37,11 @@ pub struct CImage {
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum COperationStatus {
-    Ok                  =  0,
-    InvalidParams       = -1,
-    AllocationFailed    = -2,
-    InternalError       = -3,
-    ApiVersionMismatch  = -4,
+    Ok = 0,
+    InvalidParams = -1,
+    AllocationFailed = -2,
+    InternalError = -3,
+    ApiVersionMismatch = -4,
 }
 
 /// Free a `CImage.data` buffer that was allocated inside a plugin.
@@ -54,7 +54,9 @@ pub unsafe extern "C" fn rasterlab_free_image_data(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
         // Reconstruct the Vec so Rust's allocator frees the memory correctly.
         // SAFETY: ptr was allocated by Vec<u8> with capacity=len in alloc_cimage.
-        unsafe { let _ = Vec::from_raw_parts(ptr, len, len); }
+        unsafe {
+            let _ = Vec::from_raw_parts(ptr, len, len);
+        }
     }
 }
 
@@ -63,11 +65,11 @@ pub unsafe extern "C" fn rasterlab_free_image_data(ptr: *mut u8, len: usize) {
 pub struct CPluginMetadata {
     // Safety: fields are pointers to static string literals (read-only, never mutated).
     /// Plugin display name (e.g. "Sepia Tone").
-    pub name:        *const c_char,
+    pub name: *const c_char,
     /// SemVer string (e.g. "1.0.0").
-    pub version:     *const c_char,
+    pub version: *const c_char,
     /// Author / vendor string.
-    pub author:      *const c_char,
+    pub author: *const c_char,
     /// Short description shown in the plugin manager UI.
     pub description: *const c_char,
 }

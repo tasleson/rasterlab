@@ -1,4 +1,4 @@
-use image::{codecs::jpeg::JpegEncoder, ExtendedColorType};
+use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
 
 use crate::{
     error::{RasterError, RasterResult},
@@ -18,11 +18,8 @@ impl FormatHandler for JpegHandler {
     }
 
     fn decode(&self, data: &[u8]) -> RasterResult<Image> {
-        let dyn_image = image::load_from_memory_with_format(
-            data,
-            image::ImageFormat::Jpeg,
-        )
-        .map_err(|e| RasterError::decode("jpeg", e.to_string()))?;
+        let dyn_image = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
+            .map_err(|e| RasterError::decode("jpeg", e.to_string()))?;
 
         let rgba = dyn_image.to_rgba8();
         let (w, h) = rgba.dimensions();

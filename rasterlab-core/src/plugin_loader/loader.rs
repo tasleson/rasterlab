@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use libloading::Library;
 use rasterlab_plugin_api::{
-    vtable::{OperationVTable, PluginInitFn, PluginVTable},
-    types::{CImage, COperationStatus},
     PLUGIN_API_VERSION, PLUGIN_INIT_SYMBOL,
+    types::{CImage, COperationStatus},
+    vtable::{OperationVTable, PluginInitFn, PluginVTable},
 };
 
 use crate::{
@@ -33,8 +33,8 @@ use crate::{
 /// Keeps the `Library` alive so that function pointers remain valid.
 pub struct DynPlugin {
     /// Must be kept alive — drop order: vtable first, then library.
-    vtable:  *mut PluginVTable,
-    _lib:    Arc<Library>,
+    vtable: *mut PluginVTable,
+    _lib: Arc<Library>,
     metadata: PluginMetadata,
 }
 
@@ -71,7 +71,7 @@ impl Plugin for DynPlugin {
                     } else {
                         Some(Box::new(DynOperation {
                             vtable: op_ptr,
-                            _lib:   Arc::clone(&self._lib),
+                            _lib: Arc::clone(&self._lib),
                         }) as Box<dyn Operation>)
                     }
                 })
@@ -92,7 +92,7 @@ impl Plugin for DynPlugin {
 
 struct DynOperation {
     vtable: *mut OperationVTable,
-    _lib:   Arc<Library>,
+    _lib: Arc<Library>,
 }
 
 // SAFETY: same reasoning as DynPlugin.
@@ -135,9 +135,13 @@ impl<'de> serde::Deserialize<'de> for DynOperation {
 impl Operation for DynOperation {
     fn name(&self) -> &'static str {
         unsafe {
-            if self.vtable.is_null() { return "unknown"; }
+            if self.vtable.is_null() {
+                return "unknown";
+            }
             let ptr = (*self.vtable).name;
-            if ptr.is_null() { return "unknown"; }
+            if ptr.is_null() {
+                return "unknown";
+            }
             // SAFETY: plugin guarantees null-terminated UTF-8 static lifetime string
             CStr::from_ptr(ptr).to_str().unwrap_or("unknown")
         }
@@ -147,10 +151,10 @@ impl Operation for DynOperation {
         unsafe {
             // Build CImage from our Image
             let src = CImage {
-                width:    image.width,
-                height:   image.height,
-                format:   rasterlab_plugin_api::types::CPixelFormat::Rgba8,
-                data:     image.data.as_ptr() as *mut u8, // plugin must not free this
+                width: image.width,
+                height: image.height,
+                format: rasterlab_plugin_api::types::CPixelFormat::Rgba8,
+                data: image.data.as_ptr() as *mut u8, // plugin must not free this
                 data_len: image.data.len(),
             };
 
@@ -184,9 +188,13 @@ impl Operation for DynOperation {
 
     fn describe(&self) -> String {
         unsafe {
-            if self.vtable.is_null() { return "Plugin operation".into(); }
+            if self.vtable.is_null() {
+                return "Plugin operation".into();
+            }
             let desc_ptr = ((*self.vtable).describe)(self.vtable);
-            if desc_ptr.is_null() { return self.name().to_string(); }
+            if desc_ptr.is_null() {
+                return self.name().to_string();
+            }
             CStr::from_ptr(desc_ptr)
                 .to_str()
                 .unwrap_or("Plugin operation")
@@ -218,9 +226,8 @@ impl PluginLoader {
         };
 
         let vtable_ptr: *mut PluginVTable = unsafe {
-            let init_fn: libloading::Symbol<PluginInitFn> = lib
-                .get(PLUGIN_INIT_SYMBOL)
-                .map_err(|e| {
+            let init_fn: libloading::Symbol<PluginInitFn> =
+                lib.get(PLUGIN_INIT_SYMBOL).map_err(|e| {
                     RasterError::Plugin(format!(
                         "'{}' does not export rasterlab_plugin_init: {}",
                         path.display(),
@@ -252,23 +259,20 @@ impl PluginLoader {
                 if p.is_null() {
                     String::new()
                 } else {
-                    CStr::from_ptr(p)
-                        .to_str()
-                        .unwrap_or("")
-                        .to_owned()
+                    CStr::from_ptr(p).to_str().unwrap_or("").to_owned()
                 }
             };
             PluginMetadata {
-                name:        s(m.name),
-                version:     s(m.version),
-                author:      s(m.author),
+                name: s(m.name),
+                version: s(m.version),
+                author: s(m.author),
                 description: s(m.description),
             }
         };
 
         Ok(Box::new(DynPlugin {
             vtable: vtable_ptr,
-            _lib:   Arc::new(lib),
+            _lib: Arc::new(lib),
             metadata,
         }))
     }

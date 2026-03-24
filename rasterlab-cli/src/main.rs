@@ -34,8 +34,8 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name    = "rasterlab",
-    about   = "High-performance non-destructive image processor",
+    name = "rasterlab",
+    about = "High-performance non-destructive image processor",
     version,
     author
 )]
@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Process(args) => commands::process::run(args),
-        Commands::Batch(args)   => commands::batch::run(args),
-        Commands::Info(args)    => commands::info::run(args),
+        Commands::Batch(args) => commands::batch::run(args),
+        Commands::Info(args) => commands::info::run(args),
     }
 }

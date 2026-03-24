@@ -1,11 +1,7 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    error::RasterResult,
-    image::Image,
-    traits::operation::Operation,
-};
+use crate::{error::RasterResult, image::Image, traits::operation::Operation};
 
 /// How to rotate the image.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,32 +32,52 @@ pub struct RotateOp {
 }
 
 impl RotateOp {
-    pub fn cw90()  -> Self { Self { mode: RotateMode::Cw90,  background: [0; 4] } }
-    pub fn cw180() -> Self { Self { mode: RotateMode::Cw180, background: [0; 4] } }
-    pub fn cw270() -> Self { Self { mode: RotateMode::Cw270, background: [0; 4] } }
+    pub fn cw90() -> Self {
+        Self {
+            mode: RotateMode::Cw90,
+            background: [0; 4],
+        }
+    }
+    pub fn cw180() -> Self {
+        Self {
+            mode: RotateMode::Cw180,
+            background: [0; 4],
+        }
+    }
+    pub fn cw270() -> Self {
+        Self {
+            mode: RotateMode::Cw270,
+            background: [0; 4],
+        }
+    }
     pub fn arbitrary(degrees: f32) -> Self {
-        Self { mode: RotateMode::Arbitrary(degrees), background: [0; 4] }
+        Self {
+            mode: RotateMode::Arbitrary(degrees),
+            background: [0; 4],
+        }
     }
 }
 
 #[typetag::serde]
 impl Operation for RotateOp {
-    fn name(&self) -> &'static str { "rotate" }
+    fn name(&self) -> &'static str {
+        "rotate"
+    }
 
     fn apply(&self, image: &Image) -> RasterResult<Image> {
         match self.mode {
-            RotateMode::Cw90          => rotate_cw90(image),
-            RotateMode::Cw180         => rotate_180(image),
-            RotateMode::Cw270         => rotate_cw270(image),
-            RotateMode::Arbitrary(d)  => rotate_arbitrary(image, d, self.background),
+            RotateMode::Cw90 => rotate_cw90(image),
+            RotateMode::Cw180 => rotate_180(image),
+            RotateMode::Cw270 => rotate_cw270(image),
+            RotateMode::Arbitrary(d) => rotate_arbitrary(image, d, self.background),
         }
     }
 
     fn describe(&self) -> String {
         match self.mode {
-            RotateMode::Cw90         => "Rotate 90° CW".into(),
-            RotateMode::Cw180        => "Rotate 180°".into(),
-            RotateMode::Cw270        => "Rotate 270° CW".into(),
+            RotateMode::Cw90 => "Rotate 90° CW".into(),
+            RotateMode::Cw180 => "Rotate 180°".into(),
+            RotateMode::Cw270 => "Rotate 270° CW".into(),
             RotateMode::Arbitrary(d) => format!("Rotate {:.2}°", d),
         }
     }
@@ -85,8 +101,8 @@ fn rotate_cw90(src: &Image) -> RasterResult<Image> {
         .enumerate()
         .for_each(|(ny, row)| {
             for nx in 0..new_w {
-                let ox = ny as u32;              // input col = output row
-                let oy = (h - 1) - nx as u32;   // input row = h-1-output_col
+                let ox = ny as u32; // input col = output row
+                let oy = (h - 1) - nx as u32; // input row = h-1-output_col
                 let src_off = (oy as usize * w as usize + ox as usize) * 4;
                 let dst_off = nx * 4;
                 row[dst_off..dst_off + 4].copy_from_slice(&src.data[src_off..src_off + 4]);
@@ -102,7 +118,7 @@ fn rotate_cw90(src: &Image) -> RasterResult<Image> {
 fn rotate_180(src: &Image) -> RasterResult<Image> {
     let mut out = src.deep_clone();
     let total = out.width as usize * out.height as usize;
-    let half  = total / 2;
+    let half = total / 2;
 
     for i in 0..half {
         let j = total - 1 - i;
@@ -133,8 +149,8 @@ fn rotate_cw270(src: &Image) -> RasterResult<Image> {
         .enumerate()
         .for_each(|(ny, row)| {
             for nx in 0..new_w {
-                let ox = (w - 1) - ny as u32;  // input col = w-1-output_row
-                let oy = nx as u32;             // input row = output_col
+                let ox = (w - 1) - ny as u32; // input col = w-1-output_row
+                let oy = nx as u32; // input row = output_col
                 let src_off = (oy as usize * w as usize + ox as usize) * 4;
                 let dst_off = nx * 4;
                 row[dst_off..dst_off + 4].copy_from_slice(&src.data[src_off..src_off + 4]);
@@ -219,7 +235,7 @@ mod tests {
     fn rotate_cw90_swaps_dimensions() {
         let src = solid(8, 4, [1, 2, 3, 255]);
         let out = RotateOp::cw90().apply(&src).unwrap();
-        assert_eq!(out.width,  4);
+        assert_eq!(out.width, 4);
         assert_eq!(out.height, 8);
     }
 
@@ -228,7 +244,7 @@ mod tests {
         let src = solid(8, 8, [10, 20, 30, 255]);
         let out = RotateOp::arbitrary(0.0).apply(&src).unwrap();
         // 0° rotation: bounding box should remain 8×8
-        assert_eq!(out.width,  8);
+        assert_eq!(out.width, 8);
         assert_eq!(out.height, 8);
         // Centre pixel unchanged
         assert_eq!(out.pixel(4, 4), [10, 20, 30, 255]);

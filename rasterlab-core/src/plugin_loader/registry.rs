@@ -45,19 +45,23 @@ impl PluginRegistry {
     ///
     /// Errors from individual plugins are logged and skipped; they do not abort
     /// the scan.
-    pub fn load_directory(&self, dir: &Path) -> Vec<(std::path::PathBuf, crate::error::RasterError)> {
+    pub fn load_directory(
+        &self,
+        dir: &Path,
+    ) -> Vec<(std::path::PathBuf, crate::error::RasterError)> {
         let mut errors = Vec::new();
-        let Ok(entries) = std::fs::read_dir(dir) else { return errors; };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return errors;
+        };
 
         for entry in entries.flatten() {
             let path = entry.path();
-            let ext  = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             let is_plugin = matches!(ext, "so" | "dylib" | "dll");
-            if is_plugin {
-                if let Err(e) = self.load_plugin(&path) {
+            if is_plugin
+                && let Err(e) = self.load_plugin(&path) {
                     errors.push((path, e));
                 }
-            }
         }
         errors
     }

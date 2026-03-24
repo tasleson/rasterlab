@@ -1,6 +1,6 @@
 use image::{
-    codecs::png::{CompressionType, FilterType, PngEncoder},
     ExtendedColorType, ImageEncoder,
+    codecs::png::{CompressionType, FilterType, PngEncoder},
 };
 
 use crate::{
@@ -21,11 +21,8 @@ impl FormatHandler for PngHandler {
     }
 
     fn decode(&self, data: &[u8]) -> RasterResult<Image> {
-        let dyn_image = image::load_from_memory_with_format(
-            data,
-            image::ImageFormat::Png,
-        )
-        .map_err(|e| RasterError::decode("png", e.to_string()))?;
+        let dyn_image = image::load_from_memory_with_format(data, image::ImageFormat::Png)
+            .map_err(|e| RasterError::decode("png", e.to_string()))?;
 
         let rgba = dyn_image.to_rgba8();
         let (w, h) = rgba.dimensions();
@@ -36,13 +33,18 @@ impl FormatHandler for PngHandler {
         let compression = match options.png_compression {
             0..=2 => CompressionType::Fast,
             3..=6 => CompressionType::Default,
-            _     => CompressionType::Best,
+            _ => CompressionType::Best,
         };
 
         let mut buf = Vec::new();
         let encoder = PngEncoder::new_with_quality(&mut buf, compression, FilterType::Adaptive);
         encoder
-            .write_image(&image.data, image.width, image.height, ExtendedColorType::Rgba8)
+            .write_image(
+                &image.data,
+                image.width,
+                image.height,
+                ExtendedColorType::Rgba8,
+            )
             .map_err(|e| RasterError::encode("png", e.to_string()))?;
 
         Ok(buf)

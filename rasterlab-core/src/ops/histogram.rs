@@ -7,13 +7,13 @@ use crate::{error::RasterResult, image::Image, traits::operation::Operation};
 #[derive(Debug, Clone)]
 pub struct HistogramData {
     /// Count of pixels with each red value 0–255.
-    pub red:   [u64; 256],
+    pub red: [u64; 256],
     /// Count of pixels with each green value 0–255.
     pub green: [u64; 256],
     /// Count of pixels with each blue value 0–255.
-    pub blue:  [u64; 256],
+    pub blue: [u64; 256],
     /// BT.709 luma (`0.2126R + 0.7152G + 0.0722B`) histogram.
-    pub luma:  [u64; 256],
+    pub luma: [u64; 256],
 }
 
 impl HistogramData {
@@ -30,8 +30,7 @@ impl HistogramData {
     pub fn compute(image: &Image) -> Self {
         type Acc = ([u64; 256], [u64; 256], [u64; 256], [u64; 256]);
 
-        let zero: fn() -> Acc =
-            || ([0u64; 256], [0u64; 256], [0u64; 256], [0u64; 256]);
+        let zero: fn() -> Acc = || ([0u64; 256], [0u64; 256], [0u64; 256], [0u64; 256]);
 
         let (red, green, blue, luma) = image
             .data
@@ -58,7 +57,12 @@ impl HistogramData {
                 a
             });
 
-        HistogramData { red, green, blue, luma }
+        HistogramData {
+            red,
+            green,
+            blue,
+            luma,
+        }
     }
 }
 
@@ -72,7 +76,9 @@ pub struct HistogramOp;
 
 #[typetag::serde]
 impl Operation for HistogramOp {
-    fn name(&self) -> &'static str { "histogram" }
+    fn name(&self) -> &'static str {
+        "histogram"
+    }
 
     fn apply(&self, image: &Image) -> RasterResult<Image> {
         Ok(image.deep_clone()) // pass-through
@@ -90,11 +96,16 @@ mod tests {
     #[test]
     fn all_red_histogram() {
         let mut img = Image::new(4, 4);
-        img.data.chunks_mut(4).for_each(|p| { p[0]=200; p[1]=0; p[2]=0; p[3]=255; });
+        img.data.chunks_mut(4).for_each(|p| {
+            p[0] = 200;
+            p[1] = 0;
+            p[2] = 0;
+            p[3] = 255;
+        });
         let h = HistogramData::compute(&img);
-        assert_eq!(h.red[200],   16);
-        assert_eq!(h.green[0],   16);
-        assert_eq!(h.blue[0],    16);
+        assert_eq!(h.red[200], 16);
+        assert_eq!(h.green[0], 16);
+        assert_eq!(h.blue[0], 16);
     }
 
     #[test]

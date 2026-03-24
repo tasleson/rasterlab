@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 use rasterlab_core::{
-    formats::FormatRegistry,
-    pipeline::EditPipeline,
-    traits::format_handler::EncodeOptions,
+    formats::FormatRegistry, pipeline::EditPipeline, traits::format_handler::EncodeOptions,
 };
 
 use crate::pipeline_builder::PipelineSpec;
@@ -70,16 +68,17 @@ pub fn run(args: ProcessArgs) -> Result<()> {
         // Load saved pipeline
         let json = std::fs::read_to_string(pipeline_path)
             .with_context(|| format!("Cannot read pipeline '{}'", pipeline_path.display()))?;
-        let state = serde_json::from_str(&json)
-            .context("Failed to parse pipeline JSON")?;
-        pipeline.load_state(state).context("Failed to restore pipeline")?;
+        let state = serde_json::from_str(&json).context("Failed to parse pipeline JSON")?;
+        pipeline
+            .load_state(state)
+            .context("Failed to restore pipeline")?;
         eprintln!("Pipeline loaded from '{}'", pipeline_path.display());
     } else {
         // Build pipeline from flags
         let spec = PipelineSpec {
-            crop:    args.crop,
-            rotate:  args.rotate,
-            bw:      args.bw,
+            crop: args.crop,
+            rotate: args.rotate,
+            bw: args.bw,
             sharpen: args.sharpen,
         };
         for op in spec.build()? {
@@ -91,8 +90,10 @@ pub fn run(args: ProcessArgs) -> Result<()> {
 
     // Optionally save the pipeline
     if let Some(save_path) = &args.save_pipeline {
-        let state = pipeline.save_state().context("Failed to serialise pipeline")?;
-        let json  = serde_json::to_string_pretty(&state).context("JSON serialisation failed")?;
+        let state = pipeline
+            .save_state()
+            .context("Failed to serialise pipeline")?;
+        let json = serde_json::to_string_pretty(&state).context("JSON serialisation failed")?;
         std::fs::write(save_path, json)
             .with_context(|| format!("Cannot write pipeline to '{}'", save_path.display()))?;
         eprintln!("Pipeline saved to '{}'", save_path.display());
@@ -104,7 +105,7 @@ pub fn run(args: ProcessArgs) -> Result<()> {
 
     // Encode and write output
     let options = EncodeOptions {
-        jpeg_quality:    args.jpeg_quality,
+        jpeg_quality: args.jpeg_quality,
         png_compression: args.png_compression,
     };
     let bytes = registry
@@ -114,10 +115,6 @@ pub fn run(args: ProcessArgs) -> Result<()> {
     std::fs::write(&args.output, &bytes)
         .with_context(|| format!("Cannot write '{}'", args.output.display()))?;
 
-    eprintln!(
-        "Written {} bytes → {}",
-        bytes.len(),
-        args.output.display()
-    );
+    eprintln!("Written {} bytes → {}", bytes.len(), args.output.display());
     Ok(())
 }

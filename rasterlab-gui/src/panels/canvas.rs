@@ -7,16 +7,21 @@ use rasterlab_core::Image;
 
 /// Persistent state for the canvas panel (zoom, pan, cached texture).
 pub struct CanvasState {
-    pub zoom:    f32,
-    pub offset:  Vec2,
-    texture:     Option<TextureHandle>,
+    pub zoom: f32,
+    pub offset: Vec2,
+    texture: Option<TextureHandle>,
     /// Hash of the last image data used to build the texture.
-    last_hash:   u64,
+    last_hash: u64,
 }
 
 impl Default for CanvasState {
     fn default() -> Self {
-        Self { zoom: 1.0, offset: Vec2::ZERO, texture: None, last_hash: 0 }
+        Self {
+            zoom: 1.0,
+            offset: Vec2::ZERO,
+            texture: None,
+            last_hash: 0,
+        }
     }
 }
 
@@ -43,13 +48,13 @@ impl CanvasState {
             ));
             self.last_hash = new_hash;
             // Reset zoom/pan when a new image is loaded
-            self.zoom   = fit_zoom(image.width, image.height, ui.available_size());
+            self.zoom = fit_zoom(image.width, image.height, ui.available_size());
             self.offset = Vec2::ZERO;
         }
 
         let tex = self.texture.as_ref().unwrap();
         let display_size = Vec2::new(
-            image.width  as f32 * self.zoom,
+            image.width as f32 * self.zoom,
             image.height as f32 * self.zoom,
         );
 
@@ -86,7 +91,7 @@ impl CanvasState {
                     self.offset = Vec2::ZERO;
                 }
                 if ui.small_button("1:1").clicked() {
-                    self.zoom   = 1.0;
+                    self.zoom = 1.0;
                     self.offset = Vec2::ZERO;
                 }
             });
@@ -101,7 +106,7 @@ fn image_to_egui(image: &Image) -> ColorImage {
         .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
         .collect();
     ColorImage {
-        size:   [image.width as usize, image.height as usize],
+        size: [image.width as usize, image.height as usize],
         pixels,
     }
 }

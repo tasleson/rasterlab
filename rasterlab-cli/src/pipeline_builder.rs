@@ -1,6 +1,6 @@
 //! Parses CLI flag strings into typed `Box<dyn Operation>` values.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use rasterlab_core::{
     ops::{BlackAndWhiteOp, CropOp, RotateOp, SharpenOp},
     traits::operation::Operation,
@@ -13,9 +13,9 @@ use rasterlab_core::{
 /// (clap preserves argument order for repeated flags in the future; for now
 /// they are applied in a fixed logical sequence).
 pub struct PipelineSpec {
-    pub crop:    Option<String>,  // "x,y,w,h"
-    pub rotate:  Option<String>,  // "90" | "180" | "270" | "<float>"
-    pub bw:      Option<String>,  // "luminance" | "average" | "perceptual" | "r,g,b"
+    pub crop: Option<String>,   // "x,y,w,h"
+    pub rotate: Option<String>, // "90" | "180" | "270" | "<float>"
+    pub bw: Option<String>,     // "luminance" | "average" | "perceptual" | "r,g,b"
     pub sharpen: Option<f32>,
 }
 
@@ -43,22 +43,34 @@ impl PipelineSpec {
 fn parse_crop(s: &str) -> Result<Box<dyn Operation>> {
     let parts: Vec<u32> = s
         .split(',')
-        .map(|p| p.trim().parse::<u32>().map_err(|e| anyhow!("Invalid crop value: {e}")))
+        .map(|p| {
+            p.trim()
+                .parse::<u32>()
+                .map_err(|e| anyhow!("Invalid crop value: {e}"))
+        })
         .collect::<Result<_>>()?;
     if parts.len() != 4 {
-        bail!("--crop requires 4 comma-separated integers: x,y,w,h  (got '{}')", s);
+        bail!(
+            "--crop requires 4 comma-separated integers: x,y,w,h  (got '{}')",
+            s
+        );
     }
-    Ok(Box::new(CropOp::new(parts[0], parts[1], parts[2], parts[3])))
+    Ok(Box::new(CropOp::new(
+        parts[0], parts[1], parts[2], parts[3],
+    )))
 }
 
 fn parse_rotate(s: &str) -> Result<Box<dyn Operation>> {
     let op = match s.trim() {
-        "90"  => RotateOp::cw90(),
+        "90" => RotateOp::cw90(),
         "180" => RotateOp::cw180(),
         "270" => RotateOp::cw270(),
         other => {
             let deg: f32 = other.parse().map_err(|_| {
-                anyhow!("--rotate expects 90|180|270 or a float degrees value, got '{}'", other)
+                anyhow!(
+                    "--rotate expects 90|180|270 or a float degrees value, got '{}'",
+                    other
+                )
             })?;
             RotateOp::arbitrary(deg)
         }
@@ -68,8 +80,8 @@ fn parse_rotate(s: &str) -> Result<Box<dyn Operation>> {
 
 fn parse_bw(s: &str) -> Result<Box<dyn Operation>> {
     let op = match s.trim().to_lowercase().as_str() {
-        "luminance"  => BlackAndWhiteOp::luminance(),
-        "average"    => BlackAndWhiteOp::average(),
+        "luminance" => BlackAndWhiteOp::luminance(),
+        "average" => BlackAndWhiteOp::average(),
         "perceptual" => BlackAndWhiteOp::perceptual(),
         other => {
             // Try parsing as "r,g,b" channel mixer weights

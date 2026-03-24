@@ -34,17 +34,25 @@ pub struct SharpenOp {
 
 impl SharpenOp {
     pub fn new(strength: f32) -> Self {
-        Self { strength: strength.clamp(0.0, 10.0), luminance_only: false }
+        Self {
+            strength: strength.clamp(0.0, 10.0),
+            luminance_only: false,
+        }
     }
 
     pub fn luminance(strength: f32) -> Self {
-        Self { strength: strength.clamp(0.0, 10.0), luminance_only: true }
+        Self {
+            strength: strength.clamp(0.0, 10.0),
+            luminance_only: true,
+        }
     }
 }
 
 #[typetag::serde]
 impl Operation for SharpenOp {
-    fn name(&self) -> &'static str { "sharpen" }
+    fn name(&self) -> &'static str {
+        "sharpen"
+    }
 
     fn apply(&self, image: &Image) -> RasterResult<Image> {
         if self.strength <= 0.0 {
@@ -68,8 +76,8 @@ impl Operation for SharpenOp {
 }
 
 fn apply_sharpen(src: &Image, strength: f32, luma_only: bool) -> RasterResult<Image> {
-    let w  = src.width  as usize;
-    let h  = src.height as usize;
+    let w = src.width as usize;
+    let h = src.height as usize;
 
     // Kernel:  centre = 1 + 4*strength / (1 + 4*strength) normalised so that flat
     // areas are unchanged.  We keep it un-normalised: centre weight = 1 + 4*s,
@@ -78,7 +86,7 @@ fn apply_sharpen(src: &Image, strength: f32, luma_only: bool) -> RasterResult<Im
     //  0    -s     0
     // -s  1+4s    -s
     //  0    -s     0
-    let s  = strength;
+    let s = strength;
 
     let mut out = Image::new(src.width, src.height);
     out.metadata = src.metadata.clone();
@@ -95,11 +103,11 @@ fn apply_sharpen(src: &Image, strength: f32, luma_only: bool) -> RasterResult<Im
                 let xp = (x + 1).min(w - 1);
 
                 // Fetch the 5 required pixels
-                let centre = fetch(src, x,  y);
-                let top    = fetch(src, x,  yn);
-                let bottom = fetch(src, x,  yp);
-                let left   = fetch(src, xn, y);
-                let right  = fetch(src, xp, y);
+                let centre = fetch(src, x, y);
+                let top = fetch(src, x, yn);
+                let bottom = fetch(src, x, yp);
+                let left = fetch(src, xn, y);
+                let right = fetch(src, xp, y);
 
                 let dst = x * 4;
                 if luma_only {
@@ -110,9 +118,9 @@ fn apply_sharpen(src: &Image, strength: f32, luma_only: bool) -> RasterResult<Im
                     let luma_l = luma(left);
                     let luma_r = luma(right);
 
-                    let sharpened_luma =
-                        ((1.0 + 4.0 * s) * luma_c - s * (luma_t + luma_b + luma_l + luma_r))
-                            .clamp(0.0, 255.0);
+                    let sharpened_luma = ((1.0 + 4.0 * s) * luma_c
+                        - s * (luma_t + luma_b + luma_l + luma_r))
+                        .clamp(0.0, 255.0);
 
                     let luma_delta = sharpened_luma - luma_c;
                     for c in 0..3 {
@@ -123,8 +131,10 @@ fn apply_sharpen(src: &Image, strength: f32, luma_only: bool) -> RasterResult<Im
                 } else {
                     for c in 0..3 {
                         let v = (1.0 + 4.0 * s) * centre[c] as f32
-                            - s * (top[c] as f32 + bottom[c] as f32
-                                + left[c] as f32 + right[c] as f32);
+                            - s * (top[c] as f32
+                                + bottom[c] as f32
+                                + left[c] as f32
+                                + right[c] as f32);
                         row[dst + c] = v.clamp(0.0, 255.0) as u8;
                     }
                     row[dst + 3] = centre[3];
@@ -138,7 +148,12 @@ fn apply_sharpen(src: &Image, strength: f32, luma_only: bool) -> RasterResult<Im
 #[inline(always)]
 fn fetch(img: &Image, x: usize, y: usize) -> [u8; 4] {
     let off = (y * img.width as usize + x) * 4;
-    [img.data[off], img.data[off + 1], img.data[off + 2], img.data[off + 3]]
+    [
+        img.data[off],
+        img.data[off + 1],
+        img.data[off + 2],
+        img.data[off + 3],
+    ]
 }
 
 #[inline(always)]
@@ -161,7 +176,12 @@ mod tests {
     fn sharpen_solid_unchanged() {
         // Sharpening a flat image should produce no change
         let mut src = Image::new(8, 8);
-        src.data.chunks_mut(4).for_each(|p| { p[0]=128; p[1]=100; p[2]=80; p[3]=255; });
+        src.data.chunks_mut(4).for_each(|p| {
+            p[0] = 128;
+            p[1] = 100;
+            p[2] = 80;
+            p[3] = 255;
+        });
         let out = SharpenOp::new(1.0).apply(&src).unwrap();
         // Centre pixels (away from borders) should be unchanged; border pixels may differ slightly
         assert_eq!(out.pixel(4, 4), src.pixel(4, 4));

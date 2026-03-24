@@ -42,10 +42,16 @@ pub type RasterResult<T> = Result<T, RasterError>;
 
 impl RasterError {
     pub fn decode(format: impl Into<String>, message: impl Into<String>) -> Self {
-        RasterError::Decode { format: format.into(), message: message.into() }
+        RasterError::Decode {
+            format: format.into(),
+            message: message.into(),
+        }
     }
 
     pub fn encode(format: impl Into<String>, message: impl Into<String>) -> Self {
-        RasterError::Encode { format: format.into(), message: message.into() }
+        RasterError::Encode {
+            format: format.into(),
+            message: message.into(),
+        }
     }
 }

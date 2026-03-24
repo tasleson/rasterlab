@@ -4,8 +4,8 @@
 //! and the plugin never calls into host code except through `rasterlab_free_image_data`.
 //! This keeps the boundary minimal and auditable.
 
+use crate::types::{CImage, COperationStatus, CPixelFormat, CPluginMetadata};
 use core::ffi::c_char;
-use crate::types::{CImage, COperationStatus, CPluginMetadata, CPixelFormat};
 
 /// Vtable for a single image-processing operation exposed by a plugin.
 ///
@@ -30,7 +30,7 @@ pub struct OperationVTable {
     /// # Returns
     /// [`COperationStatus::Ok`] on success, otherwise an error code.
     pub apply: unsafe extern "C" fn(
-        op:  *const OperationVTable,
+        op: *const OperationVTable,
         src: *const CImage,
         dst: *mut CImage,
     ) -> COperationStatus,

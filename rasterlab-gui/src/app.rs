@@ -8,14 +8,14 @@ use crate::{
 };
 
 pub struct RasterLabApp {
-    state:  AppState,
+    state: AppState,
     canvas: CanvasState,
 }
 
 impl RasterLabApp {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         Self {
-            state:  AppState::new(cc.egui_ctx.clone()),
+            state: AppState::new(cc.egui_ctx.clone()),
             canvas: CanvasState::default(),
         }
     }
@@ -47,7 +47,7 @@ impl RasterLabApp {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
             .add_filter("JPEG", &["jpg", "jpeg"])
-            .add_filter("PNG",  &["png"])
+            .add_filter("PNG", &["png"])
             .add_filter("NEF (Nikon RAW)", &["nef"])
             .pick_file()
         {
@@ -59,7 +59,7 @@ impl RasterLabApp {
     fn save_file_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("JPEG", &["jpg", "jpeg"])
-            .add_filter("PNG",  &["png"])
+            .add_filter("PNG", &["png"])
             .save_file()
         {
             self.state.save_file(path);
@@ -94,11 +94,17 @@ impl eframe::App for RasterLabApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    if ui.add_enabled(self.state.can_undo(), egui::Button::new("Undo  (Ctrl+Z)")).clicked() {
+                    if ui
+                        .add_enabled(self.state.can_undo(), egui::Button::new("Undo  (Ctrl+Z)"))
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.state.undo();
                     }
-                    if ui.add_enabled(self.state.can_redo(), egui::Button::new("Redo  (Ctrl+Y)")).clicked() {
+                    if ui
+                        .add_enabled(self.state.can_redo(), egui::Button::new("Redo  (Ctrl+Y)"))
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.state.redo();
                     }

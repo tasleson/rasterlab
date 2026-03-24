@@ -7,12 +7,12 @@
 //! Build with `cargo build -p example-plugin` to produce `libexample_plugin.so`.
 //! Then load it in rasterlab with `--plugin path/to/libexample_plugin.so`.
 
-use std::ffi::{c_char, CStr};
+use std::ffi::c_char;
 
 use rasterlab_plugin_api::{
-    types::{CImage, COperationStatus, CPixelFormat, CPluginMetadata},
-    vtable::{alloc_cimage, OperationVTable, PluginVTable},
     PLUGIN_API_VERSION,
+    types::{CImage, COperationStatus, CPluginMetadata},
+    vtable::{OperationVTable, PluginVTable, alloc_cimage},
 };
 
 // ---------------------------------------------------------------------------
@@ -29,6 +29,7 @@ macro_rules! cstr {
 // Operation: Sepia Tone
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 extern "C" fn sepia_name(_op: *const OperationVTable) -> *const c_char {
     cstr!("Sepia tone")
 }
@@ -46,11 +47,15 @@ extern "C" fn sepia_apply(
     };
 
     // Allocate output buffer
-    let mut out = unsafe { alloc_cimage(w, h) };
+    let out = unsafe { alloc_cimage(w, h) };
     let out_data = unsafe { std::slice::from_raw_parts_mut(out.data, out.data_len) };
 
     for (src_pixel, dst_pixel) in src_data.chunks_exact(4).zip(out_data.chunks_exact_mut(4)) {
-        let (r, g, b) = (src_pixel[0] as f32, src_pixel[1] as f32, src_pixel[2] as f32);
+        let (r, g, b) = (
+            src_pixel[0] as f32,
+            src_pixel[1] as f32,
+            src_pixel[2] as f32,
+        );
 
         let sr = (0.393 * r + 0.769 * g + 0.189 * b).min(255.0) as u8;
         let sg = (0.349 * r + 0.686 * g + 0.168 * b).min(255.0) as u8;
@@ -63,7 +68,9 @@ extern "C" fn sepia_apply(
     }
 
     // Write output image back
-    unsafe { *dst = out; }
+    unsafe {
+        *dst = out;
+    }
     COperationStatus::Ok
 }
 
@@ -76,17 +83,19 @@ extern "C" fn sepia_destroy(_op: *mut OperationVTable) {
 }
 
 static SEPIA_VTABLE: OperationVTable = OperationVTable {
-    name:    cstr!("sepia_tone") as *const c_char,
+    name: cstr!("sepia_tone") as *const c_char,
     describe: sepia_describe,
-    apply:    sepia_apply,
-    destroy:  sepia_destroy,
+    apply: sepia_apply,
+    destroy: sepia_destroy,
 };
 
 // ---------------------------------------------------------------------------
 // Plugin vtable
 // ---------------------------------------------------------------------------
 
-extern "C" fn plugin_op_count() -> usize { 1 }
+extern "C" fn plugin_op_count() -> usize {
+    1
+}
 
 extern "C" fn plugin_get_op(index: usize) -> *mut OperationVTable {
     if index == 0 {
@@ -103,17 +112,17 @@ extern "C" fn plugin_destroy() {
 }
 
 static PLUGIN_VTABLE: PluginVTable = PluginVTable {
-    api_version:        PLUGIN_API_VERSION,
-    metadata:           CPluginMetadata {
-        name:        cstr!("Sepia Tone Plugin"),
-        version:     cstr!("1.0.0"),
-        author:      cstr!("RasterLab Contributors"),
+    api_version: PLUGIN_API_VERSION,
+    metadata: CPluginMetadata {
+        name: cstr!("Sepia Tone Plugin"),
+        version: cstr!("1.0.0"),
+        author: cstr!("RasterLab Contributors"),
         description: cstr!("Applies a classic sepia tone warm toning effect"),
     },
-    operation_count:    plugin_op_count,
-    get_operation:      plugin_get_op,
+    operation_count: plugin_op_count,
+    get_operation: plugin_get_op,
     decoder_extensions: std::ptr::null(),
-    destroy:            plugin_destroy,
+    destroy: plugin_destroy,
 };
 
 /// Entry point called by the plugin loader.

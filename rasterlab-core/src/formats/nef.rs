@@ -76,8 +76,8 @@ fn decode_nef_rawler(path: &Path) -> RasterResult<Image> {
     // rawler 0.7: raw_to_srgb performs full RAW processing
     // (demosaicing, white balance, colour space conversion) and returns a DynamicImage.
     let params = RawDecodeParams::default();
-    let dyn_image = raw_to_srgb(path, &params)
-        .map_err(|e| RasterError::decode("nef", format!("{:?}", e)))?;
+    let dyn_image =
+        raw_to_srgb(path, &params).map_err(|e| RasterError::decode("nef", format!("{:?}", e)))?;
 
     let rgba = dyn_image.to_rgba8();
     let (w, h) = rgba.dimensions();
@@ -85,4 +85,3 @@ fn decode_nef_rawler(path: &Path) -> RasterResult<Image> {
     image.metadata.original_path = Some(path.to_path_buf());
     Ok(image)
 }
-

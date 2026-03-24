@@ -1,15 +1,14 @@
 //! `rasterlab batch` — parallel directory processing.
 
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use rayon::prelude::*;
 use rasterlab_core::{
-    formats::FormatRegistry,
-    pipeline::EditPipeline,
-    traits::format_handler::EncodeOptions,
+    formats::FormatRegistry, pipeline::EditPipeline, traits::format_handler::EncodeOptions,
 };
+use rayon::prelude::*;
 
 use crate::pipeline_builder::PipelineSpec;
 
@@ -66,13 +65,18 @@ pub fn run(args: BatchArgs) -> Result<()> {
         .flatten()
         .filter_map(|e| {
             let p = e.path();
-            if !p.is_file() { return None; }
+            if !p.is_file() {
+                return None;
+            }
             if let Some(ref want_ext) = filter_ext {
-                let actual_ext = p.extension()
+                let actual_ext = p
+                    .extension()
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_lowercase())
                     .unwrap_or_default();
-                if &actual_ext != want_ext { return None; }
+                if &actual_ext != want_ext {
+                    return None;
+                }
             }
             Some(p)
         })
@@ -95,9 +99,9 @@ pub fn run(args: BatchArgs) -> Result<()> {
 
     // Build the operation spec once; each thread clones its own pipeline.
     let spec = PipelineSpec {
-        crop:    args.crop.clone(),
-        rotate:  args.rotate.clone(),
-        bw:      args.bw.clone(),
+        crop: args.crop.clone(),
+        rotate: args.rotate.clone(),
+        bw: args.bw.clone(),
         sharpen: args.sharpen,
     };
     let ops = spec.build()?;
@@ -107,7 +111,7 @@ pub fn run(args: BatchArgs) -> Result<()> {
         .collect();
 
     let options = EncodeOptions {
-        jpeg_quality:    args.jpeg_quality,
+        jpeg_quality: args.jpeg_quality,
         png_compression: args.png_compression,
     };
 
@@ -151,12 +155,12 @@ pub fn run(args: BatchArgs) -> Result<()> {
 }
 
 fn process_one(
-    input:      &PathBuf,
-    output_dir: &PathBuf,
+    input: &Path,
+    output_dir: &Path,
     output_ext: Option<&str>,
-    registry:   &FormatRegistry,
-    ops_json:   &[serde_json::Value],
-    options:    &EncodeOptions,
+    registry: &FormatRegistry,
+    ops_json: &[serde_json::Value],
+    options: &EncodeOptions,
 ) -> Result<()> {
     let image = registry
         .decode_file(input)
@@ -166,8 +170,8 @@ fn process_one(
 
     // Deserialise operations from JSON (avoids re-parsing CLI args per thread)
     for json_val in ops_json {
-        let entry: rasterlab_core::pipeline::EditEntry = serde_json::from_value(json_val.clone())
-            .context("Deserialising operation")?;
+        let entry: rasterlab_core::pipeline::EditEntry =
+            serde_json::from_value(json_val.clone()).context("Deserialising operation")?;
         pipeline.push_op(entry.operation);
     }
 
@@ -175,7 +179,7 @@ fn process_one(
 
     // Determine output path
     let stem = input.file_stem().unwrap_or_default();
-    let ext   = output_ext
+    let ext = output_ext
         .or_else(|| input.extension().and_then(|e| e.to_str()))
         .unwrap_or("png");
     let out_name = format!("{}.{}", stem.to_string_lossy(), ext);

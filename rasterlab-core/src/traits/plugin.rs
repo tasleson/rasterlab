@@ -3,9 +3,9 @@ use crate::traits::{format_handler::FormatHandler, operation::Operation};
 /// Metadata identifying a loaded plugin.
 #[derive(Debug, Clone)]
 pub struct PluginMetadata {
-    pub name:        String,
-    pub version:     String,
-    pub author:      String,
+    pub name: String,
+    pub version: String,
+    pub author: String,
     pub description: String,
 }
 

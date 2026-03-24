@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::{
     error::{RasterError, RasterResult},
@@ -34,7 +34,7 @@ pub struct PipelineState {
     /// Serialised edit entries (each includes operation type + parameters).
     pub entries: Vec<serde_json::Value>,
     /// Cursor position at save time (undo history depth).
-    pub cursor:  usize,
+    pub cursor: usize,
 }
 
 /// The non-destructive editing pipeline.
@@ -54,11 +54,11 @@ pub struct PipelineState {
 /// The last rendered `(cursor, Arc<Image>)` pair is memoised.  Any mutation that
 /// affects the active range invalidates the cache so the next `render()` recomputes.
 pub struct EditPipeline {
-    source:  Arc<Image>,
-    ops:     Vec<EditEntry>,
-    cursor:  usize,
+    source: Arc<Image>,
+    ops: Vec<EditEntry>,
+    cursor: usize,
     /// `Some((cursor, rendered))` when the cache is valid.
-    cache:   Option<(usize, Arc<Image>)>,
+    cache: Option<(usize, Arc<Image>)>,
     next_id: u64,
 }
 
@@ -66,10 +66,10 @@ impl EditPipeline {
     /// Create a new pipeline with `source` as the immutable base image.
     pub fn new(source: Image) -> Self {
         Self {
-            source:  Arc::new(source),
-            ops:     Vec::new(),
-            cursor:  0,
-            cache:   None,
+            source: Arc::new(source),
+            ops: Vec::new(),
+            cursor: 0,
+            cache: None,
             next_id: 1,
         }
     }
@@ -83,7 +83,11 @@ impl EditPipeline {
         self.ops.truncate(self.cursor);
         let id = self.next_id;
         self.next_id += 1;
-        self.ops.push(EditEntry { id, enabled: true, operation });
+        self.ops.push(EditEntry {
+            id,
+            enabled: true,
+            operation,
+        });
         self.cursor = self.ops.len();
         self.cache = None;
     }
@@ -160,11 +164,10 @@ impl EditPipeline {
     /// Uses the internal cache when the cursor hasn't changed.
     pub fn render(&mut self) -> RasterResult<Arc<Image>> {
         // Cache hit
-        if let Some((c, ref img)) = self.cache {
-            if c == self.cursor {
+        if let Some((c, ref img)) = self.cache
+            && c == self.cursor {
                 return Ok(Arc::clone(img));
             }
-        }
 
         let mut current = self.source.deep_clone();
         for entry in &self.ops[..self.cursor] {
@@ -225,7 +228,10 @@ impl EditPipeline {
             .iter()
             .map(|e| serde_json::to_value(e).map_err(|e| RasterError::Serialization(e.to_string())))
             .collect::<RasterResult<Vec<_>>>()?;
-        Ok(PipelineState { entries, cursor: self.cursor })
+        Ok(PipelineState {
+            entries,
+            cursor: self.cursor,
+        })
     }
 
     /// Replace the current pipeline contents with a deserialised state.
@@ -237,9 +243,9 @@ impl EditPipeline {
                 serde_json::from_value(v).map_err(|e| RasterError::Serialization(e.to_string()))
             })
             .collect::<RasterResult<Vec<_>>>()?;
-        self.ops    = entries;
+        self.ops = entries;
         self.cursor = state.cursor.min(self.ops.len());
-        self.cache  = None;
+        self.cache = None;
         Ok(())
     }
 
@@ -247,22 +253,31 @@ impl EditPipeline {
     // Accessors
     // -----------------------------------------------------------------------
 
-    pub fn ops(&self) -> &[EditEntry] { &self.ops }
-    pub fn cursor(&self) -> usize     { self.cursor }
-    pub fn source(&self) -> &Arc<Image> { &self.source }
+    pub fn ops(&self) -> &[EditEntry] {
+        &self.ops
+    }
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+    pub fn source(&self) -> &Arc<Image> {
+        &self.source
+    }
 
-    pub fn can_undo(&self) -> bool { self.cursor > 0 }
-    pub fn can_redo(&self) -> bool { self.cursor < self.ops.len() }
+    pub fn can_undo(&self) -> bool {
+        self.cursor > 0
+    }
+    pub fn can_redo(&self) -> bool {
+        self.cursor < self.ops.len()
+    }
 
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
     fn invalidate_cache_from(&mut self, from_index: usize) {
-        if let Some((cached_cursor, _)) = self.cache {
-            if cached_cursor > from_index {
+        if let Some((cached_cursor, _)) = self.cache
+            && cached_cursor > from_index {
                 self.cache = None;
             }
-        }
     }
 }

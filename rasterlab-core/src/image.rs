@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use crate::error::{RasterError, RasterResult};
+use std::path::PathBuf;
 
 /// Internal pixel representation.  Always `Rgba8` after decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,11 +33,11 @@ pub struct ImageMetadata {
 /// Intentionally does NOT derive `Clone` to prevent accidental large copies.
 /// Use [`Image::deep_clone`] for explicit duplication.
 pub struct Image {
-    pub width:    u32,
-    pub height:   u32,
-    pub format:   PixelFormat,
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
     /// Raw pixel bytes (RGBA, row-major).
-    pub data:     Vec<u8>,
+    pub data: Vec<u8>,
     pub metadata: ImageMetadata,
 }
 
@@ -105,7 +105,12 @@ impl Image {
     #[inline]
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let o = self.pixel_offset(x, y);
-        [self.data[o], self.data[o + 1], self.data[o + 2], self.data[o + 3]]
+        [
+            self.data[o],
+            self.data[o + 1],
+            self.data[o + 2],
+            self.data[o + 3],
+        ]
     }
 
     /// Write pixel at `(x, y)`.
@@ -147,10 +152,10 @@ impl Image {
     /// Explicit deep copy.  Prefer this over any implicit Clone.
     pub fn deep_clone(&self) -> Self {
         Self {
-            width:    self.width,
-            height:   self.height,
-            format:   self.format.clone(),
-            data:     self.data.clone(),
+            width: self.width,
+            height: self.height,
+            format: self.format.clone(),
+            data: self.data.clone(),
             metadata: self.metadata.clone(),
         }
     }

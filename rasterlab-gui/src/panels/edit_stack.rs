@@ -18,10 +18,16 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         let can_undo = state.can_undo();
         let can_redo = state.can_redo();
-        if ui.add_enabled(can_undo, egui::Button::new("⟵ Undo")).clicked() {
+        if ui
+            .add_enabled(can_undo, egui::Button::new("⟵ Undo"))
+            .clicked()
+        {
             state.undo();
         }
-        if ui.add_enabled(can_redo, egui::Button::new("Redo ⟶")).clicked() {
+        if ui
+            .add_enabled(can_redo, egui::Button::new("Redo ⟶"))
+            .clicked()
+        {
             state.redo();
         }
     });
@@ -48,13 +54,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     }
 
     let cursor = pipeline.cursor();
-    let mut remove_idx:  Option<usize>        = None;
-    let mut reorder:     Option<(usize, usize)> = None;
-    let mut toggle_idx:  Option<usize>        = None;
+    let mut remove_idx: Option<usize> = None;
+    let mut reorder: Option<(usize, usize)> = None;
+    let mut toggle_idx: Option<usize> = None;
 
     for (i, entry) in ops.iter().enumerate() {
         let is_active = i < cursor;
-        let desc      = entry.operation.describe();
+        let desc = entry.operation.describe();
 
         // Dimmed rows are in the "redo" area (after the cursor)
         let row_color = if !is_active {
@@ -92,22 +98,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
 
                 // ── Move up ──────────────────────────────────────────
-                if i > 0
-                    && ui
-                        .button("▲")
-                        .on_hover_text("Move up")
-                        .clicked()
-                {
+                if i > 0 && ui.button("▲").on_hover_text("Move up").clicked() {
                     reorder = Some((i, i - 1));
                 }
 
                 // ── Move down ────────────────────────────────────────
-                if i + 1 < ops.len()
-                    && ui
-                        .button("▼")
-                        .on_hover_text("Move down")
-                        .clicked()
-                {
+                if i + 1 < ops.len() && ui.button("▼").on_hover_text("Move down").clicked() {
                     reorder = Some((i, i + 1));
                 }
             });

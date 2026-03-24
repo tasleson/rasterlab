@@ -35,15 +35,14 @@ pub fn detect_format(data: &[u8], hint_path: Option<&Path>) -> Option<String> {
         return Some("png".into());
     }
     // NEF / TIFF share the TIFF magic bytes (II or MM byte-order markers)
-    if data.len() >= 4
-        && ((&data[..4] == b"II\x2a\x00") || (&data[..4] == b"MM\x00\x2a"))
-    {
+    if data.len() >= 4 && ((&data[..4] == b"II\x2a\x00") || (&data[..4] == b"MM\x00\x2a")) {
         // Distinguish NEF from generic TIFF via file extension
-        if let Some(ext) = hint_path.and_then(|p| p.extension()).and_then(|e| e.to_str()) {
-            if ext.eq_ignore_ascii_case("nef") {
+        if let Some(ext) = hint_path
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            && ext.eq_ignore_ascii_case("nef") {
                 return Some("nef".into());
             }
-        }
         return Some("tiff".into());
     }
 
@@ -53,9 +52,9 @@ pub fn detect_format(data: &[u8], hint_path: Option<&Path>) -> Option<String> {
         .and_then(|e| e.to_str())
         .map(|e| match e.to_lowercase().as_str() {
             "jpg" | "jpeg" => "jpeg".into(),
-            "png"          => "png".into(),
-            "nef"          => "nef".into(),
-            other          => other.to_owned(),
+            "png" => "png".into(),
+            "nef" => "nef".into(),
+            other => other.to_owned(),
         })
 }
 
@@ -99,7 +98,7 @@ impl FormatRegistry {
     /// Decode a file from disk, auto-detecting the format.
     pub fn decode_file(&self, path: &Path) -> RasterResult<Image> {
         let data = std::fs::read(path).map_err(RasterError::Io)?;
-        let fmt  = detect_format(&data, Some(path)).ok_or_else(|| {
+        let fmt = detect_format(&data, Some(path)).ok_or_else(|| {
             RasterError::UnsupportedFormat(format!(
                 "Cannot determine format for '{}'",
                 path.display()
@@ -121,23 +120,22 @@ impl FormatRegistry {
     /// Encode an image to the format implied by `path`'s extension.
     pub fn encode_file(
         &self,
-        image:   &Image,
-        path:    &Path,
+        image: &Image,
+        path: &Path,
         options: &EncodeOptions,
     ) -> RasterResult<Vec<u8>> {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .ok_or_else(|| {
-                RasterError::UnsupportedFormat("Output path has no file extension".into())
-            })?;
+        let ext = path.extension().and_then(|e| e.to_str()).ok_or_else(|| {
+            RasterError::UnsupportedFormat("Output path has no file extension".into())
+        })?;
 
         let handler = self.handler_for_extension(ext).ok_or_else(|| {
             RasterError::UnsupportedFormat(format!("No handler for extension '{}'", ext))
         })?;
 
         if !handler.can_encode() {
-            return Err(RasterError::FormatNotEncodable(handler.display_name().into()));
+            return Err(RasterError::FormatNotEncodable(
+                handler.display_name().into(),
+            ));
         }
 
         handler.encode(image, options)

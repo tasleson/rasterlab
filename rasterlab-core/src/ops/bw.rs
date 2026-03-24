@@ -28,10 +28,14 @@ impl BwMode {
     #[inline]
     fn to_gray(&self, r: f32, g: f32, b: f32) -> f32 {
         match self {
-            BwMode::Luminance  => 0.2126 * r + 0.7152 * g + 0.0722 * b,
-            BwMode::Average    => (r + g + b) / 3.0,
+            BwMode::Luminance => 0.2126 * r + 0.7152 * g + 0.0722 * b,
+            BwMode::Average => (r + g + b) / 3.0,
             BwMode::Perceptual => 0.299 * r + 0.587 * g + 0.114 * b,
-            BwMode::ChannelMixer { r: rw, g: gw, b: bw } => rw * r + gw * g + bw * b,
+            BwMode::ChannelMixer {
+                r: rw,
+                g: gw,
+                b: bw,
+            } => rw * r + gw * g + bw * b,
         }
     }
 }
@@ -45,41 +49,56 @@ pub struct BlackAndWhiteOp {
 }
 
 impl BlackAndWhiteOp {
-    pub fn luminance()  -> Self { Self { mode: BwMode::Luminance  } }
-    pub fn average()    -> Self { Self { mode: BwMode::Average    } }
-    pub fn perceptual() -> Self { Self { mode: BwMode::Perceptual } }
+    pub fn luminance() -> Self {
+        Self {
+            mode: BwMode::Luminance,
+        }
+    }
+    pub fn average() -> Self {
+        Self {
+            mode: BwMode::Average,
+        }
+    }
+    pub fn perceptual() -> Self {
+        Self {
+            mode: BwMode::Perceptual,
+        }
+    }
     pub fn channel_mixer(r: f32, g: f32, b: f32) -> Self {
-        Self { mode: BwMode::ChannelMixer { r, g, b } }
+        Self {
+            mode: BwMode::ChannelMixer { r, g, b },
+        }
     }
 }
 
 #[typetag::serde]
 impl Operation for BlackAndWhiteOp {
-    fn name(&self) -> &'static str { "black_and_white" }
+    fn name(&self) -> &'static str {
+        "black_and_white"
+    }
 
     fn apply(&self, image: &Image) -> RasterResult<Image> {
         let mut out = image.deep_clone();
 
-        out.data
-            .par_chunks_mut(4)
-            .for_each(|pixel| {
-                let gray = self.mode
-                    .to_gray(pixel[0] as f32, pixel[1] as f32, pixel[2] as f32)
-                    .clamp(0.0, 255.0) as u8;
-                pixel[0] = gray;
-                pixel[1] = gray;
-                pixel[2] = gray;
-                // pixel[3] (alpha) untouched
-            });
+        out.data.par_chunks_mut(4).for_each(|pixel| {
+            let gray = self
+                .mode
+                .to_gray(pixel[0] as f32, pixel[1] as f32, pixel[2] as f32)
+                .clamp(0.0, 255.0) as u8;
+            pixel[0] = gray;
+            pixel[1] = gray;
+            pixel[2] = gray;
+            // pixel[3] (alpha) untouched
+        });
 
         Ok(out)
     }
 
     fn describe(&self) -> String {
         let alg = match &self.mode {
-            BwMode::Luminance           => "BT.709 Luminance",
-            BwMode::Average             => "Average",
-            BwMode::Perceptual          => "BT.601 Perceptual",
+            BwMode::Luminance => "BT.709 Luminance",
+            BwMode::Average => "Average",
+            BwMode::Perceptual => "BT.601 Perceptual",
             BwMode::ChannelMixer { .. } => "Channel Mixer",
         };
         format!("B&W  ({})", alg)
@@ -92,7 +111,12 @@ mod tests {
 
     fn make_pixel_image(r: u8, g: u8, b: u8) -> Image {
         let mut img = Image::new(2, 2);
-        img.data.chunks_mut(4).for_each(|p| { p[0]=r; p[1]=g; p[2]=b; p[3]=255; });
+        img.data.chunks_mut(4).for_each(|p| {
+            p[0] = r;
+            p[1] = g;
+            p[2] = b;
+            p[3] = 255;
+        });
         img
     }
 
@@ -102,7 +126,9 @@ mod tests {
         let out = BlackAndWhiteOp::luminance().apply(&src).unwrap();
         let [r, g, b, _] = out.pixel(0, 0);
         // 0.2126 * 255 ≈ 54
-        assert_eq!(r, 54); assert_eq!(g, 54); assert_eq!(b, 54);
+        assert_eq!(r, 54);
+        assert_eq!(g, 54);
+        assert_eq!(b, 54);
     }
 
     #[test]

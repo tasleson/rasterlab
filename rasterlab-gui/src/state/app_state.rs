@@ -1,13 +1,13 @@
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 use egui::Context;
 use rasterlab_core::{
+    Image,
     formats::FormatRegistry,
     ops::{BlackAndWhiteOp, CropOp, HistogramData, RotateOp, SharpenOp},
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
-    Image,
 };
 
 // ---------------------------------------------------------------------------
@@ -15,9 +15,12 @@ use rasterlab_core::{
 // ---------------------------------------------------------------------------
 
 enum BgMessage {
-    ImageLoaded { path: std::path::PathBuf, image: Image },
+    ImageLoaded {
+        path: std::path::PathBuf,
+        image: Image,
+    },
     /// Render finished; histogram was also computed in the same thread.
-    RenderComplete(Arc<Image>, HistogramData),
+    RenderComplete(Arc<Image>, Box<HistogramData>),
     Error(String),
 }
 
@@ -26,13 +29,13 @@ enum BgMessage {
 // ---------------------------------------------------------------------------
 
 pub struct AppState {
-    pub registry:    FormatRegistry,
-    pub pipeline:    Option<EditPipeline>,
-    pub rendered:    Option<Arc<Image>>,
-    pub histogram:   Option<HistogramData>,
-    pub loading:     bool,
-    pub status:      String,
-    pub last_path:   Option<std::path::PathBuf>,
+    pub registry: FormatRegistry,
+    pub pipeline: Option<EditPipeline>,
+    pub rendered: Option<Arc<Image>>,
+    pub histogram: Option<HistogramData>,
+    pub loading: bool,
+    pub status: String,
+    pub last_path: Option<std::path::PathBuf>,
     pub encode_opts: EncodeOptions,
 
     // Background thread channel
@@ -42,37 +45,37 @@ pub struct AppState {
     ctx: Context,
 
     // ── Tool panel inputs ─────────────────────────────────────────────────
-    pub crop_x:           u32,
-    pub crop_y:           u32,
-    pub crop_w:           u32,
-    pub crop_h:           u32,
-    pub rotate_deg:       f32,
+    pub crop_x: u32,
+    pub crop_y: u32,
+    pub crop_w: u32,
+    pub crop_h: u32,
+    pub rotate_deg: f32,
     pub sharpen_strength: f32,
-    pub bw_mode_idx:      usize,
+    pub bw_mode_idx: usize,
 }
 
 impl AppState {
     pub fn new(ctx: Context) -> Self {
         let (bg_tx, bg_rx) = mpsc::channel();
         Self {
-            registry:  FormatRegistry::with_builtins(),
-            pipeline:  None,
-            rendered:  None,
+            registry: FormatRegistry::with_builtins(),
+            pipeline: None,
+            rendered: None,
             histogram: None,
-            loading:   false,
-            status:    "Welcome to RasterLab — open an image to begin.".into(),
+            loading: false,
+            status: "Welcome to RasterLab — open an image to begin.".into(),
             last_path: None,
             encode_opts: EncodeOptions::default(),
             bg_tx,
             bg_rx,
             ctx,
-            crop_x:           0,
-            crop_y:           0,
-            crop_w:           0,
-            crop_h:           0,
-            rotate_deg:       0.0,
+            crop_x: 0,
+            crop_y: 0,
+            crop_w: 0,
+            crop_h: 0,
+            rotate_deg: 0.0,
             sharpen_strength: 1.0,
-            bw_mode_idx:      0,
+            bw_mode_idx: 0,
         }
     }
 
@@ -86,23 +89,23 @@ impl AppState {
                 BgMessage::ImageLoaded { path, image } => {
                     let w = image.width;
                     let h = image.height;
-                    self.crop_w   = w;
-                    self.crop_h   = h;
+                    self.crop_w = w;
+                    self.crop_h = h;
                     self.last_path = Some(path.clone());
-                    self.status    = format!("Opened {}  ({}×{})", path.display(), w, h);
-                    self.pipeline  = Some(EditPipeline::new(image));
-                    self.loading   = false;
+                    self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
+                    self.pipeline = Some(EditPipeline::new(image));
+                    self.loading = false;
                     // Kick off initial render
                     self.request_render();
                 }
                 BgMessage::RenderComplete(img, hist) => {
-                    self.histogram = Some(hist);
-                    self.rendered  = Some(img);
-                    self.loading   = false;
-                    self.status    = "Ready".into();
+                    self.histogram = Some(*hist);
+                    self.rendered = Some(img);
+                    self.loading = false;
+                    self.status = "Ready".into();
                 }
                 BgMessage::Error(e) => {
-                    self.status  = format!("Error: {}", e);
+                    self.status = format!("Error: {}", e);
                     self.loading = false;
                 }
             }
@@ -116,9 +119,9 @@ impl AppState {
     /// Begin loading `path` in a background thread.
     pub fn open_file(&mut self, path: std::path::PathBuf) {
         self.loading = true;
-        self.status  = format!("Loading {}…", path.display());
+        self.status = format!("Loading {}…", path.display());
 
-        let tx  = self.bg_tx.clone();
+        let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
 
         std::thread::Builder::new()
@@ -128,7 +131,7 @@ impl AppState {
                 let registry = FormatRegistry::with_builtins();
                 let msg = match registry.decode_file(&path) {
                     Ok(image) => BgMessage::ImageLoaded { path, image },
-                    Err(e)    => BgMessage::Error(e.to_string()),
+                    Err(e) => BgMessage::Error(e.to_string()),
                 };
                 let _ = tx.send(msg);
                 ctx.request_repaint();
@@ -141,7 +144,10 @@ impl AppState {
             self.status = "Nothing to save — render first".into();
             return;
         };
-        match self.registry.encode_file(rendered, &path, &self.encode_opts) {
+        match self
+            .registry
+            .encode_file(rendered, &path, &self.encode_opts)
+        {
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(&path, &bytes) {
                     self.status = format!("Write failed: {}", e);
@@ -160,14 +166,25 @@ impl AppState {
     // -----------------------------------------------------------------------
 
     pub fn push_crop(&mut self) {
-        self.push_op(Box::new(CropOp::new(self.crop_x, self.crop_y, self.crop_w, self.crop_h)));
+        self.push_op(Box::new(CropOp::new(
+            self.crop_x,
+            self.crop_y,
+            self.crop_w,
+            self.crop_h,
+        )));
     }
     pub fn push_rotate_arbitrary(&mut self) {
         self.push_op(Box::new(RotateOp::arbitrary(self.rotate_deg)));
     }
-    pub fn push_rotate_90(&mut self)  { self.push_op(Box::new(RotateOp::cw90()));  }
-    pub fn push_rotate_180(&mut self) { self.push_op(Box::new(RotateOp::cw180())); }
-    pub fn push_rotate_270(&mut self) { self.push_op(Box::new(RotateOp::cw270())); }
+    pub fn push_rotate_90(&mut self) {
+        self.push_op(Box::new(RotateOp::cw90()));
+    }
+    pub fn push_rotate_180(&mut self) {
+        self.push_op(Box::new(RotateOp::cw180()));
+    }
+    pub fn push_rotate_270(&mut self) {
+        self.push_op(Box::new(RotateOp::cw270()));
+    }
     pub fn push_sharpen(&mut self) {
         self.push_op(Box::new(SharpenOp::new(self.sharpen_strength)));
     }
@@ -181,27 +198,31 @@ impl AppState {
     }
 
     pub fn remove_op(&mut self, index: usize) {
-        if self.pipeline.as_mut().map_or(false, |p| p.remove_op(index)) {
+        if self.pipeline.as_mut().is_some_and(|p| p.remove_op(index)) {
             self.request_render();
         }
     }
     pub fn reorder_op(&mut self, from: usize, to: usize) {
-        if self.pipeline.as_mut().map_or(false, |p| p.reorder_op(from, to)) {
+        if self
+            .pipeline
+            .as_mut()
+            .is_some_and(|p| p.reorder_op(from, to))
+        {
             self.request_render();
         }
     }
     pub fn toggle_op(&mut self, index: usize) {
-        if self.pipeline.as_mut().map_or(false, |p| p.toggle_op(index)) {
+        if self.pipeline.as_mut().is_some_and(|p| p.toggle_op(index)) {
             self.request_render();
         }
     }
     pub fn undo(&mut self) {
-        if self.pipeline.as_mut().map_or(false, |p| p.undo()) {
+        if self.pipeline.as_mut().is_some_and(|p| p.undo()) {
             self.request_render();
         }
     }
     pub fn redo(&mut self) {
-        if self.pipeline.as_mut().map_or(false, |p| p.redo()) {
+        if self.pipeline.as_mut().is_some_and(|p| p.redo()) {
             self.request_render();
         }
     }
@@ -223,8 +244,12 @@ impl AppState {
     /// operations to JSON (cheap: just parameters, no pixels) and deserialise
     /// them in the worker.  The source image is shared via `Arc`.
     pub fn request_render(&mut self) {
-        let Some(pipeline) = &self.pipeline else { return; };
-        if self.loading { return; }
+        let Some(pipeline) = &self.pipeline else {
+            return;
+        };
+        if self.loading {
+            return;
+        }
 
         // Snapshot active ops as JSON — very cheap
         let source = Arc::clone(pipeline.source());
@@ -237,9 +262,9 @@ impl AppState {
             .collect();
 
         self.loading = true;
-        self.status  = "Rendering…".into();
+        self.status = "Rendering…".into();
 
-        let tx  = self.bg_tx.clone();
+        let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
 
         std::thread::Builder::new()
@@ -247,8 +272,8 @@ impl AppState {
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
                 let msg = match render_in_thread(source, ops_json) {
-                    Ok((img, hist)) => BgMessage::RenderComplete(Arc::new(img), hist),
-                    Err(e)          => BgMessage::Error(e),
+                    Ok((img, hist)) => BgMessage::RenderComplete(Arc::new(img), Box::new(hist)),
+                    Err(e) => BgMessage::Error(e),
                 };
                 let _ = tx.send(msg);
                 ctx.request_repaint();
@@ -260,8 +285,12 @@ impl AppState {
     // Accessors
     // -----------------------------------------------------------------------
 
-    pub fn can_undo(&self) -> bool { self.pipeline.as_ref().map_or(false, |p| p.can_undo()) }
-    pub fn can_redo(&self) -> bool { self.pipeline.as_ref().map_or(false, |p| p.can_redo()) }
+    pub fn can_undo(&self) -> bool {
+        self.pipeline.as_ref().is_some_and(|p| p.can_undo())
+    }
+    pub fn can_redo(&self) -> bool {
+        self.pipeline.as_ref().is_some_and(|p| p.can_redo())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,15 +298,15 @@ impl AppState {
 // ---------------------------------------------------------------------------
 
 fn render_in_thread(
-    source:   Arc<Image>,
+    source: Arc<Image>,
     ops_json: Vec<serde_json::Value>,
 ) -> Result<(Image, HistogramData), String> {
     let mut current = source.deep_clone();
 
     for json_val in ops_json {
         // Deserialise operation (only parameters, no pixel data)
-        let op: Box<dyn Operation> = serde_json::from_value(json_val)
-            .map_err(|e| format!("Deserialise op: {}", e))?;
+        let op: Box<dyn Operation> =
+            serde_json::from_value(json_val).map_err(|e| format!("Deserialise op: {}", e))?;
 
         current = op
             .apply(&current)

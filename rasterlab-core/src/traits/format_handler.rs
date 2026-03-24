@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::{error::RasterResult, image::Image};
+use std::path::Path;
 
 /// Options controlling output encoding quality.
 #[derive(Debug, Clone)]
@@ -12,7 +12,10 @@ pub struct EncodeOptions {
 
 impl Default for EncodeOptions {
     fn default() -> Self {
-        Self { jpeg_quality: 90, png_compression: 6 }
+        Self {
+            jpeg_quality: 90,
+            png_compression: 6,
+        }
     }
 }
 

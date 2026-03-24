@@ -46,18 +46,18 @@ pub fn run(args: InfoArgs) -> Result<()> {
     if args.histogram {
         let hist = HistogramData::compute(&image);
         println!();
-        print_histogram_chart("Red",   &hist.red,   'R');
+        print_histogram_chart("Red", &hist.red, 'R');
         print_histogram_chart("Green", &hist.green, 'G');
-        print_histogram_chart("Blue",  &hist.blue,  'B');
-        print_histogram_chart("Luma",  &hist.luma,  'Y');
+        print_histogram_chart("Blue", &hist.blue, 'B');
+        print_histogram_chart("Luma", &hist.luma, 'Y');
     }
 
     Ok(())
 }
 
 fn print_histogram_chart(label: &str, data: &[u64; 256], ch: char) {
-    const BARS:   usize = 64; // number of columns in the chart
-    const HEIGHT: usize = 8;  // rows
+    const BARS: usize = 64; // number of columns in the chart
+    const HEIGHT: usize = 8; // rows
 
     // Downsample 256 buckets → BARS buckets
     let bucket_size = 256 / BARS;
@@ -77,10 +77,6 @@ fn print_histogram_chart(label: &str, data: &[u64; 256], ch: char) {
             .collect();
         println!("│{}│", line);
     }
-    println!(
-        " {}{}",
-        "0".to_string(),
-        " ".repeat(BARS - 3) + "255"
-    );
+    println!(" 0{}", " ".repeat(BARS - 3) + "255");
     println!();
 }

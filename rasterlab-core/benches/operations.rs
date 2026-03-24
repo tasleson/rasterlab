@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rasterlab_core::{
     image::Image,
     ops::{BlackAndWhiteOp, CropOp, RotateOp, SharpenOp},
@@ -6,9 +6,7 @@ use rasterlab_core::{
 };
 
 fn make_image(w: u32, h: u32) -> Image {
-    let data: Vec<u8> = (0..(w * h * 4))
-        .map(|i| (i % 256) as u8)
-        .collect();
+    let data: Vec<u8> = (0..(w * h * 4)).map(|i| (i % 256) as u8).collect();
     Image::from_rgba8(w, h, data).unwrap()
 }
 
@@ -51,5 +49,12 @@ fn bench_bw(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_crop, bench_rotate_90, bench_rotate_arbitrary, bench_sharpen, bench_bw);
+criterion_group!(
+    benches,
+    bench_crop,
+    bench_rotate_90,
+    bench_rotate_arbitrary,
+    bench_sharpen,
+    bench_bw
+);
 criterion_main!(benches);
