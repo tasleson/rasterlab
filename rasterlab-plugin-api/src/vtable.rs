@@ -22,10 +22,10 @@ pub struct OperationVTable {
     /// Apply the operation.
     ///
     /// # Parameters
-    /// - `op`  — pointer to this vtable (allows stateful operations by casting to a larger struct)
-    /// - `src` — source image (plugin must not free `src.data`)
-    /// - `dst` — output image to fill; plugin must allocate `dst.data` via the system allocator
-    ///           so the host can free it with [`rasterlab_free_image_data`]
+    /// - `op`  - pointer to this vtable (allows stateful operations by casting to a larger struct)
+    /// - `src` - source image (plugin must not free `src.data`)
+    /// - `dst` - output image to fill; plugin must allocate `dst.data` via the system allocator
+    ///   so the host can free it with [`rasterlab_free_image_data`]
     ///
     /// # Returns
     /// [`COperationStatus::Ok`] on success, otherwise an error code.
@@ -81,8 +81,7 @@ unsafe impl Sync for PluginVTable {}
 /// Caller is responsible for eventually calling `rasterlab_free_image_data` on `data`.
 pub unsafe fn alloc_cimage(width: u32, height: u32) -> CImage {
     let len = (width * height * 4) as usize;
-    let mut data = Vec::<u8>::with_capacity(len);
-    data.resize(len, 0u8);
+    let mut data = vec![0; len];
     let ptr = data.as_mut_ptr();
     core::mem::forget(data); // ownership transferred to CImage
     CImage {

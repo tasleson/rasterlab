@@ -9,27 +9,33 @@ use crate::state::AppState;
 
 /// Persistent state for the canvas panel.
 pub struct CanvasState {
-    pub zoom:       f32,
-    pan_offset:     Vec2,
-    texture:        Option<TextureHandle>,
+    pub zoom: f32,
+    pan_offset: Vec2,
+    texture: Option<TextureHandle>,
     /// Hash of the last image pointer+length — detects when pixel data changes.
-    last_hash:      u64,
-    /// Dimensions of the last loaded image — detects when a new file is opened.
-    last_img_dims:  (u32, u32),
-    crop_start:     Option<Pos2>,
-    crop_end:       Option<Pos2>,
+    last_hash: u64,
+    /// Generation counter from AppState — resets view on a new file open.
+    last_generation: u64,
+    /// Dimensions of the last rendered image — resets view when they change (crop, rotate 90/270).
+    last_img_dims: (u32, u32),
+    /// Canvas size on the previous frame — triggers a refit when the window is resized.
+    last_canvas_size: Vec2,
+    crop_start: Option<Pos2>,
+    crop_end: Option<Pos2>,
 }
 
 impl Default for CanvasState {
     fn default() -> Self {
         Self {
-            zoom:          1.0,
-            pan_offset:    Vec2::ZERO,
-            texture:       None,
-            last_hash:     0,
+            zoom: 1.0,
+            pan_offset: Vec2::ZERO,
+            texture: None,
+            last_hash: 0,
+            last_generation: 0,
             last_img_dims: (0, 0),
-            crop_start:    None,
-            crop_end:      None,
+            last_canvas_size: Vec2::ZERO,
+            crop_start: None,
+            crop_end: None,
         }
     }
 }
@@ -52,15 +58,17 @@ impl CanvasState {
 
         // ── Reserve bottom strip for zoom controls before computing canvas rect ──
         // This must come first so the controls have real layout space.
-        let available    = ui.available_rect_before_wrap();
-        let bar_height   = 24.0;
-        let canvas_size  = Vec2::new(available.width(), (available.height() - bar_height).max(1.0));
-        let canvas_rect  = Rect::from_min_size(available.min, canvas_size);
+        let available = ui.available_rect_before_wrap();
+        let bar_height = 24.0;
+        let canvas_size = Vec2::new(
+            available.width(),
+            (available.height() - bar_height).max(1.0),
+        );
+        let canvas_rect = Rect::from_min_size(available.min, canvas_size);
 
         // ── Rebuild GPU texture only when pixel data changes ─────────────────
-        let new_hash     = compute_hash(image);
-        let new_dims     = (img_w, img_h);
-        let is_new_image = self.texture.is_none() || new_dims != self.last_img_dims;
+        let new_hash = compute_hash(image);
+        let img_gen = state.image_generation;
 
         if self.texture.is_none() || new_hash != self.last_hash {
             self.texture = Some(ui.ctx().load_texture(
@@ -71,21 +79,25 @@ impl CanvasState {
             self.last_hash = new_hash;
         }
 
-        // Reset view only when a genuinely new image is loaded, not on every
-        // render (sharpen, B&W, etc. would otherwise jump the viewport).
-        if is_new_image {
-            self.zoom          = fit_zoom(img_w, img_h, canvas_size);
-            self.pan_offset    = Vec2::ZERO;
-            self.crop_start    = None;
-            self.crop_end      = None;
-            self.last_img_dims = new_dims;
+        // Reset view when a new file is opened OR when dimensions change
+        // (crop, rotate 90°/270°). Sharpen, B&W, rotate 180° etc. preserve zoom/pan.
+        let dims_changed = (img_w, img_h) != self.last_img_dims;
+        let canvas_resized =
+            canvas_size != self.last_canvas_size && self.last_canvas_size != Vec2::ZERO;
+        if img_gen != self.last_generation || dims_changed || canvas_resized {
+            self.zoom = fit_zoom(img_w, img_h, canvas_size);
+            self.pan_offset = Vec2::ZERO;
+            self.crop_start = None;
+            self.crop_end = None;
+            self.last_generation = img_gen;
+            self.last_img_dims = (img_w, img_h);
         }
+        self.last_canvas_size = canvas_size;
 
-        let tex          = self.texture.as_ref().unwrap();
+        let tex = self.texture.as_ref().unwrap();
         let display_size = Vec2::new(img_w as f32 * self.zoom, img_h as f32 * self.zoom);
 
-        let (resp, painter) =
-            ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
+        let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
 
         // ── Middle-mouse pan + scroll-wheel zoom ─────────────────────────────
         ui.input(|i| {
@@ -97,12 +109,12 @@ impl CanvasState {
             // frame and causes the image to jump.
             let scroll = i.raw_scroll_delta.y;
             if scroll != 0.0 {
-                let old_zoom    = self.zoom;
-                let factor      = (1.0 + scroll * 0.003).clamp(0.8, 1.25);
-                self.zoom       = (self.zoom * factor).clamp(0.05, 32.0);
-                let actual      = self.zoom / old_zoom;
+                let old_zoom = self.zoom;
+                let factor = (1.0 + scroll * 0.003).clamp(0.8, 1.25);
+                self.zoom = (self.zoom * factor).clamp(0.05, 32.0);
+                let actual = self.zoom / old_zoom;
                 if let Some(cursor) = i.pointer.hover_pos() {
-                    let pivot       = cursor - canvas_rect.min;
+                    let pivot = cursor - canvas_rect.min;
                     self.pan_offset = pivot - (pivot - self.pan_offset) * actual;
                 }
             }
@@ -120,31 +132,30 @@ impl CanvasState {
         // ── Crop selection (primary drag only) ───────────────────────────────
         if resp.drag_started_by(egui::PointerButton::Primary) {
             self.crop_start = resp.interact_pointer_pos();
-            self.crop_end   = self.crop_start;
+            self.crop_end = self.crop_start;
         }
         if resp.dragged_by(egui::PointerButton::Primary) {
             self.crop_end = resp.interact_pointer_pos();
         }
-        if resp.drag_stopped_by(egui::PointerButton::Primary) {
-            if let (Some(start), Some(end)) = (self.crop_start, self.crop_end) {
-                let (x, y, w, h) =
-                    screen_to_crop(start, end, image_tl, self.zoom, img_w, img_h);
-                state.crop_x = x;
-                state.crop_y = y;
-                state.crop_w = w;
-                state.crop_h = h;
-            }
+        if resp.drag_stopped_by(egui::PointerButton::Primary)
+            && let (Some(start), Some(end)) = (self.crop_start, self.crop_end)
+        {
+            let (x, y, w, h) = screen_to_crop(start, end, image_tl, self.zoom, img_w, img_h);
+            state.crop_x = x;
+            state.crop_y = y;
+            state.crop_w = w;
+            state.crop_h = h;
         }
 
         // ── Clear selection: right-click or Escape ───────────────────────────
         if resp.secondary_clicked() {
             self.crop_start = None;
-            self.crop_end   = None;
+            self.crop_end = None;
         }
         ui.input(|i| {
             if i.key_pressed(egui::Key::Escape) {
                 self.crop_start = None;
-                self.crop_end   = None;
+                self.crop_end = None;
             }
         });
 
@@ -170,11 +181,11 @@ impl CanvasState {
                 self.zoom = (self.zoom * 1.25).min(32.0);
             }
             if ui.small_button("Fit").clicked() {
-                self.zoom       = fit_zoom(img_w, img_h, canvas_size);
+                self.zoom = fit_zoom(img_w, img_h, canvas_size);
                 self.pan_offset = Vec2::ZERO;
             }
             if ui.small_button("1:1").clicked() {
-                self.zoom       = 1.0;
+                self.zoom = 1.0;
                 self.pan_offset = Vec2::ZERO;
             }
         });
@@ -186,20 +197,25 @@ impl CanvasState {
 // ---------------------------------------------------------------------------
 
 fn screen_to_crop(
-    start:    Pos2,
-    end:      Pos2,
+    start: Pos2,
+    end: Pos2,
     image_tl: Pos2,
-    zoom:     f32,
-    img_w:    u32,
-    img_h:    u32,
+    zoom: f32,
+    img_w: u32,
+    img_h: u32,
 ) -> (u32, u32, u32, u32) {
     let min = start.min(end);
     let max = start.max(end);
-    let x1  = (((min.x - image_tl.x) / zoom).max(0.0) as u32).min(img_w);
-    let y1  = (((min.y - image_tl.y) / zoom).max(0.0) as u32).min(img_h);
-    let x2  = (((max.x - image_tl.x) / zoom).max(0.0) as u32).min(img_w);
-    let y2  = (((max.y - image_tl.y) / zoom).max(0.0) as u32).min(img_h);
-    (x1, y1, x2.saturating_sub(x1).max(1), y2.saturating_sub(y1).max(1))
+    let x1 = (((min.x - image_tl.x) / zoom).max(0.0) as u32).min(img_w);
+    let y1 = (((min.y - image_tl.y) / zoom).max(0.0) as u32).min(img_h);
+    let x2 = (((max.x - image_tl.x) / zoom).max(0.0) as u32).min(img_w);
+    let y2 = (((max.y - image_tl.y) / zoom).max(0.0) as u32).min(img_h);
+    (
+        x1,
+        y1,
+        x2.saturating_sub(x1).max(1),
+        y2.saturating_sub(y1).max(1),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -207,37 +223,54 @@ fn screen_to_crop(
 // ---------------------------------------------------------------------------
 
 fn draw_marching_ants(painter: &egui::Painter, rect: Rect, time: f32) {
-    const DASH:  f32 = 8.0;
-    const GAP:   f32 = 4.0;
+    const DASH: f32 = 8.0;
+    const GAP: f32 = 4.0;
     const SPEED: f32 = 15.0;
 
-    let offset  = (time * SPEED).rem_euclid(DASH + GAP);
+    let offset = (time * SPEED).rem_euclid(DASH + GAP);
     painter.rect_stroke(rect, 0.0, Stroke::new(2.0, Color32::WHITE));
 
-    let corners = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom()];
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
     for i in 0..4 {
         dashed_segment(
-            painter, corners[i], corners[(i + 1) % 4],
-            Stroke::new(1.0, Color32::BLACK), DASH, GAP, offset,
+            painter,
+            corners[i],
+            corners[(i + 1) % 4],
+            Stroke::new(1.0, Color32::BLACK),
+            DASH,
+            GAP,
+            offset,
         );
     }
 }
 
 fn dashed_segment(
     painter: &egui::Painter,
-    a: Pos2, b: Pos2,
+    a: Pos2,
+    b: Pos2,
     stroke: Stroke,
-    dash: f32, gap: f32, offset: f32,
+    dash: f32,
+    gap: f32,
+    offset: f32,
 ) {
     let total = (b - a).length();
-    if total < 0.5 { return; }
-    let dir    = (b - a) / total;
+    if total < 0.5 {
+        return;
+    }
+    let dir = (b - a) / total;
     let period = dash + gap;
-    let mut t  = -(offset.rem_euclid(period));
+    let mut t = -(offset.rem_euclid(period));
     while t < total {
         let s = t.max(0.0);
         let e = (t + dash).min(total);
-        if s < e { painter.line_segment([a + dir * s, a + dir * e], stroke); }
+        if s < e {
+            painter.line_segment([a + dir * s, a + dir * e], stroke);
+        }
         t += period;
     }
 }
@@ -252,7 +285,10 @@ fn image_to_egui(image: &Image) -> ColorImage {
         .chunks_exact(4)
         .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
         .collect();
-    ColorImage { size: [image.width as usize, image.height as usize], pixels }
+    ColorImage {
+        size: [image.width as usize, image.height as usize],
+        pixels,
+    }
 }
 
 fn fit_zoom(img_w: u32, img_h: u32, available: Vec2) -> f32 {

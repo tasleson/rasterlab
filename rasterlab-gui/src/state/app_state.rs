@@ -37,6 +37,9 @@ pub struct AppState {
     pub status: String,
     pub last_path: Option<std::path::PathBuf>,
     pub encode_opts: EncodeOptions,
+    /// Incremented each time a new file is opened. Canvas uses this to know
+    /// when to reset zoom/pan vs. just updating the texture.
+    pub image_generation: u64,
 
     // Background thread channel
     bg_tx: mpsc::Sender<BgMessage>,
@@ -66,6 +69,7 @@ impl AppState {
             status: "Welcome to RasterLab — open an image to begin.".into(),
             last_path: None,
             encode_opts: EncodeOptions::default(),
+            image_generation: 0,
             bg_tx,
             bg_rx,
             ctx,
@@ -95,6 +99,7 @@ impl AppState {
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.pipeline = Some(EditPipeline::new(image));
                     self.loading = false;
+                    self.image_generation += 1;
                     // Kick off initial render
                     self.request_render();
                 }
