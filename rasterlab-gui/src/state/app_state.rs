@@ -1,0 +1,288 @@
+use std::sync::{mpsc, Arc};
+
+use egui::Context;
+use rasterlab_core::{
+    formats::FormatRegistry,
+    ops::{BlackAndWhiteOp, CropOp, HistogramData, RotateOp, SharpenOp},
+    pipeline::{EditEntry, EditPipeline},
+    traits::format_handler::EncodeOptions,
+    traits::operation::Operation,
+    Image,
+};
+
+// ---------------------------------------------------------------------------
+// Background-thread messaging
+// ---------------------------------------------------------------------------
+
+enum BgMessage {
+    ImageLoaded { path: std::path::PathBuf, image: Image },
+    RenderComplete(Arc<Image>),
+    Error(String),
+}
+
+// ---------------------------------------------------------------------------
+// AppState
+// ---------------------------------------------------------------------------
+
+pub struct AppState {
+    pub registry:    FormatRegistry,
+    pub pipeline:    Option<EditPipeline>,
+    pub rendered:    Option<Arc<Image>>,
+    pub histogram:   Option<HistogramData>,
+    pub loading:     bool,
+    pub status:      String,
+    pub last_path:   Option<std::path::PathBuf>,
+    pub encode_opts: EncodeOptions,
+
+    // Background thread channel
+    bg_tx: mpsc::Sender<BgMessage>,
+    bg_rx: mpsc::Receiver<BgMessage>,
+    // egui context — needed to wake up the UI after background work completes
+    ctx: Context,
+
+    // ── Tool panel inputs ─────────────────────────────────────────────────
+    pub crop_x:           u32,
+    pub crop_y:           u32,
+    pub crop_w:           u32,
+    pub crop_h:           u32,
+    pub rotate_deg:       f32,
+    pub sharpen_strength: f32,
+    pub bw_mode_idx:      usize,
+}
+
+impl AppState {
+    pub fn new(ctx: Context) -> Self {
+        let (bg_tx, bg_rx) = mpsc::channel();
+        Self {
+            registry:  FormatRegistry::with_builtins(),
+            pipeline:  None,
+            rendered:  None,
+            histogram: None,
+            loading:   false,
+            status:    "Welcome to RasterLab — open an image to begin.".into(),
+            last_path: None,
+            encode_opts: EncodeOptions::default(),
+            bg_tx,
+            bg_rx,
+            ctx,
+            crop_x:           0,
+            crop_y:           0,
+            crop_w:           0,
+            crop_h:           0,
+            rotate_deg:       0.0,
+            sharpen_strength: 1.0,
+            bw_mode_idx:      0,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Background message pump — call once per frame from update()
+    // -----------------------------------------------------------------------
+
+    pub fn poll_background(&mut self) {
+        while let Ok(msg) = self.bg_rx.try_recv() {
+            match msg {
+                BgMessage::ImageLoaded { path, image } => {
+                    let w = image.width;
+                    let h = image.height;
+                    self.crop_w   = w;
+                    self.crop_h   = h;
+                    self.last_path = Some(path.clone());
+                    self.status    = format!("Opened {}  ({}×{})", path.display(), w, h);
+                    self.pipeline  = Some(EditPipeline::new(image));
+                    self.loading   = false;
+                    // Kick off initial render
+                    self.request_render();
+                }
+                BgMessage::RenderComplete(img) => {
+                    self.histogram = Some(HistogramData::compute(&img));
+                    self.rendered  = Some(img);
+                    self.loading   = false;
+                    self.status    = "Ready".into();
+                }
+                BgMessage::Error(e) => {
+                    self.status  = format!("Error: {}", e);
+                    self.loading = false;
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // File I/O
+    // -----------------------------------------------------------------------
+
+    /// Begin loading `path` in a background thread.
+    pub fn open_file(&mut self, path: std::path::PathBuf) {
+        self.loading = true;
+        self.status  = format!("Loading {}…", path.display());
+
+        let tx  = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
+
+        std::thread::Builder::new()
+            .name("rasterlab-load".into())
+            .stack_size(32 * 1024 * 1024) // 32 MiB — some RAW decoders are deep
+            .spawn(move || {
+                let registry = FormatRegistry::with_builtins();
+                let msg = match registry.decode_file(&path) {
+                    Ok(image) => BgMessage::ImageLoaded { path, image },
+                    Err(e)    => BgMessage::Error(e.to_string()),
+                };
+                let _ = tx.send(msg);
+                ctx.request_repaint();
+            })
+            .expect("failed to spawn load thread");
+    }
+
+    pub fn save_file(&mut self, path: std::path::PathBuf) {
+        let Some(rendered) = &self.rendered else {
+            self.status = "Nothing to save — render first".into();
+            return;
+        };
+        match self.registry.encode_file(rendered, &path, &self.encode_opts) {
+            Ok(bytes) => {
+                if let Err(e) = std::fs::write(&path, &bytes) {
+                    self.status = format!("Write failed: {}", e);
+                } else {
+                    self.status = format!("Saved {} bytes → {}", bytes.len(), path.display());
+                }
+            }
+            Err(e) => {
+                self.status = format!("Encode failed: {}", e);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pipeline mutations (always followed by request_render)
+    // -----------------------------------------------------------------------
+
+    pub fn push_crop(&mut self) {
+        self.push_op(Box::new(CropOp::new(self.crop_x, self.crop_y, self.crop_w, self.crop_h)));
+    }
+    pub fn push_rotate_arbitrary(&mut self) {
+        self.push_op(Box::new(RotateOp::arbitrary(self.rotate_deg)));
+    }
+    pub fn push_rotate_90(&mut self)  { self.push_op(Box::new(RotateOp::cw90()));  }
+    pub fn push_rotate_180(&mut self) { self.push_op(Box::new(RotateOp::cw180())); }
+    pub fn push_rotate_270(&mut self) { self.push_op(Box::new(RotateOp::cw270())); }
+    pub fn push_sharpen(&mut self) {
+        self.push_op(Box::new(SharpenOp::new(self.sharpen_strength)));
+    }
+    pub fn push_bw(&mut self) {
+        let op: Box<dyn Operation> = match self.bw_mode_idx {
+            1 => Box::new(BlackAndWhiteOp::average()),
+            2 => Box::new(BlackAndWhiteOp::perceptual()),
+            _ => Box::new(BlackAndWhiteOp::luminance()),
+        };
+        self.push_op(op);
+    }
+
+    pub fn remove_op(&mut self, index: usize) {
+        if self.pipeline.as_mut().map_or(false, |p| p.remove_op(index)) {
+            self.request_render();
+        }
+    }
+    pub fn reorder_op(&mut self, from: usize, to: usize) {
+        if self.pipeline.as_mut().map_or(false, |p| p.reorder_op(from, to)) {
+            self.request_render();
+        }
+    }
+    pub fn toggle_op(&mut self, index: usize) {
+        if self.pipeline.as_mut().map_or(false, |p| p.toggle_op(index)) {
+            self.request_render();
+        }
+    }
+    pub fn undo(&mut self) {
+        if self.pipeline.as_mut().map_or(false, |p| p.undo()) {
+            self.request_render();
+        }
+    }
+    pub fn redo(&mut self) {
+        if self.pipeline.as_mut().map_or(false, |p| p.redo()) {
+            self.request_render();
+        }
+    }
+
+    fn push_op(&mut self, op: Box<dyn Operation>) {
+        if let Some(p) = &mut self.pipeline {
+            p.push_op(op);
+            self.request_render();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Background rendering
+    // -----------------------------------------------------------------------
+
+    /// Kick off a background render of the current pipeline.
+    ///
+    /// The pipeline is NOT moved to the thread — instead we serialise the active
+    /// operations to JSON (cheap: just parameters, no pixels) and deserialise
+    /// them in the worker.  The source image is shared via `Arc`.
+    pub fn request_render(&mut self) {
+        let Some(pipeline) = &self.pipeline else { return; };
+        if self.loading { return; }
+
+        // Snapshot active ops as JSON — very cheap
+        let source = Arc::clone(pipeline.source());
+        let ops_json: Vec<serde_json::Value> = pipeline
+            .ops()
+            .iter()
+            .take(pipeline.cursor())
+            .filter(|e| e.enabled)
+            .filter_map(|e| serde_json::to_value(&e.operation).ok())
+            .collect();
+
+        self.loading = true;
+        self.status  = "Rendering…".into();
+
+        let tx  = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
+
+        std::thread::Builder::new()
+            .name("rasterlab-render".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let result = render_in_thread(source, ops_json);
+                let msg = match result {
+                    Ok(img)  => BgMessage::RenderComplete(Arc::new(img)),
+                    Err(e)   => BgMessage::Error(e),
+                };
+                let _ = tx.send(msg);
+                ctx.request_repaint();
+            })
+            .expect("failed to spawn render thread");
+    }
+
+    // -----------------------------------------------------------------------
+    // Accessors
+    // -----------------------------------------------------------------------
+
+    pub fn can_undo(&self) -> bool { self.pipeline.as_ref().map_or(false, |p| p.can_undo()) }
+    pub fn can_redo(&self) -> bool { self.pipeline.as_ref().map_or(false, |p| p.can_redo()) }
+}
+
+// ---------------------------------------------------------------------------
+// Free function: runs in the render thread
+// ---------------------------------------------------------------------------
+
+fn render_in_thread(
+    source:   Arc<Image>,
+    ops_json: Vec<serde_json::Value>,
+) -> Result<Image, String> {
+    let mut current = source.deep_clone();
+
+    for json_val in ops_json {
+        // Deserialise operation (only parameters, no pixel data)
+        let entry: EditEntry = serde_json::from_value(json_val)
+            .map_err(|e| format!("Deserialise op: {}", e))?;
+
+        current = entry.operation
+            .apply(&current)
+            .map_err(|e| format!("Op '{}' failed: {}", entry.operation.name(), e))?;
+    }
+
+    Ok(current)
+}

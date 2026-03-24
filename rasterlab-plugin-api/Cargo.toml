@@ -1,0 +1,9 @@
+# This crate has ZERO external dependencies by design.
+# Plugin authors link only against this crate, keeping their build graphs small
+# and avoiding accidental coupling to the host's dependency versions.
+[package]
+name        = "rasterlab-plugin-api"
+description = "Stable C-ABI plugin interface for RasterLab"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true

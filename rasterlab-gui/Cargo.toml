@@ -1,0 +1,22 @@
+[package]
+name        = "rasterlab-gui"
+description = "Cross-platform GUI for RasterLab (egui/eframe)"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+
+[[bin]]
+name = "rasterlab-gui"
+path = "src/main.rs"
+
+[dependencies]
+rasterlab-core = { workspace = true }
+
+eframe       = { workspace = true }
+egui         = { workspace = true }
+serde_json   = { workspace = true }
+anyhow       = { workspace = true }
+
+# Native file dialogs (open/save)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = { workspace = true }

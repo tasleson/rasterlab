@@ -1,0 +1,18 @@
+[package]
+name        = "rasterlab-cli"
+description = "Command-line interface for RasterLab image processing"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+
+[[bin]]
+name = "rasterlab"
+path = "src/main.rs"
+
+[dependencies]
+rasterlab-core = { workspace = true }
+
+clap         = { workspace = true }
+serde_json   = { workspace = true }
+rayon        = { workspace = true }
+anyhow       = { workspace = true }
