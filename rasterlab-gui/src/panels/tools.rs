@@ -136,6 +136,65 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Vignette ──────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("◎  Vignette")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut changed = false;
+            egui::Grid::new("vignette_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Strength");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.vignette_strength)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("Radius");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.vignette_radius)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("Feather");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.vignette_feather)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                });
+            if changed && has_image {
+                state.update_vignette_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply Vignette"))
+                    .clicked()
+                {
+                    state.push_vignette();
+                }
+                if state.vignette_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_vignette_preview();
+                }
+            });
+        });
+
+    ui.separator();
+
     // ── Black & White ─────────────────────────────────────────────────────
     egui::CollapsingHeader::new("◑  Black & White")
         .default_open(true)

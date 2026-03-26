@@ -4,7 +4,7 @@ use egui::Context;
 use rasterlab_core::{
     Image,
     formats::FormatRegistry,
-    ops::{BlackAndWhiteOp, CropOp, HistogramData, LevelsOp, RotateOp, SharpenOp},
+    ops::{BlackAndWhiteOp, CropOp, HistogramData, LevelsOp, RotateOp, SharpenOp, VignetteOp},
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
@@ -77,6 +77,13 @@ pub struct AppState {
     /// When true, a BlackAndWhiteOp preview is appended to each render.
     pub bw_preview_active: bool,
 
+    // ── Vignette tool ─────────────────────────────────────────────────────
+    pub vignette_strength: f32,
+    pub vignette_radius: f32,
+    pub vignette_feather: f32,
+    /// When true, a VignetteOp preview is appended to each render.
+    pub vignette_preview_active: bool,
+
     // ── Levels tool ───────────────────────────────────────────────────────
     /// Live slider values for the levels tool (not yet committed to pipeline).
     pub levels_black: f32,
@@ -118,6 +125,10 @@ impl AppState {
             bw_mixer_g: 0.7152,
             bw_mixer_b: 0.0722,
             bw_preview_active: false,
+            vignette_strength: 0.5,
+            vignette_radius: 0.65,
+            vignette_feather: 0.5,
+            vignette_preview_active: false,
             levels_black: 0.0,
             levels_mid: 1.0,
             levels_white: 1.0,
@@ -269,6 +280,27 @@ impl AppState {
     pub fn push_sharpen(&mut self) {
         self.push_op(Box::new(SharpenOp::new(self.sharpen_strength)));
     }
+
+    pub fn update_vignette_preview(&mut self) {
+        self.vignette_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_vignette_preview(&mut self) {
+        if self.vignette_preview_active {
+            self.vignette_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_vignette(&mut self) {
+        self.vignette_preview_active = false;
+        self.push_op(Box::new(VignetteOp::new(
+            self.vignette_strength,
+            self.vignette_radius,
+            self.vignette_feather,
+        )));
+    }
     /// Update the live levels preview and trigger a re-render.
     /// Call this whenever a levels slider changes.
     pub fn update_levels_preview(&mut self) {
@@ -401,7 +433,9 @@ impl AppState {
         // Render at reduced scale when a preview op is active so ops run on
         // a fraction of the pixels (~16× fewer at 25%).  Full-res renders are
         // queued automatically once the preview is displayed.
-        let is_preview = (self.levels_preview_active || self.bw_preview_active) && !force_full_res;
+        let is_preview =
+            (self.levels_preview_active || self.bw_preview_active || self.vignette_preview_active)
+                && !force_full_res;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
         } else {
@@ -438,6 +472,13 @@ impl AppState {
             serde_json::to_value(&preview).ok()
         } else if self.bw_preview_active {
             serde_json::to_value(self.make_bw_op()).ok()
+        } else if self.vignette_preview_active {
+            let preview: Box<dyn Operation> = Box::new(VignetteOp::new(
+                self.vignette_strength,
+                self.vignette_radius,
+                self.vignette_feather,
+            ));
+            serde_json::to_value(&preview).ok()
         } else {
             None
         };

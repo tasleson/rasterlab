@@ -314,7 +314,10 @@ fn fit_zoom(img_w: u32, img_h: u32, available: Vec2) -> f32 {
 fn compute_hash(image: &Image) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    image.data.as_ptr().hash(&mut h);
+    // Sample every 128th byte — fast, but catches any pixel change.
     image.data.len().hash(&mut h);
+    for byte in image.data.iter().step_by(128) {
+        byte.hash(&mut h);
+    }
     h.finish()
 }
