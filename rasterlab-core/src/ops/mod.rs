@@ -1,6 +1,7 @@
 pub mod blur;
 pub mod brightness_contrast;
 pub mod bw;
+pub mod color_balance;
 pub mod crop;
 pub mod curves;
 pub mod faux_hdr;
@@ -22,6 +23,7 @@ pub mod white_balance;
 pub use blur::BlurOp;
 pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::BlackAndWhiteOp;
+pub use color_balance::ColorBalanceOp;
 pub use crop::CropOp;
 pub use curves::CurvesOp;
 pub use faux_hdr::FauxHdrOp;
