@@ -941,6 +941,53 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.add(DragValue::new(&mut state.encode_opts.png_compression).range(0..=9u8));
                     ui.end_row();
                 });
+
+            ui.separator();
+            ui.label("Resize on export:");
+            ui.checkbox(&mut state.export_resize_enabled, "Enable");
+            if state.export_resize_enabled {
+                egui::Grid::new("export_resize_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Width:");
+                        ui.add(
+                            DragValue::new(&mut state.export_resize_w)
+                                .range(1..=65535u32)
+                                .suffix(" px"),
+                        );
+                        ui.end_row();
+                        ui.label("Height:");
+                        ui.add(
+                            DragValue::new(&mut state.export_resize_h)
+                                .range(1..=65535u32)
+                                .suffix(" px"),
+                        );
+                        ui.end_row();
+                        ui.label("Mode:");
+                        egui::ComboBox::from_id_salt("export_resize_mode")
+                            .selected_text(format!("{:?}", state.export_resize_mode))
+                            .show_ui(ui, |ui| {
+                                use rasterlab_core::ops::ResampleMode;
+                                ui.selectable_value(
+                                    &mut state.export_resize_mode,
+                                    ResampleMode::NearestNeighbour,
+                                    "Nearest",
+                                );
+                                ui.selectable_value(
+                                    &mut state.export_resize_mode,
+                                    ResampleMode::Bilinear,
+                                    "Bilinear",
+                                );
+                                ui.selectable_value(
+                                    &mut state.export_resize_mode,
+                                    ResampleMode::Bicubic,
+                                    "Bicubic",
+                                );
+                            });
+                        ui.end_row();
+                    });
+            }
         });
 }
 

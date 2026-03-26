@@ -57,6 +57,11 @@ pub struct AppState {
     pub status: String,
     pub last_path: Option<std::path::PathBuf>,
     pub encode_opts: EncodeOptions,
+    /// When `true`, apply a resize step before encoding.
+    pub export_resize_enabled: bool,
+    pub export_resize_w: u32,
+    pub export_resize_h: u32,
+    pub export_resize_mode: ResampleMode,
     /// Incremented each time a new file is opened. Canvas uses this to know
     /// when to reset zoom/pan vs. just updating the texture.
     pub image_generation: u64,
@@ -195,6 +200,10 @@ impl AppState {
             status: "Welcome to RasterLab — open an image to begin.".into(),
             last_path: None,
             encode_opts: EncodeOptions::default(),
+            export_resize_enabled: false,
+            export_resize_w: 0,
+            export_resize_h: 0,
+            export_resize_mode: ResampleMode::Bicubic,
             image_generation: 0,
             bg_tx,
             bg_rx,
@@ -364,10 +373,31 @@ impl AppState {
             self.status = "Nothing to save — render first".into();
             return;
         };
-        match self
-            .registry
-            .encode_file(rendered, &path, &self.encode_opts)
-        {
+
+        // Optionally resize before encoding.
+        let resized_buf;
+        let to_save: &Image =
+            if self.export_resize_enabled && self.export_resize_w > 0 && self.export_resize_h > 0 {
+                let op = ResizeOp::new(
+                    self.export_resize_w,
+                    self.export_resize_h,
+                    self.export_resize_mode,
+                );
+                match op.apply(rendered.as_ref()) {
+                    Ok(img) => {
+                        resized_buf = img;
+                        &resized_buf
+                    }
+                    Err(e) => {
+                        self.status = format!("Export resize failed: {}", e);
+                        return;
+                    }
+                }
+            } else {
+                rendered.as_ref()
+            };
+
+        match self.registry.encode_file(to_save, &path, &self.encode_opts) {
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(&path, &bytes) {
                     self.status = format!("Write failed: {}", e);
