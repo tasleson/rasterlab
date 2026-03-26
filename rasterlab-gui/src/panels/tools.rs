@@ -605,6 +605,38 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Vibrance ──────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("✦  Vibrance")
+        .default_open(true)
+        .show(ui, |ui| {
+            let changed = ui
+                .add(egui::Slider::new(&mut state.vibrance, -1.0..=1.0).step_by(0.01))
+                .changed();
+            if changed && has_image {
+                state.update_vibrance_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_vibrance();
+                }
+                if state.vibrance_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_vibrance_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_vibrance();
+                }
+            });
+        });
+
+    ui.separator();
+
     // ── White Balance ─────────────────────────────────────────────────────
     egui::CollapsingHeader::new("🌡  White Balance")
         .default_open(true)

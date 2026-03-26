@@ -15,6 +15,7 @@ pub mod rotate;
 pub mod saturation;
 pub mod sepia;
 pub mod sharpen;
+pub mod vibrance;
 pub mod vignette;
 pub mod white_balance;
 
@@ -35,5 +36,6 @@ pub use rotate::{RotateMode, RotateOp};
 pub use saturation::SaturationOp;
 pub use sepia::SepiaOp;
 pub use sharpen::SharpenOp;
+pub use vibrance::VibranceOp;
 pub use vignette::VignetteOp;
 pub use white_balance::WhiteBalanceOp;

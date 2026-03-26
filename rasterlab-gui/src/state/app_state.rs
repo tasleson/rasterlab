@@ -7,7 +7,7 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, CropOp, CurvesOp, FauxHdrOp, FlipOp,
         GrainOp, HighlightsShadowsOp, HistogramData, HueShiftOp, LevelsOp, ResampleMode, ResizeOp,
-        RotateOp, SaturationOp, SepiaOp, SharpenOp, VignetteOp, WhiteBalanceOp,
+        RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -104,6 +104,10 @@ pub struct AppState {
     /// When true, a VignetteOp preview is appended to each render.
     pub vignette_preview_active: bool,
 
+    // ── Vibrance tool ─────────────────────────────────────────────────────
+    pub vibrance: f32,
+    pub vibrance_preview_active: bool,
+
     // ── Sepia tool ────────────────────────────────────────────────────────
     pub sepia_strength: f32,
 
@@ -190,6 +194,8 @@ impl AppState {
             curve_points: vec![[0.0, 0.0], [1.0, 1.0]],
             curve_preview_active: false,
             curve_dragging_idx: None,
+            vibrance: 0.0,
+            vibrance_preview_active: false,
             sepia_strength: 1.0,
             resize_w: 0,
             resize_h: 0,
@@ -472,6 +478,29 @@ impl AppState {
             self.vignette_radius,
             self.vignette_feather,
         )));
+    }
+
+    pub fn update_vibrance_preview(&mut self) {
+        self.vibrance_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_vibrance_preview(&mut self) {
+        if self.vibrance_preview_active {
+            self.vibrance_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_vibrance(&mut self) {
+        self.vibrance_preview_active = false;
+        self.push_op(Box::new(VibranceOp::new(self.vibrance)));
+        self.vibrance = 0.0;
+    }
+
+    pub fn reset_vibrance(&mut self) {
+        self.vibrance = 0.0;
+        self.cancel_vibrance_preview();
     }
 
     pub fn push_sepia(&mut self) {
@@ -762,6 +791,7 @@ impl AppState {
         self.curve_preview_active = false;
         self.curve_dragging_idx = None;
         self.vignette_preview_active = false;
+        self.vibrance_preview_active = false;
         self.hue_preview_active = false;
         self.hl_preview_active = false;
         self.wb_preview_active = false;
@@ -807,7 +837,8 @@ impl AppState {
             || self.hdr_preview_active
             || self.wb_preview_active
             || self.hl_preview_active
-            || self.hue_preview_active)
+            || self.hue_preview_active
+            || self.vibrance_preview_active)
             && !force_full_res;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
@@ -865,6 +896,9 @@ impl AppState {
                 self.vignette_radius,
                 self.vignette_feather,
             ));
+            serde_json::to_value(&preview).ok()
+        } else if self.vibrance_preview_active {
+            let preview: Box<dyn Operation> = Box::new(VibranceOp::new(self.vibrance));
             serde_json::to_value(&preview).ok()
         } else if self.hue_preview_active {
             let preview: Box<dyn Operation> = Box::new(HueShiftOp::new(self.hue_degrees));
