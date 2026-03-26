@@ -6,7 +6,7 @@ use rasterlab_core::{
     formats::FormatRegistry,
     ops::{
         BlackAndWhiteOp, BrightnessContrastOp, CropOp, CurvesOp, FauxHdrOp, FlipOp, GrainOp,
-        HistogramData, LevelsOp, RotateOp, SaturationOp, SharpenOp, VignetteOp,
+        HistogramData, LevelsOp, RotateOp, SaturationOp, SharpenOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -103,6 +103,11 @@ pub struct AppState {
     /// When true, a VignetteOp preview is appended to each render.
     pub vignette_preview_active: bool,
 
+    // ── White Balance tool ────────────────────────────────────────────────
+    pub wb_temperature: f32,
+    pub wb_tint: f32,
+    pub wb_preview_active: bool,
+
     // ── Faux HDR tool ─────────────────────────────────────────────────────
     pub hdr_strength: f32,
     pub hdr_preview_active: bool,
@@ -163,6 +168,9 @@ impl AppState {
             curve_points: vec![[0.0, 0.0], [1.0, 1.0]],
             curve_preview_active: false,
             curve_dragging_idx: None,
+            wb_temperature: 0.0,
+            wb_tint: 0.0,
+            wb_preview_active: false,
             vignette_strength: 0.5,
             vignette_radius: 0.65,
             vignette_feather: 0.5,
@@ -431,6 +439,34 @@ impl AppState {
         )));
     }
 
+    pub fn update_wb_preview(&mut self) {
+        self.wb_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_wb_preview(&mut self) {
+        if self.wb_preview_active {
+            self.wb_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_wb(&mut self) {
+        self.wb_preview_active = false;
+        self.push_op(Box::new(WhiteBalanceOp::new(
+            self.wb_temperature,
+            self.wb_tint,
+        )));
+        self.wb_temperature = 0.0;
+        self.wb_tint = 0.0;
+    }
+
+    pub fn reset_wb(&mut self) {
+        self.wb_temperature = 0.0;
+        self.wb_tint = 0.0;
+        self.cancel_wb_preview();
+    }
+
     pub fn update_hdr_preview(&mut self) {
         self.hdr_preview_active = true;
         self.request_render();
@@ -624,6 +660,7 @@ impl AppState {
         self.curve_preview_active = false;
         self.curve_dragging_idx = None;
         self.vignette_preview_active = false;
+        self.wb_preview_active = false;
         self.hdr_preview_active = false;
         self.grain_preview_active = false;
     }
@@ -663,7 +700,8 @@ impl AppState {
             || self.bc_preview_active
             || self.sat_preview_active
             || self.curve_preview_active
-            || self.hdr_preview_active)
+            || self.hdr_preview_active
+            || self.wb_preview_active)
             && !force_full_res;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
@@ -721,6 +759,10 @@ impl AppState {
                 self.vignette_radius,
                 self.vignette_feather,
             ));
+            serde_json::to_value(&preview).ok()
+        } else if self.wb_preview_active {
+            let preview: Box<dyn Operation> =
+                Box::new(WhiteBalanceOp::new(self.wb_temperature, self.wb_tint));
             serde_json::to_value(&preview).ok()
         } else if self.hdr_preview_active {
             let preview: Box<dyn Operation> = Box::new(FauxHdrOp::new(self.hdr_strength));

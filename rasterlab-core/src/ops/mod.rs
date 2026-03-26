@@ -11,6 +11,7 @@ pub mod rotate;
 pub mod saturation;
 pub mod sharpen;
 pub mod vignette;
+pub mod white_balance;
 
 pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::BlackAndWhiteOp;
@@ -25,3 +26,4 @@ pub use rotate::{RotateMode, RotateOp};
 pub use saturation::SaturationOp;
 pub use sharpen::SharpenOp;
 pub use vignette::VignetteOp;
+pub use white_balance::WhiteBalanceOp;

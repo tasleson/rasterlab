@@ -401,6 +401,51 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── White Balance ─────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("🌡  White Balance")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut changed = false;
+            egui::Grid::new("wb_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Temperature");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut state.wb_temperature, -1.0..=1.0).step_by(0.01))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Tint");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut state.wb_tint, -1.0..=1.0).step_by(0.01))
+                        .changed();
+                    ui.end_row();
+                });
+            if changed && has_image {
+                state.update_wb_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_wb();
+                }
+                if state.wb_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_wb_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_wb();
+                }
+            });
+        });
+
+    ui.separator();
+
     // ── Faux HDR ──────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("◈  Faux HDR")
         .default_open(true)
