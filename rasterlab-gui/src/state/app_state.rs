@@ -7,7 +7,7 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, CropOp, CurvesOp, FauxHdrOp, FlipOp,
         GrainOp, HighlightsShadowsOp, HistogramData, HueShiftOp, LevelsOp, ResampleMode, ResizeOp,
-        RotateOp, SaturationOp, SharpenOp, VignetteOp, WhiteBalanceOp,
+        RotateOp, SaturationOp, SepiaOp, SharpenOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -104,6 +104,9 @@ pub struct AppState {
     /// When true, a VignetteOp preview is appended to each render.
     pub vignette_preview_active: bool,
 
+    // ── Sepia tool ────────────────────────────────────────────────────────
+    pub sepia_strength: f32,
+
     // ── Resize tool ───────────────────────────────────────────────────────
     pub resize_w: u32,
     pub resize_h: u32,
@@ -187,6 +190,7 @@ impl AppState {
             curve_points: vec![[0.0, 0.0], [1.0, 1.0]],
             curve_preview_active: false,
             curve_dragging_idx: None,
+            sepia_strength: 1.0,
             resize_w: 0,
             resize_h: 0,
             resize_mode: ResampleMode::Bicubic,
@@ -468,6 +472,10 @@ impl AppState {
             self.vignette_radius,
             self.vignette_feather,
         )));
+    }
+
+    pub fn push_sepia(&mut self) {
+        self.push_op(Box::new(SepiaOp::new(self.sepia_strength)));
     }
 
     pub fn push_resize(&mut self) {

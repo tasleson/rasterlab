@@ -429,6 +429,24 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Sepia ─────────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("🟫  Sepia")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Strength:");
+                ui.add(egui::Slider::new(&mut state.sepia_strength, 0.0..=1.0).step_by(0.01));
+            });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Sepia"))
+                .clicked()
+            {
+                state.push_sepia();
+            }
+        });
+
+    ui.separator();
+
     // ── Hue Shift ─────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("🎡  Hue Shift")
         .default_open(true)
