@@ -100,6 +100,10 @@ impl CanvasState {
         let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
 
         // ── Middle-mouse pan + scroll-wheel zoom ─────────────────────────────
+        let middle_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle));
+        if middle_down {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
+        }
         ui.input(|i| {
             if i.pointer.button_down(egui::PointerButton::Middle) {
                 self.pan_offset += i.pointer.delta();
