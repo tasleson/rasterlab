@@ -11,6 +11,21 @@ const BW_MODES: &[&str] = &[
     "Channel Mixer",
 ];
 
+/// Named channel-mixer presets: (label, R, G, B).
+/// Weights need not sum to 1 — clamped to [0,255] per-pixel in the op.
+const BW_PRESETS: &[(&str, f32, f32, f32)] = &[
+    ("Neutral", 0.2126, 0.7152, 0.0722),     // BT.709
+    ("Dramatic Contrast", 0.60, 0.40, 0.00), // red/yellow boost, dark skies
+    ("Red Filter", 1.00, 0.00, 0.00),        // mimics red lens filter
+    ("Green Filter", 0.00, 1.00, 0.00),      // maximum fine detail
+    ("Blue Filter", 0.00, 0.00, 1.00),       // hazy, atmospheric
+    ("Soften / Skin", 0.25, 0.55, 0.20),     // flatters skin tones
+    ("Urban / Cool", 0.00, 0.30, 0.70),      // gritty blue-channel look
+    ("High Key", 0.40, 0.50, 0.30),          // weights > sum→lifted midtones
+    ("Low Key", 0.10, 0.20, 0.05),           // weights < sum→crushed midtones
+    ("Infrared", 0.90, 0.10, -0.10),         // blown-out foliage simulation
+];
+
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.heading("Tools");
     ui.separator();
@@ -140,6 +155,21 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             // Channel mixer sliders — only shown when that mode is selected.
             if state.bw_mode_idx == 3 {
                 let mut changed = false;
+
+                // Preset buttons — clicking one loads the weights and previews.
+                ui.label("Presets:");
+                ui.horizontal_wrapped(|ui| {
+                    for &(label, r, g, b) in BW_PRESETS {
+                        if ui.small_button(label).clicked() && has_image {
+                            state.bw_mixer_r = r;
+                            state.bw_mixer_g = g;
+                            state.bw_mixer_b = b;
+                            state.update_bw_preview();
+                        }
+                    }
+                });
+                ui.add_space(2.0);
+
                 egui::Grid::new("bw_mixer_grid")
                     .num_columns(2)
                     .spacing([8.0, 4.0])
