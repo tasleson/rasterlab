@@ -1,3 +1,4 @@
+pub mod blur;
 pub mod brightness_contrast;
 pub mod bw;
 pub mod crop;
@@ -15,6 +16,7 @@ pub mod sharpen;
 pub mod vignette;
 pub mod white_balance;
 
+pub use blur::BlurOp;
 pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::BlackAndWhiteOp;
 pub use crop::CropOp;

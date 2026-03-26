@@ -5,8 +5,8 @@ use rasterlab_core::{
     Image,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BrightnessContrastOp, CropOp, CurvesOp, FauxHdrOp, FlipOp, GrainOp,
-        HighlightsShadowsOp, HistogramData, HueShiftOp, LevelsOp, RotateOp, SaturationOp,
+        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, CropOp, CurvesOp, FauxHdrOp, FlipOp,
+        GrainOp, HighlightsShadowsOp, HistogramData, HueShiftOp, LevelsOp, RotateOp, SaturationOp,
         SharpenOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
@@ -104,6 +104,9 @@ pub struct AppState {
     /// When true, a VignetteOp preview is appended to each render.
     pub vignette_preview_active: bool,
 
+    // ── Blur tool ─────────────────────────────────────────────────────────
+    pub blur_radius: f32,
+
     // ── Hue Shift tool ────────────────────────────────────────────────────
     pub hue_degrees: f32,
     pub hue_preview_active: bool,
@@ -178,6 +181,7 @@ impl AppState {
             curve_points: vec![[0.0, 0.0], [1.0, 1.0]],
             curve_preview_active: false,
             curve_dragging_idx: None,
+            blur_radius: 2.0,
             hue_degrees: 0.0,
             hue_preview_active: false,
             hl_highlights: 0.0,
@@ -452,6 +456,10 @@ impl AppState {
             self.vignette_radius,
             self.vignette_feather,
         )));
+    }
+
+    pub fn push_blur(&mut self) {
+        self.push_op(Box::new(BlurOp::new(self.blur_radius)));
     }
 
     pub fn update_hue_preview(&mut self) {

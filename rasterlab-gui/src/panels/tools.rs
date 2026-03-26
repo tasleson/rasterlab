@@ -175,6 +175,29 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Blur ──────────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("≋  Blur")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Radius (σ):");
+                ui.add(
+                    DragValue::new(&mut state.blur_radius)
+                        .speed(0.1)
+                        .range(0.1..=100.0_f32)
+                        .suffix(" px"),
+                );
+            });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Blur"))
+                .clicked()
+            {
+                state.push_blur();
+            }
+        });
+
+    ui.separator();
+
     // ── Vignette ──────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("◎  Vignette")
         .default_open(true)
