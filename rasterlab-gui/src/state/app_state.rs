@@ -4,7 +4,10 @@ use egui::Context;
 use rasterlab_core::{
     Image,
     formats::FormatRegistry,
-    ops::{BlackAndWhiteOp, CropOp, HistogramData, LevelsOp, RotateOp, SharpenOp, VignetteOp},
+    ops::{
+        BlackAndWhiteOp, BrightnessContrastOp, CropOp, CurvesOp, FlipOp, HistogramData, LevelsOp,
+        RotateOp, SaturationOp, SharpenOp, VignetteOp,
+    },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
@@ -77,6 +80,22 @@ pub struct AppState {
     /// When true, a BlackAndWhiteOp preview is appended to each render.
     pub bw_preview_active: bool,
 
+    // ── Brightness / Contrast tool ────────────────────────────────────────
+    pub bc_brightness: f32,
+    pub bc_contrast: f32,
+    pub bc_preview_active: bool,
+
+    // ── Saturation tool ───────────────────────────────────────────────────
+    pub saturation: f32,
+    pub sat_preview_active: bool,
+
+    // ── Curves tool ───────────────────────────────────────────────────────
+    /// Control points `[input, output]` in `[0,1]`, sorted by input.
+    pub curve_points: Vec<[f32; 2]>,
+    pub curve_preview_active: bool,
+    /// Index of the control point currently being dragged in the curve editor.
+    pub curve_dragging_idx: Option<usize>,
+
     // ── Vignette tool ─────────────────────────────────────────────────────
     pub vignette_strength: f32,
     pub vignette_radius: f32,
@@ -125,6 +144,14 @@ impl AppState {
             bw_mixer_g: 0.7152,
             bw_mixer_b: 0.0722,
             bw_preview_active: false,
+            bc_brightness: 0.0,
+            bc_contrast: 0.0,
+            bc_preview_active: false,
+            saturation: 1.0,
+            sat_preview_active: false,
+            curve_points: vec![[0.0, 0.0], [1.0, 1.0]],
+            curve_preview_active: false,
+            curve_dragging_idx: None,
             vignette_strength: 0.5,
             vignette_radius: 0.65,
             vignette_feather: 0.5,
@@ -281,6 +308,91 @@ impl AppState {
         self.push_op(Box::new(SharpenOp::new(self.sharpen_strength)));
     }
 
+    pub fn push_flip_horizontal(&mut self) {
+        self.push_op(Box::new(FlipOp::horizontal()));
+    }
+
+    pub fn push_flip_vertical(&mut self) {
+        self.push_op(Box::new(FlipOp::vertical()));
+    }
+
+    pub fn update_bc_preview(&mut self) {
+        self.bc_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_bc_preview(&mut self) {
+        if self.bc_preview_active {
+            self.bc_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_bc(&mut self) {
+        self.bc_preview_active = false;
+        self.push_op(Box::new(BrightnessContrastOp::new(
+            self.bc_brightness,
+            self.bc_contrast,
+        )));
+        self.bc_brightness = 0.0;
+        self.bc_contrast = 0.0;
+    }
+
+    pub fn reset_bc(&mut self) {
+        self.bc_brightness = 0.0;
+        self.bc_contrast = 0.0;
+        self.cancel_bc_preview();
+    }
+
+    pub fn update_sat_preview(&mut self) {
+        self.sat_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_sat_preview(&mut self) {
+        if self.sat_preview_active {
+            self.sat_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_saturation(&mut self) {
+        self.sat_preview_active = false;
+        self.push_op(Box::new(SaturationOp::new(self.saturation)));
+        self.saturation = 1.0;
+    }
+
+    pub fn reset_saturation(&mut self) {
+        self.saturation = 1.0;
+        self.cancel_sat_preview();
+    }
+
+    pub fn update_curve_preview(&mut self) {
+        self.curve_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_curve_preview(&mut self) {
+        if self.curve_preview_active {
+            self.curve_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_curves(&mut self) {
+        self.curve_preview_active = false;
+        self.push_op(Box::new(CurvesOp {
+            points: self.curve_points.clone(),
+        }));
+        self.curve_points = vec![[0.0, 0.0], [1.0, 1.0]];
+    }
+
+    pub fn reset_curves(&mut self) {
+        self.curve_points = vec![[0.0, 0.0], [1.0, 1.0]];
+        self.curve_dragging_idx = None;
+        self.cancel_curve_preview();
+    }
+
     pub fn update_vignette_preview(&mut self) {
         self.vignette_preview_active = true;
         self.request_render();
@@ -433,9 +545,13 @@ impl AppState {
         // Render at reduced scale when a preview op is active so ops run on
         // a fraction of the pixels (~16× fewer at 25%).  Full-res renders are
         // queued automatically once the preview is displayed.
-        let is_preview =
-            (self.levels_preview_active || self.bw_preview_active || self.vignette_preview_active)
-                && !force_full_res;
+        let is_preview = (self.levels_preview_active
+            || self.bw_preview_active
+            || self.vignette_preview_active
+            || self.bc_preview_active
+            || self.sat_preview_active
+            || self.curve_preview_active)
+            && !force_full_res;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
         } else {
@@ -472,6 +588,20 @@ impl AppState {
             serde_json::to_value(&preview).ok()
         } else if self.bw_preview_active {
             serde_json::to_value(self.make_bw_op()).ok()
+        } else if self.bc_preview_active {
+            let preview: Box<dyn Operation> = Box::new(BrightnessContrastOp::new(
+                self.bc_brightness,
+                self.bc_contrast,
+            ));
+            serde_json::to_value(&preview).ok()
+        } else if self.sat_preview_active {
+            let preview: Box<dyn Operation> = Box::new(SaturationOp::new(self.saturation));
+            serde_json::to_value(&preview).ok()
+        } else if self.curve_preview_active {
+            let preview: Box<dyn Operation> = Box::new(CurvesOp {
+                points: self.curve_points.clone(),
+            });
+            serde_json::to_value(&preview).ok()
         } else if self.vignette_preview_active {
             let preview: Box<dyn Operation> = Box::new(VignetteOp::new(
                 self.vignette_strength,

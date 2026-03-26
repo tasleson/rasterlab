@@ -1,15 +1,23 @@
+pub mod brightness_contrast;
 pub mod bw;
 pub mod crop;
+pub mod curves;
+pub mod flip;
 pub mod histogram;
 pub mod levels;
 pub mod rotate;
+pub mod saturation;
 pub mod sharpen;
 pub mod vignette;
 
+pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::BlackAndWhiteOp;
 pub use crop::CropOp;
+pub use curves::CurvesOp;
+pub use flip::FlipOp;
 pub use histogram::{HistogramData, HistogramOp};
 pub use levels::LevelsOp;
 pub use rotate::{RotateMode, RotateOp};
+pub use saturation::SaturationOp;
 pub use sharpen::SharpenOp;
 pub use vignette::VignetteOp;
