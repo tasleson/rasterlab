@@ -66,6 +66,8 @@ pub struct AppState {
     /// Set when a slider changes while a render is in-flight; triggers a
     /// follow-up render as soon as the current one completes.
     needs_rerender: bool,
+    /// Wall-clock time at which the most recent render thread was spawned.
+    render_start: Option<std::time::Instant>,
 }
 
 impl AppState {
@@ -96,6 +98,7 @@ impl AppState {
             levels_white: 1.0,
             levels_preview_active: false,
             needs_rerender: false,
+            render_start: None,
         }
     }
 
@@ -123,7 +126,12 @@ impl AppState {
                     self.histogram = Some(*hist);
                     self.rendered = Some(img);
                     self.loading = false;
-                    self.status = "Ready".into();
+                    let elapsed_ms = self
+                        .render_start
+                        .take()
+                        .map(|t| t.elapsed().as_millis())
+                        .unwrap_or(0);
+                    self.status = format!("Ready  ({} ms)", elapsed_ms);
                     // Re-render if a slider changed while this render was in-flight.
                     if self.needs_rerender {
                         self.needs_rerender = false;
@@ -335,6 +343,7 @@ impl AppState {
 
         self.loading = true;
         self.status = "Rendering…".into();
+        self.render_start = Some(std::time::Instant::now());
 
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
