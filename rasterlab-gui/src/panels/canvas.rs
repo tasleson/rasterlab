@@ -130,17 +130,23 @@ impl CanvasState {
         );
 
         // ── Crop selection (primary drag only) ───────────────────────────────
+        // crop_start/crop_end are stored in image coordinates so the selection
+        // tracks correctly when the user pans or zooms after drawing it.
         if resp.drag_started_by(egui::PointerButton::Primary) {
-            self.crop_start = resp.interact_pointer_pos();
+            self.crop_start = resp
+                .interact_pointer_pos()
+                .map(|p| screen_to_image(p, image_tl, self.zoom));
             self.crop_end = self.crop_start;
         }
         if resp.dragged_by(egui::PointerButton::Primary) {
-            self.crop_end = resp.interact_pointer_pos();
+            self.crop_end = resp
+                .interact_pointer_pos()
+                .map(|p| screen_to_image(p, image_tl, self.zoom));
         }
         if resp.drag_stopped_by(egui::PointerButton::Primary)
             && let (Some(start), Some(end)) = (self.crop_start, self.crop_end)
         {
-            let (x, y, w, h) = screen_to_crop(start, end, image_tl, self.zoom, img_w, img_h);
+            let (x, y, w, h) = image_to_crop(start, end, img_w, img_h);
             state.crop_x = x;
             state.crop_y = y;
             state.crop_w = w;
@@ -161,7 +167,11 @@ impl CanvasState {
 
         // ── Marching-ants overlay ─────────────────────────────────────────────
         if let (Some(start), Some(end)) = (self.crop_start, self.crop_end) {
-            let sel = Rect::from_two_pos(start, end);
+            // Convert image-space coords back to screen space for drawing.
+            let sel = Rect::from_two_pos(
+                image_to_screen(start, image_tl, self.zoom),
+                image_to_screen(end, image_tl, self.zoom),
+            );
             if sel.width() > 2.0 && sel.height() > 2.0 {
                 let time = ui.input(|i| i.time) as f32;
                 draw_marching_ants(&painter, sel, time);
@@ -196,20 +206,24 @@ impl CanvasState {
 // Coordinate helpers
 // ---------------------------------------------------------------------------
 
-fn screen_to_crop(
-    start: Pos2,
-    end: Pos2,
-    image_tl: Pos2,
-    zoom: f32,
-    img_w: u32,
-    img_h: u32,
-) -> (u32, u32, u32, u32) {
+/// Convert a screen position to image-space coordinates.
+fn screen_to_image(pos: Pos2, image_tl: Pos2, zoom: f32) -> Pos2 {
+    Pos2::new((pos.x - image_tl.x) / zoom, (pos.y - image_tl.y) / zoom)
+}
+
+/// Convert an image-space position to screen coordinates.
+fn image_to_screen(pos: Pos2, image_tl: Pos2, zoom: f32) -> Pos2 {
+    Pos2::new(pos.x * zoom + image_tl.x, pos.y * zoom + image_tl.y)
+}
+
+/// Convert two image-space corner points into a clamped crop rectangle (x, y, w, h).
+fn image_to_crop(start: Pos2, end: Pos2, img_w: u32, img_h: u32) -> (u32, u32, u32, u32) {
     let min = start.min(end);
     let max = start.max(end);
-    let x1 = (((min.x - image_tl.x) / zoom).max(0.0) as u32).min(img_w);
-    let y1 = (((min.y - image_tl.y) / zoom).max(0.0) as u32).min(img_h);
-    let x2 = (((max.x - image_tl.x) / zoom).max(0.0) as u32).min(img_w);
-    let y2 = (((max.y - image_tl.y) / zoom).max(0.0) as u32).min(img_h);
+    let x1 = (min.x.max(0.0) as u32).min(img_w);
+    let y1 = (min.y.max(0.0) as u32).min(img_h);
+    let x2 = (max.x.max(0.0) as u32).min(img_w);
+    let y2 = (max.y.max(0.0) as u32).min(img_h);
     (
         x1,
         y1,
