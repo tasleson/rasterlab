@@ -529,6 +529,38 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Color Space Conversion ────────────────────────────────────────────
+    egui::CollapsingHeader::new("⬛  Color Space")
+        .default_open(true)
+        .show(ui, |ui| {
+            use rasterlab_core::ops::ColorSpaceConversion;
+            egui::ComboBox::from_id_salt("color_space_combo")
+                .selected_text(match state.color_space_conversion {
+                    ColorSpaceConversion::SrgbToDisplayP3 => "sRGB → Display P3",
+                    ColorSpaceConversion::DisplayP3ToSrgb => "Display P3 → sRGB",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut state.color_space_conversion,
+                        ColorSpaceConversion::SrgbToDisplayP3,
+                        "sRGB → Display P3",
+                    );
+                    ui.selectable_value(
+                        &mut state.color_space_conversion,
+                        ColorSpaceConversion::DisplayP3ToSrgb,
+                        "Display P3 → sRGB",
+                    );
+                });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Conversion"))
+                .clicked()
+            {
+                state.push_color_space();
+            }
+        });
+
+    ui.separator();
+
     // ── Hue Shift ─────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("🎡  Hue Shift")
         .default_open(true)

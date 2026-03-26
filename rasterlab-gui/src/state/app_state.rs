@@ -5,10 +5,10 @@ use rasterlab_core::{
     Image,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, CropOp, CurvesOp, DenoiseOp,
-        FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp,
-        LevelsOp, PerspectiveOp, ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp,
-        SharpenOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, ColorSpaceConversion,
+        ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp,
+        HistogramData, HslPanelOp, HueShiftOp, LevelsOp, PerspectiveOp, ResampleMode, ResizeOp,
+        RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -135,6 +135,9 @@ pub struct AppState {
     /// as fractions of image width/height in `[-1, 1]`.
     pub perspective_corners: [[f32; 2]; 4],
 
+    // ── Color Space Conversion tool ───────────────────────────────────────
+    pub color_space_conversion: ColorSpaceConversion,
+
     // ── Hue Shift tool ────────────────────────────────────────────────────
     pub hue_degrees: f32,
     pub hue_preview_active: bool,
@@ -238,6 +241,7 @@ impl AppState {
             denoise_strength: 0.1,
             denoise_radius: 3,
             perspective_corners: [[0.0; 2]; 4],
+            color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,
             hue_degrees: 0.0,
             hue_preview_active: false,
             hl_highlights: 0.0,
@@ -598,6 +602,10 @@ impl AppState {
 
     pub fn reset_perspective(&mut self) {
         self.perspective_corners = [[0.0; 2]; 4];
+    }
+
+    pub fn push_color_space(&mut self) {
+        self.push_op(Box::new(ColorSpaceOp::new(self.color_space_conversion)));
     }
 
     pub fn update_hue_preview(&mut self) {
