@@ -70,6 +70,10 @@ pub struct AppState {
     pub rotate_deg: f32,
     pub sharpen_strength: f32,
     pub bw_mode_idx: usize,
+    /// Channel mixer weights for the ChannelMixer B&W mode.
+    pub bw_mixer_r: f32,
+    pub bw_mixer_g: f32,
+    pub bw_mixer_b: f32,
     /// When true, a BlackAndWhiteOp preview is appended to each render.
     pub bw_preview_active: bool,
 
@@ -110,6 +114,9 @@ impl AppState {
             rotate_deg: 0.0,
             sharpen_strength: 1.0,
             bw_mode_idx: 0,
+            bw_mixer_r: 0.2126,
+            bw_mixer_g: 0.7152,
+            bw_mixer_b: 0.0722,
             bw_preview_active: false,
             levels_black: 0.0,
             levels_mid: 1.0,
@@ -311,12 +318,21 @@ impl AppState {
 
     pub fn push_bw(&mut self) {
         self.bw_preview_active = false;
-        let op: Box<dyn Operation> = match self.bw_mode_idx {
+        let op: Box<dyn Operation> = self.make_bw_op();
+        self.push_op(op);
+    }
+
+    fn make_bw_op(&self) -> Box<dyn Operation> {
+        match self.bw_mode_idx {
             1 => Box::new(BlackAndWhiteOp::average()),
             2 => Box::new(BlackAndWhiteOp::perceptual()),
+            3 => Box::new(BlackAndWhiteOp::channel_mixer(
+                self.bw_mixer_r,
+                self.bw_mixer_g,
+                self.bw_mixer_b,
+            )),
             _ => Box::new(BlackAndWhiteOp::luminance()),
-        };
-        self.push_op(op);
+        }
     }
 
     pub fn remove_op(&mut self, index: usize) {
@@ -421,12 +437,7 @@ impl AppState {
             ));
             serde_json::to_value(&preview).ok()
         } else if self.bw_preview_active {
-            let preview: Box<dyn Operation> = match self.bw_mode_idx {
-                1 => Box::new(BlackAndWhiteOp::average()),
-                2 => Box::new(BlackAndWhiteOp::perceptual()),
-                _ => Box::new(BlackAndWhiteOp::luminance()),
-            };
-            serde_json::to_value(&preview).ok()
+            serde_json::to_value(self.make_bw_op()).ok()
         } else {
             None
         };
