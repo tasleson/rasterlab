@@ -324,6 +324,42 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Hue Shift ─────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("🎡  Hue Shift")
+        .default_open(true)
+        .show(ui, |ui| {
+            let changed = ui
+                .add(
+                    egui::Slider::new(&mut state.hue_degrees, -180.0..=180.0)
+                        .text("Degrees")
+                        .step_by(1.0),
+                )
+                .changed();
+            if changed && has_image {
+                state.update_hue_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_hue();
+                }
+                if state.hue_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_hue_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_hue();
+                }
+            });
+        });
+
+    ui.separator();
+
     // ── Brightness / Contrast ─────────────────────────────────────────────
     egui::CollapsingHeader::new("☀  Brightness / Contrast")
         .default_open(true)
