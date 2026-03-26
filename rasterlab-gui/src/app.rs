@@ -22,9 +22,13 @@ pub struct RasterLabApp {
 }
 
 impl RasterLabApp {
-    pub fn new(cc: &eframe::CreationContext) -> Self {
+    pub fn new(cc: &eframe::CreationContext, initial_file: Option<PathBuf>) -> Self {
+        let mut state = AppState::new(cc.egui_ctx.clone());
+        if let Some(path) = initial_file {
+            state.open_file(path);
+        }
         Self {
-            state: AppState::new(cc.egui_ctx.clone()),
+            state,
             canvas: CanvasState::default(),
             #[cfg(not(target_arch = "wasm32"))]
             open_rx: None,
