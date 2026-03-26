@@ -522,6 +522,25 @@ impl AppState {
         }
     }
 
+    /// One-click auto-enhance: stretch levels to the 0.5/99.5 percentile,
+    /// boost saturation slightly, apply a mild sharpen.  Pushes three ops
+    /// as a single atomic batch (one render fired at the end).
+    pub fn push_auto_enhance(&mut self) {
+        if self.pipeline.is_none() || self.histogram.is_none() {
+            return;
+        }
+        let (black, white) = {
+            let hist = self.histogram.as_ref().unwrap();
+            percentile_levels(&hist.luma, 0.005, 0.995)
+        };
+        self.cancel_all_previews();
+        let pipeline = self.pipeline.as_mut().unwrap();
+        pipeline.push_op(Box::new(LevelsOp::new(black, white, 1.0)));
+        pipeline.push_op(Box::new(SaturationOp::new(1.1)));
+        pipeline.push_op(Box::new(SharpenOp::new(0.5)));
+        self.request_render();
+    }
+
     /// Silently dismiss every tool preview without committing any of them.
     ///
     /// Called automatically whenever the pipeline is mutated through any means
@@ -717,6 +736,43 @@ fn downsample_nn(img: &Image, scale: f32) -> Image {
 /// on a small image, so the result is fast but low-resolution.  Intermediates
 /// are not returned for preview renders (they are low-res and must not be
 /// stored in the full-res step cache).
+/// Find the black and white points for auto-levels by clipping the histogram
+/// at `lo_pct` and `hi_pct` percentiles of the cumulative pixel count.
+/// Returns `(black, white)` as fractions in `[0.0, 1.0]`.
+fn percentile_levels(hist: &[u64; 256], lo_pct: f64, hi_pct: f64) -> (f32, f32) {
+    let total: u64 = hist.iter().sum();
+    if total == 0 {
+        return (0.0, 1.0);
+    }
+    let lo_target = ((total as f64 * lo_pct).ceil() as u64).max(1);
+    let hi_target = ((total as f64 * (1.0 - hi_pct)).ceil() as u64).max(1);
+
+    let mut black = 0usize;
+    let mut cumsum = 0u64;
+    for (i, &count) in hist.iter().enumerate() {
+        cumsum += count;
+        if cumsum >= lo_target {
+            black = i;
+            break;
+        }
+    }
+
+    let mut white = 255usize;
+    cumsum = 0;
+    for (i, &count) in hist.iter().enumerate().rev() {
+        cumsum += count;
+        if cumsum >= hi_target {
+            white = i;
+            break;
+        }
+    }
+
+    if white <= black {
+        return (0.0, 1.0); // degenerate — don't adjust
+    }
+    (black as f32 / 255.0, white as f32 / 255.0)
+}
+
 fn render_in_thread(
     start_image: Arc<Image>,
     committed_ops: Vec<Option<serde_json::Value>>,
