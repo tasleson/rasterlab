@@ -1,5 +1,6 @@
 mod app;
 mod panels;
+mod prefs;
 mod state;
 
 fn main() -> eframe::Result<()> {

@@ -119,7 +119,17 @@ impl RasterLabApp {
 }
 
 impl eframe::App for RasterLabApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.state.prefs.save();
+    }
+
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Save prefs when the window close is requested (more reliable than
+        // on_exit alone, which may not fire on all platforms/close paths).
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.state.prefs.save();
+        }
+
         self.state.poll_background();
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_dialogs();

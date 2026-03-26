@@ -1,5 +1,7 @@
 use std::sync::{Arc, mpsc};
 
+use crate::prefs::Prefs;
+
 use egui::Context;
 use rasterlab_core::{
     Image,
@@ -50,6 +52,8 @@ enum BgMessage {
 // ---------------------------------------------------------------------------
 
 pub struct AppState {
+    /// Persistent GUI preferences (tool panel open/closed states, etc.).
+    pub prefs: Prefs,
     pub registry: FormatRegistry,
     pub pipeline: Option<EditPipeline>,
     pub rendered: Option<Arc<Image>>,
@@ -204,6 +208,7 @@ impl AppState {
     pub fn new(ctx: Context) -> Self {
         let (bg_tx, bg_rx) = mpsc::channel();
         Self {
+            prefs: Prefs::load(),
             registry: FormatRegistry::with_builtins(),
             pipeline: None,
             rendered: None,

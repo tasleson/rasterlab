@@ -14,9 +14,12 @@ rasterlab-core = { workspace = true }
 
 eframe       = { workspace = true }
 egui         = { workspace = true }
+serde        = { workspace = true }
 serde_json   = { workspace = true }
+serde_yaml   = "0.9"
 anyhow       = { workspace = true }
 rayon        = { workspace = true }
+dirs         = "5"
 
 # Native file dialogs (open/save)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

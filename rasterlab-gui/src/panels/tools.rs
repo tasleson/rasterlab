@@ -58,8 +58,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.separator();
 
     // ── Crop ─────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("✂  Crop")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("crop");
+    let resp = egui::CollapsingHeader::new("✂  Crop")
+        .id_salt("crop")
+        .default_open(default_open)
         .show(ui, |ui| {
             egui::Grid::new("crop_grid")
                 .num_columns(2)
@@ -93,12 +95,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.push_crop();
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("crop".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Rotate ───────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("↻  Rotate")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("rotate");
+    let resp = egui::CollapsingHeader::new("↻  Rotate")
+        .id_salt("rotate")
+        .default_open(default_open)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
@@ -150,12 +160,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("rotate".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Resize ────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("⤢  Resize")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("resize");
+    let resp = egui::CollapsingHeader::new("⤢  Resize")
+        .id_salt("resize")
+        .default_open(default_open)
         .show(ui, |ui| {
             use rasterlab_core::ops::ResampleMode;
 
@@ -232,12 +250,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.push_resize();
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("resize".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Sharpen ──────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("◈  Sharpen")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("sharpen");
+    let resp = egui::CollapsingHeader::new("◈  Sharpen")
+        .id_salt("sharpen")
+        .default_open(default_open)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Strength:");
@@ -254,12 +280,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.push_sharpen();
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("sharpen".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Blur ──────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("≋  Blur")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("blur");
+    let resp = egui::CollapsingHeader::new("≋  Blur")
+        .id_salt("blur")
+        .default_open(default_open)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Radius (σ):");
@@ -277,12 +311,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.push_blur();
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("blur".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Denoise ───────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("◌  Denoise")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("denoise");
+    let resp = egui::CollapsingHeader::new("◌  Denoise")
+        .id_salt("denoise")
+        .default_open(default_open)
         .show(ui, |ui| {
             egui::Grid::new("denoise_grid")
                 .num_columns(2)
@@ -311,12 +353,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.push_denoise();
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("denoise".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Perspective ───────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("⬡  Perspective")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("perspective");
+    let resp = egui::CollapsingHeader::new("⬡  Perspective")
+        .id_salt("perspective")
+        .default_open(default_open)
         .show(ui, |ui| {
             let corner_labels = [
                 ("Top-left", 0usize),
@@ -359,12 +409,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("perspective".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Vignette ──────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("◎  Vignette")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("vignette");
+    let resp = egui::CollapsingHeader::new("◎  Vignette")
+        .id_salt("vignette")
+        .default_open(default_open)
         .show(ui, |ui| {
             let mut changed = false;
             egui::Grid::new("vignette_grid")
@@ -418,12 +476,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("vignette".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Black & White ─────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("◑  Black & White")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("bw");
+    let resp = egui::CollapsingHeader::new("◑  Black & White")
+        .id_salt("bw")
+        .default_open(default_open)
         .show(ui, |ui| {
             let old_idx = state.bw_mode_idx;
             let combo_resp = ComboBox::from_label("Mode")
@@ -508,12 +574,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("bw".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Sepia ─────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("🟫  Sepia")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("sepia");
+    let resp = egui::CollapsingHeader::new("🟫  Sepia")
+        .id_salt("sepia")
+        .default_open(default_open)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Strength:");
@@ -526,12 +600,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.push_sepia();
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("sepia".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Color Space Conversion ────────────────────────────────────────────
-    egui::CollapsingHeader::new("⬛  Color Space")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("color_space");
+    let resp = egui::CollapsingHeader::new("⬛  Color Space")
+        .id_salt("color_space")
+        .default_open(default_open)
         .show(ui, |ui| {
             use rasterlab_core::ops::ColorSpaceConversion;
             egui::ComboBox::from_id_salt("color_space_combo")
@@ -558,12 +640,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.push_color_space();
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("color_space".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── LUT (Color Grading) ───────────────────────────────────────────────
-    egui::CollapsingHeader::new("🎞  LUT / Color Grading")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("lut");
+    let resp = egui::CollapsingHeader::new("🎞  LUT / Color Grading")
+        .id_salt("lut")
+        .default_open(default_open)
         .show(ui, |ui| {
             if ui.button("Load .cube LUT…").clicked()
                 && let Some(path) = rfd::FileDialog::new()
@@ -588,12 +678,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 ui.label("No LUT loaded.");
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("lut".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Hue Shift ─────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("🎡  Hue Shift")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("hue_shift");
+    let resp = egui::CollapsingHeader::new("🎡  Hue Shift")
+        .id_salt("hue_shift")
+        .default_open(default_open)
         .show(ui, |ui| {
             let changed = ui
                 .add(
@@ -624,12 +722,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("hue_shift".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Brightness / Contrast ─────────────────────────────────────────────
-    egui::CollapsingHeader::new("☀  Brightness / Contrast")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("brightness_contrast");
+    let resp = egui::CollapsingHeader::new("☀  Brightness / Contrast")
+        .id_salt("brightness_contrast")
+        .default_open(default_open)
         .show(ui, |ui| {
             let mut changed = false;
             egui::Grid::new("bc_grid")
@@ -669,12 +775,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("brightness_contrast".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Highlights & Shadows ──────────────────────────────────────────────
-    egui::CollapsingHeader::new("◑  Highlights / Shadows")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("highlights_shadows");
+    let resp = egui::CollapsingHeader::new("◑  Highlights / Shadows")
+        .id_salt("highlights_shadows")
+        .default_open(default_open)
         .show(ui, |ui| {
             let mut changed = false;
             egui::Grid::new("hl_grid")
@@ -714,12 +828,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("highlights_shadows".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Saturation ────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("🎨  Saturation")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("saturation");
+    let resp = egui::CollapsingHeader::new("🎨  Saturation")
+        .id_salt("saturation")
+        .default_open(default_open)
         .show(ui, |ui| {
             let changed = ui
                 .add(egui::Slider::new(&mut state.saturation, 0.0..=4.0).step_by(0.01))
@@ -746,12 +868,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("saturation".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Vibrance ──────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("✦  Vibrance")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("vibrance");
+    let resp = egui::CollapsingHeader::new("✦  Vibrance")
+        .id_salt("vibrance")
+        .default_open(default_open)
         .show(ui, |ui| {
             let changed = ui
                 .add(egui::Slider::new(&mut state.vibrance, -1.0..=1.0).step_by(0.01))
@@ -778,12 +908,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("vibrance".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── White Balance ─────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("🌡  White Balance")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("white_balance");
+    let resp = egui::CollapsingHeader::new("🌡  White Balance")
+        .id_salt("white_balance")
+        .default_open(default_open)
         .show(ui, |ui| {
             let mut changed = false;
             egui::Grid::new("wb_grid")
@@ -823,12 +961,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("white_balance".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Faux HDR ──────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("◈  Faux HDR")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("faux_hdr");
+    let resp = egui::CollapsingHeader::new("◈  Faux HDR")
+        .id_salt("faux_hdr")
+        .default_open(default_open)
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new("Exposure fusion from ±1 stop virtual brackets")
@@ -865,39 +1011,71 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("faux_hdr".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Curves ────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("〜  Curves")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("curves");
+    let resp = egui::CollapsingHeader::new("〜  Curves")
+        .id_salt("curves")
+        .default_open(default_open)
         .show(ui, |ui| {
             curves_ui(ui, state);
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("curves".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Levels ────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("▨  Levels")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("levels");
+    let resp = egui::CollapsingHeader::new("▨  Levels")
+        .id_salt("levels")
+        .default_open(default_open)
         .show(ui, |ui| {
             levels_ui(ui, state);
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("levels".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Grain ─────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("⣿  Grain")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("grain");
+    let resp = egui::CollapsingHeader::new("⣿  Grain")
+        .id_salt("grain")
+        .default_open(default_open)
         .show(ui, |ui| {
             grain_ui(ui, state);
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("grain".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Color Balance ─────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("⚖  Color Balance")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("color_balance");
+    let resp = egui::CollapsingHeader::new("⚖  Color Balance")
+        .id_salt("color_balance")
+        .default_open(default_open)
         .show(ui, |ui| {
             let mut changed = false;
             let zone_labels = ["Shadows", "Midtones", "Highlights"];
@@ -976,21 +1154,37 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 }
             });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("color_balance".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── HSL Panel ─────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("🌈  HSL Panel")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("hsl_panel");
+    let resp = egui::CollapsingHeader::new("🌈  HSL Panel")
+        .id_salt("hsl_panel")
+        .default_open(default_open)
         .show(ui, |ui| {
             hsl_panel_ui(ui, state, has_image);
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("hsl_panel".to_string(), !default_open);
+    }
 
     ui.separator();
 
     // ── Export settings ──────────────────────────────────────────────────
-    egui::CollapsingHeader::new("⚙  Export Settings")
-        .default_open(false)
+    let default_open = state.prefs.is_tool_open("export_settings");
+    let resp = egui::CollapsingHeader::new("⚙  Export Settings")
+        .id_salt("export_settings")
+        .default_open(default_open)
         .show(ui, |ui| {
             egui::Grid::new("export_grid")
                 .num_columns(2)
@@ -1051,6 +1245,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     });
             }
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("export_settings".to_string(), !default_open);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,8 +1578,10 @@ const HSL_BAND_NAMES: [&str; 8] = [
 fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
     let mut changed = false;
 
-    egui::CollapsingHeader::new("Hue")
-        .default_open(false)
+    let default_open = state.prefs.is_tool_open("hsl_hue");
+    let resp = egui::CollapsingHeader::new("Hue")
+        .id_salt("hsl_hue")
+        .default_open(default_open)
         .show(ui, |ui| {
             egui::Grid::new("hsl_hue_grid")
                 .num_columns(2)
@@ -1398,9 +1600,17 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     }
                 });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("hsl_hue".to_string(), !default_open);
+    }
 
-    egui::CollapsingHeader::new("Saturation")
-        .default_open(true)
+    let default_open = state.prefs.is_tool_open("hsl_sat");
+    let resp = egui::CollapsingHeader::new("Saturation")
+        .id_salt("hsl_sat")
+        .default_open(default_open)
         .show(ui, |ui| {
             egui::Grid::new("hsl_sat_grid")
                 .num_columns(2)
@@ -1415,9 +1625,17 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     }
                 });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("hsl_sat".to_string(), !default_open);
+    }
 
-    egui::CollapsingHeader::new("Luminance")
-        .default_open(false)
+    let default_open = state.prefs.is_tool_open("hsl_lum");
+    let resp = egui::CollapsingHeader::new("Luminance")
+        .id_salt("hsl_lum")
+        .default_open(default_open)
         .show(ui, |ui| {
             egui::Grid::new("hsl_lum_grid")
                 .num_columns(2)
@@ -1432,6 +1650,12 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     }
                 });
         });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("hsl_lum".to_string(), !default_open);
+    }
 
     if changed && has_image {
         state.update_hsl_preview();

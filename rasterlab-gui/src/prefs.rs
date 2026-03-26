@@ -1,0 +1,62 @@
+//! GUI preference persistence.
+//!
+//! Prefs are stored as YAML in the platform-appropriate user data directory:
+//!   * macOS   – `~/Library/Application Support/rasterlab/prefs.yaml`
+//!   * Linux   – `~/.local/share/rasterlab/prefs.yaml`
+//!   * Windows – `%APPDATA%\rasterlab\prefs.yaml`
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+/// Persistent GUI preferences.  Missing keys are treated as `false`/default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Prefs {
+    /// Open/closed state of each collapsing tool section, keyed by a stable
+    /// ASCII string (e.g. `"blur"`, `"crop"`, `"hsl_panel"`).
+    #[serde(default)]
+    pub tools_open: HashMap<String, bool>,
+}
+
+impl Prefs {
+    /// Returns the platform-specific path for the prefs file, or `None` if the
+    /// data directory cannot be determined.
+    pub fn path() -> Option<PathBuf> {
+        dirs::data_dir().map(|d| d.join("rasterlab").join("prefs.yaml"))
+    }
+
+    /// Load prefs from disk.  Returns an all-default `Prefs` (all tools
+    /// collapsed) if the file does not exist or cannot be parsed.
+    pub fn load() -> Self {
+        let path = match Self::path() {
+            Some(p) => p,
+            None => return Self::default(),
+        };
+        let content = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return Self::default(),
+        };
+        serde_yaml::from_str(&content).unwrap_or_default()
+    }
+
+    /// Persist prefs to disk, creating the directory if necessary.
+    pub fn save(&self) {
+        let path = match Self::path() {
+            Some(p) => p,
+            None => return,
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(yaml) = serde_yaml::to_string(self) {
+            let _ = std::fs::write(&path, yaml);
+        }
+    }
+
+    /// Returns `true` if the tool section with this key is currently open.
+    /// Defaults to `false` for unknown keys.
+    pub fn is_tool_open(&self, key: &str) -> bool {
+        self.tools_open.get(key).copied().unwrap_or(false)
+    }
+}
