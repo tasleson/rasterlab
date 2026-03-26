@@ -207,17 +207,23 @@ mod tests {
     }
 
     #[test]
-    fn luminance_preserved_after_shift() {
-        // Hue rotation should not change perceived brightness.
+    fn lightness_preserved_after_shift() {
+        // HSL hue rotation preserves HSL lightness (not perceptual luma —
+        // those differ because HSL is not a perceptually-uniform space).
         let src = solid(180, 100, 50);
         let out = HueShiftOp::new(90.0).apply(&src).unwrap();
-        let luma_in = 0.2126 * 180.0 + 0.7152 * 100.0 + 0.0722 * 50.0;
-        let luma_out =
-            0.2126 * out.data[0] as f32 + 0.7152 * out.data[1] as f32 + 0.0722 * out.data[2] as f32;
+
+        let hsl_l = |r: f32, g: f32, b: f32| -> f32 { (r.max(g).max(b) + r.min(g).min(b)) * 0.5 };
+        let l_in = hsl_l(180.0 / 255.0, 100.0 / 255.0, 50.0 / 255.0);
+        let l_out = hsl_l(
+            out.data[0] as f32 / 255.0,
+            out.data[1] as f32 / 255.0,
+            out.data[2] as f32 / 255.0,
+        );
         assert!(
-            (luma_in - luma_out).abs() < 8.0,
-            "luminance changed by {:.1}",
-            (luma_in - luma_out).abs()
+            (l_in - l_out).abs() < 0.02,
+            "HSL lightness changed by {:.4}",
+            (l_in - l_out).abs()
         );
     }
 }

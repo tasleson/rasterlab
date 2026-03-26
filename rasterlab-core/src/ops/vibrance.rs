@@ -60,6 +60,14 @@ impl Operation for VibranceOp {
 
                 let (h, s, l) = rgb_to_hsl(r, g, b);
 
+                // Achromatic pixels (s=0) have no hue to boost; skip them.
+                if s < 1e-6 {
+                    dst[0] = src[0];
+                    dst[1] = src[1];
+                    dst[2] = src[2];
+                    return;
+                }
+
                 // Boost weight: strongest for muted (s≈0), zero for vivid (s≈1).
                 let weight = (1.0 - s).powi(2);
                 let new_s = (s + strength * weight).clamp(0.0, 1.0);

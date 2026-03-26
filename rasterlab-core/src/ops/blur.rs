@@ -67,10 +67,10 @@ fn blur_h(src: &Image, kernel: &[f32]) -> Image {
                     a += src.data[off + 3] as f32 * kv;
                 }
                 let off = x * 4;
-                row[off] = r.clamp(0.0, 255.0) as u8;
-                row[off + 1] = g.clamp(0.0, 255.0) as u8;
-                row[off + 2] = b.clamp(0.0, 255.0) as u8;
-                row[off + 3] = a.clamp(0.0, 255.0) as u8;
+                row[off] = r.clamp(0.0, 255.0).round() as u8;
+                row[off + 1] = g.clamp(0.0, 255.0).round() as u8;
+                row[off + 2] = b.clamp(0.0, 255.0).round() as u8;
+                row[off + 3] = a.clamp(0.0, 255.0).round() as u8;
             }
         });
 
@@ -102,10 +102,10 @@ fn blur_v(src: &Image, kernel: &[f32]) -> Image {
                     a += src.data[off + 3] as f32 * kv;
                 }
                 let off = x * 4;
-                row[off] = r.clamp(0.0, 255.0) as u8;
-                row[off + 1] = g.clamp(0.0, 255.0) as u8;
-                row[off + 2] = b.clamp(0.0, 255.0) as u8;
-                row[off + 3] = a.clamp(0.0, 255.0) as u8;
+                row[off] = r.clamp(0.0, 255.0).round() as u8;
+                row[off + 1] = g.clamp(0.0, 255.0).round() as u8;
+                row[off + 2] = b.clamp(0.0, 255.0).round() as u8;
+                row[off + 3] = a.clamp(0.0, 255.0).round() as u8;
             }
         });
 
