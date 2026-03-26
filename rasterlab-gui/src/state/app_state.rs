@@ -32,6 +32,9 @@ enum BgMessage {
         start_index: usize,
         /// Snapshot of `pipeline.step_cache_gen()` taken when the render began.
         cache_gen: u64,
+        /// True when this was a downsampled preview render.  A full-res render
+        /// will be queued automatically after this result is displayed.
+        is_preview: bool,
     },
     Error(String),
 }
@@ -140,27 +143,36 @@ impl AppState {
                     intermediates,
                     start_index,
                     cache_gen,
+                    is_preview,
                 } => {
                     self.histogram = Some(*hist);
                     self.rendered = Some(image);
                     self.loading = false;
-                    let elapsed_ms = self
-                        .render_start
-                        .take()
-                        .map(|t| t.elapsed().as_millis())
-                        .unwrap_or(0);
-                    self.status = format!("Ready  ({} ms)", elapsed_ms);
-                    // Store intermediates only if no pipeline mutation occurred
-                    // while this render was in flight (gen mismatch → stale data).
-                    if let Some(pipeline) = &mut self.pipeline
-                        && cache_gen == pipeline.step_cache_gen()
-                    {
-                        pipeline.store_steps(start_index, intermediates);
+
+                    if !is_preview {
+                        // Only report timing and populate the step cache for
+                        // full-res renders; preview intermediates are low-res.
+                        let elapsed_ms = self
+                            .render_start
+                            .take()
+                            .map(|t| t.elapsed().as_millis())
+                            .unwrap_or(0);
+                        self.status = format!("Ready  ({} ms)", elapsed_ms);
+                        if let Some(pipeline) = &mut self.pipeline
+                            && cache_gen == pipeline.step_cache_gen()
+                        {
+                            pipeline.store_steps(start_index, intermediates);
+                        }
                     }
-                    // Re-render if a slider changed while this render was in-flight.
+
                     if self.needs_rerender {
+                        // Slider changed again while this render was in-flight;
+                        // start a fresh preview cycle.
                         self.needs_rerender = false;
-                        self.request_render();
+                        self.request_render_inner(false);
+                    } else if is_preview {
+                        // Preview displayed — follow up with a full-res render.
+                        self.request_render_inner(true);
                     }
                 }
                 BgMessage::Error(e) => {
@@ -331,11 +343,17 @@ impl AppState {
 
     /// Kick off a background render of the current pipeline.
     ///
-    /// Consults the pipeline's step cache to find the furthest valid
-    /// intermediate result and only re-executes operations from that point
-    /// forward.  The preview levels op (if active) is applied last but is
-    /// not included in the intermediates returned for caching.
+    /// When `levels_preview_active` this renders at [`PREVIEW_SCALE`] so that
+    /// slider feedback is immediate, then automatically queues a full-res render
+    /// once the preview is displayed.
     pub fn request_render(&mut self) {
+        self.request_render_inner(false);
+    }
+
+    /// `force_full_res` bypasses the downsampled-preview path even when a
+    /// preview op is active.  Used internally to follow up a preview render
+    /// with a full-resolution render.
+    fn request_render_inner(&mut self, force_full_res: bool) {
         let Some(pipeline) = &self.pipeline else {
             return;
         };
@@ -344,6 +362,16 @@ impl AppState {
             self.needs_rerender = true;
             return;
         }
+
+        // Render at reduced scale when a preview op is active so ops run on
+        // a fraction of the pixels (~16× fewer at 25%).  Full-res renders are
+        // queued automatically once the preview is displayed.
+        let is_preview = self.levels_preview_active && !force_full_res;
+        let preview_scale = if is_preview {
+            Some(PREVIEW_SCALE)
+        } else {
+            None
+        };
 
         // Find the best cached starting point — may skip all committed ops
         // if the full pipeline result is already in the cache.
@@ -387,16 +415,18 @@ impl AppState {
             .name("rasterlab-render".into())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let msg = match render_in_thread(start_image, committed_ops, preview_op) {
-                    Ok((image, hist, intermediates)) => BgMessage::RenderComplete {
-                        image,
-                        hist: Box::new(hist),
-                        intermediates,
-                        start_index: start_idx,
-                        cache_gen,
-                    },
-                    Err(e) => BgMessage::Error(e),
-                };
+                let msg =
+                    match render_in_thread(start_image, committed_ops, preview_op, preview_scale) {
+                        Ok((image, hist, intermediates)) => BgMessage::RenderComplete {
+                            image,
+                            hist: Box::new(hist),
+                            intermediates,
+                            start_index: start_idx,
+                            cache_gen,
+                            is_preview,
+                        },
+                        Err(e) => BgMessage::Error(e),
+                    };
                 let _ = tx.send(msg);
                 ctx.request_repaint();
             })
@@ -416,25 +446,66 @@ impl AppState {
 }
 
 // ---------------------------------------------------------------------------
-// Free function: runs in the render thread
+// Free functions: run in the render thread
 // ---------------------------------------------------------------------------
+
+/// Linear scale factor used for the fast downsampled preview.
+/// 0.25 = 1/4 width × 1/4 height = 1/16 the pixels → ~16× faster ops.
+const PREVIEW_SCALE: f32 = 0.25;
 
 type RenderResult = Result<(Arc<Image>, HistogramData, Vec<Arc<Image>>), String>;
 
-/// Run committed ops then an optional preview op, returning the display image,
-/// histogram, and one intermediate `Arc<Image>` per committed op slot
-/// (unchanged image reused for disabled ops — just an Arc clone, no copy).
+/// Nearest-neighbour downsample via rayon row-parallel copy.
+fn downsample_nn(img: &Image, scale: f32) -> Image {
+    use rayon::prelude::*;
+    let new_w = ((img.width as f32 * scale) as u32).max(1);
+    let new_h = ((img.height as f32 * scale) as u32).max(1);
+    let mut out = Image::new(new_w, new_h);
+    let x_ratio = img.width as f32 / new_w as f32;
+    let y_ratio = img.height as f32 / new_h as f32;
+    let src_w = img.width as usize;
+    out.data
+        .par_chunks_mut(new_w as usize * 4)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let src_y = (y as f32 * y_ratio) as usize;
+            for x in 0..new_w as usize {
+                let src_x = (x as f32 * x_ratio) as usize;
+                let src_off = (src_y * src_w + src_x) * 4;
+                let dst_off = x * 4;
+                row[dst_off..dst_off + 4].copy_from_slice(&img.data[src_off..src_off + 4]);
+            }
+        });
+    out
+}
+
+/// Run committed ops then an optional preview op.
+///
+/// When `preview_scale` is `Some(s)`, the starting image is downsampled to
+/// `s` of its original dimensions before any ops run — all work then happens
+/// on a small image, so the result is fast but low-resolution.  Intermediates
+/// are not returned for preview renders (they are low-res and must not be
+/// stored in the full-res step cache).
 fn render_in_thread(
     start_image: Arc<Image>,
     committed_ops: Vec<Option<serde_json::Value>>,
     preview_op: Option<serde_json::Value>,
+    preview_scale: Option<f32>,
 ) -> RenderResult {
-    let mut current = start_image;
-    let mut intermediates = Vec::with_capacity(committed_ops.len());
+    // Downsample if this is a preview render; otherwise use the image as-is.
+    let mut current: Arc<Image> = match preview_scale {
+        Some(scale) => Arc::new(downsample_nn(start_image.as_ref(), scale)),
+        None => start_image,
+    };
+    // Intermediates are only collected for full-res renders.
+    let mut intermediates = if preview_scale.is_none() {
+        Vec::with_capacity(committed_ops.len())
+    } else {
+        Vec::new()
+    };
 
     for op_json in committed_ops {
         if let Some(json) = op_json {
-            // Deserialise operation (parameters only, no pixel data)
             let op: Box<dyn Operation> =
                 serde_json::from_value(json).map_err(|e| format!("Deserialise op: {}", e))?;
             current = Arc::new(
@@ -442,8 +513,10 @@ fn render_in_thread(
                     .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
             );
         }
-        // Record state at this pipeline position (Arc clone — no pixel copy for disabled ops).
-        intermediates.push(Arc::clone(&current));
+        if preview_scale.is_none() {
+            // Record state at this pipeline position (Arc clone — no pixel copy for disabled ops).
+            intermediates.push(Arc::clone(&current));
+        }
     }
 
     // Apply preview op on top of committed result without caching it.
