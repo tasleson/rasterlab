@@ -5,8 +5,8 @@ use rasterlab_core::{
     Image,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BrightnessContrastOp, CropOp, CurvesOp, FlipOp, HistogramData, LevelsOp,
-        RotateOp, SaturationOp, SharpenOp, VignetteOp,
+        BlackAndWhiteOp, BrightnessContrastOp, CropOp, CurvesOp, FlipOp, GrainOp, HistogramData,
+        LevelsOp, RotateOp, SaturationOp, SharpenOp, VignetteOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -103,6 +103,13 @@ pub struct AppState {
     /// When true, a VignetteOp preview is appended to each render.
     pub vignette_preview_active: bool,
 
+    // ── Grain tool ────────────────────────────────────────────────────────
+    pub grain_strength: f32,
+    pub grain_size: f32,
+    pub grain_seed: u64,
+    /// When true, a GrainOp preview is appended to each render (always full-res).
+    pub grain_preview_active: bool,
+
     // ── Levels tool ───────────────────────────────────────────────────────
     /// Live slider values for the levels tool (not yet committed to pipeline).
     pub levels_black: f32,
@@ -156,6 +163,10 @@ impl AppState {
             vignette_radius: 0.65,
             vignette_feather: 0.5,
             vignette_preview_active: false,
+            grain_strength: 0.10,
+            grain_size: 1.8,
+            grain_seed: 42,
+            grain_preview_active: false,
             levels_black: 0.0,
             levels_mid: 1.0,
             levels_white: 1.0,
@@ -413,6 +424,36 @@ impl AppState {
             self.vignette_feather,
         )));
     }
+
+    pub fn update_grain_preview(&mut self) {
+        self.grain_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_grain_preview(&mut self) {
+        if self.grain_preview_active {
+            self.grain_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_grain(&mut self) {
+        self.grain_preview_active = false;
+        self.push_op(Box::new(GrainOp::new(
+            self.grain_strength,
+            self.grain_size,
+            self.grain_seed,
+        )));
+        self.grain_seed = self.grain_seed.wrapping_add(1);
+    }
+
+    pub fn reset_grain(&mut self) {
+        self.grain_strength = 0.10;
+        self.grain_size = 1.8;
+        self.grain_seed = 42;
+        self.cancel_grain_preview();
+    }
+
     /// Update the live levels preview and trigger a re-render.
     /// Call this whenever a levels slider changes.
     pub fn update_levels_preview(&mut self) {
@@ -555,6 +596,7 @@ impl AppState {
         self.curve_preview_active = false;
         self.curve_dragging_idx = None;
         self.vignette_preview_active = false;
+        self.grain_preview_active = false;
     }
 
     // -----------------------------------------------------------------------
@@ -648,6 +690,13 @@ impl AppState {
                 self.vignette_strength,
                 self.vignette_radius,
                 self.vignette_feather,
+            ));
+            serde_json::to_value(&preview).ok()
+        } else if self.grain_preview_active {
+            let preview: Box<dyn Operation> = Box::new(GrainOp::new(
+                self.grain_strength,
+                self.grain_size,
+                self.grain_seed,
             ));
             serde_json::to_value(&preview).ok()
         } else {
