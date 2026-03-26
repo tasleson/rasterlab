@@ -1,3 +1,5 @@
+<img width="1408" height="768" alt="vibe_this" src="https://github.com/user-attachments/assets/bcf3af6b-4982-4dad-b460-99cca597660a" />
+
 # RasterLab
 
 > *How good of an image editor can you build with $20 worth of Claude Code?*
@@ -52,7 +54,7 @@ plugins/              # Example plugin
 
 The GUI render path is fully async: mutations serialize op parameters to JSON, a background thread deserializes and applies them, results come back via mpsc. The main thread never blocks on pixel work.
 
-## How the experiment went
+## How the experiment is going
 
 **Things Claude got right immediately:**
 - The overall architecture (non-destructive pipeline, background render thread, Arc-based image sharing)
@@ -83,9 +85,8 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 - **Render timing** — status bar now shows how long the last render took in milliseconds
 - **Intermediate result caching** — the pipeline caches the rendered image after each committed op; changing op N no longer re-runs ops 0 through N-1, and undo/redo are often instant
 - **Downsampled live preview** — while a levels slider is being dragged, ops run on a 25% resolution image (~16× fewer pixels) for immediate feedback; a full-res render queues automatically once the preview is displayed
-- **Dev build optimization** — `opt-level = 1` added to the dev profile so pixel-processing loops aren't painfully slow during development (was ~800ms per render, now reasonable)
 - **CLI file argument** — the GUI now accepts a file path on the command line so you can open an image directly without using the file dialog
-- **Crop fix** — corrected an off-by-one in crop start/end coordinate handling
+- **Crop fix** — corrected crop start/end coordinate handling when panning
 
 ## 2026-03-24 (14% of our first week usage)
 
@@ -94,6 +95,10 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 - **Smoother zoom** — zoom now centers on the cursor position rather than the canvas origin
 - **Stability** — fixed a segfault on startup
 - **Plugin API** — trait definitions and an example plugin for extending the op set
+
+## Screen shot
+<img width="1405" height="933" alt="Screenshot 2026-03-26 at 12 19 59 AM" src="https://github.com/user-attachments/assets/1650d897-232c-44de-80c5-64ee0450a135" />
+
 
 
 ## License
