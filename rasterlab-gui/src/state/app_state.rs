@@ -481,6 +481,7 @@ impl AppState {
 
     pub fn remove_op(&mut self, index: usize) {
         if self.pipeline.as_mut().is_some_and(|p| p.remove_op(index)) {
+            self.cancel_all_previews();
             self.request_render();
         }
     }
@@ -490,30 +491,51 @@ impl AppState {
             .as_mut()
             .is_some_and(|p| p.reorder_op(from, to))
         {
+            self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn toggle_op(&mut self, index: usize) {
         if self.pipeline.as_mut().is_some_and(|p| p.toggle_op(index)) {
+            self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn undo(&mut self) {
         if self.pipeline.as_mut().is_some_and(|p| p.undo()) {
+            self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn redo(&mut self) {
         if self.pipeline.as_mut().is_some_and(|p| p.redo()) {
+            self.cancel_all_previews();
             self.request_render();
         }
     }
 
     fn push_op(&mut self, op: Box<dyn Operation>) {
+        self.cancel_all_previews();
         if let Some(p) = &mut self.pipeline {
             p.push_op(op);
             self.request_render();
         }
+    }
+
+    /// Silently dismiss every tool preview without committing any of them.
+    ///
+    /// Called automatically whenever the pipeline is mutated through any means
+    /// other than a tool's own "Apply" button, so the committed state is always
+    /// visible unobscured.  Slider/curve values are preserved so the user can
+    /// resume adjusting after the other operation is complete.
+    fn cancel_all_previews(&mut self) {
+        self.levels_preview_active = false;
+        self.bw_preview_active = false;
+        self.bc_preview_active = false;
+        self.sat_preview_active = false;
+        self.curve_preview_active = false;
+        self.curve_dragging_idx = None;
+        self.vignette_preview_active = false;
     }
 
     // -----------------------------------------------------------------------
