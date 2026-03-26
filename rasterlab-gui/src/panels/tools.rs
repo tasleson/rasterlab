@@ -835,6 +835,15 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── HSL Panel ─────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("🌈  HSL Panel")
+        .default_open(true)
+        .show(ui, |ui| {
+            hsl_panel_ui(ui, state, has_image);
+        });
+
+    ui.separator();
+
     // ── Export settings ──────────────────────────────────────────────────
     egui::CollapsingHeader::new("⚙  Export Settings")
         .default_open(false)
@@ -1163,6 +1172,96 @@ fn grain_ui(ui: &mut Ui, state: &mut AppState) {
         }
         if ui.button("Reset").clicked() {
             state.reset_grain();
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// HSL Panel tool
+// ---------------------------------------------------------------------------
+
+const HSL_BAND_NAMES: [&str; 8] = [
+    "Reds", "Oranges", "Yellows", "Greens", "Aquas", "Blues", "Purples", "Magentas",
+];
+
+fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
+    let mut changed = false;
+
+    egui::CollapsingHeader::new("Hue")
+        .default_open(false)
+        .show(ui, |ui| {
+            egui::Grid::new("hsl_hue_grid")
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    for (i, name) in HSL_BAND_NAMES.iter().enumerate() {
+                        ui.label(*name);
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut state.hsl_hue[i], -180.0..=180.0)
+                                    .text("°")
+                                    .step_by(1.0),
+                            )
+                            .changed();
+                        ui.end_row();
+                    }
+                });
+        });
+
+    egui::CollapsingHeader::new("Saturation")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new("hsl_sat_grid")
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    for (i, name) in HSL_BAND_NAMES.iter().enumerate() {
+                        ui.label(*name);
+                        changed |= ui
+                            .add(egui::Slider::new(&mut state.hsl_sat[i], -1.0..=1.0).step_by(0.01))
+                            .changed();
+                        ui.end_row();
+                    }
+                });
+        });
+
+    egui::CollapsingHeader::new("Luminance")
+        .default_open(false)
+        .show(ui, |ui| {
+            egui::Grid::new("hsl_lum_grid")
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    for (i, name) in HSL_BAND_NAMES.iter().enumerate() {
+                        ui.label(*name);
+                        changed |= ui
+                            .add(egui::Slider::new(&mut state.hsl_lum[i], -0.5..=0.5).step_by(0.01))
+                            .changed();
+                        ui.end_row();
+                    }
+                });
+        });
+
+    if changed && has_image {
+        state.update_hsl_preview();
+    }
+
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(has_image, egui::Button::new("Apply"))
+            .clicked()
+        {
+            state.push_hsl();
+        }
+        if state.hsl_preview_active
+            && ui
+                .add_enabled(has_image, egui::Button::new("Cancel"))
+                .clicked()
+        {
+            state.cancel_hsl_preview();
+        }
+        if ui.button("Reset").clicked() {
+            state.reset_hsl();
         }
     });
 }

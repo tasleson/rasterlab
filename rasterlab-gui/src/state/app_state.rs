@@ -6,8 +6,8 @@ use rasterlab_core::{
     formats::FormatRegistry,
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, CropOp, CurvesOp, FauxHdrOp,
-        FlipOp, GrainOp, HighlightsShadowsOp, HistogramData, HueShiftOp, LevelsOp, ResampleMode,
-        ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp, VignetteOp,
+        FlipOp, GrainOp, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp,
+        ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp, VignetteOp,
         WhiteBalanceOp,
     },
     pipeline::EditPipeline,
@@ -153,6 +153,13 @@ pub struct AppState {
     pub cb_yellow_blue: [f32; 3],
     pub cb_preview_active: bool,
 
+    // ── HSL Panel tool ────────────────────────────────────────────────────
+    /// Per-band hue shifts in degrees (8 bands: Reds … Magentas).
+    pub hsl_hue: [f32; 8],
+    pub hsl_sat: [f32; 8],
+    pub hsl_lum: [f32; 8],
+    pub hsl_preview_active: bool,
+
     // ── Levels tool ───────────────────────────────────────────────────────
     /// Live slider values for the levels tool (not yet committed to pipeline).
     pub levels_black: f32,
@@ -232,6 +239,10 @@ impl AppState {
             cb_magenta_green: [0.0; 3],
             cb_yellow_blue: [0.0; 3],
             cb_preview_active: false,
+            hsl_hue: [0.0; 8],
+            hsl_sat: [0.0; 8],
+            hsl_lum: [0.0; 8],
+            hsl_preview_active: false,
             levels_black: 0.0,
             levels_mid: 1.0,
             levels_white: 1.0,
@@ -692,6 +703,37 @@ impl AppState {
         self.cancel_cb_preview();
     }
 
+    pub fn update_hsl_preview(&mut self) {
+        self.hsl_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_hsl_preview(&mut self) {
+        if self.hsl_preview_active {
+            self.hsl_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_hsl(&mut self) {
+        self.hsl_preview_active = false;
+        self.push_op(Box::new(HslPanelOp::new(
+            self.hsl_hue,
+            self.hsl_sat,
+            self.hsl_lum,
+        )));
+        self.hsl_hue = [0.0; 8];
+        self.hsl_sat = [0.0; 8];
+        self.hsl_lum = [0.0; 8];
+    }
+
+    pub fn reset_hsl(&mut self) {
+        self.hsl_hue = [0.0; 8];
+        self.hsl_sat = [0.0; 8];
+        self.hsl_lum = [0.0; 8];
+        self.cancel_hsl_preview();
+    }
+
     /// Update the live levels preview and trigger a re-render.
     /// Call this whenever a levels slider changes.
     pub fn update_levels_preview(&mut self) {
@@ -841,6 +883,7 @@ impl AppState {
         self.hdr_preview_active = false;
         self.grain_preview_active = false;
         self.cb_preview_active = false;
+        self.hsl_preview_active = false;
     }
 
     // -----------------------------------------------------------------------
@@ -883,7 +926,8 @@ impl AppState {
             || self.hl_preview_active
             || self.hue_preview_active
             || self.vibrance_preview_active
-            || self.cb_preview_active)
+            || self.cb_preview_active
+            || self.hsl_preview_active)
             && !force_full_res;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
@@ -974,6 +1018,10 @@ impl AppState {
                 self.cb_magenta_green,
                 self.cb_yellow_blue,
             ));
+            serde_json::to_value(&preview).ok()
+        } else if self.hsl_preview_active {
+            let preview: Box<dyn Operation> =
+                Box::new(HslPanelOp::new(self.hsl_hue, self.hsl_sat, self.hsl_lum));
             serde_json::to_value(&preview).ok()
         } else {
             None
