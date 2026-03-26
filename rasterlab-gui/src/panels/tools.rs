@@ -401,6 +401,48 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Faux HDR ──────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("◈  Faux HDR")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Exposure fusion from ±1 stop virtual brackets")
+                    .small()
+                    .color(Color32::from_gray(140)),
+            );
+            ui.add_space(2.0);
+            let changed = ui
+                .add(
+                    egui::Slider::new(&mut state.hdr_strength, 0.0..=1.0)
+                        .text("Strength")
+                        .step_by(0.01),
+                )
+                .changed();
+            if changed && has_image {
+                state.update_hdr_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_hdr();
+                }
+                if state.hdr_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_hdr_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_hdr();
+                }
+            });
+        });
+
+    ui.separator();
+
     // ── Curves ────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("〜  Curves")
         .default_open(true)

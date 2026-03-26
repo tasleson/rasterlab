@@ -5,8 +5,8 @@ use rasterlab_core::{
     Image,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BrightnessContrastOp, CropOp, CurvesOp, FlipOp, GrainOp, HistogramData,
-        LevelsOp, RotateOp, SaturationOp, SharpenOp, VignetteOp,
+        BlackAndWhiteOp, BrightnessContrastOp, CropOp, CurvesOp, FauxHdrOp, FlipOp, GrainOp,
+        HistogramData, LevelsOp, RotateOp, SaturationOp, SharpenOp, VignetteOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -103,6 +103,10 @@ pub struct AppState {
     /// When true, a VignetteOp preview is appended to each render.
     pub vignette_preview_active: bool,
 
+    // ── Faux HDR tool ─────────────────────────────────────────────────────
+    pub hdr_strength: f32,
+    pub hdr_preview_active: bool,
+
     // ── Grain tool ────────────────────────────────────────────────────────
     pub grain_strength: f32,
     pub grain_size: f32,
@@ -163,6 +167,8 @@ impl AppState {
             vignette_radius: 0.65,
             vignette_feather: 0.5,
             vignette_preview_active: false,
+            hdr_strength: 0.8,
+            hdr_preview_active: false,
             grain_strength: 0.10,
             grain_size: 1.8,
             grain_seed: 42,
@@ -425,6 +431,28 @@ impl AppState {
         )));
     }
 
+    pub fn update_hdr_preview(&mut self) {
+        self.hdr_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_hdr_preview(&mut self) {
+        if self.hdr_preview_active {
+            self.hdr_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_hdr(&mut self) {
+        self.hdr_preview_active = false;
+        self.push_op(Box::new(FauxHdrOp::new(self.hdr_strength)));
+    }
+
+    pub fn reset_hdr(&mut self) {
+        self.hdr_strength = 0.8;
+        self.cancel_hdr_preview();
+    }
+
     pub fn update_grain_preview(&mut self) {
         self.grain_preview_active = true;
         self.request_render();
@@ -596,6 +624,7 @@ impl AppState {
         self.curve_preview_active = false;
         self.curve_dragging_idx = None;
         self.vignette_preview_active = false;
+        self.hdr_preview_active = false;
         self.grain_preview_active = false;
     }
 
@@ -633,7 +662,8 @@ impl AppState {
             || self.vignette_preview_active
             || self.bc_preview_active
             || self.sat_preview_active
-            || self.curve_preview_active)
+            || self.curve_preview_active
+            || self.hdr_preview_active)
             && !force_full_res;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
@@ -691,6 +721,9 @@ impl AppState {
                 self.vignette_radius,
                 self.vignette_feather,
             ));
+            serde_json::to_value(&preview).ok()
+        } else if self.hdr_preview_active {
+            let preview: Box<dyn Operation> = Box::new(FauxHdrOp::new(self.hdr_strength));
             serde_json::to_value(&preview).ok()
         } else if self.grain_preview_active {
             let preview: Box<dyn Operation> = Box::new(GrainOp::new(
