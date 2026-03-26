@@ -6,8 +6,8 @@ use rasterlab_core::{
     formats::FormatRegistry,
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, CropOp, CurvesOp, FauxHdrOp, FlipOp,
-        GrainOp, HighlightsShadowsOp, HistogramData, HueShiftOp, LevelsOp, RotateOp, SaturationOp,
-        SharpenOp, VignetteOp, WhiteBalanceOp,
+        GrainOp, HighlightsShadowsOp, HistogramData, HueShiftOp, LevelsOp, ResampleMode, ResizeOp,
+        RotateOp, SaturationOp, SharpenOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -104,6 +104,12 @@ pub struct AppState {
     /// When true, a VignetteOp preview is appended to each render.
     pub vignette_preview_active: bool,
 
+    // ── Resize tool ───────────────────────────────────────────────────────
+    pub resize_w: u32,
+    pub resize_h: u32,
+    pub resize_mode: ResampleMode,
+    pub resize_lock_aspect: bool,
+
     // ── Blur tool ─────────────────────────────────────────────────────────
     pub blur_radius: f32,
 
@@ -181,6 +187,10 @@ impl AppState {
             curve_points: vec![[0.0, 0.0], [1.0, 1.0]],
             curve_preview_active: false,
             curve_dragging_idx: None,
+            resize_w: 0,
+            resize_h: 0,
+            resize_mode: ResampleMode::Bicubic,
+            resize_lock_aspect: true,
             blur_radius: 2.0,
             hue_degrees: 0.0,
             hue_preview_active: false,
@@ -221,6 +231,8 @@ impl AppState {
                     let h = image.height;
                     self.crop_w = w;
                     self.crop_h = h;
+                    self.resize_w = w;
+                    self.resize_h = h;
                     self.last_path = Some(path.clone());
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.pipeline = Some(EditPipeline::new(image));
@@ -455,6 +467,14 @@ impl AppState {
             self.vignette_strength,
             self.vignette_radius,
             self.vignette_feather,
+        )));
+    }
+
+    pub fn push_resize(&mut self) {
+        self.push_op(Box::new(ResizeOp::new(
+            self.resize_w,
+            self.resize_h,
+            self.resize_mode,
         )));
     }
 

@@ -153,6 +153,88 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Resize ────────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("⤢  Resize")
+        .default_open(true)
+        .show(ui, |ui| {
+            use rasterlab_core::ops::ResampleMode;
+
+            let orig_w = state.resize_w;
+            let orig_h = state.resize_h;
+
+            egui::Grid::new("resize_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Width");
+                    let w_resp = ui.add(
+                        DragValue::new(&mut state.resize_w)
+                            .speed(1)
+                            .range(1..=32000_u32)
+                            .suffix(" px"),
+                    );
+                    ui.end_row();
+                    ui.label("Height");
+                    let h_resp = ui.add(
+                        DragValue::new(&mut state.resize_h)
+                            .speed(1)
+                            .range(1..=32000_u32)
+                            .suffix(" px"),
+                    );
+                    ui.end_row();
+                    ui.label("Method");
+                    egui::ComboBox::from_id_salt("resize_mode")
+                        .selected_text(match state.resize_mode {
+                            ResampleMode::NearestNeighbour => "Nearest",
+                            ResampleMode::Bilinear => "Bilinear",
+                            ResampleMode::Bicubic => "Bicubic",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut state.resize_mode,
+                                ResampleMode::NearestNeighbour,
+                                "Nearest",
+                            );
+                            ui.selectable_value(
+                                &mut state.resize_mode,
+                                ResampleMode::Bilinear,
+                                "Bilinear",
+                            );
+                            ui.selectable_value(
+                                &mut state.resize_mode,
+                                ResampleMode::Bicubic,
+                                "Bicubic",
+                            );
+                        });
+                    ui.end_row();
+                    ui.label("Lock aspect");
+                    ui.checkbox(&mut state.resize_lock_aspect, "");
+                    ui.end_row();
+
+                    // Propagate aspect-ratio constraint after editing.
+                    if state.resize_lock_aspect && orig_w > 0 && orig_h > 0 {
+                        if w_resp.changed() && orig_w != state.resize_w {
+                            let ratio = orig_h as f64 / orig_w as f64;
+                            state.resize_h =
+                                ((state.resize_w as f64 * ratio).round() as u32).max(1);
+                        } else if h_resp.changed() && orig_h != state.resize_h {
+                            let ratio = orig_w as f64 / orig_h as f64;
+                            state.resize_w =
+                                ((state.resize_h as f64 * ratio).round() as u32).max(1);
+                        }
+                    }
+                });
+
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Resize"))
+                .clicked()
+            {
+                state.push_resize();
+            }
+        });
+
+    ui.separator();
+
     // ── Sharpen ──────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("◈  Sharpen")
         .default_open(true)
