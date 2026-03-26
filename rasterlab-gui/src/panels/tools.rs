@@ -280,6 +280,40 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Denoise ───────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("◌  Denoise")
+        .default_open(true)
+        .show(ui, |ui| {
+            egui::Grid::new("denoise_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Strength:");
+                    ui.add(
+                        DragValue::new(&mut state.denoise_strength)
+                            .speed(0.01)
+                            .range(0.01..=1.0_f32),
+                    );
+                    ui.end_row();
+                    ui.label("Radius:");
+                    ui.add(
+                        DragValue::new(&mut state.denoise_radius)
+                            .speed(1)
+                            .range(1..=10_u32)
+                            .suffix(" px"),
+                    );
+                    ui.end_row();
+                });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Denoise"))
+                .clicked()
+            {
+                state.push_denoise();
+            }
+        });
+
+    ui.separator();
+
     // ── Vignette ──────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("◎  Vignette")
         .default_open(true)

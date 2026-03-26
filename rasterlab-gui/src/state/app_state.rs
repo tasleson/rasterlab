@@ -5,10 +5,10 @@ use rasterlab_core::{
     Image,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, CropOp, CurvesOp, FauxHdrOp,
-        FlipOp, GrainOp, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp,
-        ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp, VignetteOp,
-        WhiteBalanceOp,
+        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, CropOp, CurvesOp, DenoiseOp,
+        FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp,
+        LevelsOp, ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp,
+        VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -121,6 +121,10 @@ pub struct AppState {
     // ── Blur tool ─────────────────────────────────────────────────────────
     pub blur_radius: f32,
 
+    // ── Denoise tool ──────────────────────────────────────────────────────
+    pub denoise_strength: f32,
+    pub denoise_radius: u32,
+
     // ── Hue Shift tool ────────────────────────────────────────────────────
     pub hue_degrees: f32,
     pub hue_preview_active: bool,
@@ -217,6 +221,8 @@ impl AppState {
             resize_mode: ResampleMode::Bicubic,
             resize_lock_aspect: true,
             blur_radius: 2.0,
+            denoise_strength: 0.1,
+            denoise_radius: 3,
             hue_degrees: 0.0,
             hue_preview_active: false,
             hl_highlights: 0.0,
@@ -540,6 +546,13 @@ impl AppState {
 
     pub fn push_blur(&mut self) {
         self.push_op(Box::new(BlurOp::new(self.blur_radius)));
+    }
+
+    pub fn push_denoise(&mut self) {
+        self.push_op(Box::new(DenoiseOp::new(
+            self.denoise_strength,
+            self.denoise_radius,
+        )));
     }
 
     pub fn update_hue_preview(&mut self) {
