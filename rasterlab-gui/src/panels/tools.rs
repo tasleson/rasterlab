@@ -561,6 +561,36 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── LUT (Color Grading) ───────────────────────────────────────────────
+    egui::CollapsingHeader::new("🎞  LUT / Color Grading")
+        .default_open(true)
+        .show(ui, |ui| {
+            if ui.button("Load .cube LUT…").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("CUBE LUT", &["cube"])
+                    .pick_file()
+            {
+                state.load_lut(path);
+            }
+            if !state.lut_name.is_empty() {
+                ui.label(format!("Loaded: {}", state.lut_name));
+                ui.horizontal(|ui| {
+                    ui.label("Strength:");
+                    ui.add(egui::Slider::new(&mut state.lut_strength, 0.0..=1.0).step_by(0.01));
+                });
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply LUT"))
+                    .clicked()
+                {
+                    state.push_lut();
+                }
+            } else {
+                ui.label("No LUT loaded.");
+            }
+        });
+
+    ui.separator();
+
     // ── Hue Shift ─────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("🎡  Hue Shift")
         .default_open(true)

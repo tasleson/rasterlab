@@ -7,8 +7,9 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, ColorSpaceConversion,
         ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp,
-        HistogramData, HslPanelOp, HueShiftOp, LevelsOp, PerspectiveOp, ResampleMode, ResizeOp,
-        RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LutOp, PerspectiveOp, ResampleMode,
+        ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp, VignetteOp,
+        WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -138,6 +139,14 @@ pub struct AppState {
     // ── Color Space Conversion tool ───────────────────────────────────────
     pub color_space_conversion: ColorSpaceConversion,
 
+    // ── LUT tool ──────────────────────────────────────────────────────────
+    /// Loaded LUT op, or `None` if no LUT has been loaded.
+    pub lut_op: Option<LutOp>,
+    /// Blend strength for the loaded LUT.
+    pub lut_strength: f32,
+    /// Display name of the loaded LUT file.
+    pub lut_name: String,
+
     // ── Hue Shift tool ────────────────────────────────────────────────────
     pub hue_degrees: f32,
     pub hue_preview_active: bool,
@@ -242,6 +251,9 @@ impl AppState {
             denoise_radius: 3,
             perspective_corners: [[0.0; 2]; 4],
             color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,
+            lut_op: None,
+            lut_strength: 1.0,
+            lut_name: String::new(),
             hue_degrees: 0.0,
             hue_preview_active: false,
             hl_highlights: 0.0,
@@ -606,6 +618,38 @@ impl AppState {
 
     pub fn push_color_space(&mut self) {
         self.push_op(Box::new(ColorSpaceOp::new(self.color_space_conversion)));
+    }
+
+    /// Load a `.cube` file from `path` into `lut_op`.  Reports status on
+    /// success or failure.
+    pub fn load_lut(&mut self, path: std::path::PathBuf) {
+        match std::fs::read_to_string(&path) {
+            Ok(src) => match LutOp::from_cube_str(&src, self.lut_strength) {
+                Ok(mut op) => {
+                    op.strength = self.lut_strength;
+                    self.lut_name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.status = format!("Loaded LUT: {}", self.lut_name);
+                    self.lut_op = Some(op);
+                }
+                Err(e) => {
+                    self.status = format!("LUT parse error: {}", e);
+                }
+            },
+            Err(e) => {
+                self.status = format!("LUT read error: {}", e);
+            }
+        }
+    }
+
+    /// Apply the currently loaded LUT (with current strength) to the pipeline.
+    pub fn push_lut(&mut self) {
+        if let Some(mut op) = self.lut_op.clone() {
+            op.strength = self.lut_strength;
+            self.push_op(Box::new(op));
+        }
     }
 
     pub fn update_hue_preview(&mut self) {
