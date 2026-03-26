@@ -4,7 +4,7 @@ use egui::Context;
 use rasterlab_core::{
     Image,
     formats::FormatRegistry,
-    ops::{BlackAndWhiteOp, CropOp, HistogramData, RotateOp, SharpenOp},
+    ops::{BlackAndWhiteOp, CropOp, HistogramData, LevelsOp, RotateOp, SharpenOp},
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
@@ -55,6 +55,17 @@ pub struct AppState {
     pub rotate_deg: f32,
     pub sharpen_strength: f32,
     pub bw_mode_idx: usize,
+
+    // ── Levels tool ───────────────────────────────────────────────────────
+    /// Live slider values for the levels tool (not yet committed to pipeline).
+    pub levels_black: f32,
+    pub levels_mid: f32,
+    pub levels_white: f32,
+    /// When true, a LevelsOp preview is appended to each render.
+    pub levels_preview_active: bool,
+    /// Set when a slider changes while a render is in-flight; triggers a
+    /// follow-up render as soon as the current one completes.
+    needs_rerender: bool,
 }
 
 impl AppState {
@@ -80,6 +91,11 @@ impl AppState {
             rotate_deg: 0.0,
             sharpen_strength: 1.0,
             bw_mode_idx: 0,
+            levels_black: 0.0,
+            levels_mid: 1.0,
+            levels_white: 1.0,
+            levels_preview_active: false,
+            needs_rerender: false,
         }
     }
 
@@ -108,6 +124,11 @@ impl AppState {
                     self.rendered = Some(img);
                     self.loading = false;
                     self.status = "Ready".into();
+                    // Re-render if a slider changed while this render was in-flight.
+                    if self.needs_rerender {
+                        self.needs_rerender = false;
+                        self.request_render();
+                    }
                 }
                 BgMessage::Error(e) => {
                     self.status = format!("Error: {}", e);
@@ -193,6 +214,38 @@ impl AppState {
     pub fn push_sharpen(&mut self) {
         self.push_op(Box::new(SharpenOp::new(self.sharpen_strength)));
     }
+    /// Update the live levels preview and trigger a re-render.
+    /// Call this whenever a levels slider changes.
+    pub fn update_levels_preview(&mut self) {
+        self.levels_preview_active = true;
+        self.request_render();
+    }
+
+    /// Commit the current levels settings as a permanent pipeline operation.
+    pub fn apply_levels(&mut self) {
+        self.levels_preview_active = false;
+        self.push_op(Box::new(LevelsOp::new(
+            self.levels_black,
+            self.levels_white,
+            self.levels_mid,
+        )));
+        // Reset sliders for the next use
+        self.levels_black = 0.0;
+        self.levels_mid = 1.0;
+        self.levels_white = 1.0;
+    }
+
+    /// Discard the live levels preview without committing.
+    pub fn reset_levels(&mut self) {
+        self.levels_black = 0.0;
+        self.levels_mid = 1.0;
+        self.levels_white = 1.0;
+        if self.levels_preview_active {
+            self.levels_preview_active = false;
+            self.request_render();
+        }
+    }
+
     pub fn push_bw(&mut self) {
         let op: Box<dyn Operation> = match self.bw_mode_idx {
             1 => Box::new(BlackAndWhiteOp::average()),
@@ -253,18 +306,32 @@ impl AppState {
             return;
         };
         if self.loading {
+            // Another render is in-flight; mark dirty so we re-render after it.
+            self.needs_rerender = true;
             return;
         }
 
         // Snapshot active ops as JSON — very cheap
         let source = Arc::clone(pipeline.source());
-        let ops_json: Vec<serde_json::Value> = pipeline
+        let mut ops_json: Vec<serde_json::Value> = pipeline
             .ops()
             .iter()
             .take(pipeline.cursor())
             .filter(|e| e.enabled)
             .filter_map(|e| serde_json::to_value(&e.operation).ok())
             .collect();
+
+        // Append preview levels op if active (not yet committed to pipeline)
+        if self.levels_preview_active {
+            let preview: Box<dyn Operation> = Box::new(LevelsOp::new(
+                self.levels_black,
+                self.levels_white,
+                self.levels_mid,
+            ));
+            if let Ok(v) = serde_json::to_value(&preview) {
+                ops_json.push(v);
+            }
+        }
 
         self.loading = true;
         self.status = "Rendering…".into();

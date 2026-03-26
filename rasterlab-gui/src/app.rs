@@ -197,16 +197,19 @@ impl eframe::App for RasterLabApp {
             .default_width(280.0)
             .min_width(220.0)
             .show(ctx, |ui| {
-                egui::TopBottomPanel::top("edit_stack_panel")
+                // Histogram pinned to the bottom; must be declared before the
+                // fill content so egui reserves the space correctly.
+                egui::TopBottomPanel::bottom("histogram_panel")
                     .resizable(true)
-                    .default_height(350.0)
+                    .default_height(200.0)
+                    .min_height(80.0)
                     .show_inside(ui, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            edit_stack::ui(ui, &mut self.state);
-                        });
+                        histogram_panel::ui(ui, self.state.histogram.as_ref());
                     });
+
+                // Edit stack fills whatever space remains above the histogram.
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    histogram_panel::ui(ui, self.state.histogram.as_ref());
+                    edit_stack::ui(ui, &mut self.state);
                 });
             });
 
