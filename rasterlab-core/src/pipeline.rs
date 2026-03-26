@@ -49,17 +49,26 @@ pub struct PipelineState {
 /// - `undo` decrements cursor without removing ops.
 /// - `redo` increments cursor.
 ///
-/// ## Caching
+/// ## Step Cache
 ///
-/// The last rendered `(cursor, Arc<Image>)` pair is memoised.  Any mutation that
-/// affects the active range invalidates the cache so the next `render()` recomputes.
+/// `step_cache[i]` holds the rendered image after processing `ops[0..=i]`
+/// (disabled entries leave the image unchanged but still occupy a slot).
+/// Any mutation affecting `ops[0..i]` calls `invalidate_steps_from(i)`, which
+/// truncates the cache vector and bumps `step_cache_gen`.
+///
+/// The generation counter lets the GUI render thread detect whether the cache
+/// was dirtied between the moment it took a snapshot and the moment it tries
+/// to write new entries back, preventing stale data from being stored.
 pub struct EditPipeline {
     source: Arc<Image>,
     ops: Vec<EditEntry>,
     cursor: usize,
-    /// `Some((cursor, rendered))` when the cache is valid.
-    cache: Option<(usize, Arc<Image>)>,
     next_id: u64,
+    /// Per-step intermediate result cache.
+    /// `step_cache[i]` = image after ops[0..=i] (disabled ops leave image unchanged).
+    step_cache: Vec<Option<Arc<Image>>>,
+    /// Bumped on every invalidation so callers can detect concurrent mutations.
+    step_cache_gen: u64,
 }
 
 impl EditPipeline {
@@ -69,8 +78,9 @@ impl EditPipeline {
             source: Arc::new(source),
             ops: Vec::new(),
             cursor: 0,
-            cache: None,
             next_id: 1,
+            step_cache: Vec::new(),
+            step_cache_gen: 0,
         }
     }
 
@@ -80,7 +90,9 @@ impl EditPipeline {
 
     /// Append an operation after the current cursor, truncating any redo history.
     pub fn push_op(&mut self, operation: Box<dyn Operation>) {
+        // Discard redo history and its cached images.
         self.ops.truncate(self.cursor);
+        self.step_cache.truncate(self.cursor);
         let id = self.next_id;
         self.next_id += 1;
         self.ops.push(EditEntry {
@@ -89,7 +101,8 @@ impl EditPipeline {
             operation,
         });
         self.cursor = self.ops.len();
-        self.cache = None;
+        // step_cache has no entry for the new cursor-1 position yet — correct.
+        // Entries [0..old_cursor] remain valid as the start for the new op.
     }
 
     /// Remove the operation at `index`.  Returns `false` if out of range.
@@ -101,7 +114,7 @@ impl EditPipeline {
         if self.cursor > index {
             self.cursor = self.cursor.saturating_sub(1);
         }
-        self.invalidate_cache_from(index);
+        self.invalidate_steps_from(index);
         true
     }
 
@@ -112,7 +125,7 @@ impl EditPipeline {
         }
         let entry = self.ops.remove(from);
         self.ops.insert(to, entry);
-        self.invalidate_cache_from(from.min(to));
+        self.invalidate_steps_from(from.min(to));
         true
     }
 
@@ -121,7 +134,7 @@ impl EditPipeline {
         if let Some(entry) = self.ops.get_mut(index) {
             entry.enabled = !entry.enabled;
             if index < self.cursor {
-                self.cache = None;
+                self.invalidate_steps_from(index);
             }
             true
         } else {
@@ -134,10 +147,12 @@ impl EditPipeline {
     // -----------------------------------------------------------------------
 
     /// Move the cursor one step back (undo).  Returns `false` if at the beginning.
+    ///
+    /// The step cache is **not** invalidated — cached images before the new
+    /// cursor remain valid and will be reused on the next render.
     pub fn undo(&mut self) -> bool {
         if self.cursor > 0 {
             self.cursor -= 1;
-            self.cache = None;
             true
         } else {
             false
@@ -148,7 +163,6 @@ impl EditPipeline {
     pub fn redo(&mut self) -> bool {
         if self.cursor < self.ops.len() {
             self.cursor += 1;
-            self.cache = None;
             true
         } else {
             false
@@ -161,31 +175,33 @@ impl EditPipeline {
 
     /// Render the image by applying `ops[0..cursor]` to the source.
     ///
-    /// Uses the internal cache when the cursor hasn't changed.
+    /// Starts from the best available cached intermediate result, so only
+    /// operations after the last valid cache entry are re-executed.
     pub fn render(&mut self) -> RasterResult<Arc<Image>> {
-        // Cache hit
-        if let Some((c, ref img)) = self.cache
-            && c == self.cursor
-        {
-            return Ok(Arc::clone(img));
+        let (start_idx, mut current) = self.best_cached_start();
+
+        if start_idx == self.cursor {
+            return Ok(current);
         }
 
-        let mut current = self.source.deep_clone();
-        for entry in &self.ops[..self.cursor] {
+        for (k, entry) in self.ops[start_idx..self.cursor].iter().enumerate() {
             if entry.enabled {
-                current = entry.operation.apply(&current).map_err(|e| {
+                current = Arc::new(entry.operation.apply(current.as_ref()).map_err(|e| {
                     RasterError::Pipeline(format!(
                         "Operation '{}' failed: {}",
                         entry.operation.name(),
                         e
                     ))
-                })?;
+                })?);
             }
+            let op_idx = start_idx + k;
+            if self.step_cache.len() <= op_idx {
+                self.step_cache.resize(op_idx + 1, None);
+            }
+            self.step_cache[op_idx] = Some(Arc::clone(&current));
         }
 
-        let result = Arc::new(current);
-        self.cache = Some((self.cursor, Arc::clone(&result)));
-        Ok(result)
+        Ok(current)
     }
 
     /// Render at a reduced scale for fast preview.
@@ -193,7 +209,7 @@ impl EditPipeline {
     /// `scale` must be in `(0.0, 1.0]`.  A scale of `0.25` renders at 25% of
     /// the source resolution, which is much faster for live feedback.
     ///
-    /// Note: the result is not cached separately from the full-res render.
+    /// Note: the result is not stored in the step cache.
     pub fn render_preview(&mut self, scale: f32) -> RasterResult<Arc<Image>> {
         let scale = scale.clamp(0.01, 1.0);
         if (scale - 1.0).abs() < f32::EPSILON {
@@ -216,6 +232,54 @@ impl EditPipeline {
             }
         }
         Ok(Arc::new(preview))
+    }
+
+    // -----------------------------------------------------------------------
+    // Step-cache management (called by GUI render thread coordination)
+    // -----------------------------------------------------------------------
+
+    /// Returns `(start_op_index, starting_image)`.
+    ///
+    /// `start_op_index` is the index of the first op that still needs to be
+    /// applied; `starting_image` is the cached result after `ops[0..start_op_index]`.
+    ///
+    /// Returns `(cursor, cached_image)` when the full render is already cached,
+    /// or `(0, source)` when nothing is cached.
+    pub fn best_cached_start(&self) -> (usize, Arc<Image>) {
+        for i in (0..self.cursor).rev() {
+            if let Some(Some(img)) = self.step_cache.get(i) {
+                return (i + 1, Arc::clone(img));
+            }
+        }
+        (0, Arc::clone(&self.source))
+    }
+
+    /// Store a batch of intermediate results produced by the background render thread.
+    ///
+    /// `start_index` is the op position where the render began.  `images[k]`
+    /// is the image state after op `start_index + k` was processed (unchanged
+    /// if that op is disabled).
+    ///
+    /// Callers must guard this with a [`step_cache_gen`](Self::step_cache_gen)
+    /// check to avoid writing stale data when a pipeline mutation occurred
+    /// while the render was in flight.
+    pub fn store_steps(&mut self, start_index: usize, images: Vec<Arc<Image>>) {
+        let needed = start_index + images.len();
+        if self.step_cache.len() < needed {
+            self.step_cache.resize(needed, None);
+        }
+        for (k, img) in images.into_iter().enumerate() {
+            self.step_cache[start_index + k] = Some(img);
+        }
+    }
+
+    /// Generation counter for the step cache.
+    ///
+    /// Incremented whenever cached entries are invalidated.  Callers can
+    /// snapshot this value before kicking off a render and compare it on
+    /// completion to detect intervening mutations.
+    pub fn step_cache_gen(&self) -> u64 {
+        self.step_cache_gen
     }
 
     // -----------------------------------------------------------------------
@@ -246,7 +310,8 @@ impl EditPipeline {
             .collect::<RasterResult<Vec<_>>>()?;
         self.ops = entries;
         self.cursor = state.cursor.min(self.ops.len());
-        self.cache = None;
+        self.step_cache.clear();
+        self.step_cache_gen += 1;
         Ok(())
     }
 
@@ -275,11 +340,12 @@ impl EditPipeline {
     // Private helpers
     // -----------------------------------------------------------------------
 
-    fn invalidate_cache_from(&mut self, from_index: usize) {
-        if let Some((cached_cursor, _)) = self.cache
-            && cached_cursor > from_index
-        {
-            self.cache = None;
+    /// Discard all step-cache entries at `op_index` and beyond, and bump the
+    /// generation counter so in-flight renders know their data is stale.
+    fn invalidate_steps_from(&mut self, op_index: usize) {
+        if op_index < self.step_cache.len() {
+            self.step_cache.truncate(op_index);
+            self.step_cache_gen += 1;
         }
     }
 }

@@ -20,7 +20,19 @@ enum BgMessage {
         image: Image,
     },
     /// Render finished; histogram was also computed in the same thread.
-    RenderComplete(Arc<Image>, Box<HistogramData>),
+    RenderComplete {
+        image: Arc<Image>,
+        hist: Box<HistogramData>,
+        /// One image per op in `ops[start_index..cursor]`.  Entry `k` is the
+        /// image state after op `start_index + k` was processed (unchanged for
+        /// disabled ops).  Safe to store into the pipeline step cache only when
+        /// `cache_gen` still matches `pipeline.step_cache_gen()`.
+        intermediates: Vec<Arc<Image>>,
+        /// The op index from which this render started.
+        start_index: usize,
+        /// Snapshot of `pipeline.step_cache_gen()` taken when the render began.
+        cache_gen: u64,
+    },
     Error(String),
 }
 
@@ -122,9 +134,15 @@ impl AppState {
                     // Kick off initial render
                     self.request_render();
                 }
-                BgMessage::RenderComplete(img, hist) => {
+                BgMessage::RenderComplete {
+                    image,
+                    hist,
+                    intermediates,
+                    start_index,
+                    cache_gen,
+                } => {
                     self.histogram = Some(*hist);
-                    self.rendered = Some(img);
+                    self.rendered = Some(image);
                     self.loading = false;
                     let elapsed_ms = self
                         .render_start
@@ -132,6 +150,13 @@ impl AppState {
                         .map(|t| t.elapsed().as_millis())
                         .unwrap_or(0);
                     self.status = format!("Ready  ({} ms)", elapsed_ms);
+                    // Store intermediates only if no pipeline mutation occurred
+                    // while this render was in flight (gen mismatch → stale data).
+                    if let Some(pipeline) = &mut self.pipeline
+                        && cache_gen == pipeline.step_cache_gen()
+                    {
+                        pipeline.store_steps(start_index, intermediates);
+                    }
                     // Re-render if a slider changed while this render was in-flight.
                     if self.needs_rerender {
                         self.needs_rerender = false;
@@ -306,9 +331,10 @@ impl AppState {
 
     /// Kick off a background render of the current pipeline.
     ///
-    /// The pipeline is NOT moved to the thread — instead we serialise the active
-    /// operations to JSON (cheap: just parameters, no pixels) and deserialise
-    /// them in the worker.  The source image is shared via `Arc`.
+    /// Consults the pipeline's step cache to find the furthest valid
+    /// intermediate result and only re-executes operations from that point
+    /// forward.  The preview levels op (if active) is applied last but is
+    /// not included in the intermediates returned for caching.
     pub fn request_render(&mut self) {
         let Some(pipeline) = &self.pipeline else {
             return;
@@ -319,27 +345,36 @@ impl AppState {
             return;
         }
 
-        // Snapshot active ops as JSON — very cheap
-        let source = Arc::clone(pipeline.source());
-        let mut ops_json: Vec<serde_json::Value> = pipeline
-            .ops()
+        // Find the best cached starting point — may skip all committed ops
+        // if the full pipeline result is already in the cache.
+        let (start_idx, start_image) = pipeline.best_cached_start();
+        let cache_gen = pipeline.step_cache_gen();
+
+        // Committed ops from start_idx to cursor.  `None` entries represent
+        // disabled ops (image passes through unchanged).
+        let committed_ops: Vec<Option<serde_json::Value>> = pipeline.ops()
+            [start_idx..pipeline.cursor()]
             .iter()
-            .take(pipeline.cursor())
-            .filter(|e| e.enabled)
-            .filter_map(|e| serde_json::to_value(&e.operation).ok())
+            .map(|e| {
+                if e.enabled {
+                    serde_json::to_value(&e.operation).ok()
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        // Append preview levels op if active (not yet committed to pipeline)
-        if self.levels_preview_active {
+        // Preview levels op — applied on top of committed result but NOT cached.
+        let preview_op = if self.levels_preview_active {
             let preview: Box<dyn Operation> = Box::new(LevelsOp::new(
                 self.levels_black,
                 self.levels_white,
                 self.levels_mid,
             ));
-            if let Ok(v) = serde_json::to_value(&preview) {
-                ops_json.push(v);
-            }
-        }
+            serde_json::to_value(&preview).ok()
+        } else {
+            None
+        };
 
         self.loading = true;
         self.status = "Rendering…".into();
@@ -352,8 +387,14 @@ impl AppState {
             .name("rasterlab-render".into())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let msg = match render_in_thread(source, ops_json) {
-                    Ok((img, hist)) => BgMessage::RenderComplete(Arc::new(img), Box::new(hist)),
+                let msg = match render_in_thread(start_image, committed_ops, preview_op) {
+                    Ok((image, hist, intermediates)) => BgMessage::RenderComplete {
+                        image,
+                        hist: Box::new(hist),
+                        intermediates,
+                        start_index: start_idx,
+                        cache_gen,
+                    },
                     Err(e) => BgMessage::Error(e),
                 };
                 let _ = tx.send(msg);
@@ -378,23 +419,44 @@ impl AppState {
 // Free function: runs in the render thread
 // ---------------------------------------------------------------------------
 
+type RenderResult = Result<(Arc<Image>, HistogramData, Vec<Arc<Image>>), String>;
+
+/// Run committed ops then an optional preview op, returning the display image,
+/// histogram, and one intermediate `Arc<Image>` per committed op slot
+/// (unchanged image reused for disabled ops — just an Arc clone, no copy).
 fn render_in_thread(
-    source: Arc<Image>,
-    ops_json: Vec<serde_json::Value>,
-) -> Result<(Image, HistogramData), String> {
-    let mut current = source.deep_clone();
+    start_image: Arc<Image>,
+    committed_ops: Vec<Option<serde_json::Value>>,
+    preview_op: Option<serde_json::Value>,
+) -> RenderResult {
+    let mut current = start_image;
+    let mut intermediates = Vec::with_capacity(committed_ops.len());
 
-    for json_val in ops_json {
-        // Deserialise operation (only parameters, no pixel data)
+    for op_json in committed_ops {
+        if let Some(json) = op_json {
+            // Deserialise operation (parameters only, no pixel data)
+            let op: Box<dyn Operation> =
+                serde_json::from_value(json).map_err(|e| format!("Deserialise op: {}", e))?;
+            current = Arc::new(
+                op.apply(current.as_ref())
+                    .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
+            );
+        }
+        // Record state at this pipeline position (Arc clone — no pixel copy for disabled ops).
+        intermediates.push(Arc::clone(&current));
+    }
+
+    // Apply preview op on top of committed result without caching it.
+    if let Some(json) = preview_op {
         let op: Box<dyn Operation> =
-            serde_json::from_value(json_val).map_err(|e| format!("Deserialise op: {}", e))?;
-
-        current = op
-            .apply(&current)
-            .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?;
+            serde_json::from_value(json).map_err(|e| format!("Deserialise preview op: {}", e))?;
+        current = Arc::new(
+            op.apply(current.as_ref())
+                .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?,
+        );
     }
 
     // Compute histogram in this thread so the main thread never does heavy work.
-    let hist = HistogramData::compute(&current);
-    Ok((current, hist))
+    let hist = HistogramData::compute(current.as_ref());
+    Ok((current, hist, intermediates))
 }
