@@ -314,6 +314,54 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Perspective ───────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("⬡  Perspective")
+        .default_open(true)
+        .show(ui, |ui| {
+            let corner_labels = [
+                ("Top-left", 0usize),
+                ("Top-right", 1),
+                ("Bottom-right", 2),
+                ("Bottom-left", 3),
+            ];
+            egui::Grid::new("perspective_grid")
+                .num_columns(3)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("");
+                    ui.label("X");
+                    ui.label("Y");
+                    ui.end_row();
+                    for (label, i) in corner_labels {
+                        ui.label(label);
+                        ui.add(
+                            DragValue::new(&mut state.perspective_corners[i][0])
+                                .speed(0.005)
+                                .range(-1.0..=1.0_f32),
+                        );
+                        ui.add(
+                            DragValue::new(&mut state.perspective_corners[i][1])
+                                .speed(0.005)
+                                .range(-1.0..=1.0_f32),
+                        );
+                        ui.end_row();
+                    }
+                });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_perspective();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_perspective();
+                }
+            });
+        });
+
+    ui.separator();
+
     // ── Vignette ──────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("◎  Vignette")
         .default_open(true)

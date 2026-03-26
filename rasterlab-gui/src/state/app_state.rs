@@ -7,8 +7,8 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, CropOp, CurvesOp, DenoiseOp,
         FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp,
-        LevelsOp, ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp,
-        VignetteOp, WhiteBalanceOp,
+        LevelsOp, PerspectiveOp, ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp,
+        SharpenOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -125,6 +125,11 @@ pub struct AppState {
     pub denoise_strength: f32,
     pub denoise_radius: u32,
 
+    // ── Perspective tool ──────────────────────────────────────────────────
+    /// Corner offsets `[[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]`
+    /// as fractions of image width/height in `[-1, 1]`.
+    pub perspective_corners: [[f32; 2]; 4],
+
     // ── Hue Shift tool ────────────────────────────────────────────────────
     pub hue_degrees: f32,
     pub hue_preview_active: bool,
@@ -223,6 +228,7 @@ impl AppState {
             blur_radius: 2.0,
             denoise_strength: 0.1,
             denoise_radius: 3,
+            perspective_corners: [[0.0; 2]; 4],
             hue_degrees: 0.0,
             hue_preview_active: false,
             hl_highlights: 0.0,
@@ -553,6 +559,15 @@ impl AppState {
             self.denoise_strength,
             self.denoise_radius,
         )));
+    }
+
+    pub fn push_perspective(&mut self) {
+        self.push_op(Box::new(PerspectiveOp::new(self.perspective_corners)));
+        self.perspective_corners = [[0.0; 2]; 4];
+    }
+
+    pub fn reset_perspective(&mut self) {
+        self.perspective_corners = [[0.0; 2]; 4];
     }
 
     pub fn update_hue_preview(&mut self) {
