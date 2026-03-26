@@ -70,6 +70,8 @@ pub struct AppState {
     pub rotate_deg: f32,
     pub sharpen_strength: f32,
     pub bw_mode_idx: usize,
+    /// When true, a BlackAndWhiteOp preview is appended to each render.
+    pub bw_preview_active: bool,
 
     // ── Levels tool ───────────────────────────────────────────────────────
     /// Live slider values for the levels tool (not yet committed to pipeline).
@@ -108,6 +110,7 @@ impl AppState {
             rotate_deg: 0.0,
             sharpen_strength: 1.0,
             bw_mode_idx: 0,
+            bw_preview_active: false,
             levels_black: 0.0,
             levels_mid: 1.0,
             levels_white: 1.0,
@@ -291,7 +294,23 @@ impl AppState {
         }
     }
 
+    /// Show a live 1/4-scale preview of the selected B&W mode.
+    /// Call this whenever the mode combobox changes.
+    pub fn update_bw_preview(&mut self) {
+        self.bw_preview_active = true;
+        self.request_render();
+    }
+
+    /// Discard the live B&W preview without committing.
+    pub fn cancel_bw_preview(&mut self) {
+        if self.bw_preview_active {
+            self.bw_preview_active = false;
+            self.request_render();
+        }
+    }
+
     pub fn push_bw(&mut self) {
+        self.bw_preview_active = false;
         let op: Box<dyn Operation> = match self.bw_mode_idx {
             1 => Box::new(BlackAndWhiteOp::average()),
             2 => Box::new(BlackAndWhiteOp::perceptual()),
@@ -366,7 +385,7 @@ impl AppState {
         // Render at reduced scale when a preview op is active so ops run on
         // a fraction of the pixels (~16× fewer at 25%).  Full-res renders are
         // queued automatically once the preview is displayed.
-        let is_preview = self.levels_preview_active && !force_full_res;
+        let is_preview = (self.levels_preview_active || self.bw_preview_active) && !force_full_res;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
         } else {
@@ -392,13 +411,21 @@ impl AppState {
             })
             .collect();
 
-        // Preview levels op — applied on top of committed result but NOT cached.
+        // Preview op — applied on top of committed result but NOT cached.
+        // Levels takes priority if both previews are somehow active simultaneously.
         let preview_op = if self.levels_preview_active {
             let preview: Box<dyn Operation> = Box::new(LevelsOp::new(
                 self.levels_black,
                 self.levels_white,
                 self.levels_mid,
             ));
+            serde_json::to_value(&preview).ok()
+        } else if self.bw_preview_active {
+            let preview: Box<dyn Operation> = match self.bw_mode_idx {
+                1 => Box::new(BlackAndWhiteOp::average()),
+                2 => Box::new(BlackAndWhiteOp::perceptual()),
+                _ => Box::new(BlackAndWhiteOp::luminance()),
+            };
             serde_json::to_value(&preview).ok()
         } else {
             None

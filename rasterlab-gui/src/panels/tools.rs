@@ -120,19 +120,33 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     egui::CollapsingHeader::new("◑  Black & White")
         .default_open(true)
         .show(ui, |ui| {
-            ComboBox::from_label("Mode")
+            let old_idx = state.bw_mode_idx;
+            let combo_resp = ComboBox::from_label("Mode")
                 .selected_text(BW_MODES[state.bw_mode_idx])
                 .show_ui(ui, |ui| {
                     for (i, &label) in BW_MODES.iter().enumerate() {
                         ui.selectable_value(&mut state.bw_mode_idx, i, label);
                     }
                 });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply B&W"))
-                .clicked()
-            {
-                state.push_bw();
-            }
+            if (combo_resp.response.changed() || state.bw_mode_idx != old_idx)
+                && has_image {
+                    state.update_bw_preview();
+                }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply B&W"))
+                    .clicked()
+                {
+                    state.push_bw();
+                }
+                if state.bw_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_bw_preview();
+                }
+            });
         });
 
     ui.separator();
