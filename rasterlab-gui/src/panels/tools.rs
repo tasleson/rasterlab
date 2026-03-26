@@ -369,6 +369,51 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Highlights & Shadows ──────────────────────────────────────────────
+    egui::CollapsingHeader::new("◑  Highlights / Shadows")
+        .default_open(true)
+        .show(ui, |ui| {
+            let mut changed = false;
+            egui::Grid::new("hl_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Highlights");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut state.hl_highlights, -1.0..=1.0).step_by(0.01))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Shadows");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut state.hl_shadows, -1.0..=1.0).step_by(0.01))
+                        .changed();
+                    ui.end_row();
+                });
+            if changed && has_image {
+                state.update_hl_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_hl();
+                }
+                if state.hl_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_hl_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_hl();
+                }
+            });
+        });
+
+    ui.separator();
+
     // ── Saturation ────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("🎨  Saturation")
         .default_open(true)

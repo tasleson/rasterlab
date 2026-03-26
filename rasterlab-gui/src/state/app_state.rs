@@ -6,7 +6,8 @@ use rasterlab_core::{
     formats::FormatRegistry,
     ops::{
         BlackAndWhiteOp, BrightnessContrastOp, CropOp, CurvesOp, FauxHdrOp, FlipOp, GrainOp,
-        HistogramData, LevelsOp, RotateOp, SaturationOp, SharpenOp, VignetteOp, WhiteBalanceOp,
+        HighlightsShadowsOp, HistogramData, LevelsOp, RotateOp, SaturationOp, SharpenOp,
+        VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     traits::format_handler::EncodeOptions,
@@ -103,6 +104,11 @@ pub struct AppState {
     /// When true, a VignetteOp preview is appended to each render.
     pub vignette_preview_active: bool,
 
+    // ── Highlights & Shadows tool ─────────────────────────────────────────
+    pub hl_highlights: f32,
+    pub hl_shadows: f32,
+    pub hl_preview_active: bool,
+
     // ── White Balance tool ────────────────────────────────────────────────
     pub wb_temperature: f32,
     pub wb_tint: f32,
@@ -168,6 +174,9 @@ impl AppState {
             curve_points: vec![[0.0, 0.0], [1.0, 1.0]],
             curve_preview_active: false,
             curve_dragging_idx: None,
+            hl_highlights: 0.0,
+            hl_shadows: 0.0,
+            hl_preview_active: false,
             wb_temperature: 0.0,
             wb_tint: 0.0,
             wb_preview_active: false,
@@ -439,6 +448,34 @@ impl AppState {
         )));
     }
 
+    pub fn update_hl_preview(&mut self) {
+        self.hl_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_hl_preview(&mut self) {
+        if self.hl_preview_active {
+            self.hl_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_hl(&mut self) {
+        self.hl_preview_active = false;
+        self.push_op(Box::new(HighlightsShadowsOp::new(
+            self.hl_highlights,
+            self.hl_shadows,
+        )));
+        self.hl_highlights = 0.0;
+        self.hl_shadows = 0.0;
+    }
+
+    pub fn reset_hl(&mut self) {
+        self.hl_highlights = 0.0;
+        self.hl_shadows = 0.0;
+        self.cancel_hl_preview();
+    }
+
     pub fn update_wb_preview(&mut self) {
         self.wb_preview_active = true;
         self.request_render();
@@ -660,6 +697,7 @@ impl AppState {
         self.curve_preview_active = false;
         self.curve_dragging_idx = None;
         self.vignette_preview_active = false;
+        self.hl_preview_active = false;
         self.wb_preview_active = false;
         self.hdr_preview_active = false;
         self.grain_preview_active = false;
@@ -701,7 +739,8 @@ impl AppState {
             || self.sat_preview_active
             || self.curve_preview_active
             || self.hdr_preview_active
-            || self.wb_preview_active)
+            || self.wb_preview_active
+            || self.hl_preview_active)
             && !force_full_res;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
@@ -758,6 +797,12 @@ impl AppState {
                 self.vignette_strength,
                 self.vignette_radius,
                 self.vignette_feather,
+            ));
+            serde_json::to_value(&preview).ok()
+        } else if self.hl_preview_active {
+            let preview: Box<dyn Operation> = Box::new(HighlightsShadowsOp::new(
+                self.hl_highlights,
+                self.hl_shadows,
             ));
             serde_json::to_value(&preview).ok()
         } else if self.wb_preview_active {
