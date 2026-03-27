@@ -99,11 +99,7 @@ impl CanvasState {
 
         let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
 
-        // ── Middle-mouse pan + scroll-wheel zoom ─────────────────────────────
-        let middle_down = ui.input(|i| i.pointer.button_down(egui::PointerButton::Middle));
-        if middle_down {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
-        }
+        // ── Middle-mouse pan + Ctrl+scroll-wheel zoom ────────────────────────
         ui.input(|i| {
             if i.pointer.button_down(egui::PointerButton::Middle) {
                 self.pan_offset += i.pointer.delta();
@@ -112,7 +108,7 @@ impl CanvasState {
             // spreads one event across many frames which shifts the pivot each
             // frame and causes the image to jump.
             let scroll = i.raw_scroll_delta.y;
-            if scroll != 0.0 {
+            if scroll != 0.0 && i.modifiers.ctrl {
                 let old_zoom = self.zoom;
                 let factor = (1.0 + scroll * 0.003).clamp(0.8, 1.25);
                 self.zoom = (self.zoom * factor).clamp(0.05, 32.0);
@@ -123,6 +119,23 @@ impl CanvasState {
                 }
             }
         });
+
+        // ── Cursor icon ───────────────────────────────────────────────────────
+        let (middle_down, ctrl_held, over_canvas) = ui.input(|i| {
+            (
+                i.pointer.button_down(egui::PointerButton::Middle),
+                i.modifiers.ctrl,
+                i.pointer
+                    .hover_pos()
+                    .map(|p| canvas_rect.contains(p))
+                    .unwrap_or(false),
+            )
+        });
+        if middle_down {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
+        } else if ctrl_held && over_canvas {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
+        }
 
         // ── Draw image ───────────────────────────────────────────────────────
         let image_tl = canvas_rect.min + self.pan_offset;
