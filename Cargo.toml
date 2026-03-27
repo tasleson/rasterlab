@@ -50,6 +50,9 @@ eframe          = "0.29"
 egui            = "0.29"
 rfd             = "0.15"
 
+# Hashing
+blake3 = "1"
+
 # Internal crates
 rasterlab-plugin-api = { path = "rasterlab-plugin-api" }
 rasterlab-core       = { path = "rasterlab-core" }
