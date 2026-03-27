@@ -763,16 +763,27 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             }
             if !state.lut_name.is_empty() {
                 ui.label(format!("Loaded: {}", state.lut_name));
-                ui.horizontal(|ui| {
-                    ui.label("Strength:");
-                    ui.add(egui::Slider::new(&mut state.lut_strength, 0.0..=1.0).step_by(0.01));
-                });
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply LUT"))
-                    .clicked()
-                {
-                    state.push_lut();
+                let changed = ui
+                    .add(egui::Slider::new(&mut state.lut_strength, 0.0..=1.0).step_by(0.01).text("Strength"))
+                    .changed();
+                if changed && has_image {
+                    state.update_lut_preview();
                 }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(has_image, egui::Button::new("Apply LUT"))
+                        .clicked()
+                    {
+                        state.push_lut();
+                    }
+                    if state.lut_preview_active
+                        && ui
+                            .add_enabled(has_image, egui::Button::new("Cancel"))
+                            .clicked()
+                    {
+                        state.cancel_lut_preview();
+                    }
+                });
             } else {
                 ui.label("No LUT loaded.");
             }

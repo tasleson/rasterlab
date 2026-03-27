@@ -170,6 +170,7 @@ pub struct AppState {
     pub lut_strength: f32,
     /// Display name of the loaded LUT file.
     pub lut_name: String,
+    pub lut_preview_active: bool,
 
     // ── Hue Shift tool ────────────────────────────────────────────────────
     pub hue_degrees: f32,
@@ -284,6 +285,7 @@ impl AppState {
             lut_op: None,
             lut_strength: 1.0,
             lut_name: String::new(),
+            lut_preview_active: false,
             hue_degrees: 0.0,
             hue_preview_active: false,
             hl_highlights: 0.0,
@@ -832,6 +834,7 @@ impl AppState {
                         .unwrap_or_default();
                     self.status = format!("Loaded LUT: {}", self.lut_name);
                     self.lut_op = Some(op);
+                    self.lut_preview_active = false;
                 }
                 Err(e) => {
                     self.status = format!("LUT parse error: {}", e);
@@ -846,8 +849,21 @@ impl AppState {
     /// Apply the currently loaded LUT (with current strength) to the pipeline.
     pub fn push_lut(&mut self) {
         if let Some(mut op) = self.lut_op.clone() {
+            self.lut_preview_active = false;
             op.strength = self.lut_strength;
             self.push_op(Box::new(op));
+        }
+    }
+
+    pub fn update_lut_preview(&mut self) {
+        self.lut_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_lut_preview(&mut self) {
+        if self.lut_preview_active {
+            self.lut_preview_active = false;
+            self.request_render();
         }
     }
 
@@ -1187,6 +1203,7 @@ impl AppState {
         self.bc_preview_active = false;
         self.sat_preview_active = false;
         self.sepia_preview_active = false;
+        self.lut_preview_active = false;
         self.curve_preview_active = false;
         self.curve_dragging_idx = None;
         self.vignette_preview_active = false;
@@ -1235,6 +1252,7 @@ impl AppState {
             || self.bc_preview_active
             || self.sat_preview_active
             || self.sepia_preview_active
+            || self.lut_preview_active
             || self.curve_preview_active
             || self.hdr_preview_active
             || self.wb_preview_active
@@ -1292,6 +1310,13 @@ impl AppState {
         } else if self.sepia_preview_active {
             let preview: Box<dyn Operation> = Box::new(SepiaOp::new(self.sepia_strength));
             serde_json::to_value(&preview).ok()
+        } else if self.lut_preview_active {
+            self.lut_op.as_ref().map(|op| {
+                let mut preview = op.clone();
+                preview.strength = self.lut_strength;
+                let boxed: Box<dyn Operation> = Box::new(preview);
+                serde_json::to_value(&boxed).ok()
+            }).flatten()
         } else if self.curve_preview_active {
             let preview: Box<dyn Operation> = Box::new(CurvesOp {
                 points: self.curve_points.clone(),
