@@ -41,6 +41,10 @@ pub struct BatchArgs {
     #[arg(long)]
     pub sharpen: Option<f32>,
 
+    /// Load a previously saved pipeline JSON and apply it (ignores other op flags).
+    #[arg(long)]
+    pub load_pipeline: Option<PathBuf>,
+
     /// Output file extension (infers format).  Defaults to input extension.
     #[arg(long)]
     pub output_ext: Option<String>,
@@ -97,18 +101,32 @@ pub fn run(args: BatchArgs) -> Result<()> {
 
     let registry = FormatRegistry::with_builtins();
 
-    // Build the operation spec once; each thread clones its own pipeline.
-    let spec = PipelineSpec {
-        crop: args.crop.clone(),
-        rotate: args.rotate.clone(),
-        bw: args.bw.clone(),
-        sharpen: args.sharpen,
+    // Build the operation list once; each thread deserialises its own copies.
+    let ops_json: Vec<serde_json::Value> = if let Some(pipeline_path) = &args.load_pipeline {
+        let json = std::fs::read_to_string(pipeline_path)
+            .with_context(|| format!("Cannot read pipeline '{}'", pipeline_path.display()))?;
+        let state: rasterlab_core::pipeline::PipelineState =
+            serde_json::from_str(&json).context("Failed to parse pipeline JSON")?;
+        // Only include entries up to the saved cursor (respects undo state).
+        let active = state.entries[..state.cursor.min(state.entries.len())].to_vec();
+        eprintln!(
+            "Pipeline loaded from '{}' ({} op(s))",
+            pipeline_path.display(),
+            active.len()
+        );
+        active
+    } else {
+        let spec = PipelineSpec {
+            crop: args.crop.clone(),
+            rotate: args.rotate.clone(),
+            bw: args.bw.clone(),
+            sharpen: args.sharpen,
+        };
+        let ops = spec.build()?;
+        ops.iter()
+            .map(|op| serde_json::to_value(op.as_ref()).unwrap())
+            .collect()
     };
-    let ops = spec.build()?;
-    let ops_json: Vec<serde_json::Value> = ops
-        .iter()
-        .map(|op| serde_json::to_value(op.as_ref()).unwrap())
-        .collect();
 
     let options = EncodeOptions {
         jpeg_quality: args.jpeg_quality,

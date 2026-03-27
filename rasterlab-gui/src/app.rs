@@ -264,10 +264,10 @@ impl eframe::App for RasterLabApp {
                                     egui::Button::new("Save As…  (Ctrl+⇧S)"),
                                 )
                                 .clicked()
-                            {
-                                ui.close_menu();
-                                self.project_save_dialog(ctx);
-                            }
+                        {
+                            ui.close_menu();
+                            self.project_save_dialog(ctx);
+                        }
                         ui.separator();
                         if ui
                             .add_enabled(
