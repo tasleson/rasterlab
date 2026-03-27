@@ -16,9 +16,9 @@ pub struct RasterLabApp {
     /// Receives the path chosen by an in-progress open dialog (None = cancelled).
     #[cfg(not(target_arch = "wasm32"))]
     open_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
-    /// Receives the path chosen by an in-progress export (render save) dialog.
+    /// Receives the path chosen by an in-progress Export dialog.
     #[cfg(not(target_arch = "wasm32"))]
-    save_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    export_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
     /// Receives the path chosen by an in-progress Save As project dialog.
     #[cfg(not(target_arch = "wasm32"))]
     project_save_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
@@ -36,7 +36,7 @@ impl RasterLabApp {
             #[cfg(not(target_arch = "wasm32"))]
             open_rx: None,
             #[cfg(not(target_arch = "wasm32"))]
-            save_rx: None,
+            export_rx: None,
             #[cfg(not(target_arch = "wasm32"))]
             project_save_rx: None,
         }
@@ -57,6 +57,14 @@ impl RasterLabApp {
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::S) {
                 self.save_project_or_prompt(ctx);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::S) {
+                self.project_save_dialog(ctx);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if i.consume_key(Modifiers::CTRL, Key::E) {
+                self.export_file_dialog(ctx);
             }
         });
     }
@@ -84,14 +92,14 @@ impl RasterLabApp {
         });
     }
 
-    /// Spawn the save dialog on a background thread so the event loop keeps running.
+    /// Spawn the Export dialog (save rendered image as JPEG/PNG) on a background thread.
     #[cfg(not(target_arch = "wasm32"))]
-    fn save_file_dialog(&mut self, ctx: &Context) {
-        if self.save_rx.is_some() {
+    fn export_file_dialog(&mut self, ctx: &Context) {
+        if self.export_rx.is_some() {
             return;
-        } // dialog already open
+        }
         let (tx, rx) = mpsc::channel();
-        self.save_rx = Some(rx);
+        self.export_rx = Some(rx);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let path = rfd::FileDialog::new()
@@ -142,13 +150,13 @@ impl RasterLabApp {
             }
             self.open_rx = None;
         }
-        if let Some(rx) = &self.save_rx
+        if let Some(rx) = &self.export_rx
             && let Ok(maybe_path) = rx.try_recv()
         {
             if let Some(path) = maybe_path {
                 self.state.save_file(path);
             }
-            self.save_rx = None;
+            self.export_rx = None;
         }
         if let Some(rx) = &self.project_save_rx
             && let Ok(maybe_path) = rx.try_recv()
@@ -237,12 +245,12 @@ impl eframe::App for RasterLabApp {
                         if ui
                             .add_enabled(
                                 self.state.pipeline.is_some(),
-                                egui::Button::new("Save rendered image…"),
+                                egui::Button::new("Export…  (Ctrl+E)"),
                             )
                             .clicked()
                         {
                             ui.close_menu();
-                            self.save_file_dialog(ctx);
+                            self.export_file_dialog(ctx);
                         }
                     }
                     ui.separator();
