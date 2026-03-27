@@ -525,6 +525,36 @@ impl AppState {
         }
     }
 
+    /// Export the current edit stack to a JSON file consumable by the CLI.
+    ///
+    /// The resulting file can be passed to `rasterlab process --load-pipeline <path>`
+    /// or `rasterlab batch --load-pipeline <path>` to replay the same edits on
+    /// any image without opening the GUI.
+    pub fn export_edit_stack_json(&mut self, path: std::path::PathBuf) {
+        let Some(pipeline) = &self.pipeline else {
+            self.status = "No edit stack to export".into();
+            return;
+        };
+        let state = match pipeline.save_state() {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("Export failed: {}", e);
+                return;
+            }
+        };
+        let json = match serde_json::to_string_pretty(&state) {
+            Ok(j) => j,
+            Err(e) => {
+                self.status = format!("JSON serialisation failed: {}", e);
+                return;
+            }
+        };
+        match std::fs::write(&path, json) {
+            Ok(()) => self.status = format!("Edit stack exported → {}", path.display()),
+            Err(e) => self.status = format!("Export failed: {}", e),
+        }
+    }
+
     /// Save the current project to `path` as a `.rlab` file.
     pub fn save_project(&mut self, path: std::path::PathBuf) {
         let Some(original_bytes) = self.original_bytes.clone() else {

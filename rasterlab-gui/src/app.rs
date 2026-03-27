@@ -22,6 +22,9 @@ pub struct RasterLabApp {
     /// Receives the path chosen by an in-progress Save As project dialog.
     #[cfg(not(target_arch = "wasm32"))]
     project_save_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// Receives the path chosen by an in-progress Export Edit Stack dialog.
+    #[cfg(not(target_arch = "wasm32"))]
+    json_export_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
 }
 
 impl RasterLabApp {
@@ -39,6 +42,8 @@ impl RasterLabApp {
             export_rx: None,
             #[cfg(not(target_arch = "wasm32"))]
             project_save_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            json_export_rx: None,
         }
     }
 
@@ -139,6 +144,24 @@ impl RasterLabApp {
         });
     }
 
+    /// Open a save dialog for exporting the edit stack as a JSON file.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn export_edit_stack_dialog(&mut self, ctx: &Context) {
+        if self.json_export_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.json_export_rx = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let path = rfd::FileDialog::new()
+                .add_filter("JSON", &["json"])
+                .save_file();
+            let _ = tx.send(path);
+            ctx.request_repaint();
+        });
+    }
+
     /// Poll dialog result channels and act on completed dialogs.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_dialogs(&mut self) {
@@ -165,6 +188,14 @@ impl RasterLabApp {
                 self.state.save_project(path);
             }
             self.project_save_rx = None;
+        }
+        if let Some(rx) = &self.json_export_rx
+            && let Ok(maybe_path) = rx.try_recv()
+        {
+            if let Some(path) = maybe_path {
+                self.state.export_edit_stack_json(path);
+            }
+            self.json_export_rx = None;
         }
     }
 }
@@ -226,8 +257,8 @@ impl eframe::App for RasterLabApp {
                             ui.close_menu();
                             self.save_project_or_prompt(ctx);
                         }
-                        if self.state.project_path.is_some() {
-                            if ui
+                        if self.state.project_path.is_some()
+                            && ui
                                 .add_enabled(
                                     self.state.pipeline.is_some(),
                                     egui::Button::new("Save As…  (Ctrl+⇧S)"),
@@ -237,7 +268,6 @@ impl eframe::App for RasterLabApp {
                                 ui.close_menu();
                                 self.project_save_dialog(ctx);
                             }
-                        }
                         ui.separator();
                         if ui
                             .add_enabled(
@@ -248,6 +278,16 @@ impl eframe::App for RasterLabApp {
                         {
                             ui.close_menu();
                             self.export_file_dialog(ctx);
+                        }
+                        if ui
+                            .add_enabled(
+                                self.state.pipeline.is_some(),
+                                egui::Button::new("Export Edit Stack as JSON…"),
+                            )
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            self.export_edit_stack_dialog(ctx);
                         }
                     }
                     ui.separator();
