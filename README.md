@@ -79,6 +79,34 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 # Changelog
 
+## 2026-03-26 (40% of our first week usage)
+
+### Native File Format (.rlab) 
+  - **New .rlab binary format** — chunked layout with per-chunk and file-level Blake3 integrity hashes. Stores the
+  original source image verbatim, the full edit stack, metadata (timestamps, source path, dimensions, app version), and
+  an optional thumbnail.
+  - **Save / Save As (Ctrl+S / Ctrl+⇧S)** — saves and reopens the full editing session including undo history. Title bar
+  shows filename and a ● dirty indicator when there are unsaved changes.
+  - **Export… (Ctrl+E)** — renamed from the old Save; writes the rendered result as JPEG or PNG.
+  - **Open dialog now lists .rlab** files alongside images.
+
+### CLI Improvements
+
+  - **Export Edit Stack as JSON (File menu)** — writes the current pipeline as a JSON file compatible with the CLI's `--load-pipeline` argument.
+  - **rasterlab batch** --load-pipeline — batch processing can now load a pipeline JSON exported from the GUI and apply it
+  to an entire directory in parallel.
+
+### Tools Panel
+
+  - **Sepia tool** — added live 1/4-scale preview on slider change, plus Cancel and Reset buttons, matching all other
+  preview-capable tools.
+  - **Alphabetical ordering** — all tool sections are now sorted A–Z with Auto Enhance pinned at the top.
+  - **Tool panel state persistence** — open/close state of each tool section is saved to a YAML prefs file and restored on next launch (default: all collapsed).
+
+### Bug Fixes, I'm sure there is many more :-)
+  - Removed duplicate Save As… entry from the File menu.
+  - Resolved 3 pre-existing test failures.
+
 ## 2026-03-25 (19% of our first week usage)
 
 - **Levels tool** — black/mid/white point sliders with live preview; changes are non-destructive and can be committed to the pipeline or discarded
@@ -98,7 +126,6 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 ## Screen shot
 <img width="1405" height="933" alt="Screenshot 2026-03-26 at 12 19 59 AM" src="https://github.com/user-attachments/assets/1650d897-232c-44de-80c5-64ee0450a135" />
-
 
 
 ## License
