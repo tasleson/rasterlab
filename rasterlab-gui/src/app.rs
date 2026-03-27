@@ -216,30 +216,27 @@ impl eframe::App for RasterLabApp {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         ui.separator();
-                        let save_label = if self.state.project_path.is_some() {
-                            "Save  (Ctrl+S)"
-                        } else {
-                            "Save As…  (Ctrl+S)"
-                        };
                         if ui
                             .add_enabled(
                                 self.state.pipeline.is_some(),
-                                egui::Button::new(save_label),
+                                egui::Button::new("Save  (Ctrl+S)"),
                             )
                             .clicked()
                         {
                             ui.close_menu();
                             self.save_project_or_prompt(ctx);
                         }
-                        if ui
-                            .add_enabled(
-                                self.state.pipeline.is_some(),
-                                egui::Button::new("Save As…  (Ctrl+⇧S)"),
-                            )
-                            .clicked()
-                        {
-                            ui.close_menu();
-                            self.project_save_dialog(ctx);
+                        if self.state.project_path.is_some() {
+                            if ui
+                                .add_enabled(
+                                    self.state.pipeline.is_some(),
+                                    egui::Button::new("Save As…  (Ctrl+⇧S)"),
+                                )
+                                .clicked()
+                            {
+                                ui.close_menu();
+                                self.project_save_dialog(ctx);
+                            }
                         }
                         ui.separator();
                         if ui
