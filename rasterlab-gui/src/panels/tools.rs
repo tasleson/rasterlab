@@ -57,434 +57,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
-    // ── Crop ─────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("crop");
-    let resp = egui::CollapsingHeader::new("✂  Crop")
-        .id_salt("crop")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            egui::Grid::new("crop_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("X");
-                    ui.add(DragValue::new(&mut state.crop_x).speed(1));
-                    ui.end_row();
-                    ui.label("Y");
-                    ui.add(DragValue::new(&mut state.crop_y).speed(1));
-                    ui.end_row();
-                    ui.label("W");
-                    ui.add(
-                        DragValue::new(&mut state.crop_w)
-                            .speed(1)
-                            .range(1..=u32::MAX),
-                    );
-                    ui.end_row();
-                    ui.label("H");
-                    ui.add(
-                        DragValue::new(&mut state.crop_h)
-                            .speed(1)
-                            .range(1..=u32::MAX),
-                    );
-                    ui.end_row();
-                });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Crop"))
-                .clicked()
-            {
-                state.push_crop();
-            }
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("crop".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Rotate ───────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("rotate");
-    let resp = egui::CollapsingHeader::new("↻  Rotate")
-        .id_salt("rotate")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("90°"))
-                    .clicked()
-                {
-                    state.push_rotate_90();
-                }
-                if ui
-                    .add_enabled(has_image, egui::Button::new("180°"))
-                    .clicked()
-                {
-                    state.push_rotate_180();
-                }
-                if ui
-                    .add_enabled(has_image, egui::Button::new("270°"))
-                    .clicked()
-                {
-                    state.push_rotate_270();
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Angle:");
-                ui.add(
-                    DragValue::new(&mut state.rotate_deg)
-                        .speed(0.5)
-                        .suffix("°")
-                        .range(-360.0..=360.0),
-                );
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_rotate_arbitrary();
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Flip H"))
-                    .clicked()
-                {
-                    state.push_flip_horizontal();
-                }
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Flip V"))
-                    .clicked()
-                {
-                    state.push_flip_vertical();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("rotate".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Resize ────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("resize");
-    let resp = egui::CollapsingHeader::new("⤢  Resize")
-        .id_salt("resize")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            use rasterlab_core::ops::ResampleMode;
-
-            let orig_w = state.resize_w;
-            let orig_h = state.resize_h;
-
-            egui::Grid::new("resize_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Width");
-                    let w_resp = ui.add(
-                        DragValue::new(&mut state.resize_w)
-                            .speed(1)
-                            .range(1..=32000_u32)
-                            .suffix(" px"),
-                    );
-                    ui.end_row();
-                    ui.label("Height");
-                    let h_resp = ui.add(
-                        DragValue::new(&mut state.resize_h)
-                            .speed(1)
-                            .range(1..=32000_u32)
-                            .suffix(" px"),
-                    );
-                    ui.end_row();
-                    ui.label("Method");
-                    egui::ComboBox::from_id_salt("resize_mode")
-                        .selected_text(match state.resize_mode {
-                            ResampleMode::NearestNeighbour => "Nearest",
-                            ResampleMode::Bilinear => "Bilinear",
-                            ResampleMode::Bicubic => "Bicubic",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut state.resize_mode,
-                                ResampleMode::NearestNeighbour,
-                                "Nearest",
-                            );
-                            ui.selectable_value(
-                                &mut state.resize_mode,
-                                ResampleMode::Bilinear,
-                                "Bilinear",
-                            );
-                            ui.selectable_value(
-                                &mut state.resize_mode,
-                                ResampleMode::Bicubic,
-                                "Bicubic",
-                            );
-                        });
-                    ui.end_row();
-                    ui.label("Lock aspect");
-                    ui.checkbox(&mut state.resize_lock_aspect, "");
-                    ui.end_row();
-
-                    // Propagate aspect-ratio constraint after editing.
-                    if state.resize_lock_aspect && orig_w > 0 && orig_h > 0 {
-                        if w_resp.changed() && orig_w != state.resize_w {
-                            let ratio = orig_h as f64 / orig_w as f64;
-                            state.resize_h =
-                                ((state.resize_w as f64 * ratio).round() as u32).max(1);
-                        } else if h_resp.changed() && orig_h != state.resize_h {
-                            let ratio = orig_w as f64 / orig_h as f64;
-                            state.resize_w =
-                                ((state.resize_h as f64 * ratio).round() as u32).max(1);
-                        }
-                    }
-                });
-
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Resize"))
-                .clicked()
-            {
-                state.push_resize();
-            }
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("resize".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Sharpen ──────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("sharpen");
-    let resp = egui::CollapsingHeader::new("◈  Sharpen")
-        .id_salt("sharpen")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Strength:");
-                ui.add(
-                    DragValue::new(&mut state.sharpen_strength)
-                        .speed(0.05)
-                        .range(0.0..=10.0),
-                );
-            });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Sharpen"))
-                .clicked()
-            {
-                state.push_sharpen();
-            }
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("sharpen".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Blur ──────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("blur");
-    let resp = egui::CollapsingHeader::new("≋  Blur")
-        .id_salt("blur")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Radius (σ):");
-                ui.add(
-                    DragValue::new(&mut state.blur_radius)
-                        .speed(0.1)
-                        .range(0.1..=100.0_f32)
-                        .suffix(" px"),
-                );
-            });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Blur"))
-                .clicked()
-            {
-                state.push_blur();
-            }
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("blur".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Denoise ───────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("denoise");
-    let resp = egui::CollapsingHeader::new("◌  Denoise")
-        .id_salt("denoise")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            egui::Grid::new("denoise_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Strength:");
-                    ui.add(
-                        DragValue::new(&mut state.denoise_strength)
-                            .speed(0.01)
-                            .range(0.01..=1.0_f32),
-                    );
-                    ui.end_row();
-                    ui.label("Radius:");
-                    ui.add(
-                        DragValue::new(&mut state.denoise_radius)
-                            .speed(1)
-                            .range(1..=10_u32)
-                            .suffix(" px"),
-                    );
-                    ui.end_row();
-                });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Denoise"))
-                .clicked()
-            {
-                state.push_denoise();
-            }
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("denoise".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Perspective ───────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("perspective");
-    let resp = egui::CollapsingHeader::new("⬡  Perspective")
-        .id_salt("perspective")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let corner_labels = [
-                ("Top-left", 0usize),
-                ("Top-right", 1),
-                ("Bottom-right", 2),
-                ("Bottom-left", 3),
-            ];
-            egui::Grid::new("perspective_grid")
-                .num_columns(3)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("");
-                    ui.label("X");
-                    ui.label("Y");
-                    ui.end_row();
-                    for (label, i) in corner_labels {
-                        ui.label(label);
-                        ui.add(
-                            DragValue::new(&mut state.perspective_corners[i][0])
-                                .speed(0.005)
-                                .range(-1.0..=1.0_f32),
-                        );
-                        ui.add(
-                            DragValue::new(&mut state.perspective_corners[i][1])
-                                .speed(0.005)
-                                .range(-1.0..=1.0_f32),
-                        );
-                        ui.end_row();
-                    }
-                });
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_perspective();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_perspective();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("perspective".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Vignette ──────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("vignette");
-    let resp = egui::CollapsingHeader::new("◎  Vignette")
-        .id_salt("vignette")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let mut changed = false;
-            egui::Grid::new("vignette_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Strength");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.vignette_strength)
-                                .speed(0.01)
-                                .range(0.0..=1.0),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Radius");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.vignette_radius)
-                                .speed(0.01)
-                                .range(0.0..=1.0),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Feather");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.vignette_feather)
-                                .speed(0.01)
-                                .range(0.0..=1.0),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_vignette_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Vignette"))
-                    .clicked()
-                {
-                    state.push_vignette();
-                }
-                if state.vignette_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_vignette_preview();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("vignette".to_string(), !default_open);
-    }
-
-    ui.separator();
-
     // ── Black & White ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("bw");
     let resp = egui::CollapsingHeader::new("◑  Black & White")
@@ -583,150 +155,33 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
-    // ── Sepia ─────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("sepia");
-    let resp = egui::CollapsingHeader::new("🟫  Sepia")
-        .id_salt("sepia")
+    // ── Blur ──────────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("blur");
+    let resp = egui::CollapsingHeader::new("≋  Blur")
+        .id_salt("blur")
         .default_open(default_open)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Strength:");
-                ui.add(egui::Slider::new(&mut state.sepia_strength, 0.0..=1.0).step_by(0.01));
+                ui.label("Radius (σ):");
+                ui.add(
+                    DragValue::new(&mut state.blur_radius)
+                        .speed(0.1)
+                        .range(0.1..=100.0_f32)
+                        .suffix(" px"),
+                );
             });
             if ui
-                .add_enabled(has_image, egui::Button::new("Apply Sepia"))
+                .add_enabled(has_image, egui::Button::new("Apply Blur"))
                 .clicked()
             {
-                state.push_sepia();
+                state.push_blur();
             }
         });
     if resp.header_response.clicked() {
         state
             .prefs
             .tools_open
-            .insert("sepia".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Color Space Conversion ────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("color_space");
-    let resp = egui::CollapsingHeader::new("⬛  Color Space")
-        .id_salt("color_space")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            use rasterlab_core::ops::ColorSpaceConversion;
-            egui::ComboBox::from_id_salt("color_space_combo")
-                .selected_text(match state.color_space_conversion {
-                    ColorSpaceConversion::SrgbToDisplayP3 => "sRGB → Display P3",
-                    ColorSpaceConversion::DisplayP3ToSrgb => "Display P3 → sRGB",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut state.color_space_conversion,
-                        ColorSpaceConversion::SrgbToDisplayP3,
-                        "sRGB → Display P3",
-                    );
-                    ui.selectable_value(
-                        &mut state.color_space_conversion,
-                        ColorSpaceConversion::DisplayP3ToSrgb,
-                        "Display P3 → sRGB",
-                    );
-                });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Conversion"))
-                .clicked()
-            {
-                state.push_color_space();
-            }
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("color_space".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── LUT (Color Grading) ───────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("lut");
-    let resp = egui::CollapsingHeader::new("🎞  LUT / Color Grading")
-        .id_salt("lut")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            if ui.button("Load .cube LUT…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("CUBE LUT", &["cube"])
-                    .pick_file()
-            {
-                state.load_lut(path);
-            }
-            if !state.lut_name.is_empty() {
-                ui.label(format!("Loaded: {}", state.lut_name));
-                ui.horizontal(|ui| {
-                    ui.label("Strength:");
-                    ui.add(egui::Slider::new(&mut state.lut_strength, 0.0..=1.0).step_by(0.01));
-                });
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply LUT"))
-                    .clicked()
-                {
-                    state.push_lut();
-                }
-            } else {
-                ui.label("No LUT loaded.");
-            }
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("lut".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Hue Shift ─────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("hue_shift");
-    let resp = egui::CollapsingHeader::new("🎡  Hue Shift")
-        .id_salt("hue_shift")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut state.hue_degrees, -180.0..=180.0)
-                        .text("Degrees")
-                        .step_by(1.0),
-                )
-                .changed();
-            if changed && has_image {
-                state.update_hue_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_hue();
-                }
-                if state.hue_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_hue_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_hue();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("hue_shift".to_string(), !default_open);
+            .insert("blur".to_string(), !default_open);
     }
 
     ui.separator();
@@ -780,293 +235,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .prefs
             .tools_open
             .insert("brightness_contrast".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Highlights & Shadows ──────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("highlights_shadows");
-    let resp = egui::CollapsingHeader::new("◑  Highlights / Shadows")
-        .id_salt("highlights_shadows")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let mut changed = false;
-            egui::Grid::new("hl_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Highlights");
-                    changed |= ui
-                        .add(egui::Slider::new(&mut state.hl_highlights, -1.0..=1.0).step_by(0.01))
-                        .changed();
-                    ui.end_row();
-                    ui.label("Shadows");
-                    changed |= ui
-                        .add(egui::Slider::new(&mut state.hl_shadows, -1.0..=1.0).step_by(0.01))
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_hl_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_hl();
-                }
-                if state.hl_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_hl_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_hl();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("highlights_shadows".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Saturation ────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("saturation");
-    let resp = egui::CollapsingHeader::new("🎨  Saturation")
-        .id_salt("saturation")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let changed = ui
-                .add(egui::Slider::new(&mut state.saturation, 0.0..=4.0).step_by(0.01))
-                .changed();
-            if changed && has_image {
-                state.update_sat_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_saturation();
-                }
-                if state.sat_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_sat_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_saturation();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("saturation".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Vibrance ──────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("vibrance");
-    let resp = egui::CollapsingHeader::new("✦  Vibrance")
-        .id_salt("vibrance")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let changed = ui
-                .add(egui::Slider::new(&mut state.vibrance, -1.0..=1.0).step_by(0.01))
-                .changed();
-            if changed && has_image {
-                state.update_vibrance_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_vibrance();
-                }
-                if state.vibrance_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_vibrance_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_vibrance();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("vibrance".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── White Balance ─────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("white_balance");
-    let resp = egui::CollapsingHeader::new("🌡  White Balance")
-        .id_salt("white_balance")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let mut changed = false;
-            egui::Grid::new("wb_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Temperature");
-                    changed |= ui
-                        .add(egui::Slider::new(&mut state.wb_temperature, -1.0..=1.0).step_by(0.01))
-                        .changed();
-                    ui.end_row();
-                    ui.label("Tint");
-                    changed |= ui
-                        .add(egui::Slider::new(&mut state.wb_tint, -1.0..=1.0).step_by(0.01))
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_wb_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_wb();
-                }
-                if state.wb_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_wb_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_wb();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("white_balance".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Faux HDR ──────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("faux_hdr");
-    let resp = egui::CollapsingHeader::new("◈  Faux HDR")
-        .id_salt("faux_hdr")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Exposure fusion from ±1 stop virtual brackets")
-                    .small()
-                    .color(Color32::from_gray(140)),
-            );
-            ui.add_space(2.0);
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut state.hdr_strength, 0.0..=1.0)
-                        .text("Strength")
-                        .step_by(0.01),
-                )
-                .changed();
-            if changed && has_image {
-                state.update_hdr_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_hdr();
-                }
-                if state.hdr_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_hdr_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_hdr();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("faux_hdr".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Curves ────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("curves");
-    let resp = egui::CollapsingHeader::new("〜  Curves")
-        .id_salt("curves")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            curves_ui(ui, state);
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("curves".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Levels ────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("levels");
-    let resp = egui::CollapsingHeader::new("▨  Levels")
-        .id_salt("levels")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            levels_ui(ui, state);
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("levels".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Grain ─────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("grain");
-    let resp = egui::CollapsingHeader::new("⣿  Grain")
-        .id_salt("grain")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            grain_ui(ui, state);
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("grain".to_string(), !default_open);
     }
 
     ui.separator();
@@ -1163,19 +331,148 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
-    // ── HSL Panel ─────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("hsl_panel");
-    let resp = egui::CollapsingHeader::new("🌈  HSL Panel")
-        .id_salt("hsl_panel")
+    // ── Color Space Conversion ────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("color_space");
+    let resp = egui::CollapsingHeader::new("⬛  Color Space")
+        .id_salt("color_space")
         .default_open(default_open)
         .show(ui, |ui| {
-            hsl_panel_ui(ui, state, has_image);
+            use rasterlab_core::ops::ColorSpaceConversion;
+            egui::ComboBox::from_id_salt("color_space_combo")
+                .selected_text(match state.color_space_conversion {
+                    ColorSpaceConversion::SrgbToDisplayP3 => "sRGB → Display P3",
+                    ColorSpaceConversion::DisplayP3ToSrgb => "Display P3 → sRGB",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut state.color_space_conversion,
+                        ColorSpaceConversion::SrgbToDisplayP3,
+                        "sRGB → Display P3",
+                    );
+                    ui.selectable_value(
+                        &mut state.color_space_conversion,
+                        ColorSpaceConversion::DisplayP3ToSrgb,
+                        "Display P3 → sRGB",
+                    );
+                });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Conversion"))
+                .clicked()
+            {
+                state.push_color_space();
+            }
         });
     if resp.header_response.clicked() {
         state
             .prefs
             .tools_open
-            .insert("hsl_panel".to_string(), !default_open);
+            .insert("color_space".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Crop ─────────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("crop");
+    let resp = egui::CollapsingHeader::new("✂  Crop")
+        .id_salt("crop")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            egui::Grid::new("crop_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("X");
+                    ui.add(DragValue::new(&mut state.crop_x).speed(1));
+                    ui.end_row();
+                    ui.label("Y");
+                    ui.add(DragValue::new(&mut state.crop_y).speed(1));
+                    ui.end_row();
+                    ui.label("W");
+                    ui.add(
+                        DragValue::new(&mut state.crop_w)
+                            .speed(1)
+                            .range(1..=u32::MAX),
+                    );
+                    ui.end_row();
+                    ui.label("H");
+                    ui.add(
+                        DragValue::new(&mut state.crop_h)
+                            .speed(1)
+                            .range(1..=u32::MAX),
+                    );
+                    ui.end_row();
+                });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Crop"))
+                .clicked()
+            {
+                state.push_crop();
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("crop".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Curves ────────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("curves");
+    let resp = egui::CollapsingHeader::new("〜  Curves")
+        .id_salt("curves")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            curves_ui(ui, state);
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("curves".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Denoise ───────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("denoise");
+    let resp = egui::CollapsingHeader::new("◌  Denoise")
+        .id_salt("denoise")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            egui::Grid::new("denoise_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Strength:");
+                    ui.add(
+                        DragValue::new(&mut state.denoise_strength)
+                            .speed(0.01)
+                            .range(0.01..=1.0_f32),
+                    );
+                    ui.end_row();
+                    ui.label("Radius:");
+                    ui.add(
+                        DragValue::new(&mut state.denoise_radius)
+                            .speed(1)
+                            .range(1..=10_u32)
+                            .suffix(" px"),
+                    );
+                    ui.end_row();
+                });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Denoise"))
+                .clicked()
+            {
+                state.push_denoise();
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("denoise".to_string(), !default_open);
     }
 
     ui.separator();
@@ -1250,6 +547,708 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .prefs
             .tools_open
             .insert("export_settings".to_string(), !default_open);
+    }
+    ui.separator();
+
+    // ── Faux HDR ──────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("faux_hdr");
+    let resp = egui::CollapsingHeader::new("◈  Faux HDR")
+        .id_salt("faux_hdr")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Exposure fusion from ±1 stop virtual brackets")
+                    .small()
+                    .color(Color32::from_gray(140)),
+            );
+            ui.add_space(2.0);
+            let changed = ui
+                .add(
+                    egui::Slider::new(&mut state.hdr_strength, 0.0..=1.0)
+                        .text("Strength")
+                        .step_by(0.01),
+                )
+                .changed();
+            if changed && has_image {
+                state.update_hdr_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_hdr();
+                }
+                if state.hdr_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_hdr_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_hdr();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("faux_hdr".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Grain ─────────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("grain");
+    let resp = egui::CollapsingHeader::new("⣿  Grain")
+        .id_salt("grain")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            grain_ui(ui, state);
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("grain".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Highlights & Shadows ──────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("highlights_shadows");
+    let resp = egui::CollapsingHeader::new("◑  Highlights / Shadows")
+        .id_salt("highlights_shadows")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let mut changed = false;
+            egui::Grid::new("hl_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Highlights");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut state.hl_highlights, -1.0..=1.0).step_by(0.01))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Shadows");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut state.hl_shadows, -1.0..=1.0).step_by(0.01))
+                        .changed();
+                    ui.end_row();
+                });
+            if changed && has_image {
+                state.update_hl_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_hl();
+                }
+                if state.hl_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_hl_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_hl();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("highlights_shadows".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── HSL Panel ─────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("hsl_panel");
+    let resp = egui::CollapsingHeader::new("🌈  HSL Panel")
+        .id_salt("hsl_panel")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            hsl_panel_ui(ui, state, has_image);
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("hsl_panel".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Hue Shift ─────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("hue_shift");
+    let resp = egui::CollapsingHeader::new("🎡  Hue Shift")
+        .id_salt("hue_shift")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let changed = ui
+                .add(
+                    egui::Slider::new(&mut state.hue_degrees, -180.0..=180.0)
+                        .text("Degrees")
+                        .step_by(1.0),
+                )
+                .changed();
+            if changed && has_image {
+                state.update_hue_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_hue();
+                }
+                if state.hue_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_hue_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_hue();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("hue_shift".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Levels ────────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("levels");
+    let resp = egui::CollapsingHeader::new("▨  Levels")
+        .id_salt("levels")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            levels_ui(ui, state);
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("levels".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── LUT (Color Grading) ───────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("lut");
+    let resp = egui::CollapsingHeader::new("🎞  LUT / Color Grading")
+        .id_salt("lut")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            if ui.button("Load .cube LUT…").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("CUBE LUT", &["cube"])
+                    .pick_file()
+            {
+                state.load_lut(path);
+            }
+            if !state.lut_name.is_empty() {
+                ui.label(format!("Loaded: {}", state.lut_name));
+                ui.horizontal(|ui| {
+                    ui.label("Strength:");
+                    ui.add(egui::Slider::new(&mut state.lut_strength, 0.0..=1.0).step_by(0.01));
+                });
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply LUT"))
+                    .clicked()
+                {
+                    state.push_lut();
+                }
+            } else {
+                ui.label("No LUT loaded.");
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("lut".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Perspective ───────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("perspective");
+    let resp = egui::CollapsingHeader::new("⬡  Perspective")
+        .id_salt("perspective")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let corner_labels = [
+                ("Top-left", 0usize),
+                ("Top-right", 1),
+                ("Bottom-right", 2),
+                ("Bottom-left", 3),
+            ];
+            egui::Grid::new("perspective_grid")
+                .num_columns(3)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("");
+                    ui.label("X");
+                    ui.label("Y");
+                    ui.end_row();
+                    for (label, i) in corner_labels {
+                        ui.label(label);
+                        ui.add(
+                            DragValue::new(&mut state.perspective_corners[i][0])
+                                .speed(0.005)
+                                .range(-1.0..=1.0_f32),
+                        );
+                        ui.add(
+                            DragValue::new(&mut state.perspective_corners[i][1])
+                                .speed(0.005)
+                                .range(-1.0..=1.0_f32),
+                        );
+                        ui.end_row();
+                    }
+                });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_perspective();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_perspective();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("perspective".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Resize ────────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("resize");
+    let resp = egui::CollapsingHeader::new("⤢  Resize")
+        .id_salt("resize")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            use rasterlab_core::ops::ResampleMode;
+
+            let orig_w = state.resize_w;
+            let orig_h = state.resize_h;
+
+            egui::Grid::new("resize_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Width");
+                    let w_resp = ui.add(
+                        DragValue::new(&mut state.resize_w)
+                            .speed(1)
+                            .range(1..=32000_u32)
+                            .suffix(" px"),
+                    );
+                    ui.end_row();
+                    ui.label("Height");
+                    let h_resp = ui.add(
+                        DragValue::new(&mut state.resize_h)
+                            .speed(1)
+                            .range(1..=32000_u32)
+                            .suffix(" px"),
+                    );
+                    ui.end_row();
+                    ui.label("Method");
+                    egui::ComboBox::from_id_salt("resize_mode")
+                        .selected_text(match state.resize_mode {
+                            ResampleMode::NearestNeighbour => "Nearest",
+                            ResampleMode::Bilinear => "Bilinear",
+                            ResampleMode::Bicubic => "Bicubic",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut state.resize_mode,
+                                ResampleMode::NearestNeighbour,
+                                "Nearest",
+                            );
+                            ui.selectable_value(
+                                &mut state.resize_mode,
+                                ResampleMode::Bilinear,
+                                "Bilinear",
+                            );
+                            ui.selectable_value(
+                                &mut state.resize_mode,
+                                ResampleMode::Bicubic,
+                                "Bicubic",
+                            );
+                        });
+                    ui.end_row();
+                    ui.label("Lock aspect");
+                    ui.checkbox(&mut state.resize_lock_aspect, "");
+                    ui.end_row();
+
+                    // Propagate aspect-ratio constraint after editing.
+                    if state.resize_lock_aspect && orig_w > 0 && orig_h > 0 {
+                        if w_resp.changed() && orig_w != state.resize_w {
+                            let ratio = orig_h as f64 / orig_w as f64;
+                            state.resize_h =
+                                ((state.resize_w as f64 * ratio).round() as u32).max(1);
+                        } else if h_resp.changed() && orig_h != state.resize_h {
+                            let ratio = orig_w as f64 / orig_h as f64;
+                            state.resize_w =
+                                ((state.resize_h as f64 * ratio).round() as u32).max(1);
+                        }
+                    }
+                });
+
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Resize"))
+                .clicked()
+            {
+                state.push_resize();
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("resize".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Rotate ───────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("rotate");
+    let resp = egui::CollapsingHeader::new("↻  Rotate")
+        .id_salt("rotate")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("90°"))
+                    .clicked()
+                {
+                    state.push_rotate_90();
+                }
+                if ui
+                    .add_enabled(has_image, egui::Button::new("180°"))
+                    .clicked()
+                {
+                    state.push_rotate_180();
+                }
+                if ui
+                    .add_enabled(has_image, egui::Button::new("270°"))
+                    .clicked()
+                {
+                    state.push_rotate_270();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Angle:");
+                ui.add(
+                    DragValue::new(&mut state.rotate_deg)
+                        .speed(0.5)
+                        .suffix("°")
+                        .range(-360.0..=360.0),
+                );
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_rotate_arbitrary();
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Flip H"))
+                    .clicked()
+                {
+                    state.push_flip_horizontal();
+                }
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Flip V"))
+                    .clicked()
+                {
+                    state.push_flip_vertical();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("rotate".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Saturation ────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("saturation");
+    let resp = egui::CollapsingHeader::new("🎨  Saturation")
+        .id_salt("saturation")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let changed = ui
+                .add(egui::Slider::new(&mut state.saturation, 0.0..=4.0).step_by(0.01))
+                .changed();
+            if changed && has_image {
+                state.update_sat_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_saturation();
+                }
+                if state.sat_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_sat_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_saturation();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("saturation".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Sepia ─────────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("sepia");
+    let resp = egui::CollapsingHeader::new("🟫  Sepia")
+        .id_salt("sepia")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Strength:");
+                ui.add(egui::Slider::new(&mut state.sepia_strength, 0.0..=1.0).step_by(0.01));
+            });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Sepia"))
+                .clicked()
+            {
+                state.push_sepia();
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("sepia".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Sharpen ──────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("sharpen");
+    let resp = egui::CollapsingHeader::new("◈  Sharpen")
+        .id_salt("sharpen")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Strength:");
+                ui.add(
+                    DragValue::new(&mut state.sharpen_strength)
+                        .speed(0.05)
+                        .range(0.0..=10.0),
+                );
+            });
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Sharpen"))
+                .clicked()
+            {
+                state.push_sharpen();
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("sharpen".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Vibrance ──────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("vibrance");
+    let resp = egui::CollapsingHeader::new("✦  Vibrance")
+        .id_salt("vibrance")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let changed = ui
+                .add(egui::Slider::new(&mut state.vibrance, -1.0..=1.0).step_by(0.01))
+                .changed();
+            if changed && has_image {
+                state.update_vibrance_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_vibrance();
+                }
+                if state.vibrance_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_vibrance_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_vibrance();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("vibrance".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Vignette ──────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("vignette");
+    let resp = egui::CollapsingHeader::new("◎  Vignette")
+        .id_salt("vignette")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let mut changed = false;
+            egui::Grid::new("vignette_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Strength");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.vignette_strength)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("Radius");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.vignette_radius)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("Feather");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.vignette_feather)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                });
+            if changed && has_image {
+                state.update_vignette_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply Vignette"))
+                    .clicked()
+                {
+                    state.push_vignette();
+                }
+                if state.vignette_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_vignette_preview();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("vignette".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── White Balance ─────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("white_balance");
+    let resp = egui::CollapsingHeader::new("🌡  White Balance")
+        .id_salt("white_balance")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let mut changed = false;
+            egui::Grid::new("wb_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Temperature");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut state.wb_temperature, -1.0..=1.0).step_by(0.01))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Tint");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut state.wb_tint, -1.0..=1.0).step_by(0.01))
+                        .changed();
+                    ui.end_row();
+                });
+            if changed && has_image {
+                state.update_wb_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_wb();
+                }
+                if state.wb_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_wb_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_wb();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("white_balance".to_string(), !default_open);
     }
 }
 
