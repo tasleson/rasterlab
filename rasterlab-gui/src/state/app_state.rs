@@ -140,6 +140,7 @@ pub struct AppState {
 
     // ── Sepia tool ────────────────────────────────────────────────────────
     pub sepia_strength: f32,
+    pub sepia_preview_active: bool,
 
     // ── Resize tool ───────────────────────────────────────────────────────
     pub resize_w: u32,
@@ -270,6 +271,7 @@ impl AppState {
             vibrance: 0.0,
             vibrance_preview_active: false,
             sepia_strength: 1.0,
+            sepia_preview_active: false,
             resize_w: 0,
             resize_h: 0,
             resize_mode: ResampleMode::Bicubic,
@@ -763,7 +765,26 @@ impl AppState {
     }
 
     pub fn push_sepia(&mut self) {
+        self.sepia_preview_active = false;
         self.push_op(Box::new(SepiaOp::new(self.sepia_strength)));
+        self.sepia_strength = 1.0;
+    }
+
+    pub fn update_sepia_preview(&mut self) {
+        self.sepia_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_sepia_preview(&mut self) {
+        if self.sepia_preview_active {
+            self.sepia_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn reset_sepia(&mut self) {
+        self.sepia_strength = 1.0;
+        self.cancel_sepia_preview();
     }
 
     pub fn push_resize(&mut self) {
@@ -1165,6 +1186,7 @@ impl AppState {
         self.bw_preview_active = false;
         self.bc_preview_active = false;
         self.sat_preview_active = false;
+        self.sepia_preview_active = false;
         self.curve_preview_active = false;
         self.curve_dragging_idx = None;
         self.vignette_preview_active = false;
@@ -1212,6 +1234,7 @@ impl AppState {
             || self.vignette_preview_active
             || self.bc_preview_active
             || self.sat_preview_active
+            || self.sepia_preview_active
             || self.curve_preview_active
             || self.hdr_preview_active
             || self.wb_preview_active
@@ -1265,6 +1288,9 @@ impl AppState {
             serde_json::to_value(&preview).ok()
         } else if self.sat_preview_active {
             let preview: Box<dyn Operation> = Box::new(SaturationOp::new(self.saturation));
+            serde_json::to_value(&preview).ok()
+        } else if self.sepia_preview_active {
+            let preview: Box<dyn Operation> = Box::new(SepiaOp::new(self.sepia_strength));
             serde_json::to_value(&preview).ok()
         } else if self.curve_preview_active {
             let preview: Box<dyn Operation> = Box::new(CurvesOp {

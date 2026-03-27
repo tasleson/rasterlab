@@ -1043,16 +1043,30 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("sepia")
         .default_open(default_open)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Strength:");
-                ui.add(egui::Slider::new(&mut state.sepia_strength, 0.0..=1.0).step_by(0.01));
-            });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Sepia"))
-                .clicked()
-            {
-                state.push_sepia();
+            let changed = ui
+                .add(egui::Slider::new(&mut state.sepia_strength, 0.0..=1.0).step_by(0.01))
+                .changed();
+            if changed && has_image {
+                state.update_sepia_preview();
             }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply Sepia"))
+                    .clicked()
+                {
+                    state.push_sepia();
+                }
+                if state.sepia_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_sepia_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_sepia();
+                }
+            });
         });
     if resp.header_response.clicked() {
         state
