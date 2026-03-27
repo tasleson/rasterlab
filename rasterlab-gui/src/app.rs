@@ -16,9 +16,12 @@ pub struct RasterLabApp {
     /// Receives the path chosen by an in-progress open dialog (None = cancelled).
     #[cfg(not(target_arch = "wasm32"))]
     open_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
-    /// Receives the path chosen by an in-progress save dialog (None = cancelled).
+    /// Receives the path chosen by an in-progress export (render save) dialog.
     #[cfg(not(target_arch = "wasm32"))]
     save_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// Receives the path chosen by an in-progress Save As project dialog.
+    #[cfg(not(target_arch = "wasm32"))]
+    project_save_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
 }
 
 impl RasterLabApp {
@@ -34,6 +37,8 @@ impl RasterLabApp {
             open_rx: None,
             #[cfg(not(target_arch = "wasm32"))]
             save_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            project_save_rx: None,
         }
     }
 
@@ -51,7 +56,7 @@ impl RasterLabApp {
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::S) {
-                self.save_file_dialog(ctx);
+                self.save_project_or_prompt(ctx);
             }
         });
     }
@@ -67,6 +72,8 @@ impl RasterLabApp {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let path = rfd::FileDialog::new()
+                .add_filter("All supported", &["rlab", "jpg", "jpeg", "png", "nef"])
+                .add_filter("RasterLab Project", &["rlab"])
                 .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
                 .add_filter("JPEG", &["jpg", "jpeg"])
                 .add_filter("PNG", &["png"])
@@ -96,6 +103,34 @@ impl RasterLabApp {
         });
     }
 
+    /// Save in-place if a project path is already known; otherwise open Save As.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_project_or_prompt(&mut self, ctx: &Context) {
+        if let Some(path) = self.state.project_path.clone() {
+            self.state.save_project(path);
+        } else {
+            self.project_save_dialog(ctx);
+        }
+    }
+
+    /// Open a Save As dialog for writing a `.rlab` project file.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn project_save_dialog(&mut self, ctx: &Context) {
+        if self.project_save_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.project_save_rx = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let path = rfd::FileDialog::new()
+                .add_filter("RasterLab Project", &["rlab"])
+                .save_file();
+            let _ = tx.send(path);
+            ctx.request_repaint();
+        });
+    }
+
     /// Poll dialog result channels and act on completed dialogs.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_dialogs(&mut self) {
@@ -114,6 +149,14 @@ impl RasterLabApp {
                 self.state.save_file(path);
             }
             self.save_rx = None;
+        }
+        if let Some(rx) = &self.project_save_rx
+            && let Ok(maybe_path) = rx.try_recv()
+        {
+            if let Some(path) = maybe_path {
+                self.state.save_project(path);
+            }
+            self.project_save_rx = None;
         }
     }
 }
@@ -136,6 +179,23 @@ impl eframe::App for RasterLabApp {
 
         self.handle_keyboard(ctx);
 
+        // ── Window title (reflects project name and dirty state) ──────────
+        {
+            let dirty_marker = if self.state.is_dirty { " ●" } else { "" };
+            let title = match &self.state.project_path {
+                Some(p) => format!(
+                    "RasterLab — {}{}",
+                    p.file_name().unwrap_or_default().to_string_lossy(),
+                    dirty_marker
+                ),
+                None if self.state.pipeline.is_some() => {
+                    format!("RasterLab — Unsaved Project{}", dirty_marker)
+                }
+                None => "RasterLab".to_string(),
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+
         // ── Menu bar ─────────────────────────────────────────────────────
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -146,9 +206,44 @@ impl eframe::App for RasterLabApp {
                         self.open_file_dialog(ctx);
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    if ui.button("Save…  (Ctrl+S)").clicked() {
-                        ui.close_menu();
-                        self.save_file_dialog(ctx);
+                    {
+                        ui.separator();
+                        let save_label = if self.state.project_path.is_some() {
+                            "Save  (Ctrl+S)"
+                        } else {
+                            "Save As…  (Ctrl+S)"
+                        };
+                        if ui
+                            .add_enabled(
+                                self.state.pipeline.is_some(),
+                                egui::Button::new(save_label),
+                            )
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            self.save_project_or_prompt(ctx);
+                        }
+                        if ui
+                            .add_enabled(
+                                self.state.pipeline.is_some(),
+                                egui::Button::new("Save As…  (Ctrl+⇧S)"),
+                            )
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            self.project_save_dialog(ctx);
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(
+                                self.state.pipeline.is_some(),
+                                egui::Button::new("Save rendered image…"),
+                            )
+                            .clicked()
+                        {
+                            ui.close_menu();
+                            self.save_file_dialog(ctx);
+                        }
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {

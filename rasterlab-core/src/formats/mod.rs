@@ -118,6 +118,33 @@ impl FormatRegistry {
         handler.decode(&data)
     }
 
+    /// Decode an image from raw bytes, using `hint_path` for format detection.
+    ///
+    /// Equivalent to [`decode_file`](Self::decode_file) but the caller provides
+    /// the bytes directly — useful when the source data is already in memory
+    /// (e.g. the `ORIG` chunk of a `.rlab` project file).
+    ///
+    /// For formats that require a seekable file path (currently NEF/rawler), the
+    /// bytes are written to a temporary file and decoded from there.
+    pub fn decode_bytes(&self, data: &[u8], hint_path: Option<&Path>) -> RasterResult<Image> {
+        let fmt = detect_format(data, hint_path).ok_or_else(|| {
+            RasterError::UnsupportedFormat("Cannot determine image format from bytes".into())
+        })?;
+
+        let handler = self.handler_for_extension(&fmt).ok_or_else(|| {
+            RasterError::UnsupportedFormat(format!("No handler registered for '{}'", fmt))
+        })?;
+
+        if fmt == "nef" {
+            // rawler requires a seekable file path — write to a temp file
+            let tmp = std::env::temp_dir().join("rasterlab_orig.nef");
+            std::fs::write(&tmp, data)?;
+            return handler.decode_file(&tmp);
+        }
+
+        handler.decode(data)
+    }
+
     /// Encode an image to the format implied by `path`'s extension.
     pub fn encode_file(
         &self,

@@ -6,6 +6,7 @@ use egui::Context;
 use rasterlab_core::{
     Image,
     formats::FormatRegistry,
+    project::{RlabFile, RlabMeta},
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, ColorSpaceConversion,
         ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp,
@@ -25,6 +26,14 @@ use rasterlab_core::{
 enum BgMessage {
     ImageLoaded {
         path: std::path::PathBuf,
+        image: Image,
+        /// Verbatim bytes of the source file, kept for future `.rlab` saves.
+        original_bytes: Vec<u8>,
+    },
+    /// A `.rlab` project file was successfully decoded.
+    ProjectLoaded {
+        path: std::path::PathBuf,
+        rlab: Box<RlabFile>,
         image: Image,
     },
     /// Render finished; histogram was also computed in the same thread.
@@ -61,6 +70,16 @@ pub struct AppState {
     pub loading: bool,
     pub status: String,
     pub last_path: Option<std::path::PathBuf>,
+    /// Verbatim bytes of the currently loaded source file (for `.rlab` saves).
+    pub original_bytes: Option<Vec<u8>>,
+    /// Path of the open `.rlab` project file.  `None` when an image was opened
+    /// directly and has not yet been saved as a project.
+    pub project_path: Option<std::path::PathBuf>,
+    /// `true` when there are unsaved changes since the last project save.
+    pub is_dirty: bool,
+    /// `created_at` timestamp from the last project load/save, preserved on
+    /// in-place re-saves so the original creation date is not lost.
+    pub project_created_at: Option<u64>,
     pub encode_opts: EncodeOptions,
     /// When `true`, apply a resize step before encoding.
     pub export_resize_enabled: bool,
@@ -216,6 +235,10 @@ impl AppState {
             loading: false,
             status: "Welcome to RasterLab — open an image to begin.".into(),
             last_path: None,
+            original_bytes: None,
+            project_path: None,
+            is_dirty: false,
+            project_created_at: None,
             encode_opts: EncodeOptions::default(),
             export_resize_enabled: false,
             export_resize_w: 0,
@@ -301,7 +324,7 @@ impl AppState {
     pub fn poll_background(&mut self) {
         while let Ok(msg) = self.bg_rx.try_recv() {
             match msg {
-                BgMessage::ImageLoaded { path, image } => {
+                BgMessage::ImageLoaded { path, image, original_bytes } => {
                     let w = image.width;
                     let h = image.height;
                     self.crop_w = w;
@@ -309,11 +332,38 @@ impl AppState {
                     self.resize_w = w;
                     self.resize_h = h;
                     self.last_path = Some(path.clone());
+                    self.original_bytes = Some(original_bytes);
+                    self.project_path = None;
+                    self.is_dirty = false;
+                    self.project_created_at = None;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.pipeline = Some(EditPipeline::new(image));
                     self.loading = false;
                     self.image_generation += 1;
-                    // Kick off initial render
+                    self.request_render();
+                }
+                BgMessage::ProjectLoaded { path, rlab, image } => {
+                    let w = image.width;
+                    let h = image.height;
+                    self.crop_w = w;
+                    self.crop_h = h;
+                    self.resize_w = w;
+                    self.resize_h = h;
+                    self.last_path = rlab.meta.source_path.as_deref()
+                        .map(std::path::PathBuf::from)
+                        .or_else(|| Some(path.clone()));
+                    self.project_created_at = Some(rlab.meta.created_at);
+                    self.original_bytes = Some(rlab.original_bytes.clone());
+                    self.project_path = Some(path.clone());
+                    self.is_dirty = false;
+                    self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
+                    let mut pipeline = EditPipeline::new(image);
+                    if let Err(e) = pipeline.load_state(rlab.pipeline_state) {
+                        self.status = format!("Warning: could not restore edit stack: {}", e);
+                    }
+                    self.pipeline = Some(pipeline);
+                    self.loading = false;
+                    self.image_generation += 1;
                     self.request_render();
                 }
                 BgMessage::RenderComplete {
@@ -367,6 +417,9 @@ impl AppState {
     // -----------------------------------------------------------------------
 
     /// Begin loading `path` in a background thread.
+    ///
+    /// Dispatches on the file extension: `.rlab` files are loaded as projects
+    /// (restoring the full edit stack); all other files are loaded as source images.
     pub fn open_file(&mut self, path: std::path::PathBuf) {
         self.loading = true;
         self.status = format!("Loading {}…", path.display());
@@ -374,14 +427,51 @@ impl AppState {
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
 
+        let is_project = path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("rlab"))
+            .unwrap_or(false);
+
         std::thread::Builder::new()
             .name("rasterlab-load".into())
-            .stack_size(32 * 1024 * 1024) // 32 MiB — some RAW decoders are deep
+            .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let registry = FormatRegistry::with_builtins();
-                let msg = match registry.decode_file(&path) {
-                    Ok(image) => BgMessage::ImageLoaded { path, image },
-                    Err(e) => BgMessage::Error(e.to_string()),
+                let msg = if is_project {
+                    match RlabFile::read(&path) {
+                        Ok(rlab) => {
+                            let registry = FormatRegistry::with_builtins();
+                            let hint = rlab
+                                .meta
+                                .source_path
+                                .as_deref()
+                                .map(std::path::Path::new);
+                            match registry.decode_bytes(&rlab.original_bytes, hint) {
+                                Ok(image) => BgMessage::ProjectLoaded {
+                                    path,
+                                    rlab: Box::new(rlab),
+                                    image,
+                                },
+                                Err(e) => BgMessage::Error(e.to_string()),
+                            }
+                        }
+                        Err(e) => BgMessage::Error(e.to_string()),
+                    }
+                } else {
+                    // Read the raw bytes for storage in .rlab saves, then decode.
+                    match std::fs::read(&path) {
+                        Ok(original_bytes) => {
+                            let registry = FormatRegistry::with_builtins();
+                            match registry.decode_file(&path) {
+                                Ok(image) => BgMessage::ImageLoaded {
+                                    path,
+                                    image,
+                                    original_bytes,
+                                },
+                                Err(e) => BgMessage::Error(e.to_string()),
+                            }
+                        }
+                        Err(e) => BgMessage::Error(e.to_string()),
+                    }
                 };
                 let _ = tx.send(msg);
                 ctx.request_repaint();
@@ -428,6 +518,52 @@ impl AppState {
             }
             Err(e) => {
                 self.status = format!("Encode failed: {}", e);
+            }
+        }
+    }
+
+    /// Save the current project to `path` as a `.rlab` file.
+    pub fn save_project(&mut self, path: std::path::PathBuf) {
+        let Some(original_bytes) = self.original_bytes.clone() else {
+            self.status = "Nothing to save — open an image first".into();
+            return;
+        };
+        let Some(pipeline) = &self.pipeline else {
+            self.status = "Nothing to save — no active pipeline".into();
+            return;
+        };
+
+        let pipeline_state = match pipeline.save_state() {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("Save failed (pipeline): {}", e);
+                return;
+            }
+        };
+
+        let source = pipeline.source();
+        let (w, h) = (source.width, source.height);
+        let source_path = self.last_path.as_deref().and_then(|p| p.to_str()).map(String::from);
+        let app_version = env!("CARGO_PKG_VERSION").to_string();
+
+        let mut meta = RlabMeta::new(app_version, source_path, w, h);
+        // Preserve the original creation timestamp on in-place re-saves.
+        if let Some(created_at) = self.project_created_at {
+            meta.created_at = created_at;
+        }
+        meta = meta.touch();
+
+        let created_at = meta.created_at;
+        let rlab = RlabFile::new(meta, original_bytes, pipeline_state, None);
+        match rlab.write(&path) {
+            Ok(()) => {
+                self.project_created_at = Some(created_at);
+                self.project_path = Some(path.clone());
+                self.is_dirty = false;
+                self.status = format!("Saved → {}", path.display());
+            }
+            Err(e) => {
+                self.status = format!("Save failed: {}", e);
             }
         }
     }
@@ -939,12 +1075,14 @@ impl AppState {
     }
     pub fn undo(&mut self) {
         if self.pipeline.as_mut().is_some_and(|p| p.undo()) {
+            self.is_dirty = true;
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn redo(&mut self) {
         if self.pipeline.as_mut().is_some_and(|p| p.redo()) {
+            self.is_dirty = true;
             self.cancel_all_previews();
             self.request_render();
         }
@@ -954,6 +1092,7 @@ impl AppState {
         self.cancel_all_previews();
         if let Some(p) = &mut self.pipeline {
             p.push_op(op);
+            self.is_dirty = true;
             self.request_render();
         }
     }
@@ -974,6 +1113,7 @@ impl AppState {
         pipeline.push_op(Box::new(LevelsOp::new(black, white, 1.0)));
         pipeline.push_op(Box::new(SaturationOp::new(1.1)));
         pipeline.push_op(Box::new(SharpenOp::new(0.5)));
+        self.is_dirty = true;
         self.request_render();
     }
 
