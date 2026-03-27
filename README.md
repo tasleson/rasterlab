@@ -27,11 +27,31 @@ Currently we're a couple days in, and we've burned 19% of our weekly usage.
 
 | Op | What it does |
 |---|---|
-| Crop | Crops. Parallel row copy. |
-| Rotate | 90°/180°/270° lossless, or arbitrary angle with bilinear interp |
-| Sharpen | Unsharp mask convolution, optionally luma-only |
-| Black & White | Luminance, average, perceptual, or channel mixer |
+| Auto Enhance | One-click levels stretch + saturation boost + mild sharpen |
+| Black & White | Luminance, average, perceptual, or channel mixer with presets |
+| Blur | Gaussian blur with configurable radius |
+| Brightness / Contrast | Linear brightness and contrast adjustment |
+| Color Balance | Cyan↔Red, Magenta↔Green, Yellow↔Blue per shadows/midtones/highlights |
+| Color Space | sRGB ↔ Display P3 conversion |
+| Crop | Axis-aligned crop with canvas drag-to-select. Parallel row copy. |
+| Curves | Interactive curve editor with draggable control points |
+| Denoise | Bilateral filter noise reduction |
+| Faux HDR | Exposure fusion from ±1 stop virtual brackets |
+| Grain | Film grain with presets modelled on classic 35 mm stocks |
+| Highlights / Shadows | Independent highlight and shadow recovery |
+| HSL Panel | Per-hue-band hue, saturation, and luminance (8 bands) |
+| Hue Shift | Global hue rotation in degrees |
 | Levels | Black/mid/white point with LUT-based remapping |
+| LUT / Color Grading | Apply a .cube 3D LUT with blend strength |
+| Perspective | Four-corner keystone/perspective correction |
+| Resize | Nearest-neighbour, bilinear, or bicubic resampling |
+| Rotate | 90°/180°/270° lossless, or arbitrary angle with bilinear interp |
+| Saturation | Global saturation multiplier |
+| Sepia | Sepia tone with adjustable strength |
+| Sharpen | Unsharp mask convolution |
+| Vibrance | Saturation boost that protects already-saturated colours |
+| Vignette | Radial darkening with strength, radius, and feather controls |
+| White Balance | Temperature and tint sliders |
 
 ## Building
 
@@ -102,6 +122,10 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
   preview-capable tools.
   - **Alphabetical ordering** — all tool sections are now sorted A–Z with Auto Enhance pinned at the top.
   - **Tool panel state persistence** — open/close state of each tool section is saved to a YAML prefs file and restored on next launch (default: all collapsed).
+
+### Canvas
+  - **Ctrl+scroll to zoom** — scroll wheel alone no longer hijacks the canvas; hold Ctrl to zoom, pivoting around the cursor.
+  - **Magnifier cursor** — cursor changes to a magnifying glass when Ctrl is held over the canvas.
 
 ### Bug Fixes, I'm sure there is many more :-)
   - Removed duplicate Save As… entry from the File menu.
