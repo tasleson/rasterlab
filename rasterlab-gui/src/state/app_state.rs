@@ -6,7 +6,6 @@ use egui::Context;
 use rasterlab_core::{
     Image,
     formats::FormatRegistry,
-    project::{RlabFile, RlabMeta},
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, ColorSpaceConversion,
         ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp,
@@ -15,6 +14,7 @@ use rasterlab_core::{
         WhiteBalanceOp,
     },
     pipeline::EditPipeline,
+    project::{RlabFile, RlabMeta},
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
 };
@@ -324,7 +324,11 @@ impl AppState {
     pub fn poll_background(&mut self) {
         while let Ok(msg) = self.bg_rx.try_recv() {
             match msg {
-                BgMessage::ImageLoaded { path, image, original_bytes } => {
+                BgMessage::ImageLoaded {
+                    path,
+                    image,
+                    original_bytes,
+                } => {
                     let w = image.width;
                     let h = image.height;
                     self.crop_w = w;
@@ -349,7 +353,10 @@ impl AppState {
                     self.crop_h = h;
                     self.resize_w = w;
                     self.resize_h = h;
-                    self.last_path = rlab.meta.source_path.as_deref()
+                    self.last_path = rlab
+                        .meta
+                        .source_path
+                        .as_deref()
                         .map(std::path::PathBuf::from)
                         .or_else(|| Some(path.clone()));
                     self.project_created_at = Some(rlab.meta.created_at);
@@ -440,11 +447,7 @@ impl AppState {
                     match RlabFile::read(&path) {
                         Ok(rlab) => {
                             let registry = FormatRegistry::with_builtins();
-                            let hint = rlab
-                                .meta
-                                .source_path
-                                .as_deref()
-                                .map(std::path::Path::new);
+                            let hint = rlab.meta.source_path.as_deref().map(std::path::Path::new);
                             match registry.decode_bytes(&rlab.original_bytes, hint) {
                                 Ok(image) => BgMessage::ProjectLoaded {
                                     path,
@@ -543,7 +546,11 @@ impl AppState {
 
         let source = pipeline.source();
         let (w, h) = (source.width, source.height);
-        let source_path = self.last_path.as_deref().and_then(|p| p.to_str()).map(String::from);
+        let source_path = self
+            .last_path
+            .as_deref()
+            .and_then(|p| p.to_str())
+            .map(String::from);
         let app_version = env!("CARGO_PKG_VERSION").to_string();
 
         let mut meta = RlabMeta::new(app_version, source_path, w, h);
