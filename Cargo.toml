@@ -1,6 +1,21 @@
 [profile.dev]
 opt-level = 1                   # eliminates most bounds-check overhead in hot pixel loops
 
+[profile.release]
+opt-level = 3        # default, keep it
+lto = "thin"         # link-time optimization across crates (thin is fast, "fat" is slower but more aggressive)
+codegen-units = 1    # single CGU = more optimization opportunities, slower compile
+debug = 1            # keep for samply profiling; drop to false for distribution builds
+strip = "debuginfo"  # remove debug info from final binary (drop this if using debug = 1)
+
+#For distribution (ship to other Macs):
+# Universal binary target — runs on both Intel and Apple Silicon
+# Build with:
+# cargo build --release --target aarch64-apple-darwin
+# cargo build --release --target x86_64-apple-darwin
+# lipo -create -output rasterlab-gui target/aarch64-apple-darwin/release/rasterlab-gui \
+# target/x86_64-apple-darwin/release/rasterlab-gui
+
 [profile.dev.package."*"]
 opt-level = 3                   # fully optimise deps (rayon, codecs, etc.) even in dev builds
 
