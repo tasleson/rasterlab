@@ -22,6 +22,9 @@ pub struct CanvasState {
     last_canvas_size: Vec2,
     crop_start: Option<Pos2>,
     crop_end: Option<Pos2>,
+    /// Overlay texture for full-resolution viewport previews.
+    overlay_texture: Option<TextureHandle>,
+    overlay_last_hash: u64,
 }
 
 impl Default for CanvasState {
@@ -36,6 +39,8 @@ impl Default for CanvasState {
             last_canvas_size: Vec2::ZERO,
             crop_start: None,
             crop_end: None,
+            overlay_texture: None,
+            overlay_last_hash: 0,
         }
     }
 }
@@ -170,6 +175,36 @@ impl CanvasState {
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
+
+        // ── Overlay: full-resolution viewport preview ─────────────────────
+        // Drawn on top of the base image — sharp because it's 1:1 pixels.
+        if let Some(overlay_img) = &state.preview_overlay {
+            let new_hash = compute_hash(overlay_img);
+            if self.overlay_texture.is_none() || new_hash != self.overlay_last_hash {
+                self.overlay_texture = Some(ui.ctx().load_texture(
+                    "canvas_overlay",
+                    image_to_egui(overlay_img),
+                    TextureOptions::LINEAR,
+                ));
+                self.overlay_last_hash = new_hash;
+            }
+            if let (Some(ol_tex), Some([ol_x, ol_y, ol_w, ol_h])) =
+                (&self.overlay_texture, &state.preview_overlay_rect)
+            {
+                let ol_tl = image_tl
+                    + Vec2::new(*ol_x as f32 * self.zoom, *ol_y as f32 * self.zoom);
+                let ol_size = Vec2::new(*ol_w as f32 * self.zoom, *ol_h as f32 * self.zoom);
+                painter.image(
+                    ol_tex.id(),
+                    Rect::from_min_size(ol_tl, ol_size),
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        } else {
+            self.overlay_texture = None;
+            self.overlay_last_hash = 0;
+        }
 
         // ── Crop selection (primary drag only) ───────────────────────────────
         // crop_start/crop_end are stored in image coordinates so the selection

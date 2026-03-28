@@ -52,6 +52,10 @@ enum BgMessage {
         /// True when this was a downsampled preview render.  A full-res render
         /// will be queued automatically after this result is displayed.
         is_preview: bool,
+        /// When Some, this image is a full-resolution crop of just the visible
+        /// viewport — it should be drawn as an overlay at [x,y,w,h] in
+        /// full-res image coordinates rather than replacing `state.rendered`.
+        overlay_rect: Option<[u32; 4]>,
     },
     Error(String),
 }
@@ -75,6 +79,11 @@ pub struct AppState {
     /// Updated by the canvas every frame; used to restrict preview renders to
     /// only the pixels the user can actually see.
     pub preview_viewport: Option<[u32; 4]>,
+    /// Full-resolution preview of just the visible viewport, rendered on top of
+    /// `rendered` by the canvas.  None when no preview is active.
+    pub preview_overlay: Option<Arc<Image>>,
+    /// Position of `preview_overlay` in full-res image pixel coordinates.
+    pub preview_overlay_rect: Option<[u32; 4]>,
     pub histogram: Option<HistogramData>,
     pub loading: bool,
     pub status: String,
@@ -255,6 +264,8 @@ impl AppState {
             rendered: None,
             rendered_is_preview: false,
             rendered_scale: 1.0,
+            preview_overlay: None,
+            preview_overlay_rect: None,
             preview_viewport: None,
             histogram: None,
             loading: false,
@@ -415,14 +426,28 @@ impl AppState {
                     start_index,
                     cache_gen,
                     is_preview,
+                    overlay_rect,
                 } => {
                     self.histogram = Some(*hist);
-                    self.rendered = Some(image);
-                    self.rendered_is_preview = is_preview;
-                    self.rendered_scale = if is_preview { PREVIEW_SCALE } else { 1.0 };
                     self.loading = false;
 
-                    if !is_preview {
+                    if let Some(rect) = overlay_rect {
+                        // Viewport overlay — draw on top of the existing base render.
+                        // Don't touch state.rendered so the canvas never goes blank.
+                        self.preview_overlay = Some(image);
+                        self.preview_overlay_rect = Some(rect);
+                    } else {
+                        // Full-res or fallback-scale render — update the base image.
+                        self.rendered = Some(image);
+                        self.rendered_is_preview = is_preview;
+                        self.rendered_scale = if is_preview { PREVIEW_SCALE } else { 1.0 };
+                        if !is_preview {
+                            self.preview_overlay = None;
+                            self.preview_overlay_rect = None;
+                        }
+                    }
+
+                    if !is_preview && overlay_rect.is_none() {
                         // Only report timing and populate the step cache for
                         // full-res renders; preview intermediates are low-res.
                         let elapsed_ms = self
@@ -439,11 +464,9 @@ impl AppState {
                     }
 
                     if self.needs_rerender {
-                        // Slider changed again while this render was in-flight;
-                        // start a fresh preview cycle.
                         self.needs_rerender = false;
                         self.request_render_inner(false);
-                    } else if is_preview {
+                    } else if is_preview || overlay_rect.is_some() {
                         // Preview displayed — follow up with a full-res render.
                         self.request_render_inner(true);
                     }
@@ -1296,6 +1319,8 @@ impl AppState {
         self.grain_preview_active = false;
         self.cb_preview_active = false;
         self.hsl_preview_active = false;
+        self.preview_overlay = None;
+        self.preview_overlay_rect = None;
     }
 
     // -----------------------------------------------------------------------
@@ -1471,7 +1496,18 @@ impl AppState {
 
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
-        let preview_viewport = if is_preview {
+
+        // Use the overlay path when the entire pipeline is cached (committed_ops
+        // is empty) and we have a known viewport — run the preview op only on the
+        // visible pixels at full resolution, return as an overlay.
+        let all_cached = start_idx >= pipeline.cursor();
+        let overlay_viewport = if is_preview && all_cached {
+            self.preview_viewport
+        } else {
+            None
+        };
+        // Fall back to downsampled-blit if overlay path isn't available.
+        let preview_viewport = if is_preview && overlay_viewport.is_none() {
             self.preview_viewport
         } else {
             None
@@ -1487,14 +1523,16 @@ impl AppState {
                     preview_op,
                     preview_scale,
                     preview_viewport,
+                    overlay_viewport,
                 ) {
-                    Ok((image, hist, intermediates)) => BgMessage::RenderComplete {
+                    Ok((image, hist, intermediates, overlay_rect)) => BgMessage::RenderComplete {
                         image,
                         hist: Box::new(hist),
                         intermediates,
                         start_index: start_idx,
                         cache_gen,
                         is_preview,
+                        overlay_rect,
                     },
                     Err(e) => BgMessage::Error(e),
                 };
@@ -1524,7 +1562,7 @@ impl AppState {
 /// 0.25 = 1/4 width × 1/4 height = 1/16 the pixels → ~16× faster ops.
 const PREVIEW_SCALE: f32 = 0.25;
 
-type RenderResult = Result<(Arc<Image>, HistogramData, Vec<Arc<Image>>), String>;
+type RenderResult = Result<(Arc<Image>, HistogramData, Vec<Arc<Image>>, Option<[u32; 4]>), String>;
 
 /// Nearest-neighbour downsample via rayon row-parallel copy.
 fn downsample_nn(img: &Image, scale: f32) -> Image {
@@ -1600,14 +1638,52 @@ fn render_in_thread(
     preview_op: Option<serde_json::Value>,
     preview_scale: Option<f32>,
     preview_viewport: Option<[u32; 4]>,
+    overlay_viewport: Option<[u32; 4]>,
 ) -> RenderResult {
+    // ── Overlay path ─────────────────────────────────────────────────────
+    // The pipeline is fully cached so committed_ops is empty.  Crop the
+    // committed result to exactly the visible viewport, apply the preview
+    // op at full resolution, and return it as a positioned overlay.  The
+    // main `state.rendered` image is never replaced, so the canvas stays
+    // stable and sharp.
+    if let (Some(json), Some([vp_x, vp_y, vp_w, vp_h])) = (&preview_op, overlay_viewport) {
+        let mut current = start_image;
+        // Run committed ops (should be empty — all_cached — but be safe).
+        for op_json in &committed_ops {
+            if let Some(j) = op_json {
+                let op: Box<dyn Operation> =
+                    serde_json::from_value(j.clone()).map_err(|e| format!("Deserialise op: {}", e))?;
+                current = Arc::new(
+                    op.apply(current.as_ref())
+                        .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
+                );
+            }
+        }
+        // Clamp viewport to image bounds.
+        let x = vp_x.min(current.width.saturating_sub(1));
+        let y = vp_y.min(current.height.saturating_sub(1));
+        let w = vp_w.min(current.width.saturating_sub(x)).max(1);
+        let h = vp_h.min(current.height.saturating_sub(y)).max(1);
+
+        let crop = CropOp::new(x, y, w, h)
+            .apply(current.as_ref())
+            .map_err(|e| format!("Viewport crop: {}", e))?;
+        let op: Box<dyn Operation> =
+            serde_json::from_value(json.clone()).map_err(|e| format!("Deserialise preview op: {}", e))?;
+        let processed = op
+            .apply(&crop)
+            .map_err(|e| format!("Op '{}' (overlay) failed: {}", op.name(), e))?;
+
+        let hist = HistogramData::compute(&processed);
+        return Ok((Arc::new(processed), hist, Vec::new(), Some([x, y, w, h])));
+    }
+
+    // ── Fallback: downsampled-blit path ───────────────────────────────────
     let is_preview = preview_scale.is_some();
-    // Downsample for preview renders so committed ops also run on a small image.
     let mut current: Arc<Image> = match preview_scale {
         Some(scale) => Arc::new(downsample_nn(start_image.as_ref(), scale)),
         None => start_image,
     };
-    // Intermediates are only collected for full-res renders.
     let mut intermediates = if !is_preview {
         Vec::with_capacity(committed_ops.len())
     } else {
@@ -1624,21 +1700,15 @@ fn render_in_thread(
             );
         }
         if !is_preview {
-            // Record state at this pipeline position (Arc clone — no pixel copy for disabled ops).
             intermediates.push(Arc::clone(&current));
         }
     }
 
-    // Apply preview op on top of committed result without caching it.
-    // When a viewport is known, run the op only on the visible pixels then blit
-    // the result back into the full (downsampled) image so canvas dimensions stay
-    // stable and the view doesn't reset or go blank.
     if let Some(json) = preview_op {
         let op: Box<dyn Operation> =
             serde_json::from_value(json).map_err(|e| format!("Deserialise preview op: {}", e))?;
 
         if let Some([vp_x, vp_y, vp_w, vp_h]) = preview_viewport {
-            // Scale the full-res viewport rect to the current (possibly downsampled) image.
             let scale = preview_scale.unwrap_or(1.0);
             let sx = ((vp_x as f32 * scale) as u32).min(current.width.saturating_sub(1));
             let sy = ((vp_y as f32 * scale) as u32).min(current.height.saturating_sub(1));
@@ -1648,17 +1718,12 @@ fn render_in_thread(
             let sh = ((vp_h as f32 * scale).ceil() as u32)
                 .min(current.height.saturating_sub(sy))
                 .max(1);
-
-            // Apply op to the viewport crop only.
             let crop = CropOp::new(sx, sy, sw, sh)
                 .apply(current.as_ref())
                 .map_err(|e| format!("Viewport crop: {}", e))?;
             let processed = op
                 .apply(&crop)
                 .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
-
-            // Blit the processed crop back into a clone of the full (downsampled) image
-            // so the returned image has the correct dimensions for the canvas.
             let mut base = current.as_ref().deep_clone();
             blit_region(&mut base, &processed, sx, sy);
             current = Arc::new(base);
@@ -1670,9 +1735,8 @@ fn render_in_thread(
         }
     }
 
-    // Compute histogram in this thread so the main thread never does heavy work.
     let hist = HistogramData::compute(current.as_ref());
-    Ok((current, hist, intermediates))
+    Ok((current, hist, intermediates, None))
 }
 
 /// Copy `src` into `dst` at pixel offset `(x, y)`.  Caller must ensure the
