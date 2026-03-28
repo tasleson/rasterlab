@@ -49,6 +49,7 @@ Currently we're a couple days in, and we've burned 19% of our weekly usage.
 | Saturation | Global saturation multiplier |
 | Sepia | Sepia tone with adjustable strength |
 | Sharpen | Unsharp mask convolution |
+| Split Tone | Shadow / highlight tinting with independent hue, saturation, and balance |
 | Vibrance | Saturation boost that protects already-saturated colours |
 | Vignette | Radial darkening with strength, radius, and feather controls |
 | White Balance | Temperature and tint sliders |
@@ -98,6 +99,24 @@ Works. Suspiciously well for what we've done so far.  I'm interested in seeing w
 The plugin system exists and has an example. Nobody has written a plugin. The arbitrary rotation is slow on large images because bilinear interpolation has terrible cache locality and nobody has fixed it.
 
 # Changelog
+
+## 2026-03-27 (46% of our first week usage)
+
+### New Tools
+
+- **Split Tone** — tint shadows and highlights with independent hue and saturation controls. A balance slider shifts the crossover point between the two zones. Defaults to cool blue shadows / warm gold highlights — the classic darkroom look.
+
+### Tools Panel
+
+- **Sharpen** — added live 1/4-scale preview while dragging the strength slider, with a Cancel button to discard. Slider replaces the old drag-value widget for consistency with other preview tools.
+- **Resize** — added MP preset dropdown that shows standard megapixel targets (1 MP – 24 MP) filtered to only those smaller than the current source image. Each entry shows the computed pixel dimensions for the image's aspect ratio. Selecting a preset populates the Width and Height fields; manual editing and lock-aspect still work as before.
+- **LUT / Color Grading** — fixed the Load .cube file dialog hanging the event loop; now runs on a background thread like all other file dialogs.
+
+### Canvas / Preview Performance
+
+- **Viewport-restricted previews** — when zoomed in, preview renders now process only the pixels visible on screen rather than the entire image. The render thread receives the visible image region each frame and restricts work accordingly.
+- **Overlay-based full-resolution preview** — when the pipeline is fully cached (the common slider-drag case), the preview op is applied at full resolution to just the visible viewport and drawn as an overlay on top of the base image. Sharp at any zoom level; base image is never replaced so the canvas never goes blank.
+- **Stable zoom/pan during previews** — the canvas no longer resets zoom and pan position when a downsampled preview image arrives. Scale compensation ensures the preview fills the same screen area as the full-res image.
 
 ## 2026-03-26 (40% of our first week usage)
 
