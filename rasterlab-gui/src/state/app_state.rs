@@ -103,6 +103,7 @@ pub struct AppState {
     pub crop_h: u32,
     pub rotate_deg: f32,
     pub sharpen_strength: f32,
+    pub sharpen_preview_active: bool,
     pub bw_mode_idx: usize,
     /// Channel mixer weights for the ChannelMixer B&W mode.
     pub bw_mixer_r: f32,
@@ -266,6 +267,7 @@ impl AppState {
             crop_h: 0,
             rotate_deg: 0.0,
             sharpen_strength: 1.0,
+            sharpen_preview_active: false,
             bw_mode_idx: 0,
             bw_mixer_r: 0.2126,
             bw_mixer_g: 0.7152,
@@ -651,7 +653,20 @@ impl AppState {
         self.push_op(Box::new(RotateOp::cw270()));
     }
     pub fn push_sharpen(&mut self) {
+        self.sharpen_preview_active = false;
         self.push_op(Box::new(SharpenOp::new(self.sharpen_strength)));
+    }
+
+    pub fn update_sharpen_preview(&mut self) {
+        self.sharpen_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_sharpen_preview(&mut self) {
+        if self.sharpen_preview_active {
+            self.sharpen_preview_active = false;
+            self.request_render();
+        }
     }
 
     pub fn push_flip_horizontal(&mut self) {
@@ -1253,6 +1268,7 @@ impl AppState {
         self.bc_preview_active = false;
         self.sat_preview_active = false;
         self.sepia_preview_active = false;
+        self.sharpen_preview_active = false;
         self.split_preview_active = false;
         self.lut_preview_active = false;
         self.curve_preview_active = false;
@@ -1303,6 +1319,7 @@ impl AppState {
             || self.bc_preview_active
             || self.sat_preview_active
             || self.sepia_preview_active
+            || self.sharpen_preview_active
             || self.split_preview_active
             || self.lut_preview_active
             || self.curve_preview_active
@@ -1361,6 +1378,9 @@ impl AppState {
             serde_json::to_value(&preview).ok()
         } else if self.sepia_preview_active {
             let preview: Box<dyn Operation> = Box::new(SepiaOp::new(self.sepia_strength));
+            serde_json::to_value(&preview).ok()
+        } else if self.sharpen_preview_active {
+            let preview: Box<dyn Operation> = Box::new(SharpenOp::new(self.sharpen_strength));
             serde_json::to_value(&preview).ok()
         } else if self.split_preview_active {
             let preview: Box<dyn Operation> = Box::new(SplitToneOp::new(
