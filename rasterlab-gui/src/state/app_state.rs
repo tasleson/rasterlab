@@ -68,6 +68,10 @@ pub struct AppState {
     pub rendered: Option<Arc<Image>>,
     /// True while the canvas is displaying a downsampled preview render.
     pub rendered_is_preview: bool,
+    /// Visible region of the rendered image [x, y, w, h] in image-pixel coords.
+    /// Updated by the canvas every frame; used to restrict preview renders to
+    /// only the pixels the user can actually see.
+    pub preview_viewport: Option<[u32; 4]>,
     pub histogram: Option<HistogramData>,
     pub loading: bool,
     pub status: String,
@@ -247,6 +251,7 @@ impl AppState {
             pipeline: None,
             rendered: None,
             rendered_is_preview: false,
+            preview_viewport: None,
             histogram: None,
             loading: false,
             status: "Welcome to RasterLab — open an image to begin.".into(),
@@ -1461,23 +1466,33 @@ impl AppState {
 
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
+        let preview_viewport = if is_preview {
+            self.preview_viewport
+        } else {
+            None
+        };
 
         std::thread::Builder::new()
             .name("rasterlab-render".into())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let msg =
-                    match render_in_thread(start_image, committed_ops, preview_op, preview_scale) {
-                        Ok((image, hist, intermediates)) => BgMessage::RenderComplete {
-                            image,
-                            hist: Box::new(hist),
-                            intermediates,
-                            start_index: start_idx,
-                            cache_gen,
-                            is_preview,
-                        },
-                        Err(e) => BgMessage::Error(e),
-                    };
+                let msg = match render_in_thread(
+                    start_image,
+                    committed_ops,
+                    preview_op,
+                    preview_scale,
+                    preview_viewport,
+                ) {
+                    Ok((image, hist, intermediates)) => BgMessage::RenderComplete {
+                        image,
+                        hist: Box::new(hist),
+                        intermediates,
+                        start_index: start_idx,
+                        cache_gen,
+                        is_preview,
+                    },
+                    Err(e) => BgMessage::Error(e),
+                };
                 let _ = tx.send(msg);
                 ctx.request_repaint();
             })
@@ -1579,14 +1594,17 @@ fn render_in_thread(
     committed_ops: Vec<Option<serde_json::Value>>,
     preview_op: Option<serde_json::Value>,
     preview_scale: Option<f32>,
+    preview_viewport: Option<[u32; 4]>,
 ) -> RenderResult {
-    // Downsample if this is a preview render; otherwise use the image as-is.
-    let mut current: Arc<Image> = match preview_scale {
-        Some(scale) => Arc::new(downsample_nn(start_image.as_ref(), scale)),
-        None => start_image,
+    let is_preview = preview_scale.is_some() || preview_viewport.is_some();
+    // Downsample if this is a global-scale preview and no viewport is provided.
+    // When a viewport is provided we defer reduction until after committed ops.
+    let mut current: Arc<Image> = match (preview_scale, &preview_viewport) {
+        (Some(scale), None) => Arc::new(downsample_nn(start_image.as_ref(), scale)),
+        _ => start_image,
     };
     // Intermediates are only collected for full-res renders.
-    let mut intermediates = if preview_scale.is_none() {
+    let mut intermediates = if !is_preview {
         Vec::with_capacity(committed_ops.len())
     } else {
         Vec::new()
@@ -1601,9 +1619,32 @@ fn render_in_thread(
                     .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
             );
         }
-        if preview_scale.is_none() {
+        if !is_preview {
             // Record state at this pipeline position (Arc clone — no pixel copy for disabled ops).
             intermediates.push(Arc::clone(&current));
+        }
+    }
+
+    // If a viewport is known, restrict the preview to only the visible pixels.
+    // Choose whichever strategy produces fewer pixels: viewport crop or global scale.
+    if let Some([vp_x, vp_y, vp_w, vp_h]) = preview_viewport {
+        let vp_px = vp_w as u64 * vp_h as u64;
+        let scale = preview_scale.unwrap_or(PREVIEW_SCALE);
+        let scale_px =
+            (current.width as f64 * scale as f64 * current.height as f64 * scale as f64) as u64;
+        if vp_px <= scale_px {
+            // Viewport crop is smaller — use it (no further downsampling needed).
+            let x = vp_x.min(current.width.saturating_sub(1));
+            let y = vp_y.min(current.height.saturating_sub(1));
+            let w = vp_w.min(current.width.saturating_sub(x)).max(1);
+            let h = vp_h.min(current.height.saturating_sub(y)).max(1);
+            let cropped = CropOp::new(x, y, w, h)
+                .apply(current.as_ref())
+                .map_err(|e| format!("Viewport crop failed: {}", e))?;
+            current = Arc::new(cropped);
+        } else {
+            // Viewport is large (zoomed out) — fall back to global scale.
+            current = Arc::new(downsample_nn(current.as_ref(), scale));
         }
     }
 

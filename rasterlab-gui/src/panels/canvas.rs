@@ -96,6 +96,19 @@ impl CanvasState {
         }
         self.last_canvas_size = canvas_size;
 
+        // ── Publish viewport for preview optimisation ─────────────────────
+        // Compute which region of the image is currently visible, so the
+        // render thread can restrict preview ops to just those pixels.
+        {
+            let vis_x0 = (-self.pan_offset.x / self.zoom).max(0.0) as u32;
+            let vis_y0 = (-self.pan_offset.y / self.zoom).max(0.0) as u32;
+            let vis_x1 = ((canvas_size.x - self.pan_offset.x) / self.zoom).min(img_w as f32) as u32;
+            let vis_y1 = ((canvas_size.y - self.pan_offset.y) / self.zoom).min(img_h as f32) as u32;
+            let vp_w = vis_x1.saturating_sub(vis_x0).max(1);
+            let vp_h = vis_y1.saturating_sub(vis_y0).max(1);
+            state.preview_viewport = Some([vis_x0, vis_y0, vp_w, vp_h]);
+        }
+
         let tex = self.texture.as_ref().unwrap();
         let display_size = Vec2::new(img_w as f32 * self.zoom, img_h as f32 * self.zoom);
 
