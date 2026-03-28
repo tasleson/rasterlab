@@ -66,6 +66,8 @@ pub struct AppState {
     pub registry: FormatRegistry,
     pub pipeline: Option<EditPipeline>,
     pub rendered: Option<Arc<Image>>,
+    /// True while the canvas is displaying a downsampled preview render.
+    pub rendered_is_preview: bool,
     pub histogram: Option<HistogramData>,
     pub loading: bool,
     pub status: String,
@@ -244,6 +246,7 @@ impl AppState {
             registry: FormatRegistry::with_builtins(),
             pipeline: None,
             rendered: None,
+            rendered_is_preview: false,
             histogram: None,
             loading: false,
             status: "Welcome to RasterLab — open an image to begin.".into(),
@@ -406,6 +409,7 @@ impl AppState {
                 } => {
                     self.histogram = Some(*hist);
                     self.rendered = Some(image);
+                    self.rendered_is_preview = is_preview;
                     self.loading = false;
 
                     if !is_preview {

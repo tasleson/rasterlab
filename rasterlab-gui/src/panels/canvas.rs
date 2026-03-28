@@ -81,7 +81,9 @@ impl CanvasState {
 
         // Reset view when a new file is opened OR when dimensions change
         // (crop, rotate 90°/270°). Sharpen, B&W, rotate 180° etc. preserve zoom/pan.
-        let dims_changed = (img_w, img_h) != self.last_img_dims;
+        // Ignore dimension changes caused by downsampled preview renders — we
+        // don't want to reset zoom/pan every time a 1/4-scale preview arrives.
+        let dims_changed = (img_w, img_h) != self.last_img_dims && !state.rendered_is_preview;
         let canvas_resized =
             canvas_size != self.last_canvas_size && self.last_canvas_size != Vec2::ZERO;
         if img_gen != self.last_generation || dims_changed || canvas_resized {
