@@ -25,6 +25,9 @@ pub struct RasterLabApp {
     /// Receives the path chosen by an in-progress Export Edit Stack dialog.
     #[cfg(not(target_arch = "wasm32"))]
     json_export_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// Receives the path chosen by an in-progress Load LUT dialog.
+    #[cfg(not(target_arch = "wasm32"))]
+    lut_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
 }
 
 impl RasterLabApp {
@@ -44,6 +47,8 @@ impl RasterLabApp {
             project_save_rx: None,
             #[cfg(not(target_arch = "wasm32"))]
             json_export_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lut_rx: None,
         }
     }
 
@@ -162,6 +167,24 @@ impl RasterLabApp {
         });
     }
 
+    /// Spawn the Load LUT dialog on a background thread.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn lut_file_dialog(&mut self, ctx: &Context) {
+        if self.lut_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.lut_rx = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let path = rfd::FileDialog::new()
+                .add_filter("CUBE LUT", &["cube"])
+                .pick_file();
+            let _ = tx.send(path);
+            ctx.request_repaint();
+        });
+    }
+
     /// Poll dialog result channels and act on completed dialogs.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_dialogs(&mut self) {
@@ -197,6 +220,14 @@ impl RasterLabApp {
             }
             self.json_export_rx = None;
         }
+        if let Some(rx) = &self.lut_rx
+            && let Ok(maybe_path) = rx.try_recv()
+        {
+            if let Some(path) = maybe_path {
+                self.state.load_lut(path);
+            }
+            self.lut_rx = None;
+        }
     }
 }
 
@@ -215,6 +246,11 @@ impl eframe::App for RasterLabApp {
         self.state.poll_background();
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_dialogs();
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.state.lut_dialog_requested {
+            self.state.lut_dialog_requested = false;
+            self.lut_file_dialog(ctx);
+        }
 
         self.handle_keyboard(ctx);
 

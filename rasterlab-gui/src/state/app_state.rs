@@ -171,6 +171,8 @@ pub struct AppState {
     /// Display name of the loaded LUT file.
     pub lut_name: String,
     pub lut_preview_active: bool,
+    /// Set to true by the tools panel to ask app.rs to open the LUT file dialog.
+    pub lut_dialog_requested: bool,
 
     // ── Hue Shift tool ────────────────────────────────────────────────────
     pub hue_degrees: f32,
@@ -286,6 +288,7 @@ impl AppState {
             lut_strength: 1.0,
             lut_name: String::new(),
             lut_preview_active: false,
+            lut_dialog_requested: false,
             hue_degrees: 0.0,
             hue_preview_active: false,
             hl_highlights: 0.0,
@@ -1311,14 +1314,12 @@ impl AppState {
             let preview: Box<dyn Operation> = Box::new(SepiaOp::new(self.sepia_strength));
             serde_json::to_value(&preview).ok()
         } else if self.lut_preview_active {
-            self.lut_op
-                .as_ref()
-                .and_then(|op| {
-                    let mut preview = op.clone();
-                    preview.strength = self.lut_strength;
-                    let boxed: Box<dyn Operation> = Box::new(preview);
-                    serde_json::to_value(&boxed).ok()
-                })
+            self.lut_op.as_ref().and_then(|op| {
+                let mut preview = op.clone();
+                preview.strength = self.lut_strength;
+                let boxed: Box<dyn Operation> = Box::new(preview);
+                serde_json::to_value(&boxed).ok()
+            })
         } else if self.curve_preview_active {
             let preview: Box<dyn Operation> = Box::new(CurvesOp {
                 points: self.curve_points.clone(),

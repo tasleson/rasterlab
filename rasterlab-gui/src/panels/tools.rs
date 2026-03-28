@@ -754,12 +754,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("lut")
         .default_open(default_open)
         .show(ui, |ui| {
-            if ui.button("Load .cube LUT…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("CUBE LUT", &["cube"])
-                    .pick_file()
-            {
-                state.load_lut(path);
+            if ui.button("Load .cube LUT…").clicked() {
+                state.lut_dialog_requested = true;
             }
             if !state.lut_name.is_empty() {
                 ui.label(format!("Loaded: {}", state.lut_name));
