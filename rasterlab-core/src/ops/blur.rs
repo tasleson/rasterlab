@@ -77,14 +77,17 @@ fn blur_h(src: &Image, kernel: &[f32]) -> Image {
     out
 }
 
-/// Vertical 1-D convolution pass.
-fn blur_v(src: &Image, kernel: &[f32]) -> Image {
+/// Vertical 1-D convolution pass writing into an existing buffer.
+///
+/// Reads from `src` (the H-blurred intermediate) and writes into `dst`
+/// (which is the original input buffer, now free to reuse).  This avoids
+/// a second allocation for the V-pass output.
+fn blur_v_into(src: &Image, kernel: &[f32], dst: &mut Image) {
     let w = src.width as usize;
     let h = src.height as usize;
     let half = kernel.len() / 2;
-    let mut out = Image::new(src.width, src.height);
 
-    out.data
+    dst.data
         .par_chunks_mut(w * 4)
         .enumerate()
         .for_each(|(y, row)| {
@@ -108,8 +111,6 @@ fn blur_v(src: &Image, kernel: &[f32]) -> Image {
                 row[off + 3] = a.clamp(0.0, 255.0).round() as u8;
             }
         });
-
-    out
 }
 
 #[typetag::serde]
@@ -118,10 +119,13 @@ impl Operation for BlurOp {
         "blur"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let kernel = gaussian_kernel(self.radius);
-        let tmp = blur_h(image, &kernel);
-        Ok(blur_v(&tmp, &kernel))
+        // H-pass: allocate one intermediate buffer.
+        let h_blurred = blur_h(&image, &kernel);
+        // V-pass: write back into the original `image` buffer (now free to reuse).
+        blur_v_into(&h_blurred, &kernel, &mut image);
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -148,7 +152,7 @@ mod tests {
     fn uniform_image_unchanged() {
         // Blurring a constant-colour image should produce the same colour.
         let src = solid(128, 16, 16);
-        let out = BlurOp::new(2.0).apply(&src).unwrap();
+        let out = BlurOp::new(2.0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| {
             assert!((p[0] as i16 - 128).abs() <= 1);
         });
@@ -157,7 +161,7 @@ mod tests {
     #[test]
     fn output_dimensions_unchanged() {
         let src = solid(100, 32, 20);
-        let out = BlurOp::new(3.0).apply(&src).unwrap();
+        let out = BlurOp::new(3.0).apply(src).unwrap();
         assert_eq!(out.width, 32);
         assert_eq!(out.height, 20);
     }
@@ -176,7 +180,7 @@ mod tests {
         src.data[off + 1] = 255;
         src.data[off + 2] = 255;
 
-        let out = BlurOp::new(2.0).apply(&src).unwrap();
+        let out = BlurOp::new(2.0).apply(src).unwrap();
         assert!(
             out.data[off] < 255,
             "bright spot centre should be dimmed by blur"

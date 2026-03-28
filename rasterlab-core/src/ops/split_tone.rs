@@ -76,9 +76,9 @@ impl Operation for SplitToneOp {
         "split_tone"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.shadow_sat < 1e-4 && self.highlight_sat < 1e-4 {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
         let (sh_r, sh_g, sh_b) = hue_to_rgb(self.shadow_hue);
@@ -89,38 +89,34 @@ impl Operation for SplitToneOp {
         // -1 toward shadows (luma 0.0). We bias the luma value before weighting.
         let balance = self.balance * 0.5; // scale to keep effect subtle
 
-        let mut out = image.deep_clone();
-        out.data
-            .par_chunks_mut(4)
-            .zip(image.data.par_chunks(4))
-            .for_each(|(dst, src)| {
-                let r = src[0] as f32 / 255.0;
-                let g = src[1] as f32 / 255.0;
-                let b = src[2] as f32 / 255.0;
+        image.data.par_chunks_mut(4).for_each(|p| {
+            let r = p[0] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
 
-                // Perceptual luminance (BT.709).
-                let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-                // Bias luma by balance so the crossover shifts.
-                let luma_b = (luma + balance).clamp(0.0, 1.0);
+            // Perceptual luminance (BT.709).
+            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            // Bias luma by balance so the crossover shifts.
+            let luma_b = (luma + balance).clamp(0.0, 1.0);
 
-                // Shadow weight: strong in dark areas, falls off toward highlights.
-                // Highlight weight: strong in bright areas, falls off toward shadows.
-                // Using squared falloff gives a smoother, more photographic feel.
-                let shadow_w = (1.0 - luma_b).powi(2) * shadow_sat;
-                let highlight_w = luma_b.powi(2) * highlight_sat;
+            // Shadow weight: strong in dark areas, falls off toward highlights.
+            // Highlight weight: strong in bright areas, falls off toward shadows.
+            // Using squared falloff gives a smoother, more photographic feel.
+            let shadow_w = (1.0 - luma_b).powi(2) * shadow_sat;
+            let highlight_w = luma_b.powi(2) * highlight_sat;
 
-                // Lerp toward each tint colour, clamped to [0, 1].
-                let nr = (r + (sh_r - r) * shadow_w + (hi_r - r) * highlight_w).clamp(0.0, 1.0);
-                let ng = (g + (sh_g - g) * shadow_w + (hi_g - g) * highlight_w).clamp(0.0, 1.0);
-                let nb = (b + (sh_b - b) * shadow_w + (hi_b - b) * highlight_w).clamp(0.0, 1.0);
+            // Lerp toward each tint colour, clamped to [0, 1].
+            let nr = (r + (sh_r - r) * shadow_w + (hi_r - r) * highlight_w).clamp(0.0, 1.0);
+            let ng = (g + (sh_g - g) * shadow_w + (hi_g - g) * highlight_w).clamp(0.0, 1.0);
+            let nb = (b + (sh_b - b) * shadow_w + (hi_b - b) * highlight_w).clamp(0.0, 1.0);
 
-                dst[0] = (nr * 255.0).round() as u8;
-                dst[1] = (ng * 255.0).round() as u8;
-                dst[2] = (nb * 255.0).round() as u8;
-                // alpha unchanged
-            });
+            p[0] = (nr * 255.0).round() as u8;
+            p[1] = (ng * 255.0).round() as u8;
+            p[2] = (nb * 255.0).round() as u8;
+            // alpha unchanged
+        });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -152,9 +148,10 @@ mod tests {
     #[test]
     fn zero_sat_is_identity() {
         let src = solid(100, 150, 200);
+        let src_data = src.data.clone();
         let op = SplitToneOp::new(220.0, 0.0, 40.0, 0.0, 0.0);
-        let out = op.apply(&src).unwrap();
-        assert_eq!(out.data, src.data);
+        let out = op.apply(src).unwrap();
+        assert_eq!(out.data, src_data);
     }
 
     #[test]
@@ -167,7 +164,7 @@ mod tests {
             p[3] = 77;
         });
         let op = SplitToneOp::default();
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 77));
     }
 
@@ -176,7 +173,7 @@ mod tests {
         // Black pixels (luma = 0) should receive only shadow tint (hue 0° = red).
         let src = solid(0, 0, 0);
         let op = SplitToneOp::new(0.0, 1.0, 180.0, 0.0, 0.0);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         // With shadow hue = 0° (red), black should become reddish: R > B.
         // (black lerps toward red, so R increases most)
         assert!(out.data[0] > out.data[2], "black should become reddish");
@@ -187,7 +184,7 @@ mod tests {
         // White pixels (luma = 1) should receive only highlight tint (hue 240° = blue).
         let src = solid(255, 255, 255);
         let op = SplitToneOp::new(0.0, 0.0, 240.0, 1.0, 0.0);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         // With highlight hue = 240° (blue), white lerps toward blue: B stays highest
         // relative to R.
         assert!(out.data[2] >= out.data[0], "white should lean blue");

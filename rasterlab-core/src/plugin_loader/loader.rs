@@ -147,7 +147,7 @@ impl Operation for DynOperation {
         }
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn apply(&self, image: Image) -> RasterResult<Image> {
         unsafe {
             // Build CImage from our Image
             let src = CImage {

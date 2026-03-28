@@ -53,62 +53,58 @@ impl Operation for FauxHdrOp {
         "faux_hdr"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.strength < 1e-5 {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
-        let mut out = image.deep_clone();
         let s = self.strength;
 
-        out.data
-            .par_chunks_mut(4)
-            .zip(image.data.par_chunks(4))
-            .for_each(|(dst, src)| {
-                let r = src[0] as f32 / 255.0;
-                let g = src[1] as f32 / 255.0;
-                let b = src[2] as f32 / 255.0;
+        image.data.par_chunks_mut(4).for_each(|p| {
+            let r = p[0] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
 
-                // BT.709 luminance — used for all weight calculations.
-                let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            // BT.709 luminance — used for all weight calculations.
+            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
-                // Luma of each synthetic bracket.
-                // The +1 stop bracket clips at 1.0 (matching sensor saturation).
-                let luma_over = (luma * 2.0).min(1.0); // +1 stop
-                let luma_under = luma * 0.5; // −1 stop
+            // Luma of each synthetic bracket.
+            // The +1 stop bracket clips at 1.0 (matching sensor saturation).
+            let luma_over = (luma * 2.0).min(1.0); // +1 stop
+            let luma_under = luma * 0.5; // −1 stop
 
-                // Well-exposedness weight for each bracket.
-                let w0 = well_exposedness(luma_over); // +1 stop
-                let w1 = well_exposedness(luma); //  0 stops
-                let w2 = well_exposedness(luma_under); // −1 stop
-                let sum = w0 + w1 + w2 + 1e-6; // epsilon avoids ÷0
+            // Well-exposedness weight for each bracket.
+            let w0 = well_exposedness(luma_over); // +1 stop
+            let w1 = well_exposedness(luma); //  0 stops
+            let w2 = well_exposedness(luma_under); // −1 stop
+            let sum = w0 + w1 + w2 + 1e-6; // epsilon avoids ÷0
 
-                // Fused luma: weighted average of bracket lumas.
-                let luma_fused = (w0 * luma_over + w1 * luma + w2 * luma_under) / sum;
+            // Fused luma: weighted average of bracket lumas.
+            let luma_fused = (w0 * luma_over + w1 * luma + w2 * luma_under) / sum;
 
-                // Derive a uniform per-pixel tone-mapping scale.
-                // Applying the same factor to R, G and B preserves the R:G:B
-                // ratio exactly, so hue and saturation are unchanged.
-                // The min(4.0) cap prevents extreme brightening of near-black
-                // pixels where floating-point division is imprecise.
-                let scale = if luma > 1e-6 {
-                    (luma_fused / luma).min(4.0)
-                } else {
-                    1.0
-                };
+            // Derive a uniform per-pixel tone-mapping scale.
+            // Applying the same factor to R, G and B preserves the R:G:B
+            // ratio exactly, so hue and saturation are unchanged.
+            // The min(4.0) cap prevents extreme brightening of near-black
+            // pixels where floating-point division is imprecise.
+            let scale = if luma > 1e-6 {
+                (luma_fused / luma).min(4.0)
+            } else {
+                1.0
+            };
 
-                let fr = r * scale;
-                let fg = g * scale;
-                let fb = b * scale;
+            let fr = r * scale;
+            let fg = g * scale;
+            let fb = b * scale;
 
-                // Blend fused result with the original based on strength.
-                dst[0] = ((r + (fr - r) * s) * 255.0).clamp(0.0, 255.0) as u8;
-                dst[1] = ((g + (fg - g) * s) * 255.0).clamp(0.0, 255.0) as u8;
-                dst[2] = ((b + (fb - b) * s) * 255.0).clamp(0.0, 255.0) as u8;
-                // alpha unchanged
-            });
+            // Blend fused result with the original based on strength.
+            p[0] = ((r + (fr - r) * s) * 255.0).clamp(0.0, 255.0) as u8;
+            p[1] = ((g + (fg - g) * s) * 255.0).clamp(0.0, 255.0) as u8;
+            p[2] = ((b + (fb - b) * s) * 255.0).clamp(0.0, 255.0) as u8;
+            // alpha unchanged
+        });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -134,8 +130,9 @@ mod tests {
     #[test]
     fn zero_strength_is_identity() {
         let src = grey_image(80);
-        let out = FauxHdrOp::new(0.0).apply(&src).unwrap();
-        assert_eq!(out.data, src.data);
+        let src_data = src.data.clone();
+        let out = FauxHdrOp::new(0.0).apply(src).unwrap();
+        assert_eq!(out.data, src_data);
     }
 
     #[test]
@@ -147,7 +144,7 @@ mod tests {
             p[2] = 100;
             p[3] = 77;
         });
-        let out = FauxHdrOp::new(1.0).apply(&src).unwrap();
+        let out = FauxHdrOp::new(1.0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 77));
     }
 
@@ -155,11 +152,12 @@ mod tests {
     fn dark_pixels_are_lifted() {
         // Dark pixels lean toward the +1-stop bracket → should be brighter.
         let src = grey_image(20);
-        let out = FauxHdrOp::new(1.0).apply(&src).unwrap();
+        let orig = src.data[0];
+        let out = FauxHdrOp::new(1.0).apply(src).unwrap();
         assert!(
-            out.data[0] > src.data[0],
+            out.data[0] > orig,
             "dark pixel should be lifted: {} → {}",
-            src.data[0],
+            orig,
             out.data[0]
         );
     }
@@ -168,11 +166,12 @@ mod tests {
     fn bright_pixels_are_pulled_down() {
         // Bright pixels lean toward the −1-stop bracket → should be darker.
         let src = grey_image(240);
-        let out = FauxHdrOp::new(1.0).apply(&src).unwrap();
+        let orig = src.data[0];
+        let out = FauxHdrOp::new(1.0).apply(src).unwrap();
         assert!(
-            out.data[0] < src.data[0],
+            out.data[0] < orig,
             "bright pixel should be pulled down: {} → {}",
-            src.data[0],
+            orig,
             out.data[0]
         );
     }
@@ -181,7 +180,7 @@ mod tests {
     fn midtone_pixel_barely_moves() {
         // Mid-grey is already well-exposed; fused result should be very close.
         let src = grey_image(128);
-        let out = FauxHdrOp::new(1.0).apply(&src).unwrap();
+        let out = FauxHdrOp::new(1.0).apply(src).unwrap();
         let diff = (out.data[0] as i16 - 128i16).unsigned_abs();
         assert!(
             diff <= 5,
@@ -193,10 +192,9 @@ mod tests {
     #[test]
     fn partial_strength_blends_toward_original() {
         // Half-strength output sits between original and full-strength result.
-        let src = grey_image(20);
-        let full = FauxHdrOp::new(1.0).apply(&src).unwrap().data[0] as i32;
-        let half = FauxHdrOp::new(0.5).apply(&src).unwrap().data[0] as i32;
-        let orig = src.data[0] as i32;
+        let orig = grey_image(20).data[0] as i32;
+        let full = FauxHdrOp::new(1.0).apply(grey_image(20)).unwrap().data[0] as i32;
+        let half = FauxHdrOp::new(0.5).apply(grey_image(20)).unwrap().data[0] as i32;
         assert!(
             half > orig && half < full,
             "half-strength {} not between {} and {}",
@@ -216,7 +214,7 @@ mod tests {
         src.data[1] = 20; // G
         src.data[2] = 20; // B
         src.data[3] = 255;
-        let out = FauxHdrOp::new(1.0).apply(&src).unwrap();
+        let out = FauxHdrOp::new(1.0).apply(src).unwrap();
         let r_out = out.data[0] as f32;
         let g_out = out.data[1] as f32;
         let b_out = out.data[2] as f32;

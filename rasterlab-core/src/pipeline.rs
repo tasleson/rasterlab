@@ -186,7 +186,11 @@ impl EditPipeline {
 
         for (k, entry) in self.ops[start_idx..self.cursor].iter().enumerate() {
             if entry.enabled {
-                current = Arc::new(entry.operation.apply(current.as_ref()).map_err(|e| {
+                let img = match Arc::try_unwrap(current) {
+                    Ok(img) => img,
+                    Err(arc) => arc.as_ref().deep_clone(),
+                };
+                current = Arc::new(entry.operation.apply(img).map_err(|e| {
                     RasterError::Pipeline(format!(
                         "Operation '{}' failed: {}",
                         entry.operation.name(),

@@ -557,7 +557,7 @@ impl AppState {
                     self.export_resize_h,
                     self.export_resize_mode,
                 );
-                match op.apply(rendered.as_ref()) {
+                match op.apply(rendered.as_ref().deep_clone()) {
                     Ok(img) => {
                         resized_buf = img;
                         &resized_buf
@@ -1653,8 +1653,12 @@ fn render_in_thread(
             if let Some(j) = op_json {
                 let op: Box<dyn Operation> =
                     serde_json::from_value(j.clone()).map_err(|e| format!("Deserialise op: {}", e))?;
+                let img = match Arc::try_unwrap(current) {
+                    Ok(img) => img,
+                    Err(a) => a.as_ref().deep_clone(),
+                };
                 current = Arc::new(
-                    op.apply(current.as_ref())
+                    op.apply(img)
                         .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
                 );
             }
@@ -1666,12 +1670,12 @@ fn render_in_thread(
         let h = vp_h.min(current.height.saturating_sub(y)).max(1);
 
         let crop = CropOp::new(x, y, w, h)
-            .apply(current.as_ref())
+            .apply(current.as_ref().deep_clone())
             .map_err(|e| format!("Viewport crop: {}", e))?;
         let op: Box<dyn Operation> =
             serde_json::from_value(json.clone()).map_err(|e| format!("Deserialise preview op: {}", e))?;
         let processed = op
-            .apply(&crop)
+            .apply(crop)
             .map_err(|e| format!("Op '{}' (overlay) failed: {}", op.name(), e))?;
 
         let hist = HistogramData::compute(&processed);
@@ -1694,8 +1698,12 @@ fn render_in_thread(
         if let Some(json) = op_json {
             let op: Box<dyn Operation> =
                 serde_json::from_value(json).map_err(|e| format!("Deserialise op: {}", e))?;
+            let img = match Arc::try_unwrap(current) {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
             current = Arc::new(
-                op.apply(current.as_ref())
+                op.apply(img)
                     .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
             );
         }
@@ -1719,17 +1727,21 @@ fn render_in_thread(
                 .min(current.height.saturating_sub(sy))
                 .max(1);
             let crop = CropOp::new(sx, sy, sw, sh)
-                .apply(current.as_ref())
+                .apply(current.as_ref().deep_clone())
                 .map_err(|e| format!("Viewport crop: {}", e))?;
             let processed = op
-                .apply(&crop)
+                .apply(crop)
                 .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
             let mut base = current.as_ref().deep_clone();
             blit_region(&mut base, &processed, sx, sy);
             current = Arc::new(base);
         } else {
+            let img = match Arc::try_unwrap(current) {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
             current = Arc::new(
-                op.apply(current.as_ref())
+                op.apply(img)
                     .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?,
             );
         }

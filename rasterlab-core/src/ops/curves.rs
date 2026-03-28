@@ -118,18 +118,17 @@ impl Operation for CurvesOp {
         "curves"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let lut = Self::build_lut(&self.points);
-        let mut out = image.deep_clone();
 
-        out.data.par_chunks_mut(4).for_each(|p| {
+        image.data.par_chunks_mut(4).for_each(|p| {
             p[0] = lut[p[0] as usize];
             p[1] = lut[p[1] as usize];
             p[2] = lut[p[2] as usize];
             // alpha untouched
         });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -165,7 +164,7 @@ mod tests {
             p[2] = 240;
             p[3] = 255;
         });
-        let out = CurvesOp::identity().apply(&src).unwrap();
+        let out = CurvesOp::identity().apply(src.deep_clone()).unwrap();
         assert_eq!(out.data, src.data);
     }
 
@@ -175,7 +174,7 @@ mod tests {
         src.data.chunks_mut(4).for_each(|p| {
             p[3] = 99;
         });
-        let out = CurvesOp::identity().apply(&src).unwrap();
+        let out = CurvesOp::identity().apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 99));
     }
 }

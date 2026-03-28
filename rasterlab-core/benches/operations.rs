@@ -1,4 +1,4 @@
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use rasterlab_core::{
     image::Image,
     ops::{BlackAndWhiteOp, CropOp, RotateOp, SharpenOp},
@@ -13,14 +13,22 @@ fn make_image(w: u32, h: u32) -> Image {
 fn bench_crop(c: &mut Criterion) {
     let img = make_image(4000, 3000);
     c.bench_function("crop 4000x3000 → 2000x1500", |b| {
-        b.iter(|| CropOp::new(500, 500, 2000, 1500).apply(&img).unwrap())
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| CropOp::new(500, 500, 2000, 1500).apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
     });
 }
 
 fn bench_rotate_90(c: &mut Criterion) {
     let img = make_image(4000, 3000);
     c.bench_function("rotate_cw90 4000x3000", |b| {
-        b.iter(|| RotateOp::cw90().apply(&img).unwrap())
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| RotateOp::cw90().apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
     });
 }
 
@@ -30,7 +38,13 @@ fn bench_rotate_arbitrary(c: &mut Criterion) {
         c.bench_with_input(
             BenchmarkId::new("rotate_arbitrary 1000x1000", deg),
             &deg,
-            |b, &d| b.iter(|| RotateOp::arbitrary(d).apply(&img).unwrap()),
+            |b, &d| {
+                b.iter_batched(
+                    || img.deep_clone(),
+                    |i| RotateOp::arbitrary(d).apply(i).unwrap(),
+                    BatchSize::LargeInput,
+                )
+            },
         );
     }
 }
@@ -38,14 +52,22 @@ fn bench_rotate_arbitrary(c: &mut Criterion) {
 fn bench_sharpen(c: &mut Criterion) {
     let img = make_image(4000, 3000);
     c.bench_function("sharpen 4000x3000 strength=1.0", |b| {
-        b.iter(|| SharpenOp::new(1.0).apply(&img).unwrap())
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| SharpenOp::new(1.0).apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
     });
 }
 
 fn bench_bw(c: &mut Criterion) {
     let img = make_image(4000, 3000);
     c.bench_function("bw_luminance 4000x3000", |b| {
-        b.iter(|| BlackAndWhiteOp::luminance().apply(&img).unwrap())
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| BlackAndWhiteOp::luminance().apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
     });
 }
 

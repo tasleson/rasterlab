@@ -33,35 +33,31 @@ impl Operation for HueShiftOp {
         "hue_shift"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.degrees.abs() < 1e-3 {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
         // Convert degrees to the [0,1] hue fraction used by the HSL functions.
         let shift = self.degrees / 360.0;
-        let mut out = image.deep_clone();
 
-        out.data
-            .par_chunks_mut(4)
-            .zip(image.data.par_chunks(4))
-            .for_each(|(dst, src)| {
-                let r = src[0] as f32 / 255.0;
-                let g = src[1] as f32 / 255.0;
-                let b = src[2] as f32 / 255.0;
+        image.data.par_chunks_mut(4).for_each(|p| {
+            let r = p[0] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
 
-                let (h, s, l) = rgb_to_hsl(r, g, b);
-                // Wrap hue into [0, 1).
-                let new_h = (h + shift).rem_euclid(1.0);
-                let (ro, go, bo) = hsl_to_rgb(new_h, s, l);
+            let (h, s, l) = rgb_to_hsl(r, g, b);
+            // Wrap hue into [0, 1).
+            let new_h = (h + shift).rem_euclid(1.0);
+            let (ro, go, bo) = hsl_to_rgb(new_h, s, l);
 
-                dst[0] = (ro * 255.0).clamp(0.0, 255.0) as u8;
-                dst[1] = (go * 255.0).clamp(0.0, 255.0) as u8;
-                dst[2] = (bo * 255.0).clamp(0.0, 255.0) as u8;
-                // alpha unchanged
-            });
+            p[0] = (ro * 255.0).clamp(0.0, 255.0) as u8;
+            p[1] = (go * 255.0).clamp(0.0, 255.0) as u8;
+            p[2] = (bo * 255.0).clamp(0.0, 255.0) as u8;
+            // alpha unchanged
+        });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -154,9 +150,10 @@ mod tests {
     #[test]
     fn zero_degrees_is_identity() {
         let src = solid(200, 80, 40);
-        let out = HueShiftOp::new(0.0).apply(&src).unwrap();
+        let src_data = src.data.clone();
+        let out = HueShiftOp::new(0.0).apply(src).unwrap();
         // Allow ±1 for round-trip HSL rounding.
-        for (a, b) in src.data.chunks(4).zip(out.data.chunks(4)) {
+        for (a, b) in src_data.chunks(4).zip(out.data.chunks(4)) {
             assert!((a[0] as i16 - b[0] as i16).abs() <= 1);
             assert!((a[1] as i16 - b[1] as i16).abs() <= 1);
             assert!((a[2] as i16 - b[2] as i16).abs() <= 1);
@@ -167,7 +164,7 @@ mod tests {
     fn grey_unchanged_by_shift() {
         // Grey pixels have no hue; shifting should leave them identical.
         let src = solid(128, 128, 128);
-        let out = HueShiftOp::new(90.0).apply(&src).unwrap();
+        let out = HueShiftOp::new(90.0).apply(src).unwrap();
         assert_eq!(out.data[0], 128);
         assert_eq!(out.data[1], 128);
         assert_eq!(out.data[2], 128);
@@ -176,8 +173,9 @@ mod tests {
     #[test]
     fn full_rotation_returns_to_original() {
         let src = solid(200, 80, 40);
-        let out = HueShiftOp::new(360.0).apply(&src).unwrap();
-        for (a, b) in src.data.chunks(4).zip(out.data.chunks(4)) {
+        let src_data = src.data.clone();
+        let out = HueShiftOp::new(360.0).apply(src).unwrap();
+        for (a, b) in src_data.chunks(4).zip(out.data.chunks(4)) {
             assert!((a[0] as i16 - b[0] as i16).abs() <= 1);
         }
     }
@@ -186,7 +184,7 @@ mod tests {
     fn red_shifts_toward_green_at_plus_120() {
         // Pure red shifted +120° should become green-ish.
         let src = solid(255, 0, 0);
-        let out = HueShiftOp::new(120.0).apply(&src).unwrap();
+        let out = HueShiftOp::new(120.0).apply(src).unwrap();
         assert!(
             out.data[1] > out.data[0],
             "green should dominate after +120°"
@@ -202,7 +200,7 @@ mod tests {
             p[2] = 50;
             p[3] = 77;
         });
-        let out = HueShiftOp::new(45.0).apply(&src).unwrap();
+        let out = HueShiftOp::new(45.0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 77));
     }
 
@@ -211,7 +209,7 @@ mod tests {
         // HSL hue rotation preserves HSL lightness (not perceptual luma —
         // those differ because HSL is not a perceptually-uniform space).
         let src = solid(180, 100, 50);
-        let out = HueShiftOp::new(90.0).apply(&src).unwrap();
+        let out = HueShiftOp::new(90.0).apply(src).unwrap();
 
         let hsl_l = |r: f32, g: f32, b: f32| -> f32 { (r.max(g).max(b) + r.min(g).min(b)) * 0.5 };
         let l_in = hsl_l(180.0 / 255.0, 100.0 / 255.0, 50.0 / 255.0);

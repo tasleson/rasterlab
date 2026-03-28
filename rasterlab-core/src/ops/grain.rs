@@ -60,15 +60,14 @@ impl Operation for GrainOp {
         "grain"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let w = image.width as usize;
         let seed = self.seed;
         let strength = self.strength;
         let size = self.size;
 
-        let mut out = image.deep_clone();
-
-        out.data
+        image
+            .data
             .par_chunks_mut(w * 4)
             .enumerate()
             .for_each(|(y, row)| {
@@ -95,7 +94,7 @@ impl Operation for GrainOp {
                 }
             });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -121,7 +120,7 @@ mod tests {
     #[test]
     fn zero_strength_is_identity() {
         let src = grey_image(128);
-        let out = GrainOp::new(0.0, 1.0, 0).apply(&src).unwrap();
+        let out = GrainOp::new(0.0, 1.0, 0).apply(src.deep_clone()).unwrap();
         assert_eq!(out.data, src.data);
     }
 
@@ -129,7 +128,7 @@ mod tests {
     fn black_pixels_unaffected() {
         // Midtone weight = 0 at luma=0 → pure black stays black.
         let src = grey_image(0);
-        let out = GrainOp::new(1.0, 1.0, 0).apply(&src).unwrap();
+        let out = GrainOp::new(1.0, 1.0, 0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| {
             assert_eq!(p[0], 0);
             assert_eq!(p[1], 0);
@@ -141,7 +140,7 @@ mod tests {
     fn white_pixels_unaffected() {
         // Midtone weight = 0 at luma=1 → pure white stays white.
         let src = grey_image(255);
-        let out = GrainOp::new(1.0, 1.0, 0).apply(&src).unwrap();
+        let out = GrainOp::new(1.0, 1.0, 0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| {
             assert_eq!(p[0], 255);
             assert_eq!(p[1], 255);
@@ -152,24 +151,25 @@ mod tests {
     #[test]
     fn midtones_are_perturbed() {
         let src = grey_image(128);
-        let out = GrainOp::new(0.5, 1.0, 0).apply(&src).unwrap();
+        let src_data = src.data.clone();
+        let out = GrainOp::new(0.5, 1.0, 0).apply(src).unwrap();
         // At least some pixels should differ from the source.
-        assert!(src.data != out.data);
+        assert!(src_data != out.data);
     }
 
     #[test]
     fn deterministic() {
         let src = grey_image(128);
-        let a = GrainOp::new(0.2, 1.0, 42).apply(&src).unwrap();
-        let b = GrainOp::new(0.2, 1.0, 42).apply(&src).unwrap();
+        let a = GrainOp::new(0.2, 1.0, 42).apply(src.deep_clone()).unwrap();
+        let b = GrainOp::new(0.2, 1.0, 42).apply(src).unwrap();
         assert_eq!(a.data, b.data);
     }
 
     #[test]
     fn different_seeds_differ() {
         let src = grey_image(128);
-        let a = GrainOp::new(0.2, 1.0, 0).apply(&src).unwrap();
-        let b = GrainOp::new(0.2, 1.0, 1).apply(&src).unwrap();
+        let a = GrainOp::new(0.2, 1.0, 0).apply(src.deep_clone()).unwrap();
+        let b = GrainOp::new(0.2, 1.0, 1).apply(src).unwrap();
         assert_ne!(a.data, b.data);
     }
 
@@ -182,7 +182,7 @@ mod tests {
             p[2] = 128;
             p[3] = 77;
         });
-        let out = GrainOp::new(0.5, 1.0, 0).apply(&src).unwrap();
+        let out = GrainOp::new(0.5, 1.0, 0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 77));
     }
 }

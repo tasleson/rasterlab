@@ -77,10 +77,8 @@ impl Operation for BlackAndWhiteOp {
         "black_and_white"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
-        let mut out = image.deep_clone();
-
-        out.data.par_chunks_mut(4).for_each(|pixel| {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
+        image.data.par_chunks_mut(4).for_each(|pixel| {
             let gray = self
                 .mode
                 .to_gray(pixel[0] as f32, pixel[1] as f32, pixel[2] as f32)
@@ -91,7 +89,7 @@ impl Operation for BlackAndWhiteOp {
             // pixel[3] (alpha) untouched
         });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -123,7 +121,7 @@ mod tests {
     #[test]
     fn pure_red_to_luma() {
         let src = make_pixel_image(255, 0, 0);
-        let out = BlackAndWhiteOp::luminance().apply(&src).unwrap();
+        let out = BlackAndWhiteOp::luminance().apply(src).unwrap();
         let [r, g, b, _] = out.pixel(0, 0);
         // 0.2126 * 255 ≈ 54
         assert_eq!(r, 54);
@@ -139,7 +137,7 @@ mod tests {
             BlackAndWhiteOp::average(),
             BlackAndWhiteOp::perceptual(),
         ] {
-            let out = op.apply(&src).unwrap();
+            let out = op.apply(src.deep_clone()).unwrap();
             assert_eq!(out.pixel(0, 0), [255, 255, 255, 255]);
         }
     }
@@ -148,7 +146,7 @@ mod tests {
     fn alpha_preserved() {
         let mut src = Image::new(1, 1);
         src.set_pixel(0, 0, [100, 150, 200, 128]);
-        let out = BlackAndWhiteOp::luminance().apply(&src).unwrap();
+        let out = BlackAndWhiteOp::luminance().apply(src).unwrap();
         assert_eq!(out.pixel(0, 0)[3], 128);
     }
 }

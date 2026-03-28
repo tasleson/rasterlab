@@ -80,8 +80,8 @@ impl Operation for HistogramOp {
         "histogram"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
-        Ok(image.deep_clone()) // pass-through
+    fn apply(&self, image: Image) -> RasterResult<Image> {
+        Ok(image) // pass-through
     }
 
     fn describe(&self) -> String {
@@ -111,7 +111,8 @@ mod tests {
     #[test]
     fn histogram_op_is_passthrough() {
         let src = Image::new(8, 8);
-        let out = HistogramOp.apply(&src).unwrap();
-        assert_eq!(out.data, src.data);
+        let src_data = src.data.clone();
+        let out = HistogramOp.apply(src).unwrap();
+        assert_eq!(out.data, src_data);
     }
 }
