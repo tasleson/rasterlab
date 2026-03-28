@@ -1596,12 +1596,11 @@ fn render_in_thread(
     preview_scale: Option<f32>,
     preview_viewport: Option<[u32; 4]>,
 ) -> RenderResult {
-    let is_preview = preview_scale.is_some() || preview_viewport.is_some();
-    // Downsample if this is a global-scale preview and no viewport is provided.
-    // When a viewport is provided we defer reduction until after committed ops.
-    let mut current: Arc<Image> = match (preview_scale, &preview_viewport) {
-        (Some(scale), None) => Arc::new(downsample_nn(start_image.as_ref(), scale)),
-        _ => start_image,
+    let is_preview = preview_scale.is_some();
+    // Downsample for preview renders so committed ops also run on a small image.
+    let mut current: Arc<Image> = match preview_scale {
+        Some(scale) => Arc::new(downsample_nn(start_image.as_ref(), scale)),
+        None => start_image,
     };
     // Intermediates are only collected for full-res renders.
     let mut intermediates = if !is_preview {
@@ -1625,40 +1624,67 @@ fn render_in_thread(
         }
     }
 
-    // If a viewport is known, restrict the preview to only the visible pixels.
-    // Choose whichever strategy produces fewer pixels: viewport crop or global scale.
-    if let Some([vp_x, vp_y, vp_w, vp_h]) = preview_viewport {
-        let vp_px = vp_w as u64 * vp_h as u64;
-        let scale = preview_scale.unwrap_or(PREVIEW_SCALE);
-        let scale_px =
-            (current.width as f64 * scale as f64 * current.height as f64 * scale as f64) as u64;
-        if vp_px <= scale_px {
-            // Viewport crop is smaller — use it (no further downsampling needed).
-            let x = vp_x.min(current.width.saturating_sub(1));
-            let y = vp_y.min(current.height.saturating_sub(1));
-            let w = vp_w.min(current.width.saturating_sub(x)).max(1);
-            let h = vp_h.min(current.height.saturating_sub(y)).max(1);
-            let cropped = CropOp::new(x, y, w, h)
-                .apply(current.as_ref())
-                .map_err(|e| format!("Viewport crop failed: {}", e))?;
-            current = Arc::new(cropped);
-        } else {
-            // Viewport is large (zoomed out) — fall back to global scale.
-            current = Arc::new(downsample_nn(current.as_ref(), scale));
-        }
-    }
-
     // Apply preview op on top of committed result without caching it.
+    // When a viewport is known, run the op only on the visible pixels then blit
+    // the result back into the full (downsampled) image so canvas dimensions stay
+    // stable and the view doesn't reset or go blank.
     if let Some(json) = preview_op {
         let op: Box<dyn Operation> =
             serde_json::from_value(json).map_err(|e| format!("Deserialise preview op: {}", e))?;
-        current = Arc::new(
-            op.apply(current.as_ref())
-                .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?,
-        );
+
+        if let Some([vp_x, vp_y, vp_w, vp_h]) = preview_viewport {
+            // Scale the full-res viewport rect to the current (possibly downsampled) image.
+            let scale = preview_scale.unwrap_or(1.0);
+            let sx = ((vp_x as f32 * scale) as u32).min(current.width.saturating_sub(1));
+            let sy = ((vp_y as f32 * scale) as u32).min(current.height.saturating_sub(1));
+            let sw = ((vp_w as f32 * scale).ceil() as u32)
+                .min(current.width.saturating_sub(sx))
+                .max(1);
+            let sh = ((vp_h as f32 * scale).ceil() as u32)
+                .min(current.height.saturating_sub(sy))
+                .max(1);
+
+            // Apply op to the viewport crop only.
+            let crop = CropOp::new(sx, sy, sw, sh)
+                .apply(current.as_ref())
+                .map_err(|e| format!("Viewport crop: {}", e))?;
+            let processed = op
+                .apply(&crop)
+                .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
+
+            // Blit the processed crop back into a clone of the full (downsampled) image
+            // so the returned image has the correct dimensions for the canvas.
+            let mut base = current.as_ref().deep_clone();
+            blit_region(&mut base, &processed, sx, sy);
+            current = Arc::new(base);
+        } else {
+            current = Arc::new(
+                op.apply(current.as_ref())
+                    .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?,
+            );
+        }
     }
 
     // Compute histogram in this thread so the main thread never does heavy work.
     let hist = HistogramData::compute(current.as_ref());
     Ok((current, hist, intermediates))
+}
+
+/// Copy `src` into `dst` at pixel offset `(x, y)`.  Caller must ensure the
+/// region fits within `dst`.
+fn blit_region(dst: &mut Image, src: &Image, x: u32, y: u32) {
+    use rayon::prelude::*;
+    let row_bytes = src.width as usize * 4;
+    let dst_stride = dst.width as usize * 4;
+    dst.data
+        .par_chunks_mut(dst_stride)
+        .enumerate()
+        .filter(|(row, _)| *row >= y as usize && *row < (y + src.height) as usize)
+        .for_each(|(row, dst_row)| {
+            let src_row = row - y as usize;
+            let dst_off = x as usize * 4;
+            let src_off = src_row * row_bytes;
+            dst_row[dst_off..dst_off + row_bytes]
+                .copy_from_slice(&src.data[src_off..src_off + row_bytes]);
+        });
 }
