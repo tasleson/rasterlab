@@ -97,20 +97,30 @@ impl CanvasState {
         self.last_canvas_size = canvas_size;
 
         // ── Publish viewport for preview optimisation ─────────────────────
-        // Compute which region of the image is currently visible, so the
-        // render thread can restrict preview ops to just those pixels.
+        // Viewport is always computed in full-res image coordinates (zoom is
+        // always expressed as screen-pixels-per-full-res-pixel).
         {
+            let rs = state.rendered_scale;
+            // Full-res dimensions regardless of whether we're showing a preview.
+            let full_w = (img_w as f32 / rs) as u32;
+            let full_h = (img_h as f32 / rs) as u32;
             let vis_x0 = (-self.pan_offset.x / self.zoom).max(0.0) as u32;
             let vis_y0 = (-self.pan_offset.y / self.zoom).max(0.0) as u32;
-            let vis_x1 = ((canvas_size.x - self.pan_offset.x) / self.zoom).min(img_w as f32) as u32;
-            let vis_y1 = ((canvas_size.y - self.pan_offset.y) / self.zoom).min(img_h as f32) as u32;
+            let vis_x1 =
+                ((canvas_size.x - self.pan_offset.x) / self.zoom).min(full_w as f32) as u32;
+            let vis_y1 =
+                ((canvas_size.y - self.pan_offset.y) / self.zoom).min(full_h as f32) as u32;
             let vp_w = vis_x1.saturating_sub(vis_x0).max(1);
             let vp_h = vis_y1.saturating_sub(vis_y0).max(1);
             state.preview_viewport = Some([vis_x0, vis_y0, vp_w, vp_h]);
         }
 
         let tex = self.texture.as_ref().unwrap();
-        let display_size = Vec2::new(img_w as f32 * self.zoom, img_h as f32 * self.zoom);
+        // When the rendered image is a downsampled preview, scale up the zoom
+        // so it fills the same screen area as the full-res image would.
+        // self.zoom is always in full-res image pixels; rendered_scale converts.
+        let effective_zoom = self.zoom / state.rendered_scale;
+        let display_size = Vec2::new(img_w as f32 * effective_zoom, img_h as f32 * effective_zoom);
 
         let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
 

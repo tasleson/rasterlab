@@ -68,6 +68,9 @@ pub struct AppState {
     pub rendered: Option<Arc<Image>>,
     /// True while the canvas is displaying a downsampled preview render.
     pub rendered_is_preview: bool,
+    /// Scale of the current `rendered` image vs the full-res committed result.
+    /// 1.0 for full-res, PREVIEW_SCALE (0.25) for a preview render.
+    pub rendered_scale: f32,
     /// Visible region of the rendered image [x, y, w, h] in image-pixel coords.
     /// Updated by the canvas every frame; used to restrict preview renders to
     /// only the pixels the user can actually see.
@@ -251,6 +254,7 @@ impl AppState {
             pipeline: None,
             rendered: None,
             rendered_is_preview: false,
+            rendered_scale: 1.0,
             preview_viewport: None,
             histogram: None,
             loading: false,
@@ -415,6 +419,7 @@ impl AppState {
                     self.histogram = Some(*hist);
                     self.rendered = Some(image);
                     self.rendered_is_preview = is_preview;
+                    self.rendered_scale = if is_preview { PREVIEW_SCALE } else { 1.0 };
                     self.loading = false;
 
                     if !is_preview {
