@@ -10,7 +10,7 @@ use rasterlab_core::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, ColorSpaceConversion,
         ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp,
         HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LutOp, PerspectiveOp, ResampleMode,
-        ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, VibranceOp, VignetteOp,
+        ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
         WhiteBalanceOp,
     },
     pipeline::EditPipeline,
@@ -141,6 +141,14 @@ pub struct AppState {
     // ── Sepia tool ────────────────────────────────────────────────────────
     pub sepia_strength: f32,
     pub sepia_preview_active: bool,
+
+    // ── Split Tone tool ───────────────────────────────────────────────────
+    pub split_shadow_hue: f32,
+    pub split_shadow_sat: f32,
+    pub split_highlight_hue: f32,
+    pub split_highlight_sat: f32,
+    pub split_balance: f32,
+    pub split_preview_active: bool,
 
     // ── Resize tool ───────────────────────────────────────────────────────
     pub resize_w: u32,
@@ -275,6 +283,12 @@ impl AppState {
             vibrance_preview_active: false,
             sepia_strength: 1.0,
             sepia_preview_active: false,
+            split_shadow_hue: 220.0,
+            split_shadow_sat: 0.20,
+            split_highlight_hue: 40.0,
+            split_highlight_sat: 0.15,
+            split_balance: 0.0,
+            split_preview_active: false,
             resize_w: 0,
             resize_h: 0,
             resize_mode: ResampleMode::Bicubic,
@@ -792,6 +806,39 @@ impl AppState {
         self.cancel_sepia_preview();
     }
 
+    pub fn push_split_tone(&mut self) {
+        self.split_preview_active = false;
+        self.push_op(Box::new(SplitToneOp::new(
+            self.split_shadow_hue,
+            self.split_shadow_sat,
+            self.split_highlight_hue,
+            self.split_highlight_sat,
+            self.split_balance,
+        )));
+    }
+
+    pub fn update_split_preview(&mut self) {
+        self.split_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_split_preview(&mut self) {
+        if self.split_preview_active {
+            self.split_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn reset_split_tone(&mut self) {
+        let defaults = SplitToneOp::default();
+        self.split_shadow_hue = defaults.shadow_hue;
+        self.split_shadow_sat = defaults.shadow_sat;
+        self.split_highlight_hue = defaults.highlight_hue;
+        self.split_highlight_sat = defaults.highlight_sat;
+        self.split_balance = defaults.balance;
+        self.cancel_split_preview();
+    }
+
     pub fn push_resize(&mut self) {
         self.push_op(Box::new(ResizeOp::new(
             self.resize_w,
@@ -1206,6 +1253,7 @@ impl AppState {
         self.bc_preview_active = false;
         self.sat_preview_active = false;
         self.sepia_preview_active = false;
+        self.split_preview_active = false;
         self.lut_preview_active = false;
         self.curve_preview_active = false;
         self.curve_dragging_idx = None;
@@ -1255,6 +1303,7 @@ impl AppState {
             || self.bc_preview_active
             || self.sat_preview_active
             || self.sepia_preview_active
+            || self.split_preview_active
             || self.lut_preview_active
             || self.curve_preview_active
             || self.hdr_preview_active
@@ -1312,6 +1361,15 @@ impl AppState {
             serde_json::to_value(&preview).ok()
         } else if self.sepia_preview_active {
             let preview: Box<dyn Operation> = Box::new(SepiaOp::new(self.sepia_strength));
+            serde_json::to_value(&preview).ok()
+        } else if self.split_preview_active {
+            let preview: Box<dyn Operation> = Box::new(SplitToneOp::new(
+                self.split_shadow_hue,
+                self.split_shadow_sat,
+                self.split_highlight_hue,
+                self.split_highlight_sat,
+                self.split_balance,
+            ));
             serde_json::to_value(&preview).ok()
         } else if self.lut_preview_active {
             self.lut_op.as_ref().and_then(|op| {
