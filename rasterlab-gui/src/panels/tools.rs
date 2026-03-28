@@ -764,7 +764,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             if !state.lut_name.is_empty() {
                 ui.label(format!("Loaded: {}", state.lut_name));
                 let changed = ui
-                    .add(egui::Slider::new(&mut state.lut_strength, 0.0..=1.0).step_by(0.01).text("Strength"))
+                    .add(
+                        egui::Slider::new(&mut state.lut_strength, 0.0..=1.0)
+                            .step_by(0.01)
+                            .text("Strength"),
+                    )
                     .changed();
                 if changed && has_image {
                     state.update_lut_preview();
@@ -863,6 +867,74 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
             let orig_w = state.resize_w;
             let orig_h = state.resize_h;
+
+            // Source image dims for preset filtering and aspect-ratio math.
+            let src_dims = state
+                .pipeline
+                .as_ref()
+                .map(|p| (p.source().width, p.source().height));
+
+            // ── MP preset dropdown ────────────────────────────────────
+            // (label, total target pixels)
+            const MP_PRESETS: &[(&str, u32)] = &[
+                ("24 MP", 24_000_000),
+                ("20 MP", 20_000_000),
+                ("16 MP", 16_000_000),
+                ("12 MP", 12_000_000),
+                ("10 MP", 10_000_000),
+                ("8 MP", 8_000_000),
+                ("6 MP", 6_000_000),
+                ("5 MP", 5_000_000),
+                ("4 MP", 4_000_000),
+                ("3 MP", 3_000_000),
+                ("2 MP", 2_000_000),
+                ("1 MP", 1_000_000),
+            ];
+
+            if let Some((src_w, src_h)) = src_dims {
+                let src_px = src_w as u64 * src_h as u64;
+                // h/w aspect ratio of the source image.
+                let aspect = src_h as f64 / src_w as f64;
+
+                let available: Vec<(&str, u32)> = MP_PRESETS
+                    .iter()
+                    .filter(|(_, px)| (*px as u64) < src_px)
+                    .map(|(lbl, px)| (*lbl, *px))
+                    .collect();
+
+                if !available.is_empty() {
+                    // Check whether the current w×h matches a preset (±2 px rounding).
+                    let cur_px = orig_w as u64 * orig_h as u64;
+                    let selected_label = available
+                        .iter()
+                        .find(|(_, target_px)| {
+                            let w = ((*target_px as f64 / aspect).sqrt().round() as u32).max(1);
+                            let h = (w as f64 * aspect).round() as u32;
+                            (w as u64 * h as u64).abs_diff(cur_px) <= 2
+                        })
+                        .map(|(lbl, _)| *lbl)
+                        .unwrap_or("— Preset —");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Preset");
+                        egui::ComboBox::from_id_salt("resize_mp_preset")
+                            .selected_text(selected_label)
+                            .show_ui(ui, |ui| {
+                                for (lbl, target_px) in &available {
+                                    let w =
+                                        ((*target_px as f64 / aspect).sqrt().round() as u32).max(1);
+                                    let h = (w as f64 * aspect).round() as u32;
+                                    let hint = format!("{lbl}  ({w}×{h})");
+                                    if ui.selectable_label(selected_label == *lbl, hint).clicked() {
+                                        state.resize_w = w;
+                                        state.resize_h = h;
+                                    }
+                                }
+                            });
+                    });
+                    ui.add_space(4.0);
+                }
+            }
 
             egui::Grid::new("resize_grid")
                 .num_columns(2)

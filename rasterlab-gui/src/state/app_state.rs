@@ -1311,12 +1311,14 @@ impl AppState {
             let preview: Box<dyn Operation> = Box::new(SepiaOp::new(self.sepia_strength));
             serde_json::to_value(&preview).ok()
         } else if self.lut_preview_active {
-            self.lut_op.as_ref().map(|op| {
-                let mut preview = op.clone();
-                preview.strength = self.lut_strength;
-                let boxed: Box<dyn Operation> = Box::new(preview);
-                serde_json::to_value(&boxed).ok()
-            }).flatten()
+            self.lut_op
+                .as_ref()
+                .and_then(|op| {
+                    let mut preview = op.clone();
+                    preview.strength = self.lut_strength;
+                    let boxed: Box<dyn Operation> = Box::new(preview);
+                    serde_json::to_value(&boxed).ok()
+                })
         } else if self.curve_preview_active {
             let preview: Box<dyn Operation> = Box::new(CurvesOp {
                 points: self.curve_points.clone(),
