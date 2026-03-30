@@ -372,11 +372,31 @@ fn dashed_segment(
 
 fn image_to_egui(image: &Image) -> ColorImage {
     use rayon::prelude::*;
-    let pixels: Vec<Color32> = image
-        .data
-        .par_chunks_exact(4)
-        .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
-        .collect();
+
+    // For fully-opaque images (all alpha = 255, typical for photographs)
+    // premultiplied and straight alpha are identical, so we can use
+    // from_rgba_premultiplied — a const fn that is just a 4-byte store with
+    // no branching and no LUT lookup.  The alpha scan itself is a cheap
+    // step_by(4) pass over the buffer.
+    //
+    // Images with any semi-transparent pixel fall back to the correct
+    // unmultiplied path, which applies the gamma-aware LUT per channel.
+    let all_opaque = image.data.iter().skip(3).step_by(4).all(|&a| a == 255);
+
+    let pixels: Vec<Color32> = if all_opaque {
+        image
+            .data
+            .par_chunks_exact(4)
+            .map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3]))
+            .collect()
+    } else {
+        image
+            .data
+            .par_chunks_exact(4)
+            .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+            .collect()
+    };
+
     ColorImage {
         size: [image.width as usize, image.height as usize],
         pixels,
