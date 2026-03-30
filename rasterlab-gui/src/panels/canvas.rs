@@ -191,8 +191,8 @@ impl CanvasState {
             if let (Some(ol_tex), Some([ol_x, ol_y, ol_w, ol_h])) =
                 (&self.overlay_texture, &state.preview_overlay_rect)
             {
-                let ol_tl = image_tl
-                    + Vec2::new(*ol_x as f32 * self.zoom, *ol_y as f32 * self.zoom);
+                let ol_tl =
+                    image_tl + Vec2::new(*ol_x as f32 * self.zoom, *ol_y as f32 * self.zoom);
                 let ol_size = Vec2::new(*ol_w as f32 * self.zoom, *ol_h as f32 * self.zoom);
                 painter.image(
                     ol_tex.id(),
@@ -371,9 +371,10 @@ fn dashed_segment(
 // ---------------------------------------------------------------------------
 
 fn image_to_egui(image: &Image) -> ColorImage {
+    use rayon::prelude::*;
     let pixels: Vec<Color32> = image
         .data
-        .chunks_exact(4)
+        .par_chunks_exact(4)
         .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
         .collect();
     ColorImage {
