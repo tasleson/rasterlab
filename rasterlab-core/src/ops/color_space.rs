@@ -104,6 +104,10 @@ impl Operation for ColorSpaceOp {
         "color_space"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let mat = match self.conversion {
             ColorSpaceConversion::SrgbToDisplayP3 => &SRGB_TO_P3,

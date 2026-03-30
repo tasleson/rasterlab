@@ -64,6 +64,10 @@ impl Operation for RotateOp {
         "rotate"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         match self.mode {
             RotateMode::Cw90 => rotate_cw90(&image),

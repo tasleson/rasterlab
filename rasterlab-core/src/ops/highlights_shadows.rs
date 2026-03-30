@@ -42,6 +42,10 @@ impl Operation for HighlightsShadowsOp {
         "highlights_shadows"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.highlights.abs() < 1e-5 && self.shadows.abs() < 1e-5 {
             return Ok(image);

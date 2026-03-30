@@ -77,6 +77,10 @@ impl Operation for BlackAndWhiteOp {
         "black_and_white"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         image.data.par_chunks_mut(4).for_each(|pixel| {
             let gray = self

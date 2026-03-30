@@ -108,6 +108,10 @@ impl Operation for HistogramOp {
         "histogram"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         Ok(image) // pass-through
     }

@@ -190,13 +190,25 @@ impl EditPipeline {
                     Ok(img) => img,
                     Err(arc) => arc.as_ref().deep_clone(),
                 };
-                current = Arc::new(entry.operation.apply(img).map_err(|e| {
+                let result = entry.operation.apply(img).map_err(|e| {
                     RasterError::Pipeline(format!(
                         "Operation '{}' failed: {}",
                         entry.operation.name(),
                         e
                     ))
-                })?);
+                })?;
+                debug_assert_eq!(
+                    result.data.len(),
+                    result.width as usize * result.height as usize * 4,
+                    "Operation '{}' returned an Image with mismatched buffer: \
+                     data.len()={} but {}x{}x4={}",
+                    entry.operation.name(),
+                    result.data.len(),
+                    result.width,
+                    result.height,
+                    result.width as usize * result.height as usize * 4,
+                );
+                current = Arc::new(result);
             }
             let op_idx = start_idx + k;
             if self.step_cache.len() <= op_idx {

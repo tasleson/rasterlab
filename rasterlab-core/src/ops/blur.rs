@@ -119,6 +119,10 @@ impl Operation for BlurOp {
         "blur"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let kernel = gaussian_kernel(self.radius);
         // H-pass: allocate one intermediate buffer.

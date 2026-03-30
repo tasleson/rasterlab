@@ -76,6 +76,10 @@ impl Operation for SplitToneOp {
         "split_tone"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.shadow_sat < 1e-4 && self.highlight_sat < 1e-4 {
             return Ok(image);

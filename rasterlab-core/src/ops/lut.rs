@@ -162,6 +162,10 @@ impl Operation for LutOp {
         "lut"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.data.is_empty() {
             return Ok(image);

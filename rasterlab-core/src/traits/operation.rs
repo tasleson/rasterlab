@@ -19,6 +19,7 @@ use crate::{error::RasterResult, image::Image};
 /// #[typetag::serde]
 /// impl Operation for InvertOp {
 ///     fn name(&self) -> &'static str { "invert" }
+///     fn clone_box(&self) -> Box<dyn Operation> { Box::new(self.clone()) }
 ///
 ///     fn apply(&self, mut image: Image) -> RasterResult<Image> {
 ///         image.data.chunks_mut(4).for_each(|p| {
@@ -39,6 +40,13 @@ use crate::{error::RasterResult, image::Image};
 pub trait Operation: Send + Sync {
     /// Short stable identifier used for serialisation (snake_case, no spaces).
     fn name(&self) -> &'static str;
+
+    /// Clone this operation into a new heap-allocated trait object.
+    ///
+    /// Used to send operations to the background render thread without a
+    /// serde round-trip.  All built-in operations derive `Clone` and
+    /// implement this as `Box::new(self.clone())`.
+    fn clone_box(&self) -> Box<dyn Operation>;
 
     /// Apply this operation to `image` and return the result.
     ///

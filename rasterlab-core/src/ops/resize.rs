@@ -153,6 +153,10 @@ impl Operation for ResizeOp {
         "resize"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         if image.width == self.width && image.height == self.height {
             return Ok(image);

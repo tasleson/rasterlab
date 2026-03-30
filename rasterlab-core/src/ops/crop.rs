@@ -40,6 +40,10 @@ impl Operation for CropOp {
         "crop"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         // Validate bounds
         if self.width == 0 || self.height == 0 {

@@ -48,6 +48,10 @@ impl Operation for BrightnessContrastOp {
         "brightness_contrast"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let lut = build_lut(self.brightness, self.contrast);
 
@@ -83,7 +87,9 @@ mod tests {
             p[2] = 200;
             p[3] = 255;
         });
-        let out = BrightnessContrastOp::new(0.0, 0.0).apply(src.deep_clone()).unwrap();
+        let out = BrightnessContrastOp::new(0.0, 0.0)
+            .apply(src.deep_clone())
+            .unwrap();
         assert_eq!(out.data, src.data);
     }
 

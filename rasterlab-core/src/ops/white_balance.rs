@@ -35,6 +35,10 @@ impl Operation for WhiteBalanceOp {
         "white_balance"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.temperature.abs() < 1e-5 && self.tint.abs() < 1e-5 {
             return Ok(image);
@@ -88,14 +92,18 @@ mod tests {
     #[test]
     fn identity() {
         let src = grey(128);
-        let out = WhiteBalanceOp::new(0.0, 0.0).apply(src.deep_clone()).unwrap();
+        let out = WhiteBalanceOp::new(0.0, 0.0)
+            .apply(src.deep_clone())
+            .unwrap();
         assert_eq!(out.data, src.data);
     }
 
     #[test]
     fn warm_raises_red_lowers_blue() {
         let src = grey(128);
-        let out = WhiteBalanceOp::new(0.5, 0.0).apply(src.deep_clone()).unwrap();
+        let out = WhiteBalanceOp::new(0.5, 0.0)
+            .apply(src.deep_clone())
+            .unwrap();
         let p = &out.data[..4];
         assert!(p[0] > 128, "R should increase");
         assert_eq!(p[1], 128, "G should be unchanged");
@@ -105,7 +113,9 @@ mod tests {
     #[test]
     fn cool_lowers_red_raises_blue() {
         let src = grey(128);
-        let out = WhiteBalanceOp::new(-0.5, 0.0).apply(src.deep_clone()).unwrap();
+        let out = WhiteBalanceOp::new(-0.5, 0.0)
+            .apply(src.deep_clone())
+            .unwrap();
         let p = &out.data[..4];
         assert!(p[0] < 128, "R should decrease");
         assert_eq!(p[1], 128, "G should be unchanged");
@@ -115,7 +125,9 @@ mod tests {
     #[test]
     fn positive_tint_lowers_green() {
         let src = grey(128);
-        let out = WhiteBalanceOp::new(0.0, 0.5).apply(src.deep_clone()).unwrap();
+        let out = WhiteBalanceOp::new(0.0, 0.5)
+            .apply(src.deep_clone())
+            .unwrap();
         let p = &out.data[..4];
         assert_eq!(p[0], 128, "R unchanged");
         assert!(p[1] < 128, "G should decrease (magenta shift)");
@@ -126,7 +138,9 @@ mod tests {
     fn black_stays_black() {
         // Multiplicative scale must leave pure black untouched.
         let src = grey(0);
-        let out = WhiteBalanceOp::new(1.0, 1.0).apply(src.deep_clone()).unwrap();
+        let out = WhiteBalanceOp::new(1.0, 1.0)
+            .apply(src.deep_clone())
+            .unwrap();
         out.data.chunks(4).for_each(|p| {
             assert_eq!(p[0], 0);
             assert_eq!(p[1], 0);
@@ -143,7 +157,9 @@ mod tests {
             p[2] = 128;
             p[3] = 99;
         });
-        let out = WhiteBalanceOp::new(0.5, 0.3).apply(src.deep_clone()).unwrap();
+        let out = WhiteBalanceOp::new(0.5, 0.3)
+            .apply(src.deep_clone())
+            .unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 99));
     }
 }

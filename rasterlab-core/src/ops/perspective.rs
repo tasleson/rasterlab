@@ -197,6 +197,10 @@ impl Operation for PerspectiveOp {
         "perspective"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         if self.is_identity() {
             return Ok(image);

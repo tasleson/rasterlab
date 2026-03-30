@@ -33,6 +33,10 @@ impl Operation for FlipOp {
         "flip"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let w = image.width as usize;
         let h = image.height as usize;

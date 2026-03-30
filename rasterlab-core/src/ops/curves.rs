@@ -118,6 +118,10 @@ impl Operation for CurvesOp {
         "curves"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let lut = Self::build_lut(&self.points);
 

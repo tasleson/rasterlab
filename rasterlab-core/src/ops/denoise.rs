@@ -51,6 +51,10 @@ impl Operation for DenoiseOp {
         "denoise"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         let w = image.width as usize;
         let h = image.height as usize;

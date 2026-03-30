@@ -54,6 +54,10 @@ impl Operation for LevelsOp {
         "levels"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let lut = self.build_lut();
 

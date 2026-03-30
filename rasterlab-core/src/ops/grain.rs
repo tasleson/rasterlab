@@ -60,6 +60,10 @@ impl Operation for GrainOp {
         "grain"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let w = image.width as usize;
         let seed = self.seed;

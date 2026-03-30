@@ -87,6 +87,10 @@ impl Operation for HslPanelOp {
         "hsl_panel"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.is_identity() {
             return Ok(image);
@@ -243,9 +247,7 @@ mod tests {
         });
         let mut sat = [0.0f32; 8];
         sat[0] = 0.5; // boost reds saturation
-        let out = HslPanelOp::new([0.0; 8], sat, [0.0; 8])
-            .apply(src)
-            .unwrap();
+        let out = HslPanelOp::new([0.0; 8], sat, [0.0; 8]).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 77));
     }
 

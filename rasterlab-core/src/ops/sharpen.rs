@@ -54,6 +54,10 @@ impl Operation for SharpenOp {
         "sharpen"
     }
 
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         if self.strength <= 0.0 {
             return Ok(image);
