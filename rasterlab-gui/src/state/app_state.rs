@@ -1681,9 +1681,7 @@ fn render_in_thread(
         let w = vp_w.min(current.width.saturating_sub(x)).max(1);
         let h = vp_h.min(current.height.saturating_sub(y)).max(1);
 
-        let crop = CropOp::new(x, y, w, h)
-            .apply(current.as_ref().deep_clone())
-            .map_err(|e| format!("Viewport crop: {}", e))?;
+        let crop = extract_region(current.as_ref(), x, y, w, h);
         let op: Box<dyn Operation> = serde_json::from_value(json.clone())
             .map_err(|e| format!("Deserialise preview op: {}", e))?;
         let processed = op
@@ -1738,13 +1736,14 @@ fn render_in_thread(
             let sh = ((vp_h as f32 * scale).ceil() as u32)
                 .min(current.height.saturating_sub(sy))
                 .max(1);
-            let crop = CropOp::new(sx, sy, sw, sh)
-                .apply(current.as_ref().deep_clone())
-                .map_err(|e| format!("Viewport crop: {}", e))?;
+            let crop = extract_region(current.as_ref(), sx, sy, sw, sh);
             let processed = op
                 .apply(crop)
                 .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
-            let mut base = current.as_ref().deep_clone();
+            let mut base = match Arc::try_unwrap(current) {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
             blit_region(&mut base, &processed, sx, sy);
             current = Arc::new(base);
         } else {
@@ -1761,6 +1760,25 @@ fn render_in_thread(
 
     let hist = HistogramData::compute(current.as_ref());
     Ok((current, hist, intermediates, None))
+}
+
+/// Extract a rectangular region from `src` into a new Image without cloning
+/// the full source buffer.  Only `w × h × 4` bytes are read and written,
+/// compared with `src_w × src_h × 4` bytes for a deep_clone + CropOp.
+fn extract_region(src: &Image, x: u32, y: u32, w: u32, h: u32) -> Image {
+    use rayon::prelude::*;
+    let mut out = Image::new(w, h);
+    let src_stride = src.width as usize * 4;
+    let x_off = x as usize * 4;
+    let row_bytes = w as usize * 4;
+    out.data
+        .par_chunks_mut(row_bytes)
+        .enumerate()
+        .for_each(|(dst_y, dst_row)| {
+            let src_start = (y as usize + dst_y) * src_stride + x_off;
+            dst_row.copy_from_slice(&src.data[src_start..src_start + row_bytes]);
+        });
+    out
 }
 
 /// Copy `src` into `dst` at pixel offset `(x, y)`.  Caller must ensure the
