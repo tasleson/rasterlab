@@ -40,9 +40,9 @@ impl HistogramData {
                 acc.0[r] += 1;
                 acc.1[g] += 1;
                 acc.2[b] += 1;
-                let l = (0.2126 * pixel[0] as f64
-                    + 0.7152 * pixel[1] as f64
-                    + 0.0722 * pixel[2] as f64)
+                let l = (0.2126_f32 * pixel[0] as f32
+                    + 0.7152_f32 * pixel[1] as f32
+                    + 0.0722_f32 * pixel[2] as f32)
                     .round() as usize;
                 acc.3[l.min(255)] += 1;
                 acc
