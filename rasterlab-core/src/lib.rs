@@ -38,6 +38,7 @@ pub mod ops;
 pub mod pipeline;
 pub mod plugin_loader;
 pub mod project;
+pub mod render_cache;
 pub mod traits;
 
 // Convenience re-exports
