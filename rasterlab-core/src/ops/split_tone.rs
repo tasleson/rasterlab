@@ -89,31 +89,39 @@ impl Operation for SplitToneOp {
         // -1 toward shadows (luma 0.0). We bias the luma value before weighting.
         let balance = self.balance * 0.5; // scale to keep effect subtle
 
-        image.data.par_chunks_mut(4).for_each(|p| {
-            let r = p[0] as f32 / 255.0;
-            let g = p[1] as f32 / 255.0;
-            let b = p[2] as f32 / 255.0;
+        // Row-level parallelism: each rayon task owns one full row.  The inner
+        // per-pixel loop is a tight, straight-line sequence visible to the
+        // compiler, allowing LLVM to auto-vectorize it with NEON/AVX.
+        // par_chunks_mut(4) calls the closure once per pixel, hiding the loop
+        // body from the vectorizer behind rayon's trait dispatch boundary.
+        let row_stride = image.width as usize * 4;
+        image.data.par_chunks_mut(row_stride).for_each(|row| {
+            for p in row.chunks_exact_mut(4) {
+                let r = p[0] as f32 / 255.0;
+                let g = p[1] as f32 / 255.0;
+                let b = p[2] as f32 / 255.0;
 
-            // Perceptual luminance (BT.709).
-            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            // Bias luma by balance so the crossover shifts.
-            let luma_b = (luma + balance).clamp(0.0, 1.0);
+                // Perceptual luminance (BT.709).
+                let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                // Bias luma by balance so the crossover shifts.
+                let luma_b = (luma + balance).clamp(0.0, 1.0);
 
-            // Shadow weight: strong in dark areas, falls off toward highlights.
-            // Highlight weight: strong in bright areas, falls off toward shadows.
-            // Using squared falloff gives a smoother, more photographic feel.
-            let shadow_w = (1.0 - luma_b).powi(2) * shadow_sat;
-            let highlight_w = luma_b.powi(2) * highlight_sat;
+                // Shadow weight: strong in dark areas, falls off toward highlights.
+                // Highlight weight: strong in bright areas, falls off toward shadows.
+                // Using squared falloff gives a smoother, more photographic feel.
+                let shadow_w = (1.0 - luma_b) * (1.0 - luma_b) * shadow_sat;
+                let highlight_w = luma_b * luma_b * highlight_sat;
 
-            // Lerp toward each tint colour, clamped to [0, 1].
-            let nr = (r + (sh_r - r) * shadow_w + (hi_r - r) * highlight_w).clamp(0.0, 1.0);
-            let ng = (g + (sh_g - g) * shadow_w + (hi_g - g) * highlight_w).clamp(0.0, 1.0);
-            let nb = (b + (sh_b - b) * shadow_w + (hi_b - b) * highlight_w).clamp(0.0, 1.0);
+                // Lerp toward each tint colour, clamped to [0, 1].
+                let nr = (r + (sh_r - r) * shadow_w + (hi_r - r) * highlight_w).clamp(0.0, 1.0);
+                let ng = (g + (sh_g - g) * shadow_w + (hi_g - g) * highlight_w).clamp(0.0, 1.0);
+                let nb = (b + (sh_b - b) * shadow_w + (hi_b - b) * highlight_w).clamp(0.0, 1.0);
 
-            p[0] = (nr * 255.0).round() as u8;
-            p[1] = (ng * 255.0).round() as u8;
-            p[2] = (nb * 255.0).round() as u8;
-            // alpha unchanged
+                p[0] = (nr * 255.0).round() as u8;
+                p[1] = (ng * 255.0).round() as u8;
+                p[2] = (nb * 255.0).round() as u8;
+                // alpha unchanged
+            }
         });
 
         Ok(image)

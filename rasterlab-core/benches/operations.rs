@@ -3,7 +3,10 @@ use std::sync::OnceLock;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use rasterlab_core::{
     image::Image,
-    ops::{BlackAndWhiteOp, CropOp, RotateOp, SharpenOp, histogram::HistogramData},
+    ops::{
+        BlackAndWhiteOp, CropOp, RotateOp, SharpenOp, histogram::HistogramData,
+        split_tone::SplitToneOp,
+    },
     traits::operation::Operation,
 };
 
@@ -27,6 +30,7 @@ fn make_image(w: u32, h: u32) -> Image {
 }
 
 fn bench_crop(c: &mut Criterion) {
+    init_rayon();
     let img = make_image(4000, 3000);
     c.bench_function("crop 4000x3000 → 2000x1500", |b| {
         b.iter_batched(
@@ -38,6 +42,7 @@ fn bench_crop(c: &mut Criterion) {
 }
 
 fn bench_rotate_90(c: &mut Criterion) {
+    init_rayon();
     let img = make_image(4000, 3000);
     c.bench_function("rotate_cw90 4000x3000", |b| {
         b.iter_batched(
@@ -49,6 +54,7 @@ fn bench_rotate_90(c: &mut Criterion) {
 }
 
 fn bench_rotate_arbitrary(c: &mut Criterion) {
+    init_rayon();
     let img = make_image(1000, 1000);
     for deg in [15.0_f32, 45.0, 90.0] {
         c.bench_with_input(
@@ -66,6 +72,7 @@ fn bench_rotate_arbitrary(c: &mut Criterion) {
 }
 
 fn bench_sharpen(c: &mut Criterion) {
+    init_rayon();
     let img = make_image(4000, 3000);
     c.bench_function("sharpen 4000x3000 strength=1.0", |b| {
         b.iter_batched(
@@ -77,11 +84,24 @@ fn bench_sharpen(c: &mut Criterion) {
 }
 
 fn bench_bw(c: &mut Criterion) {
+    init_rayon();
     let img = make_image(4000, 3000);
     c.bench_function("bw_luminance 4000x3000", |b| {
         b.iter_batched(
             || img.deep_clone(),
             |i| BlackAndWhiteOp::luminance().apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
+    });
+}
+
+fn bench_split_tone(c: &mut Criterion) {
+    init_rayon();
+    let img = make_image(4000, 3000);
+    c.bench_function("split_tone 4000x3000", |b| {
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| SplitToneOp::default().apply(i).unwrap(),
             BatchSize::LargeInput,
         )
     });
@@ -103,6 +123,7 @@ fn bench_histogram(c: &mut Criterion) {
 /// Apple Silicon, so any "optimisation" that touches this code path must
 /// show a regression here before it ships.
 fn bench_image_to_egui(c: &mut Criterion) {
+    init_rayon();
     use criterion::black_box;
     let img = make_image(4000, 3000);
     c.bench_function("image_to_egui 4000x3000", |b| {
@@ -125,6 +146,7 @@ criterion_group!(
     bench_rotate_arbitrary,
     bench_sharpen,
     bench_bw,
+    bench_split_tone,
     bench_histogram,
     bench_image_to_egui,
 );
