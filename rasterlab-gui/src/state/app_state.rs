@@ -1769,15 +1769,17 @@ fn blit_region(dst: &mut Image, src: &Image, x: u32, y: u32) {
     use rayon::prelude::*;
     let row_bytes = src.width as usize * 4;
     let dst_stride = dst.width as usize * 4;
-    dst.data
+    // Slice only the rows that receive data — avoids iterating the full image
+    // height and filtering in rayon (which still schedules tasks for empty rows).
+    let start = y as usize * dst_stride;
+    let end = start + src.height as usize * dst_stride;
+    let x_off = x as usize * 4;
+    dst.data[start..end]
         .par_chunks_mut(dst_stride)
         .enumerate()
-        .filter(|(row, _)| *row >= y as usize && *row < (y + src.height) as usize)
-        .for_each(|(row, dst_row)| {
-            let src_row = row - y as usize;
-            let dst_off = x as usize * 4;
+        .for_each(|(src_row, dst_row)| {
             let src_off = src_row * row_bytes;
-            dst_row[dst_off..dst_off + row_bytes]
+            dst_row[x_off..x_off + row_bytes]
                 .copy_from_slice(&src.data[src_off..src_off + row_bytes]);
         });
 }
