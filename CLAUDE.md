@@ -1,5 +1,15 @@
 # RasterLab — development guidance
 
+## Pre-commit checklist
+
+Before every commit run:
+
+```bash
+cargo fmt
+cargo clippy
+cargo bench
+```
+
 ## Performance rules
 
 ### Always benchmark rayon changes before committing
