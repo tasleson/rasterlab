@@ -10,7 +10,7 @@ We're here to find out!  This is still a work in progress!
 
 RasterLab is a non-destructive RAW image editor written in Rust, built almost entirely by Claude Code as an experiment in AI-assisted software development. It has a real-time preview pipeline, intermediate result caching, parallelized image processing, undo/redo, a histogram panel, and support for JPEG, PNG, and Nikon NEF files.
 
-Currently we're a couple days in, and we've burned 19% of our weekly usage.
+See change log below for status.
 
 ## Features
 
@@ -61,7 +61,7 @@ cargo build --release
 cargo run --release -p rasterlab-gui
 ```
 
-It's still not as fast as I would like.  Claude thinks it's fast, but I disagree.
+It's still not as fast as I would like.  ~~Claude thinks it's fast, but I disagree.~~ It's much faster, but would like it just a little bit more :-) 
 
 ## Architecture
 
@@ -99,6 +99,16 @@ Works. Suspiciously well for what we've done so far.  I'm interested in seeing w
 The plugin system exists and has an example. Nobody has written a plugin. The arbitrary rotation is slow on large images because bilinear interpolation has terrible cache locality and nobody has fixed it.
 
 # Changelog
+
+## 2026-03-30 (Week 1 is a wrap, we used 82% of our usage)
+
+### Usage
+- I didn't allocate enough dedicated time to leverage Claude effectively, so some resources went unused.
+  
+### Perf focus
+
+- There's a performance-focused branch pending merge that needs cleanup. We've reduced latency from ~800ms to ~50ms for computing and displaying user-requested edits. Half the improvement came from hardware-specific optimizations; the rest from bug fixes, particularly in histogram generation. The goal is ≤42ms to achieve virtually real-time feel.
+
 
 ## 2026-03-27 (46% of our first week usage)
 
