@@ -258,6 +258,28 @@ impl EditPipeline {
         (0, Arc::clone(&self.source))
     }
 
+    /// Like [`best_cached_start`] but vacates the cache slot so the caller
+    /// receives the sole `Arc` reference (refcount = 1).
+    ///
+    /// When the best starting point is a step-cache entry this lets the
+    /// render thread take exclusive ownership — `Arc::try_unwrap` will then
+    /// succeed and the first operation in the render loop avoids a 136 MiB
+    /// `deep_clone`.  The vacated slot is refilled by [`store_steps`] once
+    /// the render completes, so cache coherency is maintained as long as
+    /// rendering always succeeds or the pipeline is mutated (which resets
+    /// the cache anyway).
+    ///
+    /// Falls back to `Arc::clone(&self.source)` when there is no cache entry;
+    /// in that case the clone in the render thread remains unavoidable.
+    pub fn take_start_for_render(&mut self) -> (usize, Arc<Image>) {
+        for i in (0..self.cursor).rev() {
+            if let Some(slot @ Some(_)) = self.step_cache.get_mut(i) {
+                return (i + 1, slot.take().unwrap());
+            }
+        }
+        (0, Arc::clone(&self.source))
+    }
+
     /// Store a batch of intermediate results produced by the background render thread.
     ///
     /// `start_index` is the op position where the render began.  `images[k]`

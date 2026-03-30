@@ -1340,9 +1340,9 @@ impl AppState {
     /// preview op is active.  Used internally to follow up a preview render
     /// with a full-resolution render.
     fn request_render_inner(&mut self, force_full_res: bool) {
-        let Some(pipeline) = &self.pipeline else {
+        if self.pipeline.is_none() {
             return;
-        };
+        }
         if self.loading {
             // Another render is in-flight; mark dirty so we re-render after it.
             self.needs_rerender = true;
@@ -1376,24 +1376,38 @@ impl AppState {
             None
         };
 
-        // Find the best cached starting point — may skip all committed ops
-        // if the full pipeline result is already in the cache.
-        let (start_idx, start_image) = pipeline.best_cached_start();
-        let cache_gen = pipeline.step_cache_gen();
+        // Collect all pipeline-derived data in a scoped borrow so the borrow
+        // is dropped before we call self methods (e.g. make_bw_op) below.
+        let (start_idx, cache_gen, committed_ops, pipeline_cursor) = {
+            let pipeline = self.pipeline.as_ref().unwrap();
+            let (si, _) = pipeline.best_cached_start();
+            let cg = pipeline.step_cache_gen();
+            let co: Vec<Option<serde_json::Value>> = pipeline.ops()[si..pipeline.cursor()]
+                .iter()
+                .map(|e| {
+                    if e.enabled {
+                        serde_json::to_value(&e.operation).ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (si, cg, co, pipeline.cursor())
+        };
 
-        // Committed ops from start_idx to cursor.  `None` entries represent
-        // disabled ops (image passes through unchanged).
-        let committed_ops: Vec<Option<serde_json::Value>> = pipeline.ops()
-            [start_idx..pipeline.cursor()]
-            .iter()
-            .map(|e| {
-                if e.enabled {
-                    serde_json::to_value(&e.operation).ok()
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Obtain the starting image for the render thread.
+        //
+        // For full-resolution renders we vacate the cache slot so the render
+        // thread receives the sole Arc reference (refcount = 1).  This lets
+        // Arc::try_unwrap succeed in the render loop, avoiding a 136 MiB
+        // deep_clone before the first operation runs.  Preview renders use
+        // the read-only path because they downsample first and never write
+        // back to the step cache.
+        let start_image = if is_preview {
+            self.pipeline.as_ref().unwrap().best_cached_start().1
+        } else {
+            self.pipeline.as_mut().unwrap().take_start_for_render().1
+        };
 
         // Preview op — applied on top of committed result but NOT cached.
         // Levels takes priority if both previews are somehow active simultaneously.
@@ -1500,7 +1514,7 @@ impl AppState {
         // Use the overlay path when the entire pipeline is cached (committed_ops
         // is empty) and we have a known viewport — run the preview op only on the
         // visible pixels at full resolution, return as an overlay.
-        let all_cached = start_idx >= pipeline.cursor();
+        let all_cached = start_idx >= pipeline_cursor;
         let overlay_viewport = if is_preview && all_cached {
             self.preview_viewport
         } else {
@@ -1649,19 +1663,17 @@ fn render_in_thread(
     if let (Some(json), Some([vp_x, vp_y, vp_w, vp_h])) = (&preview_op, overlay_viewport) {
         let mut current = start_image;
         // Run committed ops (should be empty — all_cached — but be safe).
-        for op_json in &committed_ops {
-            if let Some(j) = op_json {
-                let op: Box<dyn Operation> =
-                    serde_json::from_value(j.clone()).map_err(|e| format!("Deserialise op: {}", e))?;
-                let img = match Arc::try_unwrap(current) {
-                    Ok(img) => img,
-                    Err(a) => a.as_ref().deep_clone(),
-                };
-                current = Arc::new(
-                    op.apply(img)
-                        .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
-                );
-            }
+        for j in committed_ops.iter().flatten() {
+            let op: Box<dyn Operation> =
+                serde_json::from_value(j.clone()).map_err(|e| format!("Deserialise op: {}", e))?;
+            let img = match Arc::try_unwrap(current) {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
+            current = Arc::new(
+                op.apply(img)
+                    .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
+            );
         }
         // Clamp viewport to image bounds.
         let x = vp_x.min(current.width.saturating_sub(1));
@@ -1672,8 +1684,8 @@ fn render_in_thread(
         let crop = CropOp::new(x, y, w, h)
             .apply(current.as_ref().deep_clone())
             .map_err(|e| format!("Viewport crop: {}", e))?;
-        let op: Box<dyn Operation> =
-            serde_json::from_value(json.clone()).map_err(|e| format!("Deserialise preview op: {}", e))?;
+        let op: Box<dyn Operation> = serde_json::from_value(json.clone())
+            .map_err(|e| format!("Deserialise preview op: {}", e))?;
         let processed = op
             .apply(crop)
             .map_err(|e| format!("Op '{}' (overlay) failed: {}", op.name(), e))?;
