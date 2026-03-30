@@ -32,21 +32,49 @@ impl HistogramData {
 
         let zero: fn() -> Acc = || ([0u64; 256], [0u64; 256], [0u64; 256], [0u64; 256]);
 
+        // Use large per-fold chunks so each fold call processes many pixels
+        // with a single 8 KiB accumulator kept hot in L1 cache.  With the old
+        // par_chunks(4) pattern every fold call moved the 8 KiB accumulator by
+        // value 8.95 M times (once per pixel), producing ~143 GB of stack
+        // traffic and making histogram the dominant render cost at ~400 ms.
+        // 4096 pixels per chunk → ~8 750 fold calls total.
+        const PIXELS_PER_CHUNK: usize = 4096;
+
         let (red, green, blue, luma) = image
             .data
-            .par_chunks(4)
-            .fold(zero, |mut acc, pixel| {
-                let (r, g, b) = (pixel[0] as usize, pixel[1] as usize, pixel[2] as usize);
-                acc.0[r] += 1;
-                acc.1[g] += 1;
-                acc.2[b] += 1;
-                let l = (0.2126_f32 * pixel[0] as f32
-                    + 0.7152_f32 * pixel[1] as f32
-                    + 0.0722_f32 * pixel[2] as f32)
-                    .round() as usize;
-                acc.3[l.min(255)] += 1;
+            .par_chunks_exact(4 * PIXELS_PER_CHUNK)
+            .fold(zero, |mut acc, chunk| {
+                for pixel in chunk.chunks_exact(4) {
+                    let (r, g, b) = (pixel[0] as usize, pixel[1] as usize, pixel[2] as usize);
+                    acc.0[r] += 1;
+                    acc.1[g] += 1;
+                    acc.2[b] += 1;
+                    let l = (0.2126_f32 * pixel[0] as f32
+                        + 0.7152_f32 * pixel[1] as f32
+                        + 0.0722_f32 * pixel[2] as f32)
+                        .round() as usize;
+                    acc.3[l.min(255)] += 1;
+                }
                 acc
             })
+            // Handle any trailing pixels that don't fill a complete chunk.
+            .chain(rayon::iter::once({
+                let mut acc = zero();
+                let remainder =
+                    &image.data[image.data.len() - image.data.len() % (4 * PIXELS_PER_CHUNK)..];
+                for pixel in remainder.chunks_exact(4) {
+                    let (r, g, b) = (pixel[0] as usize, pixel[1] as usize, pixel[2] as usize);
+                    acc.0[r] += 1;
+                    acc.1[g] += 1;
+                    acc.2[b] += 1;
+                    let l = (0.2126_f32 * pixel[0] as f32
+                        + 0.7152_f32 * pixel[1] as f32
+                        + 0.0722_f32 * pixel[2] as f32)
+                        .round() as usize;
+                    acc.3[l.min(255)] += 1;
+                }
+                acc
+            }))
             .reduce(zero, |mut a, b| {
                 for i in 0..256 {
                     a.0[i] += b.0[i];
