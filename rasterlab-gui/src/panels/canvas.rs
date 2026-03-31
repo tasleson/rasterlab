@@ -185,7 +185,11 @@ impl CanvasState {
                 self.pan_offset += i.pointer.delta();
             }
             let zoom_factor = i.zoom_delta();
-            let over = i.pointer.hover_pos().map(|p| canvas_rect.contains(p)).unwrap_or(false);
+            let over = i
+                .pointer
+                .hover_pos()
+                .map(|p| canvas_rect.contains(p))
+                .unwrap_or(false);
             if zoom_factor != 1.0 && over {
                 let old_zoom = self.zoom;
                 self.zoom = (self.zoom * zoom_factor).clamp(0.05, 32.0);

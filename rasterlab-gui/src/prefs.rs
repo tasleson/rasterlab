@@ -41,6 +41,17 @@ pub struct Prefs {
     /// User's preferred theme.  Defaults to `System` (follow OS setting).
     #[serde(default)]
     pub theme: ThemePref,
+    /// Use the native OS file dialog instead of the built-in egui one.
+    /// The built-in dialog works over waypipe and other network display
+    /// protocols where the native dialog is invisible.
+    /// Defaults to `true` (native) since that is the better experience on
+    /// local desktops.
+    #[serde(default = "default_true")]
+    pub use_native_dialogs: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Prefs {

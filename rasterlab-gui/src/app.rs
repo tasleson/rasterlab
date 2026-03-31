@@ -1,11 +1,11 @@
 //! Main application struct that wires together all panels.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
 
 use egui::{Context, Key, Modifiers};
 
 use crate::{
+    file_chooser::{DialogKind, FileChooser},
     panels::{canvas::CanvasState, edit_stack, histogram_panel, tools},
     state::AppState,
 };
@@ -13,21 +13,8 @@ use crate::{
 pub struct RasterLabApp {
     state: AppState,
     canvas: CanvasState,
-    /// Receives the path chosen by an in-progress open dialog (None = cancelled).
     #[cfg(not(target_arch = "wasm32"))]
-    open_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
-    /// Receives the path chosen by an in-progress Export dialog.
-    #[cfg(not(target_arch = "wasm32"))]
-    export_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
-    /// Receives the path chosen by an in-progress Save As project dialog.
-    #[cfg(not(target_arch = "wasm32"))]
-    project_save_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
-    /// Receives the path chosen by an in-progress Export Edit Stack dialog.
-    #[cfg(not(target_arch = "wasm32"))]
-    json_export_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
-    /// Receives the path chosen by an in-progress Load LUT dialog.
-    #[cfg(not(target_arch = "wasm32"))]
-    lut_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    chooser: FileChooser,
 }
 
 impl RasterLabApp {
@@ -44,19 +31,13 @@ impl RasterLabApp {
         if let Some(path) = initial_file {
             state.open_file(path);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let use_native = state.prefs.use_native_dialogs;
         Self {
             state,
             canvas: CanvasState::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            open_rx: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            export_rx: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            project_save_rx: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            json_export_rx: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            lut_rx: None,
+            chooser: FileChooser::new(use_native),
         }
     }
 
@@ -70,7 +51,7 @@ impl RasterLabApp {
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::O) {
-                self.open_file_dialog(ctx);
+                self.chooser.open_image(ctx);
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::S) {
@@ -78,54 +59,12 @@ impl RasterLabApp {
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::S) {
-                self.project_save_dialog(ctx);
+                self.chooser.save_project(ctx);
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::E) {
-                self.export_file_dialog(ctx);
+                self.chooser.export_image(ctx);
             }
-        });
-    }
-
-    /// Spawn the open dialog on a background thread so the event loop keeps running.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn open_file_dialog(&mut self, ctx: &Context) {
-        if self.open_rx.is_some() {
-            return;
-        } // dialog already open
-        let (tx, rx) = mpsc::channel();
-        self.open_rx = Some(rx);
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let path = rfd::FileDialog::new()
-                .add_filter("All supported", &["rlab", "jpg", "jpeg", "png", "nef"])
-                .add_filter("RasterLab Project", &["rlab"])
-                .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
-                .add_filter("JPEG", &["jpg", "jpeg"])
-                .add_filter("PNG", &["png"])
-                .add_filter("NEF (Nikon RAW)", &["nef"])
-                .pick_file();
-            let _ = tx.send(path);
-            ctx.request_repaint();
-        });
-    }
-
-    /// Spawn the Export dialog (save rendered image as JPEG/PNG) on a background thread.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn export_file_dialog(&mut self, ctx: &Context) {
-        if self.export_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.export_rx = Some(rx);
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let path = rfd::FileDialog::new()
-                .add_filter("JPEG", &["jpg", "jpeg"])
-                .add_filter("PNG", &["png"])
-                .save_file();
-            let _ = tx.send(path);
-            ctx.request_repaint();
         });
     }
 
@@ -135,106 +74,21 @@ impl RasterLabApp {
         if let Some(path) = self.state.project_path.clone() {
             self.state.save_project(path);
         } else {
-            self.project_save_dialog(ctx);
+            self.chooser.save_project(ctx);
         }
     }
 
-    /// Open a Save As dialog for writing a `.rlab` project file.
+    /// Poll the active file chooser and dispatch any completed result.
     #[cfg(not(target_arch = "wasm32"))]
-    fn project_save_dialog(&mut self, ctx: &Context) {
-        if self.project_save_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.project_save_rx = Some(rx);
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let path = rfd::FileDialog::new()
-                .add_filter("RasterLab Project", &["rlab"])
-                .save_file();
-            let _ = tx.send(path);
-            ctx.request_repaint();
-        });
-    }
-
-    /// Open a save dialog for exporting the edit stack as a JSON file.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn export_edit_stack_dialog(&mut self, ctx: &Context) {
-        if self.json_export_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.json_export_rx = Some(rx);
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let path = rfd::FileDialog::new()
-                .add_filter("JSON", &["json"])
-                .save_file();
-            let _ = tx.send(path);
-            ctx.request_repaint();
-        });
-    }
-
-    /// Spawn the Load LUT dialog on a background thread.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn lut_file_dialog(&mut self, ctx: &Context) {
-        if self.lut_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.lut_rx = Some(rx);
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let path = rfd::FileDialog::new()
-                .add_filter("CUBE LUT", &["cube"])
-                .pick_file();
-            let _ = tx.send(path);
-            ctx.request_repaint();
-        });
-    }
-
-    /// Poll dialog result channels and act on completed dialogs.
-    #[cfg(not(target_arch = "wasm32"))]
-    fn poll_dialogs(&mut self) {
-        if let Some(rx) = &self.open_rx
-            && let Ok(maybe_path) = rx.try_recv()
-        {
-            if let Some(path) = maybe_path {
-                self.state.open_file(path);
+    fn poll_dialogs(&mut self, ctx: &Context) {
+        if let Some((kind, path)) = self.chooser.update(ctx) {
+            match kind {
+                DialogKind::OpenFile => self.state.open_file(path),
+                DialogKind::ExportImage => self.state.save_file(path),
+                DialogKind::SaveProject => self.state.save_project(path),
+                DialogKind::ExportEditStack => self.state.export_edit_stack_json(path),
+                DialogKind::LoadLut => self.state.load_lut(path),
             }
-            self.open_rx = None;
-        }
-        if let Some(rx) = &self.export_rx
-            && let Ok(maybe_path) = rx.try_recv()
-        {
-            if let Some(path) = maybe_path {
-                self.state.save_file(path);
-            }
-            self.export_rx = None;
-        }
-        if let Some(rx) = &self.project_save_rx
-            && let Ok(maybe_path) = rx.try_recv()
-        {
-            if let Some(path) = maybe_path {
-                self.state.save_project(path);
-            }
-            self.project_save_rx = None;
-        }
-        if let Some(rx) = &self.json_export_rx
-            && let Ok(maybe_path) = rx.try_recv()
-        {
-            if let Some(path) = maybe_path {
-                self.state.export_edit_stack_json(path);
-            }
-            self.json_export_rx = None;
-        }
-        if let Some(rx) = &self.lut_rx
-            && let Ok(maybe_path) = rx.try_recv()
-        {
-            if let Some(path) = maybe_path {
-                self.state.load_lut(path);
-            }
-            self.lut_rx = None;
         }
     }
 }
@@ -257,11 +111,11 @@ impl eframe::App for RasterLabApp {
 
         self.state.poll_background();
         #[cfg(not(target_arch = "wasm32"))]
-        self.poll_dialogs();
+        self.poll_dialogs(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         if self.state.lut_dialog_requested {
             self.state.lut_dialog_requested = false;
-            self.lut_file_dialog(&ctx);
+            self.chooser.load_lut(&ctx);
         }
 
         self.handle_keyboard(&ctx);
@@ -290,7 +144,7 @@ impl eframe::App for RasterLabApp {
                     #[cfg(not(target_arch = "wasm32"))]
                     if ui.button("Open…  (Ctrl+O)").clicked() {
                         ui.close_kind(egui::UiKind::Menu);
-                        self.open_file_dialog(&ctx);
+                        self.chooser.open_image(&ctx);
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -314,7 +168,7 @@ impl eframe::App for RasterLabApp {
                                 .clicked()
                         {
                             ui.close_kind(egui::UiKind::Menu);
-                            self.project_save_dialog(&ctx);
+                            self.chooser.save_project(&ctx);
                         }
                         ui.separator();
                         if ui
@@ -325,7 +179,7 @@ impl eframe::App for RasterLabApp {
                             .clicked()
                         {
                             ui.close_kind(egui::UiKind::Menu);
-                            self.export_file_dialog(&ctx);
+                            self.chooser.export_image(&ctx);
                         }
                         if ui
                             .add_enabled(
@@ -335,7 +189,7 @@ impl eframe::App for RasterLabApp {
                             .clicked()
                         {
                             ui.close_kind(egui::UiKind::Menu);
-                            self.export_edit_stack_dialog(&ctx);
+                            self.chooser.export_edit_stack(&ctx);
                         }
                     }
                     ui.separator();
@@ -374,6 +228,28 @@ impl eframe::App for RasterLabApp {
                                 self.state.prefs.save();
                                 ui.close_kind(egui::UiKind::Menu);
                             }
+                        }
+                    });
+                    #[cfg(not(target_arch = "wasm32"))]
+                    ui.menu_button("File Dialogs", |ui| {
+                        let native = self.state.prefs.use_native_dialogs;
+                        if ui
+                            .selectable_label(native, "Native (system dialog)")
+                            .clicked()
+                        {
+                            self.state.prefs.use_native_dialogs = true;
+                            self.chooser.set_native(true);
+                            self.state.prefs.save();
+                            ui.close_kind(egui::UiKind::Menu);
+                        }
+                        if ui
+                            .selectable_label(!native, "Built-in  (works over waypipe)")
+                            .clicked()
+                        {
+                            self.state.prefs.use_native_dialogs = false;
+                            self.chooser.set_native(false);
+                            self.state.prefs.save();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                     });
                 });

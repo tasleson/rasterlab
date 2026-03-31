@@ -1,4 +1,6 @@
 mod app;
+#[cfg(not(target_arch = "wasm32"))]
+mod file_chooser;
 mod panels;
 mod prefs;
 mod state;
