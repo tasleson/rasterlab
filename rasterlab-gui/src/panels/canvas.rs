@@ -32,6 +32,12 @@ pub struct CanvasState {
     split_ratio: f32,
     /// True while the user is dragging the split divider.
     split_dragging: bool,
+    /// Semi-transparent mask preview overlay texture.
+    mask_overlay_texture: Option<TextureHandle>,
+    /// Hash of the mask params that produced the current overlay texture.
+    mask_overlay_hash: u64,
+    /// Drag-start position (normalised [0, 1] image coords) for interactive mask placement.
+    mask_drag_start: Option<Pos2>,
 }
 
 impl Default for CanvasState {
@@ -52,6 +58,9 @@ impl Default for CanvasState {
             before_hash: 0,
             split_ratio: 0.5,
             split_dragging: false,
+            mask_overlay_texture: None,
+            mask_overlay_hash: 0,
+            mask_drag_start: None,
         }
     }
 }
@@ -228,6 +237,42 @@ impl CanvasState {
                 ctrl_held,
                 over_canvas,
             );
+        }
+
+        // ── Mask overlay ──────────────────────────────────────────────────────
+        // Rendered at 256×256 and scaled to the image area so the user can see
+        // where the next masked Apply will take effect.
+        if state.mask_sel > 0 {
+            let mh = mask_params_hash(state);
+            if self.mask_overlay_texture.is_none() || mh != self.mask_overlay_hash {
+                self.mask_overlay_texture = Some(ui.ctx().load_texture(
+                    "mask_overlay",
+                    build_mask_preview(state, 256, 256),
+                    TextureOptions::LINEAR,
+                ));
+                self.mask_overlay_hash = mh;
+            }
+            if let Some(mol_tex) = &self.mask_overlay_texture {
+                // The overlay covers the image area in screen space.
+                let rs = state.rendered_scale;
+                let full_w = img_w as f32 / rs;
+                let full_h = img_h as f32 / rs;
+                let overlay_rect = Rect::from_min_size(
+                    image_tl,
+                    Vec2::new(full_w * self.zoom, full_h * self.zoom),
+                );
+                // Use a clipped painter so it stays inside the canvas area.
+                let clipped = ui.painter().with_clip_rect(canvas_rect);
+                clipped.image(
+                    mol_tex.id(),
+                    overlay_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        } else {
+            self.mask_overlay_texture = None;
+            self.mask_overlay_hash = 0;
         }
 
         // ── Zoom controls (bottom strip) ─────────────────────────────────────
@@ -416,7 +461,7 @@ impl CanvasState {
         resp: &egui::Response,
         painter: &egui::Painter,
         state: &mut AppState,
-        _canvas_rect: Rect,
+        canvas_rect: Rect,
         image_tl: Pos2,
         display_size: Vec2,
         tex_id: egui::TextureId,
@@ -427,7 +472,9 @@ impl CanvasState {
         over_canvas: bool,
     ) {
         // ── Cursor icon ──────────────────────────────────────────────────────
-        if middle_down {
+        if state.mask_sel > 0 && over_canvas {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        } else if middle_down {
             ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
         } else if ctrl_held && over_canvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
@@ -470,50 +517,91 @@ impl CanvasState {
             self.overlay_last_hash = 0;
         }
 
-        // ── Crop selection (primary drag only) ───────────────────────────────
-        if resp.drag_started_by(egui::PointerButton::Primary) {
-            self.crop_start = resp
-                .interact_pointer_pos()
-                .map(|p| screen_to_image(p, image_tl, self.zoom));
-            self.crop_end = self.crop_start;
-        }
-        if resp.dragged_by(egui::PointerButton::Primary) {
-            self.crop_end = resp
-                .interact_pointer_pos()
-                .map(|p| screen_to_image(p, image_tl, self.zoom));
-        }
-        if resp.drag_stopped_by(egui::PointerButton::Primary)
-            && let (Some(start), Some(end)) = (self.crop_start, self.crop_end)
-        {
-            let (x, y, w, h) = image_to_crop(start, end, img_w, img_h);
-            state.crop_x = x;
-            state.crop_y = y;
-            state.crop_w = w;
-            state.crop_h = h;
-        }
-
-        // ── Clear selection: right-click or Escape ───────────────────────────
-        if resp.secondary_clicked() {
+        if state.mask_sel > 0 {
+            // ── Mask drag: click-drag on canvas to define the mask ────────────
+            // Clear any stale crop selection while mask mode is active.
             self.crop_start = None;
             self.crop_end = None;
-        }
-        ui.input(|i| {
-            if i.key_pressed(egui::Key::Escape) {
+
+            let (ptr_pos, primary_pressed, primary_down) = ui.input(|i| {
+                (
+                    i.pointer.hover_pos(),
+                    i.pointer.button_pressed(egui::PointerButton::Primary),
+                    i.pointer.button_down(egui::PointerButton::Primary),
+                )
+            });
+
+            if primary_pressed
+                && over_canvas
+                && let Some(p) = ptr_pos
+            {
+                self.mask_drag_start = Some(screen_to_norm(p, image_tl, display_size));
+            }
+            if primary_down {
+                if let (Some(start), Some(p)) = (self.mask_drag_start, ptr_pos) {
+                    let end = screen_to_norm(p, image_tl, display_size);
+                    match state.mask_sel {
+                        1 => update_linear_mask(state, start, end),
+                        2 => update_radial_mask(state, start, end),
+                        _ => {}
+                    }
+                }
+            } else {
+                self.mask_drag_start = None;
+            }
+
+            // ── Draw mask handles ────────────────────────────────────────────
+            match state.mask_sel {
+                1 => draw_linear_mask_handles(painter, state, image_tl, display_size, canvas_rect),
+                2 => draw_radial_mask_handles(painter, state, image_tl, display_size, canvas_rect),
+                _ => {}
+            }
+        } else {
+            // ── Crop selection (primary drag only) ───────────────────────────
+            if resp.drag_started_by(egui::PointerButton::Primary) {
+                self.crop_start = resp
+                    .interact_pointer_pos()
+                    .map(|p| screen_to_image(p, image_tl, self.zoom));
+                self.crop_end = self.crop_start;
+            }
+            if resp.dragged_by(egui::PointerButton::Primary) {
+                self.crop_end = resp
+                    .interact_pointer_pos()
+                    .map(|p| screen_to_image(p, image_tl, self.zoom));
+            }
+            if resp.drag_stopped_by(egui::PointerButton::Primary)
+                && let (Some(start), Some(end)) = (self.crop_start, self.crop_end)
+            {
+                let (x, y, w, h) = image_to_crop(start, end, img_w, img_h);
+                state.crop_x = x;
+                state.crop_y = y;
+                state.crop_w = w;
+                state.crop_h = h;
+            }
+
+            // ── Clear selection: right-click or Escape ───────────────────────
+            if resp.secondary_clicked() {
                 self.crop_start = None;
                 self.crop_end = None;
             }
-        });
+            ui.input(|i| {
+                if i.key_pressed(egui::Key::Escape) {
+                    self.crop_start = None;
+                    self.crop_end = None;
+                }
+            });
 
-        // ── Marching-ants overlay ─────────────────────────────────────────────
-        if let (Some(start), Some(end)) = (self.crop_start, self.crop_end) {
-            let sel = Rect::from_two_pos(
-                image_to_screen(start, image_tl, self.zoom),
-                image_to_screen(end, image_tl, self.zoom),
-            );
-            if sel.width() > 2.0 && sel.height() > 2.0 {
-                let time = ui.input(|i| i.time) as f32;
-                draw_marching_ants(painter, sel, time);
-                ui.ctx().request_repaint_after(Duration::from_millis(16));
+            // ── Marching-ants overlay ─────────────────────────────────────────
+            if let (Some(start), Some(end)) = (self.crop_start, self.crop_end) {
+                let sel = Rect::from_two_pos(
+                    image_to_screen(start, image_tl, self.zoom),
+                    image_to_screen(end, image_tl, self.zoom),
+                );
+                if sel.width() > 2.0 && sel.height() > 2.0 {
+                    let time = ui.input(|i| i.time) as f32;
+                    draw_marching_ants(painter, sel, time);
+                    ui.ctx().request_repaint_after(Duration::from_millis(16));
+                }
             }
         }
     }
@@ -603,6 +691,189 @@ fn dashed_segment(
             painter.line_segment([a + dir * s, a + dir * e], stroke);
         }
         t += period;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Normalised ↔ screen helpers and interactive mask placement
+// ---------------------------------------------------------------------------
+
+/// Convert a screen position to normalised [0, 1] image coordinates.
+fn screen_to_norm(screen: Pos2, image_tl: Pos2, display_size: Vec2) -> Pos2 {
+    Pos2::new(
+        (screen.x - image_tl.x) / display_size.x,
+        (screen.y - image_tl.y) / display_size.y,
+    )
+}
+
+/// Convert a normalised [0, 1] image position to screen coordinates.
+fn norm_to_screen(norm: Pos2, image_tl: Pos2, display_size: Vec2) -> Pos2 {
+    Pos2::new(
+        image_tl.x + norm.x * display_size.x,
+        image_tl.y + norm.y * display_size.y,
+    )
+}
+
+/// Update linear mask from a drag: start is the "0% effect" end,
+/// end is the "100% effect" end.  Center, angle, and feather are derived.
+fn update_linear_mask(state: &mut AppState, start: Pos2, end: Pos2) {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-4 {
+        return; // Too short — skip to avoid a degenerate angle.
+    }
+    state.mask_lin_cx = (start.x + end.x) * 0.5;
+    state.mask_lin_cy = (start.y + end.y) * 0.5;
+    state.mask_lin_angle = dy.atan2(dx).to_degrees();
+    state.mask_lin_feather = len;
+}
+
+/// Update radial mask from a drag: start is the centre, end defines the radius.
+fn update_radial_mask(state: &mut AppState, start: Pos2, end: Pos2) {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    state.mask_rad_cx = start.x;
+    state.mask_rad_cy = start.y;
+    state.mask_rad_radius = (dx * dx + dy * dy).sqrt();
+}
+
+/// Draw handles showing the current linear gradient mask extent.
+fn draw_linear_mask_handles(
+    painter: &egui::Painter,
+    state: &AppState,
+    image_tl: Pos2,
+    display_size: Vec2,
+    canvas_rect: Rect,
+) {
+    let painter = painter.with_clip_rect(canvas_rect);
+    let rad = state.mask_lin_angle.to_radians();
+    let (cos_a, sin_a) = (rad.cos(), rad.sin());
+    let half = state.mask_lin_feather * 0.5;
+
+    let center = Pos2::new(state.mask_lin_cx, state.mask_lin_cy);
+    let a_norm = Pos2::new(center.x - cos_a * half, center.y - sin_a * half);
+    let b_norm = Pos2::new(center.x + cos_a * half, center.y + sin_a * half);
+
+    let center_s = norm_to_screen(center, image_tl, display_size);
+    let a_s = norm_to_screen(a_norm, image_tl, display_size);
+    let b_s = norm_to_screen(b_norm, image_tl, display_size);
+
+    let shadow = Stroke::new(3.0, Color32::from_black_alpha(160));
+    let white = Stroke::new(1.5, Color32::WHITE);
+
+    painter.line_segment([a_s, b_s], shadow);
+    painter.line_segment([a_s, b_s], white);
+
+    for &pt in &[a_s, center_s, b_s] {
+        painter.circle_filled(pt, 6.0, Color32::from_black_alpha(160));
+        painter.circle_stroke(pt, 6.0, Stroke::new(1.5, Color32::WHITE));
+    }
+}
+
+/// Draw handles showing the current radial gradient mask extent.
+fn draw_radial_mask_handles(
+    painter: &egui::Painter,
+    state: &AppState,
+    image_tl: Pos2,
+    display_size: Vec2,
+    canvas_rect: Rect,
+) {
+    let painter = painter.with_clip_rect(canvas_rect);
+    let center_norm = Pos2::new(state.mask_rad_cx, state.mask_rad_cy);
+    let center_s = norm_to_screen(center_norm, image_tl, display_size);
+
+    // Convert radius from normalised space to screen pixels per axis.
+    let rx = state.mask_rad_radius * display_size.x;
+    let ry = state.mask_rad_radius * display_size.y;
+
+    draw_ellipse_stroke(
+        &painter,
+        center_s,
+        rx,
+        ry,
+        Stroke::new(3.0, Color32::from_black_alpha(160)),
+    );
+    draw_ellipse_stroke(&painter, center_s, rx, ry, Stroke::new(1.5, Color32::WHITE));
+
+    // Crosshair at centre.
+    let arm = 8.0_f32;
+    painter.line_segment(
+        [
+            center_s - Vec2::new(arm, 0.0),
+            center_s + Vec2::new(arm, 0.0),
+        ],
+        Stroke::new(1.5, Color32::WHITE),
+    );
+    painter.line_segment(
+        [
+            center_s - Vec2::new(0.0, arm),
+            center_s + Vec2::new(0.0, arm),
+        ],
+        Stroke::new(1.5, Color32::WHITE),
+    );
+    painter.circle_filled(center_s, 4.0, Color32::from_black_alpha(160));
+    painter.circle_stroke(center_s, 4.0, Stroke::new(1.5, Color32::WHITE));
+}
+
+/// Approximate an ellipse with line segments.
+fn draw_ellipse_stroke(painter: &egui::Painter, center: Pos2, rx: f32, ry: f32, stroke: Stroke) {
+    const N: usize = 48;
+    let pts: Vec<Pos2> = (0..=N)
+        .map(|i| {
+            let a = i as f32 * 2.0 * std::f32::consts::PI / N as f32;
+            Pos2::new(center.x + rx * a.cos(), center.y + ry * a.sin())
+        })
+        .collect();
+    for w in pts.windows(2) {
+        painter.line_segment([w[0], w[1]], stroke);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mask overlay helpers
+// ---------------------------------------------------------------------------
+
+/// Hash the current mask parameters so the overlay texture is only rebuilt
+/// when something actually changes.
+fn mask_params_hash(state: &crate::state::AppState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    state.mask_sel.hash(&mut h);
+    // Hash float bits — NaN-safe for UI values.
+    state.mask_lin_cx.to_bits().hash(&mut h);
+    state.mask_lin_cy.to_bits().hash(&mut h);
+    state.mask_lin_angle.to_bits().hash(&mut h);
+    state.mask_lin_feather.to_bits().hash(&mut h);
+    state.mask_lin_invert.hash(&mut h);
+    state.mask_rad_cx.to_bits().hash(&mut h);
+    state.mask_rad_cy.to_bits().hash(&mut h);
+    state.mask_rad_radius.to_bits().hash(&mut h);
+    state.mask_rad_feather.to_bits().hash(&mut h);
+    state.mask_rad_invert.hash(&mut h);
+    h.finish()
+}
+
+/// Build a small `ColorImage` that visualises the current mask as a
+/// semi-transparent blue overlay.  Opacity of each pixel = mask opacity.
+fn build_mask_preview(state: &crate::state::AppState, w: usize, h: usize) -> ColorImage {
+    let shape = match state.current_mask_shape() {
+        Some(s) => s,
+        None => return ColorImage::new([w, h], Color32::TRANSPARENT),
+    };
+    let mut pixels = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let ny = (y as f32 + 0.5) / h as f32;
+        for x in 0..w {
+            let nx = (x as f32 + 0.5) / w as f32;
+            let opacity = shape.eval(nx, ny);
+            let alpha = (opacity * 140.0) as u8;
+            pixels.push(Color32::from_rgba_unmultiplied(30, 90, 255, alpha));
+        }
+    }
+    ColorImage {
+        size: [w, h],
+        pixels,
     }
 }
 

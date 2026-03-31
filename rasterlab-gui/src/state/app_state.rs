@@ -9,9 +9,9 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, ColorSpaceConversion,
         ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp,
-        HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LutOp, PerspectiveOp, ResampleMode,
-        ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
-        WhiteBalanceOp,
+        HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp, MaskShape, MaskedOp,
+        PerspectiveOp, RadialMask, ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp,
+        SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -249,6 +249,20 @@ pub struct AppState {
     pub levels_white: f32,
     /// When true, a LevelsOp preview is appended to each render.
     pub levels_preview_active: bool,
+
+    // ── Masking ───────────────────────────────────────────────────────────
+    /// 0 = None, 1 = Linear Gradient, 2 = Radial Gradient.
+    pub mask_sel: usize,
+    pub mask_lin_cx: f32,
+    pub mask_lin_cy: f32,
+    pub mask_lin_angle: f32,
+    pub mask_lin_feather: f32,
+    pub mask_lin_invert: bool,
+    pub mask_rad_cx: f32,
+    pub mask_rad_cy: f32,
+    pub mask_rad_radius: f32,
+    pub mask_rad_feather: f32,
+    pub mask_rad_invert: bool,
     /// Set when a slider changes while a render is in-flight; triggers a
     /// follow-up render as soon as the current one completes.
     needs_rerender: bool,
@@ -361,6 +375,17 @@ impl AppState {
             levels_mid: 1.0,
             levels_white: 1.0,
             levels_preview_active: false,
+            mask_sel: 0,
+            mask_lin_cx: 0.5,
+            mask_lin_cy: 0.5,
+            mask_lin_angle: 90.0,
+            mask_lin_feather: 0.5,
+            mask_lin_invert: false,
+            mask_rad_cx: 0.5,
+            mask_rad_cy: 0.5,
+            mask_rad_radius: 0.3,
+            mask_rad_feather: 0.5,
+            mask_rad_invert: false,
             needs_rerender: false,
             render_start: None,
         }
@@ -1267,7 +1292,34 @@ impl AppState {
         }
     }
 
+    /// Build a `MaskShape` from the current mask UI state, or `None` if masking
+    /// is disabled.  Used both by `push_op` and the canvas overlay renderer.
+    pub fn current_mask_shape(&self) -> Option<MaskShape> {
+        match self.mask_sel {
+            1 => Some(MaskShape::Linear(LinearMask {
+                cx: self.mask_lin_cx,
+                cy: self.mask_lin_cy,
+                angle_deg: self.mask_lin_angle,
+                feather: self.mask_lin_feather,
+                invert: self.mask_lin_invert,
+            })),
+            2 => Some(MaskShape::Radial(RadialMask {
+                cx: self.mask_rad_cx,
+                cy: self.mask_rad_cy,
+                radius: self.mask_rad_radius,
+                feather: self.mask_rad_feather,
+                invert: self.mask_rad_invert,
+            })),
+            _ => None,
+        }
+    }
+
     fn push_op(&mut self, op: Box<dyn Operation>) {
+        // Wrap in MaskedOp when masking is active.
+        let op: Box<dyn Operation> = match self.current_mask_shape() {
+            Some(mask) => Box::new(MaskedOp { inner: op, mask }),
+            None => op,
+        };
         self.cancel_all_previews();
         if let Some(p) = &mut self.pipeline {
             p.push_op(op);
