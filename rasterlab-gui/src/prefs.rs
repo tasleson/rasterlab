@@ -10,6 +10,27 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// User-selectable theme preference, stored in the prefs file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePref {
+    /// Follow the OS dark/light setting (default).
+    #[default]
+    System,
+    Dark,
+    Light,
+}
+
+impl ThemePref {
+    pub fn to_egui(self) -> egui::ThemePreference {
+        match self {
+            Self::System => egui::ThemePreference::System,
+            Self::Dark => egui::ThemePreference::Dark,
+            Self::Light => egui::ThemePreference::Light,
+        }
+    }
+}
+
 /// Persistent GUI preferences.  Missing keys are treated as `false`/default.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Prefs {
@@ -17,6 +38,9 @@ pub struct Prefs {
     /// ASCII string (e.g. `"blur"`, `"crop"`, `"hsl_panel"`).
     #[serde(default)]
     pub tools_open: HashMap<String, bool>,
+    /// User's preferred theme.  Defaults to `System` (follow OS setting).
+    #[serde(default)]
+    pub theme: ThemePref,
 }
 
 impl Prefs {

@@ -57,6 +57,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Looks ─────────────────────────────────────────────────────────────
+    egui::CollapsingHeader::new("🎞  Looks")
+        .id_salt("looks")
+        .default_open(false)
+        .show(ui, |ui| {
+            let btn =
+                egui::Button::new("Classic B&W").min_size(Vec2::new(ui.available_width(), 0.0));
+            if ui.add_enabled(has_image, btn).clicked() {
+                state.push_classic_bw();
+            }
+        });
+
+    ui.separator();
+
     // ── Black & White ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("bw");
     let resp = egui::CollapsingHeader::new("◑  Black & White")

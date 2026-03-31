@@ -33,6 +33,14 @@ pub struct RasterLabApp {
 impl RasterLabApp {
     pub fn new(cc: &eframe::CreationContext, initial_file: Option<PathBuf>) -> Self {
         let mut state = AppState::new(cc.egui_ctx.clone());
+
+        // Apply the stored theme preference.  For ThemePreference::System the fallback
+        // is set to Light so the app looks correct on platforms where winit cannot
+        // detect the OS theme (returns None).
+        cc.egui_ctx.options_mut(|o| {
+            o.theme_preference = state.prefs.theme.to_egui();
+            o.fallback_theme = egui::Theme::Light;
+        });
         if let Some(path) = initial_file {
             state.open_file(path);
         }
@@ -346,6 +354,24 @@ impl eframe::App for RasterLabApp {
                         ui.close_menu();
                         self.state.redo();
                     }
+                });
+                ui.menu_button("Preferences", |ui| {
+                    ui.menu_button("Theme", |ui| {
+                        use crate::prefs::ThemePref;
+                        let current = self.state.prefs.theme;
+                        for (label, pref) in [
+                            ("System Default", ThemePref::System),
+                            ("Light", ThemePref::Light),
+                            ("Dark", ThemePref::Dark),
+                        ] {
+                            if ui.selectable_label(current == pref, label).clicked() {
+                                self.state.prefs.theme = pref;
+                                ctx.options_mut(|o| o.theme_preference = pref.to_egui());
+                                self.state.prefs.save();
+                                ui.close_menu();
+                            }
+                        }
+                    });
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About RasterLab").clicked() {

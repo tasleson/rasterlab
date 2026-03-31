@@ -1276,6 +1276,19 @@ impl AppState {
     /// One-click auto-enhance: stretch levels to the 0.5/99.5 percentile,
     /// boost saturation slightly, apply a mild sharpen.  Pushes three ops
     /// as a single atomic batch (one render fired at the end).
+    pub fn push_classic_bw(&mut self) {
+        if self.pipeline.is_none() {
+            return;
+        }
+        self.cancel_all_previews();
+        let pipeline = self.pipeline.as_mut().unwrap();
+        pipeline.push_op(Box::new(BlackAndWhiteOp::channel_mixer(0.45, 0.35, 0.13)));
+        pipeline.push_op(Box::new(BrightnessContrastOp::new(0.03, 0.08)));
+        pipeline.push_op(Box::new(VignetteOp::new(0.52, 0.28, 1.0)));
+        self.is_dirty = true;
+        self.request_render();
+    }
+
     pub fn push_auto_enhance(&mut self) {
         if self.pipeline.is_none() || self.histogram.is_none() {
             return;
