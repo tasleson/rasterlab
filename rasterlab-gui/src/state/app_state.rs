@@ -107,6 +107,8 @@ pub struct AppState {
     /// Incremented each time a new file is opened. Canvas uses this to know
     /// when to reset zoom/pan vs. just updating the texture.
     pub image_generation: u64,
+    /// When true the canvas renders a split before/after view.
+    pub split_view: bool,
 
     // Background thread channel
     bg_tx: mpsc::Sender<BgMessage>,
@@ -281,6 +283,7 @@ impl AppState {
             export_resize_h: 0,
             export_resize_mode: ResampleMode::Bicubic,
             image_generation: 0,
+            split_view: false,
             bg_tx,
             bg_rx,
             ctx,
