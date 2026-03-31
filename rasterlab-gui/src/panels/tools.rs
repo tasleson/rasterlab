@@ -1,6 +1,6 @@
 //! Tools panel — inputs for adding operations to the pipeline.
 
-use egui::{Color32, ComboBox, DragValue, Pos2, Rect, Rounding, Stroke, Ui, Vec2};
+use egui::{Color32, ComboBox, CornerRadius, DragValue, Pos2, Rect, Stroke, Ui, Vec2};
 use rasterlab_core::ops::CurvesOp;
 
 use crate::state::AppState;
@@ -1588,7 +1588,7 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
     let h = rect.height();
 
     // Background and grid.
-    painter.rect_filled(rect, Rounding::ZERO, Color32::from_gray(25));
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_gray(25));
     for i in 1..4 {
         let t = i as f32 / 4.0;
         let gx = rect.min.x + t * w;
@@ -2011,7 +2011,7 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
     let rect = resp.rect;
 
     // Dark background
-    painter.rect_filled(rect, Rounding::ZERO, Color32::from_gray(20));
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_gray(20));
 
     let Some(hist) = &state.histogram else {
         painter.text(
@@ -2066,7 +2066,7 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
                     egui::pos2(x, rect.bottom() - bar_h),
                     Vec2::new(bar_w.max(0.5), bar_h),
                 ),
-                Rounding::ZERO,
+                CornerRadius::ZERO,
                 *color,
             );
         }

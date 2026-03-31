@@ -23,4 +23,5 @@ dirs         = "5"
 
 # Native file dialogs (open/save)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rfd = { workspace = true }
+rfd              = { workspace = true }
+egui-file-dialog = { workspace = true }

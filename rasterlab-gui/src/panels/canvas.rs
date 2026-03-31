@@ -179,15 +179,16 @@ impl CanvasState {
         let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
 
         // ── Middle-mouse pan + Ctrl+scroll-wheel zoom ────────────────────────
+        // In egui 0.34 Ctrl+scroll is translated into zoom_delta() (not smooth_scroll_delta).
         ui.input(|i| {
             if i.pointer.button_down(egui::PointerButton::Middle) {
                 self.pan_offset += i.pointer.delta();
             }
-            let scroll = i.raw_scroll_delta.y;
-            if scroll != 0.0 && i.modifiers.ctrl {
+            let zoom_factor = i.zoom_delta();
+            let over = i.pointer.hover_pos().map(|p| canvas_rect.contains(p)).unwrap_or(false);
+            if zoom_factor != 1.0 && over {
                 let old_zoom = self.zoom;
-                let factor = (1.0 + scroll * 0.003).clamp(0.8, 1.25);
-                self.zoom = (self.zoom * factor).clamp(0.05, 32.0);
+                self.zoom = (self.zoom * zoom_factor).clamp(0.05, 32.0);
                 let actual = self.zoom / old_zoom;
                 if let Some(cursor) = i.pointer.hover_pos() {
                     let pivot = cursor - canvas_rect.min;
@@ -647,7 +648,12 @@ fn draw_marching_ants(painter: &egui::Painter, rect: Rect, time: f32) {
     const SPEED: f32 = 15.0;
 
     let offset = (time * SPEED).rem_euclid(DASH + GAP);
-    painter.rect_stroke(rect, 0.0, Stroke::new(2.0, Color32::WHITE));
+    painter.rect_stroke(
+        rect,
+        0.0,
+        Stroke::new(2.0, Color32::WHITE),
+        egui::StrokeKind::Middle,
+    );
 
     let corners = [
         rect.left_top(),
@@ -859,7 +865,7 @@ fn mask_params_hash(state: &crate::state::AppState) -> u64 {
 fn build_mask_preview(state: &crate::state::AppState, w: usize, h: usize) -> ColorImage {
     let shape = match state.current_mask_shape() {
         Some(s) => s,
-        None => return ColorImage::new([w, h], Color32::TRANSPARENT),
+        None => return ColorImage::new([w, h], vec![Color32::TRANSPARENT; w * h]),
     };
     let mut pixels = Vec::with_capacity(w * h);
     for y in 0..h {
@@ -874,6 +880,7 @@ fn build_mask_preview(state: &crate::state::AppState, w: usize, h: usize) -> Col
     ColorImage {
         size: [w, h],
         pixels,
+        source_size: egui::Vec2::new(w as f32, h as f32),
     }
 }
 
@@ -894,6 +901,7 @@ fn image_to_egui(image: &Image) -> ColorImage {
     ColorImage {
         size: [image.width as usize, image.height as usize],
         pixels,
+        source_size: egui::Vec2::new(image.width as f32, image.height as f32),
     }
 }
 

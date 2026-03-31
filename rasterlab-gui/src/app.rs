@@ -240,11 +240,15 @@ impl RasterLabApp {
 }
 
 impl eframe::App for RasterLabApp {
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.state.prefs.save();
     }
 
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Clone the context so we can pass it to helper methods while also
+        // passing `ui` to panel builders (both need access simultaneously).
+        let ctx = ui.ctx().clone();
+
         // Save prefs when the window close is requested (more reliable than
         // on_exit alone, which may not fire on all platforms/close paths).
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -257,10 +261,10 @@ impl eframe::App for RasterLabApp {
         #[cfg(not(target_arch = "wasm32"))]
         if self.state.lut_dialog_requested {
             self.state.lut_dialog_requested = false;
-            self.lut_file_dialog(ctx);
+            self.lut_file_dialog(&ctx);
         }
 
-        self.handle_keyboard(ctx);
+        self.handle_keyboard(&ctx);
 
         // ── Window title (reflects project name and dirty state) ──────────
         {
@@ -280,13 +284,13 @@ impl eframe::App for RasterLabApp {
         }
 
         // ── Menu bar ─────────────────────────────────────────────────────
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+        egui::Panel::top("menu_bar").show_inside(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     #[cfg(not(target_arch = "wasm32"))]
                     if ui.button("Open…  (Ctrl+O)").clicked() {
-                        ui.close_menu();
-                        self.open_file_dialog(ctx);
+                        ui.close_kind(egui::UiKind::Menu);
+                        self.open_file_dialog(&ctx);
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -298,8 +302,8 @@ impl eframe::App for RasterLabApp {
                             )
                             .clicked()
                         {
-                            ui.close_menu();
-                            self.save_project_or_prompt(ctx);
+                            ui.close_kind(egui::UiKind::Menu);
+                            self.save_project_or_prompt(&ctx);
                         }
                         if self.state.project_path.is_some()
                             && ui
@@ -309,8 +313,8 @@ impl eframe::App for RasterLabApp {
                                 )
                                 .clicked()
                         {
-                            ui.close_menu();
-                            self.project_save_dialog(ctx);
+                            ui.close_kind(egui::UiKind::Menu);
+                            self.project_save_dialog(&ctx);
                         }
                         ui.separator();
                         if ui
@@ -320,8 +324,8 @@ impl eframe::App for RasterLabApp {
                             )
                             .clicked()
                         {
-                            ui.close_menu();
-                            self.export_file_dialog(ctx);
+                            ui.close_kind(egui::UiKind::Menu);
+                            self.export_file_dialog(&ctx);
                         }
                         if ui
                             .add_enabled(
@@ -330,8 +334,8 @@ impl eframe::App for RasterLabApp {
                             )
                             .clicked()
                         {
-                            ui.close_menu();
-                            self.export_edit_stack_dialog(ctx);
+                            ui.close_kind(egui::UiKind::Menu);
+                            self.export_edit_stack_dialog(&ctx);
                         }
                     }
                     ui.separator();
@@ -344,14 +348,14 @@ impl eframe::App for RasterLabApp {
                         .add_enabled(self.state.can_undo(), egui::Button::new("Undo  (Ctrl+Z)"))
                         .clicked()
                     {
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                         self.state.undo();
                     }
                     if ui
                         .add_enabled(self.state.can_redo(), egui::Button::new("Redo  (Ctrl+Y)"))
                         .clicked()
                     {
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                         self.state.redo();
                     }
                 });
@@ -368,21 +372,21 @@ impl eframe::App for RasterLabApp {
                                 self.state.prefs.theme = pref;
                                 ctx.options_mut(|o| o.theme_preference = pref.to_egui());
                                 self.state.prefs.save();
-                                ui.close_menu();
+                                ui.close_kind(egui::UiKind::Menu);
                             }
                         }
                     });
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About RasterLab").clicked() {
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                 });
             });
         });
 
         // ── Status bar ───────────────────────────────────────────────────
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        egui::Panel::bottom("status_bar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if self.state.loading {
                     ui.spinner();
@@ -397,28 +401,28 @@ impl eframe::App for RasterLabApp {
         });
 
         // ── Left panel: Tools ─────────────────────────────────────────────
-        egui::SidePanel::left("tools_panel")
+        egui::Panel::left("tools_panel")
             .resizable(true)
-            .default_width(220.0)
-            .min_width(180.0)
-            .show(ctx, |ui| {
+            .default_size(220.0)
+            .min_size(180.0)
+            .show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     tools::ui(ui, &mut self.state);
                 });
             });
 
         // ── Right panel: Edit stack + Histogram ───────────────────────────
-        egui::SidePanel::right("right_panel")
+        egui::Panel::right("right_panel")
             .resizable(true)
-            .default_width(280.0)
-            .min_width(220.0)
-            .show(ctx, |ui| {
+            .default_size(280.0)
+            .min_size(220.0)
+            .show_inside(ui, |ui| {
                 // Histogram pinned to the bottom; must be declared before the
                 // fill content so egui reserves the space correctly.
-                egui::TopBottomPanel::bottom("histogram_panel")
+                egui::Panel::bottom("histogram_panel")
                     .resizable(true)
-                    .default_height(200.0)
-                    .min_height(80.0)
+                    .default_size(200.0)
+                    .min_size(80.0)
                     .show_inside(ui, |ui| {
                         histogram_panel::ui(ui, self.state.histogram.as_ref());
                     });
@@ -430,7 +434,7 @@ impl eframe::App for RasterLabApp {
             });
 
         // ── Central panel: Image canvas ───────────────────────────────────
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             self.canvas.ui(ui, &mut self.state);
         });
     }

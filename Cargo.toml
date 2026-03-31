@@ -61,8 +61,9 @@ libloading      = "0.8"
 clap            = { version = "4", features = ["derive"] }
 
 # GUI
-eframe          = "0.29"
-egui            = "0.29"
+eframe          = "0.34"
+egui            = "0.34"
+egui-file-dialog = "0.13"
 rfd             = "0.15"
 
 # Hashing

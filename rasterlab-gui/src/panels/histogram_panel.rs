@@ -1,6 +1,6 @@
 //! Histogram panel — renders per-channel bar charts using egui Painter.
 
-use egui::{Color32, Rect, Rounding, Ui, Vec2};
+use egui::{Color32, CornerRadius, Rect, Ui, Vec2};
 
 use rasterlab_core::ops::HistogramData;
 
@@ -59,7 +59,7 @@ fn draw_channel(ui: &mut Ui, data: &[u64; 256], color: Color32, width: f32, labe
     let bar_w = (width / 256.0).max(1.0);
 
     // Dark background
-    painter.rect_filled(rect, Rounding::ZERO, Color32::from_gray(20));
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_gray(20));
 
     for (i, &count) in data.iter().enumerate() {
         let bar_height = (count as f32 / peak) * CHANNEL_HEIGHT;
@@ -68,7 +68,7 @@ fn draw_channel(ui: &mut Ui, data: &[u64; 256], color: Color32, width: f32, labe
             egui::pos2(x + BAR_GAP, rect.bottom() - bar_height),
             Vec2::new((bar_w - BAR_GAP).max(0.5), bar_height),
         );
-        painter.rect_filled(bar_rect, Rounding::ZERO, color);
+        painter.rect_filled(bar_rect, CornerRadius::ZERO, color);
     }
 
     // Hover tooltip: show bucket value under cursor
