@@ -64,12 +64,16 @@ impl Operation for RotateOp {
         "rotate"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, image: Image) -> RasterResult<Image> {
         match self.mode {
-            RotateMode::Cw90 => rotate_cw90(image),
+            RotateMode::Cw90 => rotate_cw90(&image),
             RotateMode::Cw180 => rotate_180(image),
-            RotateMode::Cw270 => rotate_cw270(image),
-            RotateMode::Arbitrary(d) => rotate_arbitrary(image, d, self.background),
+            RotateMode::Cw270 => rotate_cw270(&image),
+            RotateMode::Arbitrary(d) => rotate_arbitrary(&image, d, self.background),
         }
     }
 
@@ -115,9 +119,8 @@ fn rotate_cw90(src: &Image) -> RasterResult<Image> {
 // ---------------------------------------------------------------------------
 // 180°:  new(nx, ny) = old(w-1-nx, h-1-ny)
 // ---------------------------------------------------------------------------
-fn rotate_180(src: &Image) -> RasterResult<Image> {
-    let mut out = src.deep_clone();
-    let total = out.width as usize * out.height as usize;
+fn rotate_180(mut image: Image) -> RasterResult<Image> {
+    let total = image.width as usize * image.height as usize;
     let half = total / 2;
 
     for i in 0..half {
@@ -125,11 +128,11 @@ fn rotate_180(src: &Image) -> RasterResult<Image> {
         let (ai, bi) = (i * 4, j * 4);
         // Swap pixels i and j across all 4 channels
         for c in 0..4 {
-            out.data.swap(ai + c, bi + c);
+            image.data.swap(ai + c, bi + c);
         }
     }
     // handle centre pixel in odd-total case: already in place
-    Ok(out)
+    Ok(image)
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +228,7 @@ mod tests {
     #[test]
     fn rotate_180_identity_for_solid() {
         let src = solid(6, 4, [100, 150, 200, 255]);
-        let out = RotateOp::cw180().apply(&src).unwrap();
+        let out = RotateOp::cw180().apply(src).unwrap();
         assert_eq!(out.width, 6);
         assert_eq!(out.height, 4);
         assert_eq!(out.pixel(0, 0), [100, 150, 200, 255]);
@@ -234,7 +237,7 @@ mod tests {
     #[test]
     fn rotate_cw90_swaps_dimensions() {
         let src = solid(8, 4, [1, 2, 3, 255]);
-        let out = RotateOp::cw90().apply(&src).unwrap();
+        let out = RotateOp::cw90().apply(src).unwrap();
         assert_eq!(out.width, 4);
         assert_eq!(out.height, 8);
     }
@@ -242,7 +245,7 @@ mod tests {
     #[test]
     fn rotate_arbitrary_zero() {
         let src = solid(8, 8, [10, 20, 30, 255]);
-        let out = RotateOp::arbitrary(0.0).apply(&src).unwrap();
+        let out = RotateOp::arbitrary(0.0).apply(src).unwrap();
         // 0° rotation: bounding box should remain 8×8
         assert_eq!(out.width, 8);
         assert_eq!(out.height, 8);

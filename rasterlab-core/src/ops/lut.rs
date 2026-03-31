@@ -162,35 +162,34 @@ impl Operation for LutOp {
         "lut"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.data.is_empty() {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
         let size = self.size as usize;
         let strength = self.strength;
         let data = &self.data;
 
-        let mut out = image.deep_clone();
+        image.data.par_chunks_mut(4).for_each(|p| {
+            let r = p[0] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
 
-        out.data
-            .par_chunks_mut(4)
-            .zip(image.data.par_chunks(4))
-            .for_each(|(dst, src)| {
-                let r = src[0] as f32 / 255.0;
-                let g = src[1] as f32 / 255.0;
-                let b = src[2] as f32 / 255.0;
+            let (lr, lg, lb) = lut_sample(data, size, r, g, b);
 
-                let (lr, lg, lb) = lut_sample(data, size, r, g, b);
+            // Blend with original.
+            p[0] = ((r + (lr - r) * strength) * 255.0).clamp(0.0, 255.0) as u8;
+            p[1] = ((g + (lg - g) * strength) * 255.0).clamp(0.0, 255.0) as u8;
+            p[2] = ((b + (lb - b) * strength) * 255.0).clamp(0.0, 255.0) as u8;
+            // alpha unchanged
+        });
 
-                // Blend with original.
-                dst[0] = ((r + (lr - r) * strength) * 255.0).clamp(0.0, 255.0) as u8;
-                dst[1] = ((g + (lg - g) * strength) * 255.0).clamp(0.0, 255.0) as u8;
-                dst[2] = ((b + (lb - b) * strength) * 255.0).clamp(0.0, 255.0) as u8;
-                // alpha unchanged
-            });
-
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -216,9 +215,10 @@ mod tests {
     #[test]
     fn identity_lut_unchanged() {
         let src = solid(100, 150, 200);
+        let src_data = src.data.clone();
         let op = LutOp::identity(17);
-        let out = op.apply(&src).unwrap();
-        for (a, b) in src.data.chunks(4).zip(out.data.chunks(4)) {
+        let out = op.apply(src).unwrap();
+        for (a, b) in src_data.chunks(4).zip(out.data.chunks(4)) {
             assert!((a[0] as i16 - b[0] as i16).abs() <= 1);
             assert!((a[1] as i16 - b[1] as i16).abs() <= 1);
             assert!((a[2] as i16 - b[2] as i16).abs() <= 1);
@@ -228,6 +228,7 @@ mod tests {
     #[test]
     fn zero_strength_is_identity() {
         let src = solid(80, 120, 160);
+        let orig = [src.data[0], src.data[2]];
         // Build a swapped-channels LUT (R=B, G=G, B=R) but at strength=0 → unchanged.
         let mut op = LutOp::identity(17);
         // Swap R and B in the LUT data.
@@ -235,9 +236,9 @@ mod tests {
             triplet.swap(0, 2);
         }
         op.strength = 0.0;
-        let out = op.apply(&src).unwrap();
-        assert_eq!(out.data[0], src.data[0]);
-        assert_eq!(out.data[2], src.data[2]);
+        let out = op.apply(src).unwrap();
+        assert_eq!(out.data[0], orig[0]);
+        assert_eq!(out.data[2], orig[1]);
     }
 
     #[test]
@@ -255,7 +256,7 @@ mod tests {
         assert_eq!(op.size, 2);
         // Apply to a mid-grey; identity LUT → unchanged.
         let src = solid(128, 128, 128);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         assert!((out.data[0] as i16 - 128).abs() <= 2);
     }
 
@@ -269,7 +270,7 @@ mod tests {
             p[3] = 88;
         });
         let op = LutOp::identity(17);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 88));
     }
 }

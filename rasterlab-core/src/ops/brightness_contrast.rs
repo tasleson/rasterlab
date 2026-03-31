@@ -48,18 +48,21 @@ impl Operation for BrightnessContrastOp {
         "brightness_contrast"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
-        let lut = build_lut(self.brightness, self.contrast);
-        let mut out = image.deep_clone();
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
 
-        out.data.par_chunks_mut(4).for_each(|p| {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
+        let lut = build_lut(self.brightness, self.contrast);
+
+        image.data.par_chunks_mut(4).for_each(|p| {
             p[0] = lut[p[0] as usize];
             p[1] = lut[p[1] as usize];
             p[2] = lut[p[2] as usize];
             // alpha untouched
         });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -84,7 +87,9 @@ mod tests {
             p[2] = 200;
             p[3] = 255;
         });
-        let out = BrightnessContrastOp::new(0.0, 0.0).apply(&src).unwrap();
+        let out = BrightnessContrastOp::new(0.0, 0.0)
+            .apply(src.deep_clone())
+            .unwrap();
         assert_eq!(out.data, src.data);
     }
 
@@ -97,7 +102,7 @@ mod tests {
             p[2] = 100;
             p[3] = 255;
         });
-        let out = BrightnessContrastOp::new(0.2, 0.0).apply(&src).unwrap();
+        let out = BrightnessContrastOp::new(0.2, 0.0).apply(src).unwrap();
         assert!(out.pixel(0, 0)[0] > 100);
     }
 
@@ -107,7 +112,7 @@ mod tests {
         src.data.chunks_mut(4).for_each(|p| {
             p[3] = 77;
         });
-        let out = BrightnessContrastOp::new(0.5, 0.5).apply(&src).unwrap();
+        let out = BrightnessContrastOp::new(0.5, 0.5).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 77));
     }
 }

@@ -54,21 +54,21 @@ impl Operation for LevelsOp {
         "levels"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let lut = self.build_lut();
 
-        let mut out = Image::new(image.width, image.height);
-        out.data
-            .par_chunks_mut(4)
-            .zip(image.data.par_chunks(4))
-            .for_each(|(dst, src)| {
-                dst[0] = lut[src[0] as usize];
-                dst[1] = lut[src[1] as usize];
-                dst[2] = lut[src[2] as usize];
-                dst[3] = src[3]; // preserve alpha
-            });
+        image.data.par_chunks_mut(4).for_each(|p| {
+            p[0] = lut[p[0] as usize];
+            p[1] = lut[p[1] as usize];
+            p[2] = lut[p[2] as usize];
+            // p[3] (alpha) unchanged
+        });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -95,9 +95,10 @@ mod tests {
             chunk[3] = 255;
         }
         let op = LevelsOp::new(0.0, 1.0, 1.0);
-        let out = op.apply(&src).unwrap();
+        let src_data = src.data.clone();
+        let out = op.apply(src).unwrap();
         // Identity should produce the same values (within rounding)
-        for (s, d) in src.data.iter().zip(out.data.iter()) {
+        for (s, d) in src_data.iter().zip(out.data.iter()) {
             assert!(
                 (*s as i32 - *d as i32).abs() <= 1,
                 "identity mismatch: {} vs {}",
@@ -121,7 +122,7 @@ mod tests {
 
         // Black point at ~100/255 ≈ 0.392 — pixel value 50 should clip to 0
         let op = LevelsOp::new(100.0 / 255.0, 1.0, 1.0);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         assert_eq!(out.data[0], 0, "value below black_point should be 0");
         assert!(out.data[4] > 0, "value above black_point should be > 0");
     }

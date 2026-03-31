@@ -61,6 +61,15 @@ pub trait FormatHandler: Send + Sync {
         true
     }
 
+    /// Whether this handler requires a filesystem path rather than raw bytes.
+    ///
+    /// RAW formats (NEF, CR2, …) that use libraries requiring seekable file
+    /// access should return `true`.  The registry will call [`decode_file`]
+    /// instead of [`decode`] for these handlers.
+    fn needs_file_path(&self) -> bool {
+        false
+    }
+
     /// Human-readable display name (e.g. "JPEG", "Nikon RAW").
     fn display_name(&self) -> &'static str;
 }

@@ -191,8 +191,8 @@ impl CanvasState {
             if let (Some(ol_tex), Some([ol_x, ol_y, ol_w, ol_h])) =
                 (&self.overlay_texture, &state.preview_overlay_rect)
             {
-                let ol_tl = image_tl
-                    + Vec2::new(*ol_x as f32 * self.zoom, *ol_y as f32 * self.zoom);
+                let ol_tl =
+                    image_tl + Vec2::new(*ol_x as f32 * self.zoom, *ol_y as f32 * self.zoom);
                 let ol_size = Vec2::new(*ol_w as f32 * self.zoom, *ol_h as f32 * self.zoom);
                 painter.image(
                     ol_tex.id(),
@@ -371,6 +371,10 @@ fn dashed_segment(
 // ---------------------------------------------------------------------------
 
 fn image_to_egui(image: &Image) -> ColorImage {
+    // Sequential conversion: this is memory-bandwidth-bound (reads 136 MiB,
+    // writes 143 MiB of Color32).  Parallelising with rayon adds thread
+    // coordination overhead that outweighs any gain — benchmarks showed the
+    // parallel version at ~14 ms vs ~7 ms serial on Apple Silicon.
     let pixels: Vec<Color32> = image
         .data
         .chunks_exact(4)

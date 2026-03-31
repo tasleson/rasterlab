@@ -68,9 +68,13 @@ impl Operation for ColorBalanceOp {
         "color_balance"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.is_identity() {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
         let cr = self.cyan_red;
@@ -80,36 +84,31 @@ impl Operation for ColorBalanceOp {
         // Maximum additive delta in [0,1] per zone at slider = ±1.
         const SCALE: f32 = 0.4;
 
-        let mut out = image.deep_clone();
+        image.data.par_chunks_mut(4).for_each(|p| {
+            let r = p[0] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
 
-        out.data
-            .par_chunks_mut(4)
-            .zip(image.data.par_chunks(4))
-            .for_each(|(dst, src)| {
-                let r = src[0] as f32 / 255.0;
-                let g = src[1] as f32 / 255.0;
-                let b = src[2] as f32 / 255.0;
+            // BT.709 luminance drives the zone weights.
+            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
-                // BT.709 luminance drives the zone weights.
-                let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            // Zone weights — sum > 1 is intentional (zones overlap slightly
+            // to avoid abrupt transitions; combined effect is bounded by SCALE).
+            let sh = (1.0 - luma).powi(2); // shadow
+            let mt = 4.0 * luma * (1.0 - luma); // midtone
+            let hl = luma.powi(2); // highlight
 
-                // Zone weights — sum > 1 is intentional (zones overlap slightly
-                // to avoid abrupt transitions; combined effect is bounded by SCALE).
-                let sh = (1.0 - luma).powi(2); // shadow
-                let mt = 4.0 * luma * (1.0 - luma); // midtone
-                let hl = luma.powi(2); // highlight
+            let dr = (cr[0] * sh + cr[1] * mt + cr[2] * hl) * SCALE;
+            let dg = (mg[0] * sh + mg[1] * mt + mg[2] * hl) * SCALE;
+            let db = (yb[0] * sh + yb[1] * mt + yb[2] * hl) * SCALE;
 
-                let dr = (cr[0] * sh + cr[1] * mt + cr[2] * hl) * SCALE;
-                let dg = (mg[0] * sh + mg[1] * mt + mg[2] * hl) * SCALE;
-                let db = (yb[0] * sh + yb[1] * mt + yb[2] * hl) * SCALE;
+            p[0] = ((r + dr) * 255.0).clamp(0.0, 255.0) as u8;
+            p[1] = ((g + dg) * 255.0).clamp(0.0, 255.0) as u8;
+            p[2] = ((b + db) * 255.0).clamp(0.0, 255.0) as u8;
+            // alpha unchanged
+        });
 
-                dst[0] = ((r + dr) * 255.0).clamp(0.0, 255.0) as u8;
-                dst[1] = ((g + dg) * 255.0).clamp(0.0, 255.0) as u8;
-                dst[2] = ((b + db) * 255.0).clamp(0.0, 255.0) as u8;
-                // alpha unchanged
-            });
-
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -135,20 +134,22 @@ mod tests {
     #[test]
     fn identity() {
         let src = grey(128);
-        let out = ColorBalanceOp::default().apply(&src).unwrap();
-        assert_eq!(out.data, src.data);
+        let src_data = src.data.clone();
+        let out = ColorBalanceOp::default().apply(src).unwrap();
+        assert_eq!(out.data, src_data);
     }
 
     #[test]
     fn red_shift_in_shadows_brightens_dark_red() {
         // Pushing shadows toward red should increase R on a dark pixel.
         let src = grey(20);
+        let orig = [src.data[0], src.data[1], src.data[2]];
         let op = ColorBalanceOp::new([1.0, 0.0, 0.0], [0.0; 3], [0.0; 3]);
-        let out = op.apply(&src).unwrap();
-        assert!(out.data[0] > src.data[0], "R should increase in shadows");
+        let out = op.apply(src).unwrap();
+        assert!(out.data[0] > orig[0], "R should increase in shadows");
         // G and B should be less affected (cyan-red axis only touches R).
-        assert_eq!(out.data[1], src.data[1], "G should be unchanged");
-        assert_eq!(out.data[2], src.data[2], "B should be unchanged");
+        assert_eq!(out.data[1], orig[1], "G should be unchanged");
+        assert_eq!(out.data[2], orig[2], "B should be unchanged");
     }
 
     #[test]
@@ -156,7 +157,7 @@ mod tests {
         // Full shadow-red boost should leave a near-white pixel unchanged.
         let src = grey(250);
         let op = ColorBalanceOp::new([1.0, 0.0, 0.0], [0.0; 3], [0.0; 3]);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         assert!((out.data[0] as i16 - 250i16).abs() <= 2);
     }
 
@@ -164,27 +165,25 @@ mod tests {
     fn highlight_control_has_no_effect_on_shadows() {
         let src = grey(5);
         let op = ColorBalanceOp::new([0.0, 0.0, 1.0], [0.0; 3], [0.0; 3]);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         assert!((out.data[0] as i16 - 5i16).abs() <= 2);
     }
 
     #[test]
     fn midtone_control_peaks_at_mid_grey() {
         // Midtone boost should affect 128 more than 20 or 240.
-        let dark = grey(20);
-        let mid = grey(128);
-        let bright = grey(240);
-
         let op = ColorBalanceOp::new([0.0; 3], [0.0; 3], [0.0, 1.0, 0.0]);
 
-        let delta = |src: &Image| {
+        let apply_delta = |v: u8| {
+            let src = grey(v);
+            let orig = src.data[2];
             let out = op.apply(src).unwrap();
-            (out.data[2] as i16 - src.data[2] as i16).abs()
+            (out.data[2] as i16 - orig as i16).abs()
         };
 
-        let d_dark = delta(&dark);
-        let d_mid = delta(&mid);
-        let d_bright = delta(&bright);
+        let d_dark = apply_delta(20);
+        let d_mid = apply_delta(128);
+        let d_bright = apply_delta(240);
 
         assert!(
             d_mid > d_dark,
@@ -210,7 +209,7 @@ mod tests {
             p[3] = 33;
         });
         let op = ColorBalanceOp::new([0.5, 0.0, 0.0], [0.0; 3], [0.0; 3]);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 33));
     }
 }

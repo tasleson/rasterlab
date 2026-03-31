@@ -35,6 +35,10 @@ impl FormatHandler for NefHandler {
         "Nikon RAW (NEF)"
     }
 
+    fn needs_file_path(&self) -> bool {
+        true
+    }
+
     fn decode(&self, _data: &[u8]) -> RasterResult<Image> {
         // rawler requires a seekable file path; delegate to decode_file.
         Err(RasterError::UnsupportedFormat(

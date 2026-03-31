@@ -104,34 +104,33 @@ impl Operation for ColorSpaceOp {
         "color_space"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let mat = match self.conversion {
             ColorSpaceConversion::SrgbToDisplayP3 => &SRGB_TO_P3,
             ColorSpaceConversion::DisplayP3ToSrgb => &P3_TO_SRGB,
         };
 
-        let mut out = image.deep_clone();
+        image.data.par_chunks_mut(4).for_each(|p| {
+            // Decode gamma.
+            let r = srgb_to_linear(p[0] as f32 / 255.0);
+            let g = srgb_to_linear(p[1] as f32 / 255.0);
+            let b = srgb_to_linear(p[2] as f32 / 255.0);
 
-        out.data
-            .par_chunks_mut(4)
-            .zip(image.data.par_chunks(4))
-            .for_each(|(dst, src)| {
-                // Decode gamma.
-                let r = srgb_to_linear(src[0] as f32 / 255.0);
-                let g = srgb_to_linear(src[1] as f32 / 255.0);
-                let b = srgb_to_linear(src[2] as f32 / 255.0);
+            // Apply primaries conversion in linear light.
+            let (ro, go, bo) = mat3_mul(mat, r, g, b);
 
-                // Apply primaries conversion in linear light.
-                let (ro, go, bo) = mat3_mul(mat, r, g, b);
+            // Re-encode with destination transfer function (sRGB-style).
+            p[0] = (linear_to_srgb(ro.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+            p[1] = (linear_to_srgb(go.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+            p[2] = (linear_to_srgb(bo.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+            // alpha unchanged
+        });
 
-                // Re-encode with destination transfer function (sRGB-style).
-                dst[0] = (linear_to_srgb(ro.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
-                dst[1] = (linear_to_srgb(go.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
-                dst[2] = (linear_to_srgb(bo.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
-                // alpha unchanged
-            });
-
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -162,10 +161,10 @@ mod tests {
         // Neutral grey should survive a round-trip (P3 and sRGB share D65 white).
         let src = solid(128, 128, 128);
         let fwd = ColorSpaceOp::new(ColorSpaceConversion::SrgbToDisplayP3)
-            .apply(&src)
+            .apply(src)
             .unwrap();
         let back = ColorSpaceOp::new(ColorSpaceConversion::DisplayP3ToSrgb)
-            .apply(&fwd)
+            .apply(fwd)
             .unwrap();
         for p in back.data.chunks(4) {
             assert!((p[0] as i16 - 128).abs() <= 2);
@@ -176,7 +175,7 @@ mod tests {
     fn white_preserved() {
         let src = solid(255, 255, 255);
         let out = ColorSpaceOp::new(ColorSpaceConversion::SrgbToDisplayP3)
-            .apply(&src)
+            .apply(src)
             .unwrap();
         for p in out.data.chunks(4) {
             assert_eq!(p[0], 255);
@@ -189,7 +188,7 @@ mod tests {
     fn black_preserved() {
         let src = solid(0, 0, 0);
         let out = ColorSpaceOp::new(ColorSpaceConversion::SrgbToDisplayP3)
-            .apply(&src)
+            .apply(src)
             .unwrap();
         for p in out.data.chunks(4) {
             assert_eq!(p[0], 0);
@@ -208,7 +207,7 @@ mod tests {
             p[3] = 77;
         });
         let out = ColorSpaceOp::new(ColorSpaceConversion::SrgbToDisplayP3)
-            .apply(&src)
+            .apply(src)
             .unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 77));
     }
@@ -219,10 +218,11 @@ mod tests {
         // G slightly increased (P3 has a wider green, so same display colour
         // requires less red-channel contribution).
         let src = solid(200, 20, 20);
+        let orig_r = src.data[0];
         let out = ColorSpaceOp::new(ColorSpaceConversion::SrgbToDisplayP3)
-            .apply(&src)
+            .apply(src)
             .unwrap();
         // R should decrease (P3 red primary covers less linear red).
-        assert!(out.data[0] < src.data[0]);
+        assert!(out.data[0] < orig_r);
     }
 }

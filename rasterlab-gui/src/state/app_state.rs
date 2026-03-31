@@ -557,7 +557,7 @@ impl AppState {
                     self.export_resize_h,
                     self.export_resize_mode,
                 );
-                match op.apply(rendered.as_ref()) {
+                match op.apply(rendered.as_ref().deep_clone()) {
                     Ok(img) => {
                         resized_buf = img;
                         &resized_buf
@@ -1340,9 +1340,9 @@ impl AppState {
     /// preview op is active.  Used internally to follow up a preview render
     /// with a full-resolution render.
     fn request_render_inner(&mut self, force_full_res: bool) {
-        let Some(pipeline) = &self.pipeline else {
+        if self.pipeline.is_none() {
             return;
-        };
+        }
         if self.loading {
             // Another render is in-flight; mark dirty so we re-render after it.
             self.needs_rerender = true;
@@ -1376,116 +1376,118 @@ impl AppState {
             None
         };
 
-        // Find the best cached starting point — may skip all committed ops
-        // if the full pipeline result is already in the cache.
-        let (start_idx, start_image) = pipeline.best_cached_start();
-        let cache_gen = pipeline.step_cache_gen();
+        // Collect all pipeline-derived data in a scoped borrow so the borrow
+        // is dropped before we call self methods (e.g. make_bw_op) below.
+        let (start_idx, cache_gen, committed_ops, pipeline_cursor) = {
+            let pipeline = self.pipeline.as_ref().unwrap();
+            let (si, _) = pipeline.best_cached_start();
+            let cg = pipeline.step_cache_gen();
+            let co: Vec<Option<Box<dyn Operation>>> = pipeline.ops()[si..pipeline.cursor()]
+                .iter()
+                .map(|e| {
+                    if e.enabled {
+                        Some(e.operation.clone_box())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (si, cg, co, pipeline.cursor())
+        };
 
-        // Committed ops from start_idx to cursor.  `None` entries represent
-        // disabled ops (image passes through unchanged).
-        let committed_ops: Vec<Option<serde_json::Value>> = pipeline.ops()
-            [start_idx..pipeline.cursor()]
-            .iter()
-            .map(|e| {
-                if e.enabled {
-                    serde_json::to_value(&e.operation).ok()
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Obtain the starting image for the render thread.
+        //
+        // For full-resolution renders we vacate the cache slot so the render
+        // thread receives the sole Arc reference (refcount = 1).  This lets
+        // Arc::try_unwrap succeed in the render loop, avoiding a 136 MiB
+        // deep_clone before the first operation runs.  Preview renders use
+        // the read-only path because they downsample first and never write
+        // back to the step cache.
+        let start_image = if is_preview {
+            self.pipeline.as_ref().unwrap().best_cached_start().1
+        } else {
+            self.pipeline.as_mut().unwrap().take_start_for_render().1
+        };
 
         // Preview op — applied on top of committed result but NOT cached.
         // Levels takes priority if both previews are somehow active simultaneously.
-        let preview_op = if self.levels_preview_active {
-            let preview: Box<dyn Operation> = Box::new(LevelsOp::new(
+        let preview_op: Option<Box<dyn Operation>> = if self.levels_preview_active {
+            Some(Box::new(LevelsOp::new(
                 self.levels_black,
                 self.levels_white,
                 self.levels_mid,
-            ));
-            serde_json::to_value(&preview).ok()
+            )))
         } else if self.bw_preview_active {
-            serde_json::to_value(self.make_bw_op()).ok()
+            Some(self.make_bw_op())
         } else if self.bc_preview_active {
-            let preview: Box<dyn Operation> = Box::new(BrightnessContrastOp::new(
+            Some(Box::new(BrightnessContrastOp::new(
                 self.bc_brightness,
                 self.bc_contrast,
-            ));
-            serde_json::to_value(&preview).ok()
+            )))
         } else if self.sat_preview_active {
-            let preview: Box<dyn Operation> = Box::new(SaturationOp::new(self.saturation));
-            serde_json::to_value(&preview).ok()
+            Some(Box::new(SaturationOp::new(self.saturation)))
         } else if self.sepia_preview_active {
-            let preview: Box<dyn Operation> = Box::new(SepiaOp::new(self.sepia_strength));
-            serde_json::to_value(&preview).ok()
+            Some(Box::new(SepiaOp::new(self.sepia_strength)))
         } else if self.sharpen_preview_active {
-            let preview: Box<dyn Operation> = Box::new(SharpenOp::new(self.sharpen_strength));
-            serde_json::to_value(&preview).ok()
+            Some(Box::new(SharpenOp::new(self.sharpen_strength)))
         } else if self.split_preview_active {
-            let preview: Box<dyn Operation> = Box::new(SplitToneOp::new(
+            Some(Box::new(SplitToneOp::new(
                 self.split_shadow_hue,
                 self.split_shadow_sat,
                 self.split_highlight_hue,
                 self.split_highlight_sat,
                 self.split_balance,
-            ));
-            serde_json::to_value(&preview).ok()
+            )))
         } else if self.lut_preview_active {
-            self.lut_op.as_ref().and_then(|op| {
+            self.lut_op.as_ref().map(|op| {
                 let mut preview = op.clone();
                 preview.strength = self.lut_strength;
-                let boxed: Box<dyn Operation> = Box::new(preview);
-                serde_json::to_value(&boxed).ok()
+                Box::new(preview) as Box<dyn Operation>
             })
         } else if self.curve_preview_active {
-            let preview: Box<dyn Operation> = Box::new(CurvesOp {
+            Some(Box::new(CurvesOp {
                 points: self.curve_points.clone(),
-            });
-            serde_json::to_value(&preview).ok()
+            }))
         } else if self.vignette_preview_active {
-            let preview: Box<dyn Operation> = Box::new(VignetteOp::new(
+            Some(Box::new(VignetteOp::new(
                 self.vignette_strength,
                 self.vignette_radius,
                 self.vignette_feather,
-            ));
-            serde_json::to_value(&preview).ok()
+            )))
         } else if self.vibrance_preview_active {
-            let preview: Box<dyn Operation> = Box::new(VibranceOp::new(self.vibrance));
-            serde_json::to_value(&preview).ok()
+            Some(Box::new(VibranceOp::new(self.vibrance)))
         } else if self.hue_preview_active {
-            let preview: Box<dyn Operation> = Box::new(HueShiftOp::new(self.hue_degrees));
-            serde_json::to_value(&preview).ok()
+            Some(Box::new(HueShiftOp::new(self.hue_degrees)))
         } else if self.hl_preview_active {
-            let preview: Box<dyn Operation> = Box::new(HighlightsShadowsOp::new(
+            Some(Box::new(HighlightsShadowsOp::new(
                 self.hl_highlights,
                 self.hl_shadows,
-            ));
-            serde_json::to_value(&preview).ok()
+            )))
         } else if self.wb_preview_active {
-            let preview: Box<dyn Operation> =
-                Box::new(WhiteBalanceOp::new(self.wb_temperature, self.wb_tint));
-            serde_json::to_value(&preview).ok()
+            Some(Box::new(WhiteBalanceOp::new(
+                self.wb_temperature,
+                self.wb_tint,
+            )))
         } else if self.hdr_preview_active {
-            let preview: Box<dyn Operation> = Box::new(FauxHdrOp::new(self.hdr_strength));
-            serde_json::to_value(&preview).ok()
+            Some(Box::new(FauxHdrOp::new(self.hdr_strength)))
         } else if self.grain_preview_active {
-            let preview: Box<dyn Operation> = Box::new(GrainOp::new(
+            Some(Box::new(GrainOp::new(
                 self.grain_strength,
                 self.grain_size,
                 self.grain_seed,
-            ));
-            serde_json::to_value(&preview).ok()
+            )))
         } else if self.cb_preview_active {
-            let preview: Box<dyn Operation> = Box::new(ColorBalanceOp::new(
+            Some(Box::new(ColorBalanceOp::new(
                 self.cb_cyan_red,
                 self.cb_magenta_green,
                 self.cb_yellow_blue,
-            ));
-            serde_json::to_value(&preview).ok()
+            )))
         } else if self.hsl_preview_active {
-            let preview: Box<dyn Operation> =
-                Box::new(HslPanelOp::new(self.hsl_hue, self.hsl_sat, self.hsl_lum));
-            serde_json::to_value(&preview).ok()
+            Some(Box::new(HslPanelOp::new(
+                self.hsl_hue,
+                self.hsl_sat,
+                self.hsl_lum,
+            )))
         } else {
             None
         };
@@ -1500,7 +1502,7 @@ impl AppState {
         // Use the overlay path when the entire pipeline is cached (committed_ops
         // is empty) and we have a known viewport — run the preview op only on the
         // visible pixels at full resolution, return as an overlay.
-        let all_cached = start_idx >= pipeline.cursor();
+        let all_cached = start_idx >= pipeline_cursor;
         let overlay_viewport = if is_preview && all_cached {
             self.preview_viewport
         } else {
@@ -1634,8 +1636,8 @@ fn percentile_levels(hist: &[u64; 256], lo_pct: f64, hi_pct: f64) -> (f32, f32) 
 
 fn render_in_thread(
     start_image: Arc<Image>,
-    committed_ops: Vec<Option<serde_json::Value>>,
-    preview_op: Option<serde_json::Value>,
+    committed_ops: Vec<Option<Box<dyn Operation>>>,
+    preview_op: Option<Box<dyn Operation>>,
     preview_scale: Option<f32>,
     preview_viewport: Option<[u32; 4]>,
     overlay_viewport: Option<[u32; 4]>,
@@ -1646,18 +1648,19 @@ fn render_in_thread(
     // op at full resolution, and return it as a positioned overlay.  The
     // main `state.rendered` image is never replaced, so the canvas stays
     // stable and sharp.
-    if let (Some(json), Some([vp_x, vp_y, vp_w, vp_h])) = (&preview_op, overlay_viewport) {
+    if let (Some(op), Some([vp_x, vp_y, vp_w, vp_h])) = (&preview_op, overlay_viewport) {
         let mut current = start_image;
         // Run committed ops (should be empty — all_cached — but be safe).
-        for op_json in &committed_ops {
-            if let Some(j) = op_json {
-                let op: Box<dyn Operation> =
-                    serde_json::from_value(j.clone()).map_err(|e| format!("Deserialise op: {}", e))?;
-                current = Arc::new(
-                    op.apply(current.as_ref())
-                        .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
-                );
-            }
+        for committed in committed_ops.iter().flatten() {
+            let img = match Arc::try_unwrap(current) {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
+            let result = committed
+                .apply(img)
+                .map_err(|e| format!("Op '{}' failed: {}", committed.name(), e))?;
+            debug_validate_image(&result, committed.name());
+            current = Arc::new(result);
         }
         // Clamp viewport to image bounds.
         let x = vp_x.min(current.width.saturating_sub(1));
@@ -1665,14 +1668,11 @@ fn render_in_thread(
         let w = vp_w.min(current.width.saturating_sub(x)).max(1);
         let h = vp_h.min(current.height.saturating_sub(y)).max(1);
 
-        let crop = CropOp::new(x, y, w, h)
-            .apply(current.as_ref())
-            .map_err(|e| format!("Viewport crop: {}", e))?;
-        let op: Box<dyn Operation> =
-            serde_json::from_value(json.clone()).map_err(|e| format!("Deserialise preview op: {}", e))?;
+        let crop = extract_region(current.as_ref(), x, y, w, h);
         let processed = op
-            .apply(&crop)
+            .apply(crop)
             .map_err(|e| format!("Op '{}' (overlay) failed: {}", op.name(), e))?;
+        debug_validate_image(&processed, op.name());
 
         let hist = HistogramData::compute(&processed);
         return Ok((Arc::new(processed), hist, Vec::new(), Some([x, y, w, h])));
@@ -1690,24 +1690,24 @@ fn render_in_thread(
         Vec::new()
     };
 
-    for op_json in committed_ops {
-        if let Some(json) = op_json {
-            let op: Box<dyn Operation> =
-                serde_json::from_value(json).map_err(|e| format!("Deserialise op: {}", e))?;
-            current = Arc::new(
-                op.apply(current.as_ref())
-                    .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?,
-            );
+    for maybe_op in committed_ops {
+        if let Some(op) = maybe_op {
+            let img = match Arc::try_unwrap(current) {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
+            let result = op
+                .apply(img)
+                .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?;
+            debug_validate_image(&result, op.name());
+            current = Arc::new(result);
         }
         if !is_preview {
             intermediates.push(Arc::clone(&current));
         }
     }
 
-    if let Some(json) = preview_op {
-        let op: Box<dyn Operation> =
-            serde_json::from_value(json).map_err(|e| format!("Deserialise preview op: {}", e))?;
-
+    if let Some(op) = preview_op {
         if let Some([vp_x, vp_y, vp_w, vp_h]) = preview_viewport {
             let scale = preview_scale.unwrap_or(1.0);
             let sx = ((vp_x as f32 * scale) as u32).min(current.width.saturating_sub(1));
@@ -1718,25 +1718,67 @@ fn render_in_thread(
             let sh = ((vp_h as f32 * scale).ceil() as u32)
                 .min(current.height.saturating_sub(sy))
                 .max(1);
-            let crop = CropOp::new(sx, sy, sw, sh)
-                .apply(current.as_ref())
-                .map_err(|e| format!("Viewport crop: {}", e))?;
+            let crop = extract_region(current.as_ref(), sx, sy, sw, sh);
             let processed = op
-                .apply(&crop)
+                .apply(crop)
                 .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
-            let mut base = current.as_ref().deep_clone();
+            debug_validate_image(&processed, op.name());
+            let mut base = match Arc::try_unwrap(current) {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
             blit_region(&mut base, &processed, sx, sy);
             current = Arc::new(base);
         } else {
-            current = Arc::new(
-                op.apply(current.as_ref())
-                    .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?,
-            );
+            let img = match Arc::try_unwrap(current) {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
+            let result = op
+                .apply(img)
+                .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
+            debug_validate_image(&result, op.name());
+            current = Arc::new(result);
         }
     }
 
     let hist = HistogramData::compute(current.as_ref());
     Ok((current, hist, intermediates, None))
+}
+
+/// Debug-only validation that an Image's buffer matches its declared dimensions.
+#[inline]
+fn debug_validate_image(image: &Image, op_name: &str) {
+    debug_assert_eq!(
+        image.data.len(),
+        image.width as usize * image.height as usize * 4,
+        "Operation '{}' returned an Image with mismatched buffer: \
+         data.len()={} but {}x{}x4={}",
+        op_name,
+        image.data.len(),
+        image.width,
+        image.height,
+        image.width as usize * image.height as usize * 4,
+    );
+}
+
+/// Extract a rectangular region from `src` into a new Image without cloning
+/// the full source buffer.  Only `w × h × 4` bytes are read and written,
+/// compared with `src_w × src_h × 4` bytes for a deep_clone + CropOp.
+fn extract_region(src: &Image, x: u32, y: u32, w: u32, h: u32) -> Image {
+    use rayon::prelude::*;
+    let mut out = Image::new(w, h);
+    let src_stride = src.width as usize * 4;
+    let x_off = x as usize * 4;
+    let row_bytes = w as usize * 4;
+    out.data
+        .par_chunks_mut(row_bytes)
+        .enumerate()
+        .for_each(|(dst_y, dst_row)| {
+            let src_start = (y as usize + dst_y) * src_stride + x_off;
+            dst_row.copy_from_slice(&src.data[src_start..src_start + row_bytes]);
+        });
+    out
 }
 
 /// Copy `src` into `dst` at pixel offset `(x, y)`.  Caller must ensure the
@@ -1745,15 +1787,17 @@ fn blit_region(dst: &mut Image, src: &Image, x: u32, y: u32) {
     use rayon::prelude::*;
     let row_bytes = src.width as usize * 4;
     let dst_stride = dst.width as usize * 4;
-    dst.data
+    // Slice only the rows that receive data — avoids iterating the full image
+    // height and filtering in rayon (which still schedules tasks for empty rows).
+    let start = y as usize * dst_stride;
+    let end = start + src.height as usize * dst_stride;
+    let x_off = x as usize * 4;
+    dst.data[start..end]
         .par_chunks_mut(dst_stride)
         .enumerate()
-        .filter(|(row, _)| *row >= y as usize && *row < (y + src.height) as usize)
-        .for_each(|(row, dst_row)| {
-            let src_row = row - y as usize;
-            let dst_off = x as usize * 4;
+        .for_each(|(src_row, dst_row)| {
             let src_off = src_row * row_bytes;
-            dst_row[dst_off..dst_off + row_bytes]
+            dst_row[x_off..x_off + row_bytes]
                 .copy_from_slice(&src.data[src_off..src_off + row_bytes]);
         });
 }

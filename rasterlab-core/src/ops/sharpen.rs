@@ -54,16 +54,20 @@ impl Operation for SharpenOp {
         "sharpen"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, image: Image) -> RasterResult<Image> {
         if self.strength <= 0.0 {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
         if self.strength > 10.0 {
             return Err(RasterError::InvalidParams(
                 "Sharpen strength must be ≤ 10.0".into(),
             ));
         }
-        apply_sharpen(image, self.strength, self.luminance_only)
+        apply_sharpen(&image, self.strength, self.luminance_only)
     }
 
     fn describe(&self) -> String {
@@ -168,8 +172,9 @@ mod tests {
     #[test]
     fn sharpen_zero_is_identity() {
         let src = Image::new(4, 4);
-        let out = SharpenOp::new(0.0).apply(&src).unwrap();
-        assert_eq!(out.data, src.data);
+        let src_data = src.data.clone();
+        let out = SharpenOp::new(0.0).apply(src).unwrap();
+        assert_eq!(out.data, src_data);
     }
 
     #[test]
@@ -182,8 +187,9 @@ mod tests {
             p[2] = 80;
             p[3] = 255;
         });
-        let out = SharpenOp::new(1.0).apply(&src).unwrap();
+        let expected = src.pixel(4, 4);
+        let out = SharpenOp::new(1.0).apply(src).unwrap();
         // Centre pixels (away from borders) should be unchanged; border pixels may differ slightly
-        assert_eq!(out.pixel(4, 4), src.pixel(4, 4));
+        assert_eq!(out.pixel(4, 4), expected);
     }
 }

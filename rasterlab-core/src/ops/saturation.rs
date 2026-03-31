@@ -26,15 +26,18 @@ impl Operation for SaturationOp {
         "saturation"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if (self.saturation - 1.0).abs() < 1e-5 {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
         let s_factor = self.saturation;
-        let mut out = image.deep_clone();
 
-        out.data.par_chunks_mut(4).for_each(|p| {
+        image.data.par_chunks_mut(4).for_each(|p| {
             let r = p[0] as f32 / 255.0;
             let g = p[1] as f32 / 255.0;
             let b = p[2] as f32 / 255.0;
@@ -49,7 +52,7 @@ impl Operation for SaturationOp {
             // alpha untouched
         });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -137,7 +140,7 @@ mod tests {
             p[2] = 200;
             p[3] = 255;
         });
-        let out = SaturationOp::new(1.0).apply(&src).unwrap();
+        let out = SaturationOp::new(1.0).apply(src.deep_clone()).unwrap();
         // Should be unchanged (within rounding)
         for (a, b) in src.data.chunks(4).zip(out.data.chunks(4)) {
             assert!((a[0] as i16 - b[0] as i16).abs() <= 1);
@@ -153,7 +156,7 @@ mod tests {
             p[2] = 50;
             p[3] = 255;
         });
-        let out = SaturationOp::new(0.0).apply(&src).unwrap();
+        let out = SaturationOp::new(0.0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[0], p[1]));
         out.data.chunks(4).for_each(|p| assert_eq!(p[1], p[2]));
     }
@@ -164,7 +167,7 @@ mod tests {
         src.data.chunks_mut(4).for_each(|p| {
             p[3] = 42;
         });
-        let out = SaturationOp::new(2.0).apply(&src).unwrap();
+        let out = SaturationOp::new(2.0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 42));
     }
 }

@@ -110,8 +110,8 @@ impl FormatRegistry {
             RasterError::UnsupportedFormat(format!("No handler registered for '{}'", fmt))
         })?;
 
-        // For RAW formats that override decode_file, delegate directly
-        if fmt == "nef" {
+        // Formats that need seekable file access (RAW) bypass the in-memory path.
+        if handler.needs_file_path() {
             return handler.decode_file(path);
         }
 
@@ -135,11 +135,8 @@ impl FormatRegistry {
             RasterError::UnsupportedFormat(format!("No handler registered for '{}'", fmt))
         })?;
 
-        if fmt == "nef" {
-            // rawler requires a seekable file path — write to a temp file
-            let tmp = std::env::temp_dir().join("rasterlab_orig.nef");
-            std::fs::write(&tmp, data)?;
-            return handler.decode_file(&tmp);
+        if handler.needs_file_path() {
+            return self.decode_bytes_via_tempfile(&handler, data, hint_path);
         }
 
         handler.decode(data)
@@ -167,6 +164,30 @@ impl FormatRegistry {
         }
 
         handler.encode(image, options)
+    }
+
+    /// Write bytes to a unique temp file and decode via `decode_file`.
+    ///
+    /// Used for handlers that require a seekable file path (RAW formats).
+    /// The temp file is automatically deleted when the `NamedTempFile` drops.
+    fn decode_bytes_via_tempfile(
+        &self,
+        handler: &Arc<dyn FormatHandler>,
+        data: &[u8],
+        hint_path: Option<&Path>,
+    ) -> RasterResult<Image> {
+        use std::io::Write;
+        let ext = hint_path
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .unwrap_or("raw");
+        let suffix = format!(".{}", ext);
+        let mut tmp = tempfile::Builder::new()
+            .suffix(&suffix)
+            .tempfile()
+            .map_err(RasterError::Io)?;
+        tmp.write_all(data).map_err(RasterError::Io)?;
+        handler.decode_file(tmp.path())
     }
 
     /// Return all registered extensions.

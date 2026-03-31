@@ -153,9 +153,13 @@ impl Operation for ResizeOp {
         "resize"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, image: Image) -> RasterResult<Image> {
         if image.width == self.width && image.height == self.height {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
         let dst_w = self.width as usize;
@@ -175,10 +179,10 @@ impl Operation for ResizeOp {
                     let sx = (dx as f32 + 0.5) * x_ratio - 0.5;
                     let p = match mode {
                         ResampleMode::NearestNeighbour => {
-                            sample_nearest(image, sx.max(0.0), sy.max(0.0))
+                            sample_nearest(&image, sx.max(0.0), sy.max(0.0))
                         }
-                        ResampleMode::Bilinear => sample_bilinear(image, sx, sy),
-                        ResampleMode::Bicubic => sample_bicubic(image, sx, sy),
+                        ResampleMode::Bilinear => sample_bilinear(&image, sx, sy),
+                        ResampleMode::Bicubic => sample_bicubic(&image, sx, sy),
                     };
                     let off = dx * 4;
                     row[off] = p[0];
@@ -224,7 +228,7 @@ mod tests {
             ResampleMode::Bilinear,
             ResampleMode::Bicubic,
         ] {
-            let out = ResizeOp::new(16, 16, mode).apply(&src).unwrap();
+            let out = ResizeOp::new(16, 16, mode).apply(src.deep_clone()).unwrap();
             assert_eq!(out.data, src.data, "identity failed for {:?}", mode);
         }
     }
@@ -233,7 +237,7 @@ mod tests {
     fn output_dimensions_correct() {
         let src = solid(128, 128, 128, 100, 80);
         let out = ResizeOp::new(50, 40, ResampleMode::Bilinear)
-            .apply(&src)
+            .apply(src)
             .unwrap();
         assert_eq!(out.width, 50);
         assert_eq!(out.height, 40);
@@ -248,7 +252,7 @@ mod tests {
             ResampleMode::Bicubic,
         ] {
             let src = solid(200, 100, 50, 32, 32);
-            let out = ResizeOp::new(64, 64, mode).apply(&src).unwrap();
+            let out = ResizeOp::new(64, 64, mode).apply(src).unwrap();
             out.data.chunks(4).for_each(|p| {
                 assert!((p[0] as i16 - 200).abs() <= 2, "R off for {:?}", mode);
                 assert!((p[1] as i16 - 100).abs() <= 2, "G off for {:?}", mode);
@@ -269,13 +273,14 @@ mod tests {
             p[2] = v;
             p[3] = 255;
         });
+        let src_data = src.data.clone();
         let up = ResizeOp::new(16, 16, ResampleMode::Bilinear)
-            .apply(&src)
+            .apply(src)
             .unwrap();
         let down = ResizeOp::new(8, 8, ResampleMode::Bilinear)
-            .apply(&up)
+            .apply(up)
             .unwrap();
-        for (a, b) in src.data.chunks(4).zip(down.data.chunks(4)) {
+        for (a, b) in src_data.chunks(4).zip(down.data.chunks(4)) {
             assert!((a[0] as i16 - b[0] as i16).abs() <= 10);
         }
     }

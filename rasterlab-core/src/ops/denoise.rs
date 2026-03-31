@@ -51,7 +51,11 @@ impl Operation for DenoiseOp {
         "denoise"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, image: Image) -> RasterResult<Image> {
         let w = image.width as usize;
         let h = image.height as usize;
         let r = self.radius as usize;
@@ -174,8 +178,9 @@ mod tests {
     fn flat_region_largely_preserved() {
         // A uniform grey should come out nearly identical.
         let src = solid_grey(128);
-        let out = DenoiseOp::new(0.1, 3).apply(&src).unwrap();
-        for (a, b) in src.data.chunks(4).zip(out.data.chunks(4)) {
+        let src_data = src.data.clone();
+        let out = DenoiseOp::new(0.1, 3).apply(src).unwrap();
+        for (a, b) in src_data.chunks(4).zip(out.data.chunks(4)) {
             assert!((a[0] as i16 - b[0] as i16).abs() <= 2);
         }
     }
@@ -184,7 +189,8 @@ mod tests {
     fn noisy_signal_reduced() {
         // After denoising the alternating pattern should be more uniform.
         let src = noisy_image();
-        let out = DenoiseOp::new(0.5, 3).apply(&src).unwrap();
+        let src_data = src.data.clone();
+        let out = DenoiseOp::new(0.5, 3).apply(src).unwrap();
 
         // Compute variance of the output; should be less than input.
         let var = |data: &[u8]| {
@@ -200,7 +206,7 @@ mod tests {
                 / (data.len() / 4) as f64
         };
         assert!(
-            var(&out.data) < var(&src.data),
+            var(&out.data) < var(&src_data),
             "denoised variance should be lower"
         );
     }
@@ -214,7 +220,7 @@ mod tests {
             p[2] = 140;
             p[3] = 55;
         });
-        let out = DenoiseOp::new(0.1, 2).apply(&src).unwrap();
+        let out = DenoiseOp::new(0.1, 2).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 55));
     }
 
@@ -231,7 +237,7 @@ mod tests {
             p[2] = v;
             p[3] = 255;
         });
-        let out = DenoiseOp::new(0.1, 3).apply(&src).unwrap();
+        let out = DenoiseOp::new(0.1, 3).apply(src).unwrap();
         // Pixel at x=6 (left side) should stay close to 200.
         let left_idx = 6 * 4;
         assert!(

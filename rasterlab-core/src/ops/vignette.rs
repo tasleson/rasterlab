@@ -42,7 +42,11 @@ impl Operation for VignetteOp {
         "vignette"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let w = image.width as usize;
         let h = image.height as usize;
 
@@ -61,9 +65,8 @@ impl Operation for VignetteOp {
         let outer = inner + self.feather * (1.0 - inner);
         let zone = (outer - inner).max(1e-6); // avoid division by zero
 
-        let mut out = image.deep_clone();
-
-        out.data
+        image
+            .data
             .par_chunks_mut(w * 4)
             .enumerate()
             .for_each(|(y, row)| {
@@ -87,7 +90,7 @@ impl Operation for VignetteOp {
                 }
             });
 
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -118,15 +121,16 @@ mod tests {
     #[test]
     fn zero_strength_is_identity() {
         let src = white_image(16, 16);
-        let out = VignetteOp::new(0.0, 0.5, 0.5).apply(&src).unwrap();
-        assert_eq!(out.data, src.data);
+        let src_data = src.data.clone();
+        let out = VignetteOp::new(0.0, 0.5, 0.5).apply(src).unwrap();
+        assert_eq!(out.data, src_data);
     }
 
     #[test]
     fn centre_pixel_unaffected() {
         // With radius > 0 the centre pixel should be untouched.
         let src = white_image(16, 16);
-        let out = VignetteOp::new(1.0, 0.5, 0.5).apply(&src).unwrap();
+        let out = VignetteOp::new(1.0, 0.5, 0.5).apply(src).unwrap();
         let [r, g, b, a] = out.pixel(8, 8);
         assert_eq!([r, g, b, a], [255, 255, 255, 255]);
     }
@@ -134,7 +138,7 @@ mod tests {
     #[test]
     fn corners_are_darkened() {
         let src = white_image(64, 64);
-        let out = VignetteOp::new(1.0, 0.0, 1.0).apply(&src).unwrap();
+        let out = VignetteOp::new(1.0, 0.0, 1.0).apply(src).unwrap();
         // Corner pixel should be darker than the centre.
         let [cr, ..] = out.pixel(32, 32);
         let [cor, ..] = out.pixel(0, 0);
@@ -150,7 +154,7 @@ mod tests {
         src.data.chunks_mut(4).for_each(|p| {
             p[3] = 128;
         });
-        let out = VignetteOp::new(1.0, 0.0, 1.0).apply(&src).unwrap();
+        let out = VignetteOp::new(1.0, 0.0, 1.0).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 128));
     }
 }

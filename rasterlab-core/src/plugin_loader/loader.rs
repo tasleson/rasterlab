@@ -70,7 +70,7 @@ impl Plugin for DynPlugin {
                         None
                     } else {
                         Some(Box::new(DynOperation {
-                            vtable: op_ptr,
+                            guard: Arc::new(VtableGuard { ptr: op_ptr }),
                             _lib: Arc::clone(&self._lib),
                         }) as Box<dyn Operation>)
                     }
@@ -90,24 +90,40 @@ impl Plugin for DynPlugin {
 // DynOperation: wraps a single OperationVTable
 // ---------------------------------------------------------------------------
 
-struct DynOperation {
-    vtable: *mut OperationVTable,
-    _lib: Arc<Library>,
+/// Guards a plugin-allocated `OperationVTable` pointer, calling `destroy`
+/// exactly once when the last `Arc<VtableGuard>` drops.  This allows
+/// `DynOperation` to be safely cloned (via `clone_box`) for the render
+/// thread without risking a double-free or use-after-free.
+struct VtableGuard {
+    ptr: *mut OperationVTable,
 }
 
-// SAFETY: same reasoning as DynPlugin.
-unsafe impl Send for DynOperation {}
-unsafe impl Sync for DynOperation {}
-
-impl Drop for DynOperation {
+impl Drop for VtableGuard {
     fn drop(&mut self) {
-        unsafe {
-            if !self.vtable.is_null() {
-                ((*self.vtable).destroy)(self.vtable);
+        if !self.ptr.is_null() {
+            // SAFETY: ptr was returned by `get_operation` and is destroyed
+            // exactly once here.
+            unsafe {
+                ((*self.ptr).destroy)(self.ptr);
             }
         }
     }
 }
+
+// SAFETY: The vtable pointer points to code in the loaded library and is
+// only accessed via immutable function-pointer calls.  The Library Arc
+// keeps the code alive.
+unsafe impl Send for VtableGuard {}
+unsafe impl Sync for VtableGuard {}
+
+struct DynOperation {
+    guard: Arc<VtableGuard>,
+    _lib: Arc<Library>,
+}
+
+// SAFETY: DynOperation only holds an Arc (Send+Sync) and a Library Arc.
+unsafe impl Send for DynOperation {}
+unsafe impl Sync for DynOperation {}
 
 // DynOperation is not round-trip serialisable (it wraps a live pointer from a
 // loaded library).  We implement Serialize/Deserialize manually so that it can
@@ -135,10 +151,11 @@ impl<'de> serde::Deserialize<'de> for DynOperation {
 impl Operation for DynOperation {
     fn name(&self) -> &'static str {
         unsafe {
-            if self.vtable.is_null() {
+            let vtable = self.guard.ptr;
+            if vtable.is_null() {
                 return "unknown";
             }
-            let ptr = (*self.vtable).name;
+            let ptr = (*vtable).name;
             if ptr.is_null() {
                 return "unknown";
             }
@@ -147,7 +164,15 @@ impl Operation for DynOperation {
         }
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(DynOperation {
+            guard: Arc::clone(&self.guard),
+            _lib: Arc::clone(&self._lib),
+        })
+    }
+
+    fn apply(&self, image: Image) -> RasterResult<Image> {
+        let vtable = self.guard.ptr;
         unsafe {
             // Build CImage from our Image
             let src = CImage {
@@ -161,7 +186,7 @@ impl Operation for DynOperation {
             // Output CImage (plugin fills this)
             let mut dst = std::mem::zeroed::<CImage>();
 
-            let status = ((*self.vtable).apply)(self.vtable, &src, &mut dst);
+            let status = ((*vtable).apply)(vtable, &src, &mut dst);
 
             if status != COperationStatus::Ok {
                 return Err(RasterError::Plugin(format!(
@@ -187,11 +212,12 @@ impl Operation for DynOperation {
     }
 
     fn describe(&self) -> String {
+        let vtable = self.guard.ptr;
         unsafe {
-            if self.vtable.is_null() {
+            if vtable.is_null() {
                 return "Plugin operation".into();
             }
-            let desc_ptr = ((*self.vtable).describe)(self.vtable);
+            let desc_ptr = ((*vtable).describe)(vtable);
             if desc_ptr.is_null() {
                 return self.name().to_string();
             }

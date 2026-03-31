@@ -87,59 +87,58 @@ impl Operation for HslPanelOp {
         "hsl_panel"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.is_identity() {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
         let hue = self.hue;
         let sat = self.saturation;
         let lum = self.luminance;
 
-        let mut out = image.deep_clone();
+        image.data.par_chunks_mut(4).for_each(|p| {
+            let r = p[0] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
 
-        out.data
-            .par_chunks_mut(4)
-            .zip(image.data.par_chunks(4))
-            .for_each(|(dst, src)| {
-                let r = src[0] as f32 / 255.0;
-                let g = src[1] as f32 / 255.0;
-                let b = src[2] as f32 / 255.0;
+            let (h, s, l) = rgb_to_hsl(r, g, b);
 
-                let (h, s, l) = rgb_to_hsl(r, g, b);
+            // Compute weighted deltas from each band.
+            let mut dh = 0.0f32;
+            let mut ds = 0.0f32;
+            let mut dl = 0.0f32;
+            let mut w_sum = 0.0f32;
+            for i in 0..8 {
+                let w = band_weight(h, BAND_CENTRES[i]);
+                dh += w * hue[i];
+                ds += w * sat[i];
+                dl += w * lum[i];
+                w_sum += w;
+            }
 
-                // Compute weighted deltas from each band.
-                let mut dh = 0.0f32;
-                let mut ds = 0.0f32;
-                let mut dl = 0.0f32;
-                let mut w_sum = 0.0f32;
-                for i in 0..8 {
-                    let w = band_weight(h, BAND_CENTRES[i]);
-                    dh += w * hue[i];
-                    ds += w * sat[i];
-                    dl += w * lum[i];
-                    w_sum += w;
-                }
+            // If the pixel hue falls outside all bands (shouldn't happen with
+            // triangular kernels, but guard against divide-by-zero).
+            let (new_h, new_s, new_l) = if w_sum < 1e-6 {
+                (h, s, l)
+            } else {
+                let new_h = (h + dh / (360.0 * w_sum)).rem_euclid(1.0);
+                let new_s = (s + ds / w_sum).clamp(0.0, 1.0);
+                let new_l = (l + dl / w_sum).clamp(0.0, 1.0);
+                (new_h, new_s, new_l)
+            };
 
-                // If the pixel hue falls outside all bands (shouldn't happen with
-                // triangular kernels, but guard against divide-by-zero).
-                let (new_h, new_s, new_l) = if w_sum < 1e-6 {
-                    (h, s, l)
-                } else {
-                    let new_h = (h + dh / (360.0 * w_sum)).rem_euclid(1.0);
-                    let new_s = (s + ds / w_sum).clamp(0.0, 1.0);
-                    let new_l = (l + dl / w_sum).clamp(0.0, 1.0);
-                    (new_h, new_s, new_l)
-                };
+            let (ro, go, bo) = hsl_to_rgb(new_h, new_s, new_l);
+            p[0] = (ro * 255.0).clamp(0.0, 255.0) as u8;
+            p[1] = (go * 255.0).clamp(0.0, 255.0) as u8;
+            p[2] = (bo * 255.0).clamp(0.0, 255.0) as u8;
+            // alpha unchanged
+        });
 
-                let (ro, go, bo) = hsl_to_rgb(new_h, new_s, new_l);
-                dst[0] = (ro * 255.0).clamp(0.0, 255.0) as u8;
-                dst[1] = (go * 255.0).clamp(0.0, 255.0) as u8;
-                dst[2] = (bo * 255.0).clamp(0.0, 255.0) as u8;
-                // alpha unchanged
-            });
-
-        Ok(out)
+        Ok(image)
     }
 
     fn describe(&self) -> String {
@@ -232,8 +231,9 @@ mod tests {
     #[test]
     fn identity_unchanged() {
         let src = solid(180, 80, 40);
-        let out = HslPanelOp::default().apply(&src).unwrap();
-        assert_eq!(out.data, src.data);
+        let src_data = src.data.clone();
+        let out = HslPanelOp::default().apply(src).unwrap();
+        assert_eq!(out.data, src_data);
     }
 
     #[test]
@@ -247,9 +247,7 @@ mod tests {
         });
         let mut sat = [0.0f32; 8];
         sat[0] = 0.5; // boost reds saturation
-        let out = HslPanelOp::new([0.0; 8], sat, [0.0; 8])
-            .apply(&src)
-            .unwrap();
+        let out = HslPanelOp::new([0.0; 8], sat, [0.0; 8]).apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 77));
     }
 
@@ -257,13 +255,14 @@ mod tests {
     fn red_hue_shift_affects_red_pixel() {
         // Pure red (hue ≈ 0°). Shift reds +90° → should become yellow-ish.
         let src = solid(230, 20, 20);
+        let orig_g = src.data[1];
         let mut hue = [0.0f32; 8];
         hue[0] = 90.0;
         let op = HslPanelOp::new(hue, [0.0; 8], [0.0; 8]);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         // After +90° shift, R channel should decrease and G should increase.
         assert!(
-            out.data[1] > src.data[1],
+            out.data[1] > orig_g,
             "G should increase after +90° hue on reds"
         );
     }
@@ -275,7 +274,7 @@ mod tests {
         let mut hue = [0.0f32; 8];
         hue[3] = 90.0; // greens band
         let op = HslPanelOp::new(hue, [0.0; 8], [0.0; 8]);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         // Red pixel: R should be almost unchanged (±5).
         assert!((out.data[0] as i16 - 230i16).abs() <= 5);
     }
@@ -283,12 +282,12 @@ mod tests {
     #[test]
     fn saturation_boost_increases_chroma() {
         let src = solid(160, 120, 100); // low-sat warm pixel (reds/oranges)
+        let chroma_before = (src.data[0] as i16 - src.data[2] as i16).unsigned_abs();
         let mut sat = [0.0f32; 8];
         sat[0] = 0.8;
         sat[1] = 0.8;
         let op = HslPanelOp::new([0.0; 8], sat, [0.0; 8]);
-        let out = op.apply(&src).unwrap();
-        let chroma_before = (src.data[0] as i16 - src.data[2] as i16).unsigned_abs();
+        let out = op.apply(src).unwrap();
         let chroma_after = (out.data[0] as i16 - out.data[2] as i16).unsigned_abs();
         assert!(chroma_after > chroma_before, "chroma should increase");
     }
@@ -296,10 +295,11 @@ mod tests {
     #[test]
     fn luminance_shift_brightens() {
         let src = solid(100, 60, 60); // dark red
+        let orig_r = src.data[0];
         let mut lum = [0.0f32; 8];
         lum[0] = 0.3;
         let op = HslPanelOp::new([0.0; 8], [0.0; 8], lum);
-        let out = op.apply(&src).unwrap();
-        assert!(out.data[0] > src.data[0], "R should brighten");
+        let out = op.apply(src).unwrap();
+        assert!(out.data[0] > orig_r, "R should brighten");
     }
 }

@@ -197,9 +197,13 @@ impl Operation for PerspectiveOp {
         "perspective"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, image: Image) -> RasterResult<Image> {
         if self.is_identity() {
-            return Ok(image.deep_clone());
+            return Ok(image);
         }
 
         let w = image.width as f32;
@@ -232,7 +236,7 @@ impl Operation for PerspectiveOp {
                 let dx = idx % out_w;
                 let dy = idx / out_w;
                 let (sx, sy) = apply_h(&h_mat, dx as f32 + 0.5, dy as f32 + 0.5);
-                let px = bilinear_sample(image, sx - 0.5, sy - 0.5);
+                let px = bilinear_sample(&image, sx - 0.5, sy - 0.5);
                 dst.copy_from_slice(&px);
             });
 
@@ -262,8 +266,9 @@ mod tests {
     #[test]
     fn identity_unchanged() {
         let src = solid(100, 150, 200);
-        let out = PerspectiveOp::default().apply(&src).unwrap();
-        assert_eq!(out.data, src.data);
+        let src_data = src.data.clone();
+        let out = PerspectiveOp::default().apply(src).unwrap();
+        assert_eq!(out.data, src_data);
     }
 
     #[test]
@@ -289,7 +294,7 @@ mod tests {
             p[3] = 42;
         });
         let op = PerspectiveOp::new([[0.05, 0.0], [-0.05, 0.0], [0.0, 0.0], [0.0, 0.0]]);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 42));
     }
 
@@ -300,7 +305,7 @@ mod tests {
         // anywhere in the source gives the same result).
         let src = solid(200, 100, 50);
         let op = PerspectiveOp::new([[0.05, 0.05], [-0.05, 0.05], [-0.05, -0.05], [0.05, -0.05]]);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         for p in out.data.chunks(4) {
             assert!((p[0] as i16 - 200).abs() <= 2);
         }

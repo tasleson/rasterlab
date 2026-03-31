@@ -40,7 +40,11 @@ impl Operation for CropOp {
         "crop"
     }
 
-    fn apply(&self, image: &Image) -> RasterResult<Image> {
+    fn clone_box(&self) -> Box<dyn Operation> {
+        Box::new(self.clone())
+    }
+
+    fn apply(&self, image: Image) -> RasterResult<Image> {
         // Validate bounds
         if self.width == 0 || self.height == 0 {
             return Err(RasterError::InvalidParams(
@@ -109,18 +113,19 @@ mod tests {
     #[test]
     fn crop_basic() {
         let src = checkerboard(10, 10);
+        let expected = src.pixel(2, 3);
         let op = CropOp::new(2, 3, 4, 5);
-        let out = op.apply(&src).unwrap();
+        let out = op.apply(src).unwrap();
         assert_eq!(out.width, 4);
         assert_eq!(out.height, 5);
         // Top-left of crop should match src pixel at (2,3)
-        assert_eq!(out.pixel(0, 0), src.pixel(2, 3));
+        assert_eq!(out.pixel(0, 0), expected);
     }
 
     #[test]
     fn crop_out_of_bounds() {
         let src = checkerboard(8, 8);
         let op = CropOp::new(5, 5, 10, 10);
-        assert!(op.apply(&src).is_err());
+        assert!(op.apply(src).is_err());
     }
 }
