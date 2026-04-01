@@ -167,13 +167,24 @@ fn apply_detail(
 // ---------------------------------------------------------------------------
 
 fn box_blur_1ch(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
-    // Three passes of separable H+V ≈ Gaussian
+    // 2D separable box blur ≈ Gaussian via 3 passes.
+    //
+    // Because box blur is a linear separable filter, all horizontal passes
+    // commute with all vertical passes:
+    //   (H¹V¹)(H²V²)(H³V³) = H³ · V³
+    //
+    // So we do all 3 H passes first, then transpose once, run 3 H passes
+    // (which act as V passes in the original space), and transpose back.
+    // That is 2 transposes total instead of 6 (one per H+V pair).
     let mut buf = src.to_vec();
     for _ in 0..3 {
         box_blur_h_1ch(&mut buf, w, h, radius);
-        box_blur_v_1ch(&mut buf, w, h, radius);
     }
-    buf
+    let mut t = transpose(&buf, w, h);
+    for _ in 0..3 {
+        box_blur_h_1ch(&mut t, h, w, radius);
+    }
+    transpose(&t, h, w)
 }
 
 /// Horizontal box blur — one row per rayon task.
@@ -204,36 +215,23 @@ fn box_blur_h_1ch(buf: &mut [f32], w: usize, _h: usize, radius: usize) {
     });
 }
 
-/// Vertical box blur — sequential per column (cache-unfriendly but correct; 3 passes keep it fast).
-fn box_blur_v_1ch(buf: &mut [f32], w: usize, h: usize, radius: usize) {
-    let mut col = vec![0.0f32; h];
-    for x in 0..w {
-        // Gather column
-        for y in 0..h {
-            col[y] = buf[y * w + x];
-        }
-        let mut out = vec![0.0f32; h];
-        let mut sum = 0.0f32;
-        for &v in col.iter().take(radius.min(h - 1) + 1) {
-            sum += v;
-        }
-        let mut count = (radius.min(h - 1) + 1) as f32;
-        for y in 0..h {
-            out[y] = sum / count;
-            if y + radius + 1 < h {
-                sum += col[y + radius + 1];
-                count += 1.0;
+/// Transpose a row-major w×h buffer into an h×w buffer.
+/// Both the read and write passes are tiled so each touches cache-friendly blocks.
+fn transpose(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+    const TILE: usize = 64;
+    let mut dst = vec![0.0f32; w * h];
+    for ty in (0..h).step_by(TILE) {
+        for tx in (0..w).step_by(TILE) {
+            let row_end = (ty + TILE).min(h);
+            let col_end = (tx + TILE).min(w);
+            for y in ty..row_end {
+                for x in tx..col_end {
+                    dst[x * h + y] = src[y * w + x];
+                }
             }
-            if y >= radius {
-                sum -= col[y - radius];
-                count -= 1.0;
-            }
-        }
-        // Scatter back
-        for y in 0..h {
-            buf[y * w + x] = out[y];
         }
     }
+    dst
 }
 
 #[cfg(test)]

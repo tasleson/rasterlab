@@ -4,8 +4,8 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use rasterlab_core::{
     image::Image,
     ops::{
-        BlackAndWhiteOp, CropOp, RotateOp, SharpenOp, histogram::HistogramData,
-        split_tone::SplitToneOp,
+        BlackAndWhiteOp, CropOp, RotateOp, SharpenOp, clarity_texture::ClarityTextureOp,
+        histogram::HistogramData, split_tone::SplitToneOp,
     },
     traits::operation::Operation,
 };
@@ -107,6 +107,27 @@ fn bench_split_tone(c: &mut Criterion) {
     });
 }
 
+fn bench_clarity_texture(c: &mut Criterion) {
+    init_rayon();
+    let img = make_image(4000, 3000);
+    for (clarity, texture) in [(1.0_f32, 0.0_f32), (0.0, 1.0), (1.0, 1.0)] {
+        c.bench_with_input(
+            BenchmarkId::new(
+                "clarity_texture 4000x3000",
+                format!("clarity={clarity} texture={texture}"),
+            ),
+            &(clarity, texture),
+            |b, &(cl, tx)| {
+                b.iter_batched(
+                    || img.deep_clone(),
+                    |i| ClarityTextureOp::new(cl, tx).apply(i).unwrap(),
+                    BatchSize::LargeInput,
+                )
+            },
+        );
+    }
+}
+
 fn bench_histogram(c: &mut Criterion) {
     init_rayon();
     // Histogram compute is a full read of the pixel buffer with per-pixel
@@ -147,6 +168,7 @@ criterion_group!(
     bench_sharpen,
     bench_bw,
     bench_split_tone,
+    bench_clarity_texture,
     bench_histogram,
     bench_image_to_egui,
 );
