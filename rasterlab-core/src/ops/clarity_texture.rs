@@ -5,17 +5,31 @@ use crate::{error::RasterResult, image::Image, traits::operation::Operation};
 
 /// Clarity and Texture — local contrast enhancements at two different scales.
 ///
-/// Both controls work via an unsharp-mask approach (detail = image − blurred),
+/// Both controls work via an [unsharp-mask] approach (`detail = image − blurred`),
 /// but differ in scale and weighting:
 ///
 /// * **Clarity** — large-radius (≈3 % of min dimension) blur; midtone-weighted
 ///   so highlights and shadows are not blown out.  Positive values add punch
-///   and depth; negative values create a soft/dreamy look.
+///   and depth; negative values create a soft/dreamy look.  The midtone weight
+///   `4·L·(1−L)` peaks at mid-grey and falls to zero at black and white; see
+///   the [darktable local-contrast docs] for a practical description of the
+///   same approach.
 ///
 /// * **Texture** — small-radius (≈0.5 % of min dimension) blur; uniform weight.
-///   Targets fine surface detail without affecting broader tones.
+///   Targets fine surface detail without affecting broader tones.  Concept
+///   introduced by Adobe Lightroom (2019); see the [Adobe texture blog post].
+///
+/// The blur kernel is approximated by three passes of a separable box blur,
+/// which converges to a Gaussian by the central limit theorem.  See Kovesi,
+/// *[Fast Almost-Gaussian Filtering]* (2010) for the analytical justification
+/// and O(1)-in-radius sliding-window implementation used here.
 ///
 /// Range for both is `[-1.0, 1.0]`.
+///
+/// [unsharp-mask]: https://en.wikipedia.org/wiki/Unsharp_masking
+/// [darktable local-contrast docs]: https://docs.darktable.org/usermanual/development/en/module-reference/processing-modules/local-contrast/
+/// [Adobe texture blog post]: https://blog.adobe.com/en/publish/2019/03/26/texture-a-new-slider-in-lightroom
+/// [Fast Almost-Gaussian Filtering]: https://www.peterkovesi.com/papers/FastGaussianSmoothing.pdf
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClarityTextureOp {
     /// Midtone contrast. `0.0` = no change. `[-1.0, 1.0]`.
@@ -167,41 +181,26 @@ fn apply_detail(
 // ---------------------------------------------------------------------------
 
 fn box_blur_1ch(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
-    // 2D separable box blur ≈ Gaussian via 3 passes.
-    //
-    // Because box blur is a linear separable filter, all horizontal passes
-    // commute with all vertical passes:
-    //   (H¹V¹)(H²V²)(H³V³) = H³ · V³
-    //
-    // So we do all 3 H passes first, then transpose once, run 3 H passes
-    // (which act as V passes in the original space), and transpose back.
-    // That is 2 transposes total instead of 6 (one per H+V pair).
+    // Three passes of separable H+V ≈ Gaussian.
     let mut buf = src.to_vec();
     for _ in 0..3 {
         box_blur_h_1ch(&mut buf, w, h, radius);
+        box_blur_v_1ch(&mut buf, w, h, radius);
     }
-    let mut t = transpose(&buf, w, h);
-    for _ in 0..3 {
-        box_blur_h_1ch(&mut t, h, w, radius);
-    }
-    transpose(&t, h, w)
+    buf
 }
 
 /// Horizontal box blur — one row per rayon task.
 fn box_blur_h_1ch(buf: &mut [f32], w: usize, _h: usize, radius: usize) {
     buf.par_chunks_mut(w).for_each(|row| {
         let mut out = vec![0.0f32; w];
-        // Seed the window sum for x = 0
         let mut sum = 0.0f32;
         for &v in row.iter().take(radius.min(w - 1) + 1) {
             sum += v;
         }
-        // How many samples are actually in the initial window (right side may be clamped)
         let mut count = (radius.min(w - 1) + 1) as f32;
-
         for x in 0..w {
             out[x] = sum / count;
-            // Advance window: remove leaving sample (x-radius), add entering (x+radius+1)
             if x + radius + 1 < w {
                 sum += row[x + radius + 1];
                 count += 1.0;
@@ -215,23 +214,71 @@ fn box_blur_h_1ch(buf: &mut [f32], w: usize, _h: usize, radius: usize) {
     });
 }
 
-/// Transpose a row-major w×h buffer into an h×w buffer.
-/// Both the read and write passes are tiled so each touches cache-friendly blocks.
-fn transpose(src: &[f32], w: usize, h: usize) -> Vec<f32> {
-    const TILE: usize = 64;
-    let mut dst = vec![0.0f32; w * h];
-    for ty in (0..h).step_by(TILE) {
-        for tx in (0..w).step_by(TILE) {
-            let row_end = (ty + TILE).min(h);
-            let col_end = (tx + TILE).min(w);
-            for y in ty..row_end {
-                for x in tx..col_end {
-                    dst[x * h + y] = src[y * w + x];
-                }
+/// Vertical box blur — parallel column strips, no transpose.
+///
+/// Columns are processed in strips of STRIP adjacent columns.  Each strip
+/// gathers its data into a contiguous [h × STRIP] buffer (one cache-line per
+/// row in the source), runs the sliding-window blur across all STRIP columns
+/// simultaneously (SIMD-friendly inner loop), then writes the results back.
+/// Strips cover disjoint column ranges so parallel mutation is sound.
+fn box_blur_v_1ch(buf: &mut [f32], w: usize, h: usize, radius: usize) {
+    const STRIP: usize = 16; // 16 f32 = 64 bytes = one cache line per source row
+
+    let n_strips = w.div_ceil(STRIP);
+    // Cast to usize so the closure captures a Send+Sync value. Casting back
+    // inside the closure is sound because strips cover disjoint column ranges.
+    let raw = buf.as_mut_ptr() as usize;
+
+    (0..n_strips).into_par_iter().for_each(|s| {
+        let x0 = s * STRIP;
+        let sw = STRIP.min(w - x0); // actual columns in this strip (last strip may be narrow)
+        let p = raw as *mut f32;
+
+        // --- Gather: copy strip columns into contiguous [h × sw] buffer ---
+        // Each row contributes one memcpy of sw floats (≤ one cache line).
+        let mut tmp = vec![0.0f32; h * sw];
+        for y in 0..h {
+            let src_row = unsafe { std::slice::from_raw_parts(p.add(y * w + x0), sw) };
+            tmp[y * sw..y * sw + sw].copy_from_slice(src_row);
+        }
+
+        // --- Blur: sliding window over all sw columns simultaneously ---
+        // Inner loops over sw are auto-vectorised by the compiler.
+        let mut sums = vec![0.0f32; sw];
+        let seed_end = radius.min(h - 1);
+        for y in 0..=seed_end {
+            let row = &tmp[y * sw..y * sw + sw];
+            for c in 0..sw {
+                sums[c] += row[c];
             }
         }
-    }
-    dst
+        let mut count = (seed_end + 1) as f32;
+
+        for y in 0..h {
+            let inv = 1.0 / count;
+            // Write blurred values directly into buf for this strip's columns.
+            unsafe {
+                let dst_row = std::slice::from_raw_parts_mut(p.add(y * w + x0), sw);
+                for c in 0..sw {
+                    dst_row[c] = sums[c] * inv;
+                }
+            }
+            if y + radius + 1 < h {
+                let add_row = &tmp[(y + radius + 1) * sw..(y + radius + 1) * sw + sw];
+                for c in 0..sw {
+                    sums[c] += add_row[c];
+                }
+                count += 1.0;
+            }
+            if y >= radius {
+                let sub_row = &tmp[(y - radius) * sw..(y - radius) * sw + sw];
+                for c in 0..sw {
+                    sums[c] -= sub_row[c];
+                }
+                count -= 1.0;
+            }
+        }
+    });
 }
 
 #[cfg(test)]
