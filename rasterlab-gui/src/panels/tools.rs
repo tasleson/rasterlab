@@ -1,7 +1,7 @@
 //! Tools panel — inputs for adding operations to the pipeline.
 
 use egui::{Color32, ComboBox, CornerRadius, DragValue, Pos2, Rect, Stroke, Ui, Vec2};
-use rasterlab_core::ops::CurvesOp;
+use rasterlab_core::ops::{CurvesOp, NrMethod};
 
 use crate::state::AppState;
 
@@ -683,6 +683,73 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .prefs
             .tools_open
             .insert("denoise".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Noise Reduction (Advanced) ───────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("noise_reduction");
+    let resp = egui::CollapsingHeader::new("◉  Noise Reduction")
+        .id_salt("noise_reduction")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            egui::Grid::new("nr_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Method:");
+                    egui::ComboBox::from_id_salt("nr_method")
+                        .selected_text(match state.nr_method {
+                            NrMethod::Wavelet => "Wavelet (fast)",
+                            NrMethod::NonLocalMeans => "Non-Local Means",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut state.nr_method,
+                                NrMethod::Wavelet,
+                                "Wavelet (fast)",
+                            );
+                            ui.selectable_value(
+                                &mut state.nr_method,
+                                NrMethod::NonLocalMeans,
+                                "Non-Local Means",
+                            );
+                        });
+                    ui.end_row();
+
+                    ui.label("Luminance:");
+                    ui.add(egui::Slider::new(&mut state.nr_luma, 0.0..=1.0_f32).show_value(true));
+                    ui.end_row();
+
+                    ui.label("Color:");
+                    ui.add(egui::Slider::new(&mut state.nr_color, 0.0..=1.0_f32).show_value(true));
+                    ui.end_row();
+
+                    ui.label("Detail:");
+                    ui.add(egui::Slider::new(&mut state.nr_detail, 0.0..=1.0_f32).show_value(true));
+                    ui.end_row();
+                });
+
+            if state.nr_method == NrMethod::NonLocalMeans {
+                ui.label(
+                    egui::RichText::new("⚠ NLM is slow on large images (30s+)")
+                        .small()
+                        .color(egui::Color32::from_rgb(200, 150, 50)),
+                );
+            }
+
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Noise Reduction"))
+                .clicked()
+            {
+                state.push_noise_reduction();
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("noise_reduction".to_string(), !default_open);
     }
 
     ui.separator();

@@ -4,7 +4,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use rasterlab_core::{
     image::Image,
     ops::{
-        BlackAndWhiteOp, CropOp, HealOp, HealSpot, RotateOp, SharpenOp,
+        BlackAndWhiteOp, CropOp, HealOp, HealSpot, NoiseReductionOp, NrMethod, RotateOp, SharpenOp,
         clarity_texture::ClarityTextureOp, histogram::HistogramData, split_tone::SplitToneOp,
     },
     traits::operation::Operation,
@@ -196,6 +196,41 @@ fn bench_heal(c: &mut Criterion) {
     });
 }
 
+fn bench_noise_reduction(c: &mut Criterion) {
+    init_rayon();
+    let img = make_image(2000, 1500);
+
+    let wavelet_op = NoiseReductionOp {
+        method: NrMethod::Wavelet,
+        luma_strength: 0.4,
+        color_strength: 0.6,
+        detail_preservation: 0.5,
+    };
+    c.bench_function("nr_wavelet 2000x1500", |b| {
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| wavelet_op.apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
+    });
+
+    // NLM is slower — use a smaller image for the bench
+    let small = make_image(800, 600);
+    let nlm_op = NoiseReductionOp {
+        method: NrMethod::NonLocalMeans,
+        luma_strength: 0.3,
+        color_strength: 0.4,
+        detail_preservation: 0.5,
+    };
+    c.bench_function("nr_nlm 800x600", |b| {
+        b.iter_batched(
+            || small.deep_clone(),
+            |i| nlm_op.apply(i).unwrap(),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
 criterion_group!(
     benches,
     bench_crop,
@@ -208,5 +243,6 @@ criterion_group!(
     bench_histogram,
     bench_image_to_egui,
     bench_heal,
+    bench_noise_reduction,
 );
 criterion_main!(benches);

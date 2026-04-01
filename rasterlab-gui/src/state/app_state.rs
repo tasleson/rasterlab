@@ -10,9 +10,9 @@ use rasterlab_core::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
         ColorSpaceConversion, ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp,
         GrainOp, HealOp, HealSpot, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp,
-        LevelsOp, LinearMask, LutOp, MaskShape, MaskedOp, PerspectiveOp, RadialMask, ResampleMode,
-        ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
-        WhiteBalanceOp,
+        LevelsOp, LinearMask, LutOp, MaskShape, MaskedOp, NoiseReductionOp, NrMethod,
+        PerspectiveOp, RadialMask, ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp,
+        SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -191,6 +191,12 @@ pub struct AppState {
     pub denoise_strength: f32,
     pub denoise_radius: u32,
 
+    // ── Noise Reduction (advanced) ────────────────────────────────────────
+    pub nr_method: NrMethod,
+    pub nr_luma: f32,
+    pub nr_color: f32,
+    pub nr_detail: f32,
+
     // ── Heal / Clone stamp tool ──────────────────────────────────────────
     /// Whether the heal tool is active (canvas interaction mode).
     pub heal_active: bool,
@@ -356,6 +362,10 @@ impl AppState {
             blur_radius: 2.0,
             denoise_strength: 0.1,
             denoise_radius: 3,
+            nr_method: NrMethod::Wavelet,
+            nr_luma: 0.3,
+            nr_color: 0.5,
+            nr_detail: 0.5,
             heal_active: false,
             heal_radius: 30,
             heal_spots: Vec::new(),
@@ -999,6 +1009,15 @@ impl AppState {
             self.denoise_strength,
             self.denoise_radius,
         )));
+    }
+
+    pub fn push_noise_reduction(&mut self) {
+        self.push_op(Box::new(NoiseReductionOp {
+            method: self.nr_method.clone(),
+            luma_strength: self.nr_luma,
+            color_strength: self.nr_color,
+            detail_preservation: self.nr_detail,
+        }));
     }
 
     pub fn push_perspective(&mut self) {
