@@ -7,11 +7,11 @@ use rasterlab_core::{
     Image,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ColorBalanceOp, ColorSpaceConversion,
-        ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HighlightsShadowsOp,
-        HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp, MaskShape, MaskedOp,
-        PerspectiveOp, RadialMask, ResampleMode, ResizeOp, RotateOp, SaturationOp, SepiaOp,
-        SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
+        ColorSpaceConversion, ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp,
+        GrainOp, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LinearMask,
+        LutOp, MaskShape, MaskedOp, PerspectiveOp, RadialMask, ResampleMode, ResizeOp, RotateOp,
+        SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -124,6 +124,12 @@ pub struct AppState {
     pub rotate_deg: f32,
     pub sharpen_strength: f32,
     pub sharpen_preview_active: bool,
+
+    // ── Clarity / Texture tool ────────────────────────────────────────────
+    pub clarity: f32,
+    pub texture: f32,
+    pub clarity_preview_active: bool,
+
     pub bw_mode_idx: usize,
     /// Channel mixer weights for the ChannelMixer B&W mode.
     pub bw_mixer_r: f32,
@@ -308,6 +314,9 @@ impl AppState {
             rotate_deg: 0.0,
             sharpen_strength: 1.0,
             sharpen_preview_active: false,
+            clarity: 0.0,
+            texture: 0.0,
+            clarity_preview_active: false,
             bw_mode_idx: 0,
             bw_mixer_r: 0.2126,
             bw_mixer_g: 0.7152,
@@ -730,6 +739,23 @@ impl AppState {
     pub fn cancel_sharpen_preview(&mut self) {
         if self.sharpen_preview_active {
             self.sharpen_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_clarity_texture(&mut self) {
+        self.clarity_preview_active = false;
+        self.push_op(Box::new(ClarityTextureOp::new(self.clarity, self.texture)));
+    }
+
+    pub fn update_clarity_texture_preview(&mut self) {
+        self.clarity_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_clarity_texture_preview(&mut self) {
+        if self.clarity_preview_active {
+            self.clarity_preview_active = false;
             self.request_render();
         }
     }
@@ -1374,6 +1400,7 @@ impl AppState {
         self.sat_preview_active = false;
         self.sepia_preview_active = false;
         self.sharpen_preview_active = false;
+        self.clarity_preview_active = false;
         self.split_preview_active = false;
         self.lut_preview_active = false;
         self.curve_preview_active = false;
@@ -1427,6 +1454,7 @@ impl AppState {
             || self.sat_preview_active
             || self.sepia_preview_active
             || self.sharpen_preview_active
+            || self.clarity_preview_active
             || self.split_preview_active
             || self.lut_preview_active
             || self.curve_preview_active
@@ -1498,6 +1526,8 @@ impl AppState {
             Some(Box::new(SepiaOp::new(self.sepia_strength)))
         } else if self.sharpen_preview_active {
             Some(Box::new(SharpenOp::new(self.sharpen_strength)))
+        } else if self.clarity_preview_active {
+            Some(Box::new(ClarityTextureOp::new(self.clarity, self.texture)))
         } else if self.split_preview_active {
             Some(Box::new(SplitToneOp::new(
                 self.split_shadow_hue,

@@ -1,6 +1,7 @@
 pub mod blur;
 pub mod brightness_contrast;
 pub mod bw;
+pub mod clarity_texture;
 pub mod color_balance;
 pub mod color_space;
 pub mod crop;
@@ -30,6 +31,7 @@ pub mod white_balance;
 pub use blur::BlurOp;
 pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::BlackAndWhiteOp;
+pub use clarity_texture::ClarityTextureOp;
 pub use color_balance::ColorBalanceOp;
 pub use color_space::{ColorSpaceConversion, ColorSpaceOp};
 pub use crop::CropOp;

@@ -1414,6 +1414,54 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Clarity / Texture ─────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("clarity_texture");
+    let resp = egui::CollapsingHeader::new("◈  Clarity / Texture")
+        .id_salt("clarity_texture")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let c_changed = ui
+                .add(
+                    egui::Slider::new(&mut state.clarity, -1.0..=1.0)
+                        .step_by(0.01)
+                        .text("Clarity"),
+                )
+                .changed();
+            let t_changed = ui
+                .add(
+                    egui::Slider::new(&mut state.texture, -1.0..=1.0)
+                        .step_by(0.01)
+                        .text("Texture"),
+                )
+                .changed();
+            if (c_changed || t_changed) && has_image {
+                state.update_clarity_texture_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_clarity_texture();
+                }
+                if state.clarity_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_clarity_texture_preview();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("clarity_texture".to_string(), !default_open);
+    }
+
+    ui.separator();
+
     // ── Vibrance ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("vibrance");
     let resp = egui::CollapsingHeader::new("✦  Vibrance")
