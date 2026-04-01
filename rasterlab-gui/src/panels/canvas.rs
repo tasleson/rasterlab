@@ -42,6 +42,11 @@ pub struct CanvasState {
     mask_drag_start: Option<Pos2>,
     /// Dragging index for heal spots: (spot_index, is_src_circle).
     heal_dragging: Option<(usize, bool)>,
+    /// Endpoints of the horizon line being dragged, in image coordinates.
+    /// None when not active.
+    straighten_line: Option<[Pos2; 2]>,
+    /// Index of the endpoint being dragged (0 = left, 1 = right), or None.
+    straighten_dragging: Option<usize>,
 }
 
 impl Default for CanvasState {
@@ -67,6 +72,8 @@ impl Default for CanvasState {
             mask_overlay_hash: 0,
             mask_drag_start: None,
             heal_dragging: None,
+            straighten_line: None,
+            straighten_dragging: None,
         }
     }
 }
@@ -504,6 +511,11 @@ impl CanvasState {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
         }
 
+        // ── Straighten line reset when tool is deactivated ───────────────────
+        if !state.straighten_active {
+            self.straighten_line = None;
+        }
+
         // ── Draw image ───────────────────────────────────────────────────────
         painter.image(
             tex_id,
@@ -709,6 +721,110 @@ impl CanvasState {
                 );
                 painter.circle_filled(dst_screen, 4.0, Color32::from_rgb(220, 60, 60));
             }
+        } else if state.straighten_active {
+            // ── Straighten tool ──────────────────────────────────────────────
+            // Clear crop selection while straighten mode is active.
+            self.crop_start = None;
+            self.crop_end = None;
+
+            if over_canvas {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+
+            // Initialise the horizon line if not yet set.
+            if self.straighten_line.is_none() {
+                let cx = img_w as f32 / 2.0;
+                let cy = img_h as f32 / 2.0;
+                let half_w = img_w as f32 * 0.35;
+                self.straighten_line =
+                    Some([Pos2::new(cx - half_w, cy), Pos2::new(cx + half_w, cy)]);
+                state.straighten_angle = 0.0;
+            }
+
+            let (ptr_pos, primary_pressed, primary_down, primary_released) = ui.input(|i| {
+                (
+                    i.pointer.hover_pos(),
+                    i.pointer.button_pressed(egui::PointerButton::Primary),
+                    i.pointer.button_down(egui::PointerButton::Primary),
+                    i.pointer.button_released(egui::PointerButton::Primary),
+                )
+            });
+
+            // Hit-test the two endpoint handles (r=8 screen px).
+            if primary_pressed
+                && over_canvas
+                && let (Some(pts), Some(ptr)) = (self.straighten_line, ptr_pos)
+            {
+                let handle_r = 12.0_f32; // screen-space hit radius
+                for (i, &ep_img) in pts.iter().enumerate() {
+                    let ep_screen = image_to_screen(ep_img, image_tl, self.zoom);
+                    if (ep_screen - ptr).length() < handle_r {
+                        self.straighten_dragging = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            if primary_down
+                && let (Some(drag_idx), Some(ptr)) = (self.straighten_dragging, ptr_pos)
+                && let Some(pts) = &mut self.straighten_line
+            {
+                pts[drag_idx] = screen_to_image(ptr, image_tl, self.zoom);
+            }
+
+            if primary_released {
+                self.straighten_dragging = None;
+            }
+
+            // Recompute angle from current line.
+            if let Some([p0, p1]) = self.straighten_line {
+                let dx = p1.x - p0.x;
+                let dy = p1.y - p0.y;
+                let line_angle = dy.atan2(dx).to_degrees();
+                state.straighten_angle = -line_angle;
+            }
+
+            // ── Grid overlay ─────────────────────────────────────────────────
+            let img_rect = Rect::from_min_size(image_tl, display_size);
+            let clipped = painter.with_clip_rect(img_rect);
+            for i in 1..5_u32 {
+                let t = i as f32 / 5.0;
+                let x = img_rect.min.x + img_rect.width() * t;
+                let y = img_rect.min.y + img_rect.height() * t;
+                clipped.line_segment(
+                    [Pos2::new(x, img_rect.min.y), Pos2::new(x, img_rect.max.y)],
+                    Stroke::new(0.5, Color32::from_white_alpha(60)),
+                );
+                clipped.line_segment(
+                    [Pos2::new(img_rect.min.x, y), Pos2::new(img_rect.max.x, y)],
+                    Stroke::new(0.5, Color32::from_white_alpha(60)),
+                );
+            }
+
+            // ── Horizon line ─────────────────────────────────────────────────
+            if let Some([p0, p1]) = self.straighten_line {
+                let s0 = image_to_screen(p0, image_tl, self.zoom);
+                let s1 = image_to_screen(p1, image_tl, self.zoom);
+                // Shadow
+                painter.line_segment([s0, s1], Stroke::new(2.5, Color32::from_black_alpha(100)));
+                // Main line
+                painter.line_segment([s0, s1], Stroke::new(1.5, Color32::WHITE));
+                // Endpoints
+                for &ep in &[s0, s1] {
+                    painter.circle_filled(ep, 6.0, Color32::from_black_alpha(100));
+                    painter.circle_stroke(ep, 6.0, Stroke::new(1.5, Color32::WHITE));
+                }
+                // Angle label near midpoint
+                let mid = Pos2::new((s0.x + s1.x) / 2.0, (s0.y + s1.y) / 2.0 - 14.0);
+                let angle_text = format!("{:.2}°", state.straighten_angle);
+                painter.text(
+                    mid,
+                    egui::Align2::CENTER_BOTTOM,
+                    &angle_text,
+                    egui::FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+            }
         } else {
             // ── Crop selection (primary drag only) ───────────────────────────
             if resp.drag_started_by(egui::PointerButton::Primary) {
@@ -717,19 +833,28 @@ impl CanvasState {
                     .map(|p| screen_to_image(p, image_tl, self.zoom));
                 self.crop_end = self.crop_start;
             }
-            if resp.dragged_by(egui::PointerButton::Primary) {
-                self.crop_end = resp
+            if resp.dragged_by(egui::PointerButton::Primary)
+                && let Some(raw_end) = resp
                     .interact_pointer_pos()
-                    .map(|p| screen_to_image(p, image_tl, self.zoom));
+                    .map(|p| screen_to_image(p, image_tl, self.zoom))
+            {
+                // Constrain the drag-end for aspect-ratio-locked crops
+                self.crop_end = Some(constrain_drag_end(
+                    self.crop_start.unwrap_or(raw_end),
+                    raw_end,
+                    state.crop_aspect_ratio(),
+                ));
             }
             if resp.drag_stopped_by(egui::PointerButton::Primary)
                 && let (Some(start), Some(end)) = (self.crop_start, self.crop_end)
             {
                 let (x, y, w, h) = image_to_crop(start, end, img_w, img_h);
-                state.crop_x = x;
-                state.crop_y = y;
-                state.crop_w = w;
-                state.crop_h = h;
+                let (cx, cy, cw, ch) =
+                    constrain_aspect(x, y, w, h, img_w, img_h, state.crop_aspect_ratio());
+                state.crop_x = cx;
+                state.crop_y = cy;
+                state.crop_w = cw;
+                state.crop_h = ch;
             }
 
             // ── Clear selection: right-click or Escape ───────────────────────
@@ -788,6 +913,40 @@ fn image_to_crop(start: Pos2, end: Pos2, img_w: u32, img_h: u32) -> (u32, u32, u
         x2.saturating_sub(x1).max(1),
         y2.saturating_sub(y1).max(1),
     )
+}
+
+/// Clamp a crop rect to an optional aspect ratio (w/h = ratio.0/ratio.1).
+/// Adjusts height to match the width (keeping x,y fixed), then clamps to image bounds.
+fn constrain_aspect(
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    img_w: u32,
+    img_h: u32,
+    ratio: Option<(f32, f32)>,
+) -> (u32, u32, u32, u32) {
+    let Some((rw, rh)) = ratio else {
+        return (x, y, w, h);
+    };
+    let target_h = ((w as f32 * rh / rw).round() as u32).max(1);
+    let ch = target_h.min(img_h.saturating_sub(y)).max(1);
+    let cw = ((ch as f32 * rw / rh).round() as u32)
+        .min(img_w.saturating_sub(x))
+        .max(1);
+    (x, y, cw, ch)
+}
+
+/// When an aspect ratio is locked, adjust the drag end point so the selection
+/// matches the ratio.  Always fixes width and adjusts height.
+fn constrain_drag_end(start: Pos2, end: Pos2, ratio: Option<(f32, f32)>) -> Pos2 {
+    let Some((rw, rh)) = ratio else {
+        return end;
+    };
+    let w = (end.x - start.x).abs();
+    let h_target = w * rh / rw;
+    let sign_y = if end.y >= start.y { 1.0 } else { -1.0 };
+    Pos2::new(end.x, start.y + sign_y * h_target)
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,4 +1263,53 @@ fn compute_hash(image: &Image) -> u64 {
         byte.hash(&mut h);
     }
     h.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constrain_aspect_free_passthrough() {
+        assert_eq!(
+            constrain_aspect(0, 0, 100, 80, 1000, 1000, None),
+            (0, 0, 100, 80)
+        );
+    }
+
+    #[test]
+    fn constrain_aspect_square() {
+        let (x, y, w, h) = constrain_aspect(0, 0, 100, 80, 1000, 1000, Some((1.0, 1.0)));
+        assert_eq!(w, h);
+        assert_eq!(x, 0);
+        assert_eq!(y, 0);
+    }
+
+    #[test]
+    fn constrain_aspect_3_2() {
+        let (_, _, w, h) = constrain_aspect(0, 0, 120, 60, 1000, 1000, Some((3.0, 2.0)));
+        // w/h should be close to 1.5
+        let ratio = w as f32 / h as f32;
+        assert!((ratio - 1.5).abs() < 0.05, "ratio={ratio}");
+    }
+
+    #[test]
+    fn constrain_drag_end_free() {
+        let start = Pos2::new(10.0, 10.0);
+        let end = Pos2::new(50.0, 70.0);
+        assert_eq!(constrain_drag_end(start, end, None), end);
+    }
+
+    #[test]
+    fn constrain_drag_end_square() {
+        let start = Pos2::new(0.0, 0.0);
+        let end = Pos2::new(100.0, 50.0);
+        let constrained = constrain_drag_end(start, end, Some((1.0, 1.0)));
+        // With 1:1 ratio, height should equal width = 100
+        assert!((constrained.y - 100.0).abs() < 1.0, "y={}", constrained.y);
+    }
 }

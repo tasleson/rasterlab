@@ -122,7 +122,17 @@ pub struct AppState {
     pub crop_y: u32,
     pub crop_w: u32,
     pub crop_h: u32,
+    /// 0=Free, 1=3:2, 2=4:3, 3=1:1, 4=16:9, 5=9:16, 6=Custom
+    pub crop_aspect_idx: usize,
+    /// Custom ratio (width / height), only used when crop_aspect_idx == 6.
+    pub crop_custom_ratio: f32,
     pub rotate_deg: f32,
+
+    // ── Straighten tool ───────────────────────────────────────────────────────
+    /// Angle in degrees for the straighten tool, range [-45, 45].
+    pub straighten_angle: f32,
+    /// When true, show the straighten line overlay on the canvas.
+    pub straighten_active: bool,
     pub sharpen_strength: f32,
     pub sharpen_preview_active: bool,
 
@@ -326,7 +336,11 @@ impl AppState {
             crop_y: 0,
             crop_w: 0,
             crop_h: 0,
+            crop_aspect_idx: 0,
+            crop_custom_ratio: 1.5,
             rotate_deg: 0.0,
+            straighten_angle: 0.0,
+            straighten_active: false,
             sharpen_strength: 1.0,
             sharpen_preview_active: false,
             clarity: 0.0,
@@ -751,6 +765,29 @@ impl AppState {
             src_y: src.1,
             radius: self.heal_radius,
         });
+    }
+
+    /// Returns (w_ratio, h_ratio) for the current aspect selection, or None for free.
+    pub fn crop_aspect_ratio(&self) -> Option<(f32, f32)> {
+        match self.crop_aspect_idx {
+            1 => Some((3.0, 2.0)),
+            2 => Some((4.0, 3.0)),
+            3 => Some((1.0, 1.0)),
+            4 => Some((16.0, 9.0)),
+            5 => Some((9.0, 16.0)),
+            6 => Some((self.crop_custom_ratio, 1.0)),
+            _ => None,
+        }
+    }
+
+    pub fn push_straighten(&mut self) {
+        if self.straighten_angle.abs() < 0.001 {
+            return;
+        }
+        let angle = self.straighten_angle;
+        self.straighten_angle = 0.0;
+        self.straighten_active = false;
+        self.push_op(Box::new(RotateOp::arbitrary(angle)));
     }
 
     pub fn push_crop(&mut self) {

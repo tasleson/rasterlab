@@ -591,6 +591,28 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
+                    ui.label("Aspect:");
+                    const ASPECT_LABELS: &[&str] =
+                        &["Free", "3:2", "4:3", "1:1", "16:9", "9:16", "Custom"];
+                    egui::ComboBox::from_id_salt("crop_aspect")
+                        .selected_text(ASPECT_LABELS[state.crop_aspect_idx])
+                        .show_ui(ui, |ui| {
+                            for (i, &label) in ASPECT_LABELS.iter().enumerate() {
+                                ui.selectable_value(&mut state.crop_aspect_idx, i, label);
+                            }
+                        });
+                    ui.end_row();
+
+                    if state.crop_aspect_idx == 6 {
+                        ui.label("Ratio W:H");
+                        ui.add(
+                            DragValue::new(&mut state.crop_custom_ratio)
+                                .speed(0.01)
+                                .range(0.1..=20.0_f32),
+                        );
+                        ui.end_row();
+                    }
+
                     ui.label("X");
                     ui.add(DragValue::new(&mut state.crop_x).speed(1));
                     ui.end_row();
@@ -1349,6 +1371,75 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .prefs
             .tools_open
             .insert("rotate".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Straighten ───────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("straighten");
+    let straight_label = if state.straighten_active {
+        format!("⟳  Straighten  [{:.2}°]", state.straighten_angle)
+    } else {
+        "⟳  Straighten".to_string()
+    };
+    let resp = egui::CollapsingHeader::new(straight_label)
+        .id_salt("straighten")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            egui::Grid::new("straighten_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Angle:");
+                    ui.add(
+                        egui::Slider::new(&mut state.straighten_angle, -45.0..=45.0_f32)
+                            .suffix("°")
+                            .show_value(true),
+                    );
+                    ui.end_row();
+                });
+
+            let toggle_text = if state.straighten_active {
+                "Hide Horizon Line"
+            } else {
+                "Show Horizon Line"
+            };
+            if ui
+                .add_enabled(
+                    has_image,
+                    egui::Button::new(toggle_text).min_size(Vec2::new(ui.available_width(), 0.0)),
+                )
+                .clicked()
+            {
+                state.straighten_active = !state.straighten_active;
+            }
+
+            if ui
+                .add_enabled(
+                    has_image,
+                    egui::Button::new("Apply Straighten")
+                        .min_size(Vec2::new(ui.available_width(), 0.0)),
+                )
+                .clicked()
+            {
+                state.push_straighten();
+            }
+
+            if state.straighten_active {
+                ui.label(
+                    egui::RichText::new(
+                        "Drag the horizon line to match a level reference in the image.",
+                    )
+                    .small()
+                    .color(egui::Color32::from_gray(140)),
+                );
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("straighten".to_string(), !default_open);
     }
 
     ui.separator();
