@@ -9,9 +9,10 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
         ColorSpaceConversion, ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp,
-        GrainOp, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LinearMask,
-        LutOp, MaskShape, MaskedOp, PerspectiveOp, RadialMask, ResampleMode, ResizeOp, RotateOp,
-        SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        GrainOp, HealOp, HealSpot, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp,
+        LevelsOp, LinearMask, LutOp, MaskShape, MaskedOp, PerspectiveOp, RadialMask, ResampleMode,
+        ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
+        WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -190,6 +191,14 @@ pub struct AppState {
     pub denoise_strength: f32,
     pub denoise_radius: u32,
 
+    // ── Heal / Clone stamp tool ──────────────────────────────────────────
+    /// Whether the heal tool is active (canvas interaction mode).
+    pub heal_active: bool,
+    /// Brush radius in pixels for the heal tool.
+    pub heal_radius: u32,
+    /// Spots placed by the user, pending commit to the pipeline.
+    pub heal_spots: Vec<HealSpot>,
+
     // ── Perspective tool ──────────────────────────────────────────────────
     /// Corner offsets `[[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]`
     /// as fractions of image width/height in `[-1, 1]`.
@@ -347,6 +356,9 @@ impl AppState {
             blur_radius: 2.0,
             denoise_strength: 0.1,
             denoise_radius: 3,
+            heal_active: false,
+            heal_radius: 30,
+            heal_spots: Vec::new(),
             perspective_corners: [[0.0; 2]; 4],
             color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,
             lut_op: None,
@@ -705,6 +717,31 @@ impl AppState {
     // -----------------------------------------------------------------------
     // Pipeline mutations (always followed by request_render)
     // -----------------------------------------------------------------------
+
+    pub fn push_heal(&mut self) {
+        if self.heal_spots.is_empty() {
+            return;
+        }
+        let spots = std::mem::take(&mut self.heal_spots);
+        self.heal_active = false;
+        self.push_op(Box::new(HealOp::new(spots)));
+    }
+
+    pub fn heal_place_spot(&mut self, dest_x: i32, dest_y: i32) {
+        let src = if let Some(rendered) = &self.rendered {
+            let (sx, sy) = HealOp::auto_detect_source(rendered, dest_x, dest_y, self.heal_radius);
+            (sx, sy)
+        } else {
+            (dest_x + self.heal_radius as i32 * 2, dest_y)
+        };
+        self.heal_spots.push(HealSpot {
+            dest_x,
+            dest_y,
+            src_x: src.0,
+            src_y: src.1,
+            radius: self.heal_radius,
+        });
+    }
 
     pub fn push_crop(&mut self) {
         self.push_op(Box::new(CropOp::new(

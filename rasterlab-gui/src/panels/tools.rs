@@ -57,6 +57,89 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Spot Heal ─────────────────────────────────────────────────────────
+    {
+        let default_open = state.prefs.is_tool_open("heal");
+        let heal_label = if state.heal_active {
+            format!(
+                "✦  Spot Heal  [ACTIVE \u{2014} {} spot{}]",
+                state.heal_spots.len(),
+                if state.heal_spots.len() == 1 { "" } else { "s" }
+            )
+        } else {
+            "✦  Spot Heal".to_string()
+        };
+        let resp = egui::CollapsingHeader::new(heal_label)
+            .id_salt("heal")
+            .default_open(default_open)
+            .show(ui, |ui| {
+                egui::Grid::new("heal_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Radius:");
+                        ui.add(
+                            DragValue::new(&mut state.heal_radius)
+                                .speed(1)
+                                .range(5_u32..=300_u32),
+                        );
+                        ui.end_row();
+                    });
+
+                let mode_btn_text = if state.heal_active {
+                    "Stop Painting"
+                } else {
+                    "Start Painting"
+                };
+                if ui
+                    .add_enabled(
+                        has_image,
+                        egui::Button::new(mode_btn_text)
+                            .min_size(Vec2::new(ui.available_width(), 0.0)),
+                    )
+                    .clicked()
+                {
+                    state.heal_active = !state.heal_active;
+                }
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            has_image && !state.heal_spots.is_empty(),
+                            egui::Button::new("Apply Heal"),
+                        )
+                        .clicked()
+                    {
+                        state.push_heal();
+                    }
+                    if ui
+                        .add_enabled(!state.heal_spots.is_empty(), egui::Button::new("Clear"))
+                        .clicked()
+                    {
+                        state.heal_spots.clear();
+                    }
+                });
+
+                if state.heal_active {
+                    ui.label(
+                        egui::RichText::new(
+                            "Click on blemishes to heal them.\nRight-click a spot to remove it.",
+                        )
+                        .small()
+                        .color(egui::Color32::from_gray(140)),
+                    );
+                }
+            });
+        if resp.header_response.clicked() {
+            state
+                .prefs
+                .tools_open
+                .insert("heal".to_string(), !default_open);
+        }
+    }
+
+    ui.separator();
+
     // ── Masking ───────────────────────────────────────────────────────────
     // Global modifier: when active, the next "Apply" button wraps its
     // operation in a MaskedOp that restricts the effect to the masked region.

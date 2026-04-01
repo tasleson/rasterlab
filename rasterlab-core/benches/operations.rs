@@ -4,8 +4,8 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use rasterlab_core::{
     image::Image,
     ops::{
-        BlackAndWhiteOp, CropOp, RotateOp, SharpenOp, clarity_texture::ClarityTextureOp,
-        histogram::HistogramData, split_tone::SplitToneOp,
+        BlackAndWhiteOp, CropOp, HealOp, HealSpot, RotateOp, SharpenOp,
+        clarity_texture::ClarityTextureOp, histogram::HistogramData, split_tone::SplitToneOp,
     },
     traits::operation::Operation,
 };
@@ -160,6 +160,42 @@ fn bench_image_to_egui(c: &mut Criterion) {
     });
 }
 
+fn bench_heal(c: &mut Criterion) {
+    init_rayon();
+    let img = make_image(2000, 1500);
+    let spots = vec![
+        HealSpot {
+            dest_x: 500,
+            dest_y: 400,
+            src_x: 600,
+            src_y: 400,
+            radius: 30,
+        },
+        HealSpot {
+            dest_x: 1000,
+            dest_y: 700,
+            src_x: 1100,
+            src_y: 700,
+            radius: 40,
+        },
+        HealSpot {
+            dest_x: 1500,
+            dest_y: 1100,
+            src_x: 1600,
+            src_y: 1100,
+            radius: 25,
+        },
+    ];
+    let op = HealOp::new(spots);
+    c.bench_function("heal 3 spots r=25-40 on 2000x1500", |b| {
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| op.apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
+    });
+}
+
 criterion_group!(
     benches,
     bench_crop,
@@ -171,5 +207,6 @@ criterion_group!(
     bench_clarity_texture,
     bench_histogram,
     bench_image_to_egui,
+    bench_heal,
 );
 criterion_main!(benches);
