@@ -892,20 +892,52 @@ fn build_mask_preview(state: &crate::state::AppState, w: usize, h: usize) -> Col
 // Texture / hash helpers
 // ---------------------------------------------------------------------------
 
+/// wgpu's hard limit on texture dimensions (D3D12/Metal/Vulkan minimum guarantee).
+const MAX_TEXTURE_DIM: usize = 8192;
+
 fn image_to_egui(image: &Image) -> ColorImage {
-    // Sequential conversion: this is memory-bandwidth-bound (reads 136 MiB,
-    // writes 143 MiB of Color32).  Parallelising with rayon adds thread
-    // coordination overhead that outweighs any gain — benchmarks showed the
-    // parallel version at ~14 ms vs ~7 ms serial on Apple Silicon.
-    let pixels: Vec<Color32> = image
-        .data
-        .chunks_exact(4)
-        .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
-        .collect();
+    let orig_w = image.width as usize;
+    let orig_h = image.height as usize;
+
+    // Integer downsample factor: smallest value that brings both dimensions
+    // under MAX_TEXTURE_DIM.  For most images factor == 1 (no-op).
+    let factor = ((orig_w.max(orig_h) + MAX_TEXTURE_DIM - 1) / MAX_TEXTURE_DIM).max(1);
+
+    let tex_w = orig_w / factor;
+    let tex_h = orig_h / factor;
+
+    let pixels: Vec<Color32> = if factor == 1 {
+        // Fast path: sequential, memory-bandwidth-bound.  Parallelising with
+        // rayon adds coordination overhead that outweighs any gain on Apple
+        // Silicon (~14 ms parallel vs ~7 ms serial in benchmarks).
+        image
+            .data
+            .chunks_exact(4)
+            .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+            .collect()
+    } else {
+        // Nearest-neighbour integer downsample to fit within the GPU texture
+        // size limit.  Only triggered for very large sensors (e.g. >8192 px).
+        (0..tex_h)
+            .flat_map(|y| {
+                let src_row = (y * factor) * orig_w;
+                (0..tex_w).map(move |x| {
+                    let src = (src_row + x * factor) * 4;
+                    Color32::from_rgba_unmultiplied(
+                        image.data[src],
+                        image.data[src + 1],
+                        image.data[src + 2],
+                        image.data[src + 3],
+                    )
+                })
+            })
+            .collect()
+    };
+
     ColorImage {
-        size: [image.width as usize, image.height as usize],
+        size: [tex_w, tex_h],
         pixels,
-        source_size: egui::Vec2::new(image.width as f32, image.height as f32),
+        source_size: egui::Vec2::new(orig_w as f32, orig_h as f32),
     }
 }
 
