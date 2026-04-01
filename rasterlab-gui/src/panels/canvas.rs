@@ -25,9 +25,11 @@ pub struct CanvasState {
     /// Overlay texture for full-resolution viewport previews.
     overlay_texture: Option<TextureHandle>,
     overlay_last_hash: u64,
-    /// "Before" texture for split view — always the unedited source image.
+    /// "Before" texture for split view — source image with geometric ops applied.
     before_texture: Option<TextureHandle>,
     before_hash: u64,
+    /// Logical pixel dimensions of the before image (may differ from source after rotate/crop).
+    before_logical_size: (u32, u32),
     /// Position of the split divider as a fraction of canvas width (0.0–1.0).
     split_ratio: f32,
     /// True while the user is dragging the split divider.
@@ -56,6 +58,7 @@ impl Default for CanvasState {
             overlay_last_hash: 0,
             before_texture: None,
             before_hash: 0,
+            before_logical_size: (0, 0),
             split_ratio: 0.5,
             split_dragging: false,
             mask_overlay_texture: None,
@@ -117,17 +120,26 @@ impl CanvasState {
         }
 
         // ── Upload "before" texture when split view is active ─────────────────
+        // "Before" is the source image with only geometric ops applied (rotate,
+        // flip, crop) so both sides of the split share the same orientation.
         if state.split_view {
             if let Some(pipeline) = &state.pipeline {
-                let source = pipeline.source();
-                let bh = compute_hash(source);
-                if self.before_texture.is_none() || bh != self.before_hash {
-                    self.before_texture = Some(ui.ctx().load_texture(
-                        "canvas_before",
-                        image_to_egui(source),
-                        TextureOptions::LINEAR,
-                    ));
-                    self.before_hash = bh;
+                let geo_gen = pipeline.geometric_gen();
+                if self.before_texture.is_none() || geo_gen != self.before_hash {
+                    match pipeline.render_geometric_only() {
+                        Ok(geo_img) => {
+                            self.before_logical_size = (geo_img.width, geo_img.height);
+                            self.before_texture = Some(ui.ctx().load_texture(
+                                "canvas_before",
+                                image_to_egui(&geo_img),
+                                TextureOptions::LINEAR,
+                            ));
+                            self.before_hash = geo_gen;
+                        }
+                        Err(e) => {
+                            eprintln!("render_geometric_only failed: {e}");
+                        }
+                    }
                 }
             }
             // Crop selection doesn't apply in split view.
@@ -317,16 +329,20 @@ impl CanvasState {
         ctrl_held: bool,
         over_canvas: bool,
     ) {
-        let split_x = canvas_rect.min.x + canvas_rect.width() * self.split_ratio;
+        // split_x is a fraction of the *image* display width, not the canvas width,
+        // so it stays aligned to the image regardless of rotation or letterboxing.
+        let split_x = image_tl.x + display_size.x * self.split_ratio;
         let left_clip = Rect::from_min_max(canvas_rect.min, Pos2::new(split_x, canvas_rect.max.y));
         let right_clip = Rect::from_min_max(Pos2::new(split_x, canvas_rect.min.y), canvas_rect.max);
 
-        // ── Draw before (source image, left half) ────────────────────────────
+        // ── Draw before (source + geometric ops, left half) ──────────────────
         if let Some(before_tex) = &self.before_texture {
-            // Source is always full-res — use self.zoom directly (no rendered_scale).
-            let before_size = if let Some(pipeline) = &state.pipeline {
-                let src = pipeline.source();
-                Vec2::new(src.width as f32 * self.zoom, src.height as f32 * self.zoom)
+            // Use the recorded logical size of the geometric image (may differ
+            // from source after rotate/flip/crop) — always full-res so no
+            // rendered_scale correction is needed.
+            let (bw, bh) = self.before_logical_size;
+            let before_size = if bw > 0 && bh > 0 {
+                Vec2::new(bw as f32 * self.zoom, bh as f32 * self.zoom)
             } else {
                 display_size
             };
@@ -399,7 +415,7 @@ impl CanvasState {
         if self.split_dragging
             && let Some(p) = ptr_pos
         {
-            self.split_ratio = ((p.x - canvas_rect.min.x) / canvas_rect.width()).clamp(0.05, 0.95);
+            self.split_ratio = ((p.x - image_tl.x) / display_size.x).clamp(0.05, 0.95);
         }
 
         // Cursor priority: divider drag > middle-mouse pan > ctrl zoom.
@@ -413,7 +429,7 @@ impl CanvasState {
 
         // ── Draw divider line ────────────────────────────────────────────────
         // Recompute split_x after any drag update this frame.
-        let sx = canvas_rect.min.x + canvas_rect.width() * self.split_ratio;
+        let sx = image_tl.x + display_size.x * self.split_ratio;
         let top = Pos2::new(sx, canvas_rect.min.y);
         let bot = Pos2::new(sx, canvas_rect.max.y);
         painter.line_segment([top, bot], Stroke::new(3.0, Color32::from_black_alpha(80)));

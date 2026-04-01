@@ -77,6 +77,10 @@ impl Operation for FlipOp {
             FlipMode::Vertical => "Flip Vertical".into(),
         }
     }
+
+    fn is_geometric(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

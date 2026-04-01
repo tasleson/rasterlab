@@ -58,4 +58,14 @@ pub trait Operation: Send + Sync {
 
     /// Human-readable summary for display in the edit stack UI.
     fn describe(&self) -> String;
+
+    /// Returns `true` for operations that transform the image geometry (rotate,
+    /// flip, crop) rather than its colour/tone.
+    ///
+    /// The split before/after view applies geometric ops to both sides so the
+    /// images are always aligned.  Non-geometric ops (colour, tone, blur, …)
+    /// are applied only to the "after" side.
+    fn is_geometric(&self) -> bool {
+        false
+    }
 }

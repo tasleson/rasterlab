@@ -85,6 +85,10 @@ impl Operation for RotateOp {
             RotateMode::Arbitrary(d) => format!("Rotate {:.2}°", d),
         }
     }
+
+    fn is_geometric(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------

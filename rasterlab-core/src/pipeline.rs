@@ -67,6 +67,10 @@ pub struct EditPipeline {
     next_id: u64,
     /// Per-step intermediate result cache.
     cache: RenderCache,
+    /// Incremented whenever a geometric op (rotate/flip/crop) is added, removed,
+    /// reordered, or toggled so the GUI can detect when the "before" texture
+    /// needs to be rebuilt for split view.
+    geo_gen: u64,
 }
 
 impl EditPipeline {
@@ -78,6 +82,7 @@ impl EditPipeline {
             cursor: 0,
             next_id: 1,
             cache: RenderCache::new(),
+            geo_gen: 0,
         }
     }
 
@@ -92,6 +97,9 @@ impl EditPipeline {
         self.cache.truncate(self.cursor);
         let id = self.next_id;
         self.next_id += 1;
+        if operation.is_geometric() {
+            self.geo_gen += 1;
+        }
         self.ops.push(EditEntry {
             id,
             enabled: true,
@@ -107,6 +115,9 @@ impl EditPipeline {
         if index >= self.ops.len() {
             return false;
         }
+        if self.ops[index].operation.is_geometric() {
+            self.geo_gen += 1;
+        }
         self.ops.remove(index);
         if self.cursor > index {
             self.cursor = self.cursor.saturating_sub(1);
@@ -120,6 +131,9 @@ impl EditPipeline {
         if from >= self.ops.len() || to >= self.ops.len() {
             return false;
         }
+        if self.ops[from].operation.is_geometric() || self.ops[to].operation.is_geometric() {
+            self.geo_gen += 1;
+        }
         let entry = self.ops.remove(from);
         self.ops.insert(to, entry);
         self.invalidate_steps_from(from.min(to));
@@ -129,6 +143,9 @@ impl EditPipeline {
     /// Toggle the `enabled` flag of the operation at `index`.
     pub fn toggle_op(&mut self, index: usize) -> bool {
         if let Some(entry) = self.ops.get_mut(index) {
+            if entry.operation.is_geometric() {
+                self.geo_gen += 1;
+            }
             entry.enabled = !entry.enabled;
             if index < self.cursor {
                 self.invalidate_steps_from(index);
@@ -348,6 +365,39 @@ impl EditPipeline {
     }
     pub fn can_redo(&self) -> bool {
         self.cursor < self.ops.len()
+    }
+
+    /// Generation counter that increments whenever a geometric op (rotate, flip,
+    /// crop) is added, removed, reordered, or toggled.  The canvas uses this to
+    /// decide when to rebuild the "before" split-view texture.
+    pub fn geometric_gen(&self) -> u64 {
+        self.geo_gen
+    }
+
+    /// Render the source image through only the geometric ops (rotate, flip,
+    /// crop) in the current pipeline, skipping all colour/tone operations.
+    ///
+    /// Used to produce the "before" image in split view so both sides always
+    /// share the same orientation and framing.
+    pub fn render_geometric_only(&self) -> RasterResult<Arc<Image>> {
+        let mut current: Arc<Image> = Arc::clone(&self.source);
+        for entry in &self.ops[..self.cursor] {
+            if entry.enabled && entry.operation.is_geometric() {
+                let img = match Arc::try_unwrap(current) {
+                    Ok(img) => img,
+                    Err(arc) => arc.as_ref().deep_clone(),
+                };
+                let result = entry.operation.apply(img).map_err(|e| {
+                    RasterError::Pipeline(format!(
+                        "Operation '{}' failed: {}",
+                        entry.operation.name(),
+                        e
+                    ))
+                })?;
+                current = Arc::new(result);
+            }
+        }
+        Ok(current)
     }
 
     // -----------------------------------------------------------------------

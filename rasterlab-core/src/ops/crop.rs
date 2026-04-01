@@ -93,6 +93,10 @@ impl Operation for CropOp {
             self.width, self.height, self.x, self.y
         )
     }
+
+    fn is_geometric(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
