@@ -133,6 +133,8 @@ pub struct AppState {
     pub straighten_angle: f32,
     /// When true, show the straighten line overlay on the canvas.
     pub straighten_active: bool,
+    /// When true, automatically crop after straighten to remove exposed corners.
+    pub straighten_crop: bool,
     pub sharpen_strength: f32,
     pub sharpen_preview_active: bool,
 
@@ -341,6 +343,7 @@ impl AppState {
             rotate_deg: 0.0,
             straighten_angle: 0.0,
             straighten_active: false,
+            straighten_crop: true,
             sharpen_strength: 1.0,
             sharpen_preview_active: false,
             clarity: 0.0,
@@ -787,7 +790,27 @@ impl AppState {
         let angle = self.straighten_angle;
         self.straighten_angle = 0.0;
         self.straighten_active = false;
-        self.push_op(Box::new(RotateOp::arbitrary(angle)));
+
+        // Derive pre-rotation full-res dimensions from the current render.
+        let crop_op = if self.straighten_crop {
+            self.rendered.as_ref().map(|img| {
+                let w = (img.width as f32 / self.rendered_scale).round() as u32;
+                let h = (img.height as f32 / self.rendered_scale).round() as u32;
+                straighten_crop_op(w, h, angle)
+            })
+        } else {
+            None
+        };
+
+        self.cancel_all_previews();
+        if let Some(p) = &mut self.pipeline {
+            p.push_op(Box::new(RotateOp::arbitrary(angle)));
+            if let Some(crop) = crop_op {
+                p.push_op(Box::new(crop));
+            }
+            self.is_dirty = true;
+            self.request_render();
+        }
     }
 
     pub fn push_crop(&mut self) {
@@ -1745,6 +1768,48 @@ impl AppState {
     pub fn can_redo(&self) -> bool {
         self.pipeline.as_ref().is_some_and(|p| p.can_redo())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free functions
+// ---------------------------------------------------------------------------
+
+/// Compute the largest axis-aligned `CropOp` that fits inside a `W×H` image
+/// rotated by `angle_deg` degrees while preserving the original W:H aspect ratio.
+///
+/// After an arbitrary rotation the output has black/transparent corners.  This
+/// gives the tightest crop that removes all of them while keeping the same shape.
+fn straighten_crop_op(w: u32, h: u32, angle_deg: f32) -> CropOp {
+    let theta = angle_deg.to_radians().abs();
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let wf = w as f32;
+    let hf = h as f32;
+    let r = wf / hf; // aspect ratio
+
+    // Solve for the half-height `b` of the largest inscribed rectangle with
+    // the same aspect ratio:  a = r·b,  subject to
+    //   a·cos_t + b·sin_t ≤ W/2
+    //   a·sin_t + b·cos_t ≤ H/2
+    let b = f32::min(
+        wf / (2.0 * (r * cos_t + sin_t)),
+        hf / (2.0 * (r * sin_t + cos_t)),
+    );
+    let a = r * b;
+
+    // Full-pixel inner dimensions (floor to stay inside the rotated image).
+    let inner_w = (2.0 * a).floor() as u32;
+    let inner_h = (2.0 * b).floor() as u32;
+
+    // Post-rotation bounding box dimensions (matches rotate_arbitrary).
+    let rot_w = (wf * cos_t + hf * sin_t).ceil() as u32;
+    let rot_h = (wf * sin_t + hf * cos_t).ceil() as u32;
+
+    // Centre the crop inside the rotated bounding box.
+    let x = (rot_w.saturating_sub(inner_w)) / 2;
+    let y = (rot_h.saturating_sub(inner_h)) / 2;
+
+    CropOp::new(x, y, inner_w.max(1), inner_h.max(1))
 }
 
 // ---------------------------------------------------------------------------

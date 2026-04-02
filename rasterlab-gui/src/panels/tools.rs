@@ -1391,13 +1391,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("Angle:");
-                    ui.add(
-                        egui::Slider::new(&mut state.straighten_angle, -45.0..=45.0_f32)
-                            .suffix("°")
-                            .show_value(true),
-                    );
+                    ui.label(format!("{:.2}°", state.straighten_angle));
                     ui.end_row();
                 });
+
+            ui.checkbox(&mut state.straighten_crop, "Crop to rectangle after apply");
 
             let toggle_text = if state.straighten_active {
                 "Hide Horizon Line"
