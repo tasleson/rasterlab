@@ -8,6 +8,7 @@ Before every commit run:
 cargo fmt
 cargo clippy
 cargo bench
+cargo build --release
 ```
 
 ## Performance rules
@@ -70,6 +71,15 @@ rayon::ThreadPoolBuilder::new()
 ```
 
 The GUI render thread already sets 32 MiB (`app_state.rs`).
+
+## Tool ordering
+
+When adding a new tool to the tools panel (`rasterlab-gui/src/panels/tools.rs`):
+
+- **Auto Enhance** stays first.
+- **Looks** stays second.
+- All other tools are placed in **strict alphabetical order by display name** after those two.
+- Update the **Supported operations** table in `README.md` to match the same order.
 
 ## Key files
 

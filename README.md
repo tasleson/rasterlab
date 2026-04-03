@@ -110,7 +110,9 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 # Changelog
 
-## 2026-04-02 (52% of our weekly usage)
+# Week 2
+
+## 2026-04-02 (55% of our weekly usage)
 
 ### Virtual Copies
 
@@ -145,6 +147,8 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 - Spot heal: spot selection hit-testing and hover highlight were broken; both fixed.
 
 ---
+
+# Week 1
 
 ## 2026-03-30 (Week 1 is a wrap, we used 82% of our usage)
 
