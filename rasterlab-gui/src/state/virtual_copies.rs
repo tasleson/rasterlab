@@ -80,10 +80,6 @@ impl VirtualCopyStore {
         self.active
     }
 
-    pub fn active_name(&self) -> &str {
-        &self.copies[self.active].0
-    }
-
     pub fn active_pipeline(&self) -> &EditPipeline {
         &self.copies[self.active].1
     }
