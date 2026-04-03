@@ -598,14 +598,16 @@ impl CanvasState {
             self.crop_start = None;
             self.crop_end = None;
 
-            let (ptr_pos, primary_clicked, primary_down, secondary_clicked) = ui.input(|i| {
-                (
-                    i.pointer.hover_pos(),
-                    i.pointer.button_clicked(egui::PointerButton::Primary),
-                    i.pointer.button_down(egui::PointerButton::Primary),
-                    i.pointer.button_clicked(egui::PointerButton::Secondary),
-                )
-            });
+            let (ptr_pos, primary_pressed, primary_released, primary_down, secondary_clicked) = ui
+                .input(|i| {
+                    (
+                        i.pointer.hover_pos(),
+                        i.pointer.button_pressed(egui::PointerButton::Primary),
+                        i.pointer.button_released(egui::PointerButton::Primary),
+                        i.pointer.button_down(egui::PointerButton::Primary),
+                        i.pointer.button_clicked(egui::PointerButton::Secondary),
+                    )
+                });
 
             if over_canvas {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -645,37 +647,40 @@ impl CanvasState {
                 })
             });
 
-            // Start drag or place new spot
-            if primary_clicked {
-                if let Some((idx, is_src)) = hit_spot {
-                    self.heal_dragging = Some((idx, is_src));
-                } else if let Some(ptr) = ptr_pos
+            // Start drag on mouse-down; hitting an existing spot begins a drag
+            if primary_pressed && let Some((idx, is_src)) = hit_spot {
+                self.heal_dragging = Some((idx, is_src));
+            }
+
+            // Continue drag while held
+            if primary_down && let (Some((idx, is_src)), Some(ptr)) = (self.heal_dragging, ptr_pos)
+            {
+                let img_pos = screen_to_image(ptr, image_tl, self.zoom);
+                if let Some(spot) = state.heal_spots.get_mut(idx) {
+                    if is_src {
+                        spot.src_x = img_pos.x as i32;
+                        spot.src_y = img_pos.y as i32;
+                    } else {
+                        let dx = img_pos.x as i32 - spot.dest_x;
+                        let dy = img_pos.y as i32 - spot.dest_y;
+                        spot.dest_x = img_pos.x as i32;
+                        spot.dest_y = img_pos.y as i32;
+                        spot.src_x += dx;
+                        spot.src_y += dy;
+                    }
+                }
+            }
+
+            // On release: place a new spot only if this press was not a drag
+            if primary_released {
+                if self.heal_dragging.is_none()
+                    && hit_spot.is_none()
+                    && let Some(ptr) = ptr_pos
                     && over_canvas
                 {
                     let img_pos = screen_to_image(ptr, image_tl, self.zoom);
                     state.heal_place_spot(img_pos.x as i32, img_pos.y as i32);
                 }
-            }
-
-            // Continue drag
-            if primary_down {
-                if let (Some((idx, is_src)), Some(ptr)) = (self.heal_dragging, ptr_pos) {
-                    let img_pos = screen_to_image(ptr, image_tl, self.zoom);
-                    if let Some(spot) = state.heal_spots.get_mut(idx) {
-                        if is_src {
-                            spot.src_x = img_pos.x as i32;
-                            spot.src_y = img_pos.y as i32;
-                        } else {
-                            let dx = img_pos.x as i32 - spot.dest_x;
-                            let dy = img_pos.y as i32 - spot.dest_y;
-                            spot.dest_x = img_pos.x as i32;
-                            spot.dest_y = img_pos.y as i32;
-                            spot.src_x += dx;
-                            spot.src_y += dy;
-                        }
-                    }
-                }
-            } else {
                 self.heal_dragging = None;
             }
 
@@ -685,7 +690,7 @@ impl CanvasState {
             }
 
             // Draw spot overlays
-            for spot in &state.heal_spots {
+            for (i, spot) in state.heal_spots.iter().enumerate() {
                 let dst_screen = image_to_screen(
                     Pos2::new(spot.dest_x as f32, spot.dest_y as f32),
                     image_tl,
@@ -698,6 +703,9 @@ impl CanvasState {
                 );
                 let r_screen = spot.radius as f32 * self.zoom;
 
+                let hovered_src = matches!(hit_spot, Some((hi, true)) if hi == i);
+                let hovered_dst = matches!(hit_spot, Some((hi, false)) if hi == i);
+
                 // Arrow from src to dst
                 painter.arrow(
                     src_screen,
@@ -709,7 +717,10 @@ impl CanvasState {
                 painter.circle_stroke(
                     src_screen,
                     r_screen,
-                    egui::Stroke::new(1.5, Color32::from_rgb(80, 200, 80)),
+                    egui::Stroke::new(
+                        if hovered_src { 3.0 } else { 1.5 },
+                        Color32::from_rgb(80, 200, 80),
+                    ),
                 );
                 painter.circle_filled(src_screen, 4.0, Color32::from_rgb(80, 200, 80));
 
@@ -717,7 +728,10 @@ impl CanvasState {
                 painter.circle_stroke(
                     dst_screen,
                     r_screen,
-                    egui::Stroke::new(1.5, Color32::from_rgb(220, 60, 60)),
+                    egui::Stroke::new(
+                        if hovered_dst { 3.0 } else { 1.5 },
+                        Color32::from_rgb(220, 60, 60),
+                    ),
                 );
                 painter.circle_filled(dst_screen, 4.0, Color32::from_rgb(220, 60, 60));
             }
