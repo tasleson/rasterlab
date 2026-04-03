@@ -498,9 +498,12 @@ impl NoiseReductionOp {
             }
         };
 
-        // Detail preservation masking
+        // Detail preservation masking.
+        // Gradient is computed from the *denoised* Y plane so that real edges
+        // (which survive NR) are protected, while noise-induced false gradients
+        // in the noisy input do not cause the mask to cancel out the NR effect.
         if self.detail_preservation > 0.0 {
-            let grad = compute_sobel_y(&y_orig, w, h);
+            let grad = compute_sobel_y(&out_y, w, h);
             apply_detail_mask(&mut out_y, &y_orig, &grad, self.detail_preservation);
             // Also apply to chroma (using same gradient but chroma originals)
             apply_detail_mask(&mut out_cb, &cb_plane, &grad, self.detail_preservation);
@@ -591,6 +594,23 @@ mod tests {
         );
     }
 
+    // Exercises the actual default parameters (detail_preservation=0.5) — the
+    // same config the user sees in the GUI.  Previously the detail mask was
+    // computed from the noisy input, causing noise to be classified as "detail"
+    // and blended back, which made NR imperceptible at default settings.
+    #[test]
+    fn wavelet_default_params_reduces_noise() {
+        let src = make_noisy(64, 64);
+        let var_before = variance(&src.data, 0);
+        let out = NoiseReductionOp::default().apply(src).unwrap();
+        let var_after = variance(&out.data, 0);
+        // Require at least 20% variance reduction so the effect is perceptible.
+        assert!(
+            var_after < var_before * 0.80,
+            "default-param wavelet NR should visibly reduce noise: before={var_before:.1} after={var_after:.1}"
+        );
+    }
+
     #[test]
     fn nlm_reduces_noise() {
         let src = make_noisy(32, 32);
@@ -606,6 +626,25 @@ mod tests {
         assert!(
             var_after < var_before,
             "NLM NR should reduce variance: before={var_before:.1} after={var_after:.1}"
+        );
+    }
+
+    // Same as above but with detail_preservation enabled, matching defaults.
+    #[test]
+    fn nlm_default_params_reduces_noise() {
+        let src = make_noisy(32, 32);
+        let var_before = variance(&src.data, 0);
+        let op = NoiseReductionOp {
+            method: NrMethod::NonLocalMeans,
+            luma_strength: 0.5,
+            color_strength: 0.5,
+            detail_preservation: 0.5,
+        };
+        let out = op.apply(src).unwrap();
+        let var_after = variance(&out.data, 0);
+        assert!(
+            var_after < var_before * 0.80,
+            "NLM NR with detail_preservation=0.5 should visibly reduce noise: before={var_before:.1} after={var_after:.1}"
         );
     }
 
