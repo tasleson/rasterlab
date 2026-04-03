@@ -25,21 +25,18 @@ fn main() -> eframe::Result<()> {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
                 eframe::egui_wgpu::WgpuSetupCreateNew {
                     device_descriptor: std::sync::Arc::new(|adapter| {
-                        let base_limits = if adapter.get_info().backend == eframe::wgpu::Backend::Gl
-                        {
-                            eframe::wgpu::Limits::downlevel_webgl2_defaults()
-                        } else {
-                            eframe::wgpu::Limits::default()
-                        };
+                        // Use the adapter's own limits directly.  wgpu's
+                        // Limits::default() requests values (e.g. 8 color
+                        // attachments, 8 storage buffers/stage) that some
+                        // Linux drivers don't support.  Requesting exactly
+                        // what the adapter reports avoids LimitsExceeded
+                        // errors on every such field.
+                        let mut limits = adapter.limits();
+                        // egui needs at least 8192 for 4K+ display support.
+                        limits.max_texture_dimension_2d = limits.max_texture_dimension_2d.max(8192);
                         eframe::wgpu::DeviceDescriptor {
                             label: Some("egui wgpu device"),
-                            required_limits: eframe::wgpu::Limits {
-                                max_texture_dimension_2d: 8192,
-                                // Cap to what the driver exposes; some Linux drivers
-                                // report fewer than wgpu's default of 8.
-                                max_color_attachments: adapter.limits().max_color_attachments,
-                                ..base_limits
-                            },
+                            required_limits: limits,
                             ..Default::default()
                         }
                     }),
