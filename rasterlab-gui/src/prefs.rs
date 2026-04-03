@@ -31,6 +31,9 @@ impl ThemePref {
     }
 }
 
+/// Maximum number of paths kept in the recently-opened list.
+const MAX_RECENT: usize = 10;
+
 /// Persistent GUI preferences.  Missing keys are treated as `false`/default.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Prefs {
@@ -48,6 +51,9 @@ pub struct Prefs {
     /// local desktops.
     #[serde(default = "default_true")]
     pub use_native_dialogs: bool,
+    /// Most-recently-opened files, newest first.  Capped at [`MAX_RECENT`].
+    #[serde(default)]
+    pub recent_files: Vec<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -93,5 +99,13 @@ impl Prefs {
     /// Defaults to `false` for unknown keys.
     pub fn is_tool_open(&self, key: &str) -> bool {
         self.tools_open.get(key).copied().unwrap_or(false)
+    }
+
+    /// Prepend `path` to the recent-files list, deduplicating and capping at
+    /// [`MAX_RECENT`].
+    pub fn push_recent(&mut self, path: PathBuf) {
+        self.recent_files.retain(|p| p != &path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(MAX_RECENT);
     }
 }

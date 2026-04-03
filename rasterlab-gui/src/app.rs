@@ -148,6 +148,34 @@ impl eframe::App for RasterLabApp {
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
+                        let recent = self.state.prefs.recent_files.clone();
+                        ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                            ui.menu_button("Open Recent", |ui| {
+                                for path in &recent {
+                                    let label = path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| path.display().to_string());
+                                    if ui
+                                        .button(label)
+                                        .on_hover_text(path.display().to_string())
+                                        .clicked()
+                                    {
+                                        ui.close_kind(egui::UiKind::Menu);
+                                        self.state.open_file(path.clone());
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("Clear Recent").clicked() {
+                                    ui.close_kind(egui::UiKind::Menu);
+                                    self.state.prefs.recent_files.clear();
+                                    self.state.prefs.save();
+                                }
+                            });
+                        });
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
                         ui.separator();
                         if ui
                             .add_enabled(

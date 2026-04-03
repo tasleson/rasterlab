@@ -473,6 +473,8 @@ impl AppState {
                         EditPipeline::new(image),
                     ));
                     self.rename_pending = None;
+                    self.prefs.push_recent(path);
+                    self.prefs.save();
                     self.loading = false;
                     self.image_generation += 1;
                     self.request_render();
@@ -506,6 +508,8 @@ impl AppState {
                             self.status = format!("Warning: could not restore edit stack: {}", e);
                         }
                     }
+                    self.prefs.push_recent(path);
+                    self.prefs.save();
                     self.loading = false;
                     self.image_generation += 1;
                     self.request_render();
