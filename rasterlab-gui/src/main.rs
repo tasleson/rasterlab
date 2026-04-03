@@ -21,6 +21,33 @@ fn main() -> eframe::Result<()> {
             .with_title("RasterLab")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([900.0, 600.0]),
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
+                eframe::egui_wgpu::WgpuSetupCreateNew {
+                    device_descriptor: std::sync::Arc::new(|adapter| {
+                        let base_limits = if adapter.get_info().backend == eframe::wgpu::Backend::Gl
+                        {
+                            eframe::wgpu::Limits::downlevel_webgl2_defaults()
+                        } else {
+                            eframe::wgpu::Limits::default()
+                        };
+                        eframe::wgpu::DeviceDescriptor {
+                            label: Some("egui wgpu device"),
+                            required_limits: eframe::wgpu::Limits {
+                                max_texture_dimension_2d: 8192,
+                                // Cap to what the driver exposes; some Linux drivers
+                                // report fewer than wgpu's default of 8.
+                                max_color_attachments: adapter.limits().max_color_attachments,
+                                ..base_limits
+                            },
+                            ..Default::default()
+                        }
+                    }),
+                    ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
+                },
+            ),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
