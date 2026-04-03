@@ -28,24 +28,34 @@ See change log below for status.
 | Op | What it does |
 |---|---|
 | Auto Enhance | One-click levels stretch + saturation boost + mild sharpen |
+| **Looks** | |
+| Classic B&W | Channel-mixed B&W conversion with brightness lift and vignette |
+| | |
+| **——————————————** | **——————————————————————————————————————————** |
+| | |
 | Black & White | Luminance, average, perceptual, or channel mixer with presets |
 | Blur | Gaussian blur with configurable radius |
 | Brightness / Contrast | Linear brightness and contrast adjustment |
+| Clarity / Texture | Local contrast at midtone (clarity) and fine-detail (texture) spatial scales |
 | Color Balance | Cyan↔Red, Magenta↔Green, Yellow↔Blue per shadows/midtones/highlights |
 | Color Space | sRGB ↔ Display P3 conversion |
-| Crop | Axis-aligned crop with canvas drag-to-select. Parallel row copy. |
+| Crop | Axis-aligned crop with aspect-ratio presets (3:2, 4:3, 1:1, 16:9, 9:16, custom) |
 | Curves | Interactive curve editor with draggable control points |
 | Denoise | Bilateral filter noise reduction |
 | Faux HDR | Exposure fusion from ±1 stop virtual brackets |
-| Grain | Film grain with presets modelled on classic 35 mm stocks |
+| Flip | Horizontal or vertical mirror |
+| Grain | Film grain with configurable strength and size |
+| Heal | Content-aware spot heal / clone stamp; auto-detects source patch |
 | Highlights / Shadows | Independent highlight and shadow recovery |
-| HSL Panel | Per-hue-band hue, saturation, and luminance (8 bands) |
+| HSL Panel | Per-hue-band hue, saturation, and luminance (8 bands: Reds … Magentas) |
 | Hue Shift | Global hue rotation in degrees |
 | Levels | Black/mid/white point with LUT-based remapping |
+| Local Adjustments | Linear or radial gradient mask applied to any op |
 | LUT / Color Grading | Apply a .cube 3D LUT with blend strength |
+| Noise Reduction | Wavelet (fast) or Non-Local Means (quality); independent luma/chroma strength |
 | Perspective | Four-corner keystone/perspective correction |
 | Resize | Nearest-neighbour, bilinear, or bicubic resampling |
-| Rotate | 90°/180°/270° lossless, or arbitrary angle with bilinear interp |
+| Rotate / Straighten | 90°/180°/270° lossless; arbitrary angle with bilinear interp; horizon-line straighten with auto-crop |
 | Saturation | Global saturation multiplier |
 | Sepia | Sepia tone with adjustable strength |
 | Sharpen | Unsharp mask convolution |
@@ -99,6 +109,42 @@ Works. Suspiciously well for what we've done so far.  I'm interested in seeing w
 The plugin system exists and has an example. Nobody has written a plugin. The arbitrary rotation is slow on large images because bilinear interpolation has terrible cache locality and nobody has fixed it.
 
 # Changelog
+
+## 2026-04-02 (52% of our weekly usage)
+
+### Virtual Copies
+
+- **Virtual copies** — create any number of independent edit stacks for the same source image. Each copy has its own op list, undo/redo history, and name. The Edit Stack panel now shows a tab bar — click a tab to switch, `+` to add an empty copy, right-click for duplicate/rename/delete. All copies share the decoded source image in memory with zero pixel duplication. The `.rlab` format (now v2) saves every copy and restores the active one on open; v1 files load transparently as a single copy named "Copy 1".
+
+### New Tools
+
+- **Spot Heal / Clone Stamp** — Photoshop-style content-aware heal. Click to place a repair spot; RasterLab auto-detects the best source patch. Hover highlight shows which spot is selected. Multiple spots are committed as a single pipeline op.
+- **High-quality Noise Reduction** — two algorithms selectable per image: Wavelet (fast Haar soft-thresholding, ~250 ms on 20 MP) and Non-Local Means (patch-based, highest quality). Independent luminance and chrominance strength controls; edge-preserving detail mask blends the result back toward real scene edges without protecting noise-induced false gradients.
+- **Clarity / Texture** — local contrast enhancement at two spatial scales (clarity = midtone contrast, texture = fine surface detail). Live 1/4-scale preview while adjusting.
+- **Local Adjustments** — non-destructive masks: linear gradient and radial gradient. Any tool op can be wrapped in a mask so adjustments apply only to part of the frame.
+- **Straighten** — draw a horizon line on the canvas to set the rotation angle. Read-only angle display updates live as you drag; auto-crop option removes exposed corners after rotation.
+- **Crop aspect ratio presets** — 3:2, 4:3, 1:1, 16:9, 9:16 and a custom ratio picker alongside the existing free-crop mode.
+- **Classic B&W look** — one-click preset applying a channel-mixed B&W conversion, a subtle brightness/contrast lift, and a vignette.
+
+### Canvas
+
+- **Split before/after view** — draggable vertical divider shows the source (with geometric ops only) on the left and the fully edited result on the right. Correctly tracks rotation, flip, and crop so both sides share the same framing.
+- **Large-image safety** — canvas textures are downsampled when the image exceeds the wgpu 8192 px per-side limit, preventing GPU upload failures on very high-resolution files.
+
+### Performance
+
+- **Vertical blur** — replaced the transpose-based pass with parallel column strips; measurably faster on large images.
+
+### Infrastructure
+
+- **egui / eframe 0.29 → 0.34** — framework upgrade; native file dialog integrated via egui-file-dialog with a fallback to the built-in chooser when the native dialog is unavailable.
+
+### Bug Fixes
+
+- Noise reduction: detail-preservation mask was computed from the noisy input, causing it to classify noise as "detail" and blend it back — making NR imperceptible at default settings. Mask now computed from the denoised output.
+- Spot heal: spot selection hit-testing and hover highlight were broken; both fixed.
+
+---
 
 ## 2026-03-30 (Week 1 is a wrap, we used 82% of our usage)
 

@@ -57,202 +57,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
-    // ── Spot Heal ─────────────────────────────────────────────────────────
-    {
-        let default_open = state.prefs.is_tool_open("heal");
-        let heal_label = if state.heal_active {
-            format!(
-                "✦  Spot Heal  [ACTIVE \u{2014} {} spot{}]",
-                state.heal_spots.len(),
-                if state.heal_spots.len() == 1 { "" } else { "s" }
-            )
-        } else {
-            "✦  Spot Heal".to_string()
-        };
-        let resp = egui::CollapsingHeader::new(heal_label)
-            .id_salt("heal")
-            .default_open(default_open)
-            .show(ui, |ui| {
-                egui::Grid::new("heal_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Radius:");
-                        ui.add(
-                            DragValue::new(&mut state.heal_radius)
-                                .speed(1)
-                                .range(5_u32..=300_u32),
-                        );
-                        ui.end_row();
-                    });
-
-                let mode_btn_text = if state.heal_active {
-                    "Stop Painting"
-                } else {
-                    "Start Painting"
-                };
-                if ui
-                    .add_enabled(
-                        has_image,
-                        egui::Button::new(mode_btn_text)
-                            .min_size(Vec2::new(ui.available_width(), 0.0)),
-                    )
-                    .clicked()
-                {
-                    state.heal_active = !state.heal_active;
-                }
-
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            has_image && !state.heal_spots.is_empty(),
-                            egui::Button::new("Apply Heal"),
-                        )
-                        .clicked()
-                    {
-                        state.push_heal();
-                    }
-                    if ui
-                        .add_enabled(!state.heal_spots.is_empty(), egui::Button::new("Clear"))
-                        .clicked()
-                    {
-                        state.heal_spots.clear();
-                    }
-                });
-
-                if state.heal_active {
-                    ui.label(
-                        egui::RichText::new(
-                            "Click on blemishes to heal them.\nRight-click a spot to remove it.",
-                        )
-                        .small()
-                        .color(egui::Color32::from_gray(140)),
-                    );
-                }
-            });
-        if resp.header_response.clicked() {
-            state
-                .prefs
-                .tools_open
-                .insert("heal".to_string(), !default_open);
-        }
-    }
-
-    ui.separator();
-
-    // ── Masking ───────────────────────────────────────────────────────────
-    // Global modifier: when active, the next "Apply" button wraps its
-    // operation in a MaskedOp that restricts the effect to the masked region.
-    const MASK_LABELS: &[&str] = &["None", "Linear Gradient", "Radial Gradient"];
-    let mask_default_open = state.prefs.is_tool_open("masking");
-    let mask_active = state.mask_sel > 0;
-    let mask_header = if mask_active {
-        format!("◈  Masking  [{}]", MASK_LABELS[state.mask_sel])
-    } else {
-        "◈  Masking".to_string()
-    };
-    let mask_resp = egui::CollapsingHeader::new(mask_header)
-        .id_salt("masking")
-        .default_open(mask_default_open)
-        .show(ui, |ui| {
-            egui::Grid::new("mask_type_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Type:");
-                    egui::ComboBox::from_id_salt("mask_type_combo")
-                        .selected_text(MASK_LABELS[state.mask_sel])
-                        .show_ui(ui, |ui| {
-                            for (i, &label) in MASK_LABELS.iter().enumerate() {
-                                ui.selectable_value(&mut state.mask_sel, i, label);
-                            }
-                        });
-                    ui.end_row();
-                });
-
-            if state.mask_sel == 1 {
-                // Linear gradient controls
-                ui.separator();
-                egui::Grid::new("mask_lin_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Angle:");
-                        ui.add(
-                            egui::Slider::new(&mut state.mask_lin_angle, 0.0..=360.0)
-                                .suffix("°")
-                                .step_by(1.0),
-                        );
-                        ui.end_row();
-                        ui.label("Center X:");
-                        ui.add(egui::Slider::new(&mut state.mask_lin_cx, 0.0..=1.0).step_by(0.01));
-                        ui.end_row();
-                        ui.label("Center Y:");
-                        ui.add(egui::Slider::new(&mut state.mask_lin_cy, 0.0..=1.0).step_by(0.01));
-                        ui.end_row();
-                        ui.label("Feather:");
-                        ui.add(
-                            egui::Slider::new(&mut state.mask_lin_feather, 0.01..=1.0)
-                                .step_by(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Invert:");
-                        ui.checkbox(&mut state.mask_lin_invert, "");
-                        ui.end_row();
-                    });
-            }
-
-            if state.mask_sel == 2 {
-                // Radial gradient controls
-                ui.separator();
-                egui::Grid::new("mask_rad_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Center X:");
-                        ui.add(egui::Slider::new(&mut state.mask_rad_cx, 0.0..=1.0).step_by(0.01));
-                        ui.end_row();
-                        ui.label("Center Y:");
-                        ui.add(egui::Slider::new(&mut state.mask_rad_cy, 0.0..=1.0).step_by(0.01));
-                        ui.end_row();
-                        ui.label("Radius:");
-                        ui.add(
-                            egui::Slider::new(&mut state.mask_rad_radius, 0.01..=1.5).step_by(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Feather:");
-                        ui.add(
-                            egui::Slider::new(&mut state.mask_rad_feather, 0.01..=2.0)
-                                .step_by(0.01),
-                        );
-                        ui.end_row();
-                        ui.label("Invert:");
-                        ui.checkbox(&mut state.mask_rad_invert, "");
-                        ui.end_row();
-                    });
-            }
-
-            if mask_active {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("⚠ Next Apply will be masked")
-                        .small()
-                        .color(egui::Color32::from_rgb(220, 160, 40)),
-                );
-                if ui.small_button("Clear mask").clicked() {
-                    state.mask_sel = 0;
-                }
-            }
-        });
-    if mask_resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("masking".to_string(), !mask_default_open);
-    }
-
-    ui.separator();
-
     // ── Looks ─────────────────────────────────────────────────────────────
     egui::CollapsingHeader::new("🎞  Looks")
         .id_salt("looks")
@@ -265,7 +69,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             }
         });
 
+    ui.add_space(4.0);
     ui.separator();
+    ui.add_space(4.0);
 
     // ── Black & White ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("bw");
@@ -445,6 +251,54 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .prefs
             .tools_open
             .insert("brightness_contrast".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Clarity / Texture ─────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("clarity_texture");
+    let resp = egui::CollapsingHeader::new("◈  Clarity / Texture")
+        .id_salt("clarity_texture")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let c_changed = ui
+                .add(
+                    egui::Slider::new(&mut state.clarity, -1.0..=1.0)
+                        .step_by(0.01)
+                        .text("Clarity"),
+                )
+                .changed();
+            let t_changed = ui
+                .add(
+                    egui::Slider::new(&mut state.texture, -1.0..=1.0)
+                        .step_by(0.01)
+                        .text("Texture"),
+                )
+                .changed();
+            if (c_changed || t_changed) && has_image {
+                state.update_clarity_texture_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    state.push_clarity_texture();
+                }
+                if state.clarity_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_clarity_texture_preview();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("clarity_texture".to_string(), !default_open);
     }
 
     ui.separator();
@@ -709,73 +563,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
-    // ── Noise Reduction (Advanced) ───────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("noise_reduction");
-    let resp = egui::CollapsingHeader::new("◉  Noise Reduction")
-        .id_salt("noise_reduction")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            egui::Grid::new("nr_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Method:");
-                    egui::ComboBox::from_id_salt("nr_method")
-                        .selected_text(match state.nr_method {
-                            NrMethod::Wavelet => "Wavelet (fast)",
-                            NrMethod::NonLocalMeans => "Non-Local Means",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut state.nr_method,
-                                NrMethod::Wavelet,
-                                "Wavelet (fast)",
-                            );
-                            ui.selectable_value(
-                                &mut state.nr_method,
-                                NrMethod::NonLocalMeans,
-                                "Non-Local Means",
-                            );
-                        });
-                    ui.end_row();
-
-                    ui.label("Luminance:");
-                    ui.add(egui::Slider::new(&mut state.nr_luma, 0.0..=1.0_f32).show_value(true));
-                    ui.end_row();
-
-                    ui.label("Color:");
-                    ui.add(egui::Slider::new(&mut state.nr_color, 0.0..=1.0_f32).show_value(true));
-                    ui.end_row();
-
-                    ui.label("Detail:");
-                    ui.add(egui::Slider::new(&mut state.nr_detail, 0.0..=1.0_f32).show_value(true));
-                    ui.end_row();
-                });
-
-            if state.nr_method == NrMethod::NonLocalMeans {
-                ui.label(
-                    egui::RichText::new("⚠ NLM is slow on large images (30s+)")
-                        .small()
-                        .color(egui::Color32::from_rgb(200, 150, 50)),
-                );
-            }
-
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Noise Reduction"))
-                .clicked()
-            {
-                state.push_noise_reduction();
-            }
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("noise_reduction".to_string(), !default_open);
-    }
-
-    ui.separator();
-
     // ── Export settings ──────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("export_settings");
     let resp = egui::CollapsingHeader::new("⚙  Export Settings")
@@ -916,6 +703,89 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Spot Heal ─────────────────────────────────────────────────────────
+    {
+        let default_open = state.prefs.is_tool_open("heal");
+        let heal_label = if state.heal_active {
+            format!(
+                "✦  Spot Heal  [ACTIVE \u{2014} {} spot{}]",
+                state.heal_spots.len(),
+                if state.heal_spots.len() == 1 { "" } else { "s" }
+            )
+        } else {
+            "✦  Spot Heal".to_string()
+        };
+        let resp = egui::CollapsingHeader::new(heal_label)
+            .id_salt("heal")
+            .default_open(default_open)
+            .show(ui, |ui| {
+                egui::Grid::new("heal_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Radius:");
+                        ui.add(
+                            DragValue::new(&mut state.heal_radius)
+                                .speed(1)
+                                .range(5_u32..=300_u32),
+                        );
+                        ui.end_row();
+                    });
+
+                let mode_btn_text = if state.heal_active {
+                    "Stop Painting"
+                } else {
+                    "Start Painting"
+                };
+                if ui
+                    .add_enabled(
+                        has_image,
+                        egui::Button::new(mode_btn_text)
+                            .min_size(Vec2::new(ui.available_width(), 0.0)),
+                    )
+                    .clicked()
+                {
+                    state.heal_active = !state.heal_active;
+                }
+
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            has_image && !state.heal_spots.is_empty(),
+                            egui::Button::new("Apply Heal"),
+                        )
+                        .clicked()
+                    {
+                        state.push_heal();
+                    }
+                    if ui
+                        .add_enabled(!state.heal_spots.is_empty(), egui::Button::new("Clear"))
+                        .clicked()
+                    {
+                        state.heal_spots.clear();
+                    }
+                });
+
+                if state.heal_active {
+                    ui.label(
+                        egui::RichText::new(
+                            "Click on blemishes to heal them.\nRight-click a spot to remove it.",
+                        )
+                        .small()
+                        .color(egui::Color32::from_gray(140)),
+                    );
+                }
+            });
+        if resp.header_response.clicked() {
+            state
+                .prefs
+                .tools_open
+                .insert("heal".to_string(), !default_open);
+        }
+    }
+
+    ui.separator();
+
     // ── Highlights & Shadows ──────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("highlights_shadows");
     let resp = egui::CollapsingHeader::new("◑  Highlights / Shadows")
@@ -1047,6 +917,119 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Masking ───────────────────────────────────────────────────────────
+    // Global modifier: when active, the next "Apply" button wraps its
+    // operation in a MaskedOp that restricts the effect to the masked region.
+    const MASK_LABELS: &[&str] = &["None", "Linear Gradient", "Radial Gradient"];
+    let mask_default_open = state.prefs.is_tool_open("masking");
+    let mask_active = state.mask_sel > 0;
+    let mask_header = if mask_active {
+        format!("◈  Masking  [{}]", MASK_LABELS[state.mask_sel])
+    } else {
+        "◈  Masking".to_string()
+    };
+    let mask_resp = egui::CollapsingHeader::new(mask_header)
+        .id_salt("masking")
+        .default_open(mask_default_open)
+        .show(ui, |ui| {
+            egui::Grid::new("mask_type_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Type:");
+                    egui::ComboBox::from_id_salt("mask_type_combo")
+                        .selected_text(MASK_LABELS[state.mask_sel])
+                        .show_ui(ui, |ui| {
+                            for (i, &label) in MASK_LABELS.iter().enumerate() {
+                                ui.selectable_value(&mut state.mask_sel, i, label);
+                            }
+                        });
+                    ui.end_row();
+                });
+
+            if state.mask_sel == 1 {
+                // Linear gradient controls
+                ui.separator();
+                egui::Grid::new("mask_lin_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Angle:");
+                        ui.add(
+                            egui::Slider::new(&mut state.mask_lin_angle, 0.0..=360.0)
+                                .suffix("°")
+                                .step_by(1.0),
+                        );
+                        ui.end_row();
+                        ui.label("Center X:");
+                        ui.add(egui::Slider::new(&mut state.mask_lin_cx, 0.0..=1.0).step_by(0.01));
+                        ui.end_row();
+                        ui.label("Center Y:");
+                        ui.add(egui::Slider::new(&mut state.mask_lin_cy, 0.0..=1.0).step_by(0.01));
+                        ui.end_row();
+                        ui.label("Feather:");
+                        ui.add(
+                            egui::Slider::new(&mut state.mask_lin_feather, 0.01..=1.0)
+                                .step_by(0.01),
+                        );
+                        ui.end_row();
+                        ui.label("Invert:");
+                        ui.checkbox(&mut state.mask_lin_invert, "");
+                        ui.end_row();
+                    });
+            }
+
+            if state.mask_sel == 2 {
+                // Radial gradient controls
+                ui.separator();
+                egui::Grid::new("mask_rad_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Center X:");
+                        ui.add(egui::Slider::new(&mut state.mask_rad_cx, 0.0..=1.0).step_by(0.01));
+                        ui.end_row();
+                        ui.label("Center Y:");
+                        ui.add(egui::Slider::new(&mut state.mask_rad_cy, 0.0..=1.0).step_by(0.01));
+                        ui.end_row();
+                        ui.label("Radius:");
+                        ui.add(
+                            egui::Slider::new(&mut state.mask_rad_radius, 0.01..=1.5).step_by(0.01),
+                        );
+                        ui.end_row();
+                        ui.label("Feather:");
+                        ui.add(
+                            egui::Slider::new(&mut state.mask_rad_feather, 0.01..=2.0)
+                                .step_by(0.01),
+                        );
+                        ui.end_row();
+                        ui.label("Invert:");
+                        ui.checkbox(&mut state.mask_rad_invert, "");
+                        ui.end_row();
+                    });
+            }
+
+            if mask_active {
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("⚠ Next Apply will be masked")
+                        .small()
+                        .color(egui::Color32::from_rgb(220, 160, 40)),
+                );
+                if ui.small_button("Clear mask").clicked() {
+                    state.mask_sel = 0;
+                }
+            }
+        });
+    if mask_resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("masking".to_string(), !mask_default_open);
+    }
+
+    ui.separator();
+
     // ── LUT (Color Grading) ───────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("lut");
     let resp = egui::CollapsingHeader::new("🎞  LUT / Color Grading")
@@ -1092,6 +1075,73 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .prefs
             .tools_open
             .insert("lut".to_string(), !default_open);
+    }
+
+    ui.separator();
+
+    // ── Noise Reduction (Advanced) ───────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("noise_reduction");
+    let resp = egui::CollapsingHeader::new("◉  Noise Reduction")
+        .id_salt("noise_reduction")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            egui::Grid::new("nr_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Method:");
+                    egui::ComboBox::from_id_salt("nr_method")
+                        .selected_text(match state.nr_method {
+                            NrMethod::Wavelet => "Wavelet (fast)",
+                            NrMethod::NonLocalMeans => "Non-Local Means",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut state.nr_method,
+                                NrMethod::Wavelet,
+                                "Wavelet (fast)",
+                            );
+                            ui.selectable_value(
+                                &mut state.nr_method,
+                                NrMethod::NonLocalMeans,
+                                "Non-Local Means",
+                            );
+                        });
+                    ui.end_row();
+
+                    ui.label("Luminance:");
+                    ui.add(egui::Slider::new(&mut state.nr_luma, 0.0..=1.0_f32).show_value(true));
+                    ui.end_row();
+
+                    ui.label("Color:");
+                    ui.add(egui::Slider::new(&mut state.nr_color, 0.0..=1.0_f32).show_value(true));
+                    ui.end_row();
+
+                    ui.label("Detail:");
+                    ui.add(egui::Slider::new(&mut state.nr_detail, 0.0..=1.0_f32).show_value(true));
+                    ui.end_row();
+                });
+
+            if state.nr_method == NrMethod::NonLocalMeans {
+                ui.label(
+                    egui::RichText::new("⚠ NLM is slow on large images (30s+)")
+                        .small()
+                        .color(egui::Color32::from_rgb(200, 150, 50)),
+                );
+            }
+
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Noise Reduction"))
+                .clicked()
+            {
+                state.push_noise_reduction();
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("noise_reduction".to_string(), !default_open);
     }
 
     ui.separator();
@@ -1523,6 +1573,47 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Sharpen ──────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("sharpen");
+    let resp = egui::CollapsingHeader::new("◈  Sharpen")
+        .id_salt("sharpen")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            let changed = ui
+                .add(
+                    egui::Slider::new(&mut state.sharpen_strength, 0.0..=10.0)
+                        .step_by(0.05)
+                        .text("Strength"),
+                )
+                .changed();
+            if changed && has_image {
+                state.update_sharpen_preview();
+            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply Sharpen"))
+                    .clicked()
+                {
+                    state.push_sharpen();
+                }
+                if state.sharpen_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_sharpen_preview();
+                }
+            });
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("sharpen".to_string(), !default_open);
+    }
+
+    ui.separator();
+
     // ── Split Tone ────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("split_tone");
     let resp = egui::CollapsingHeader::new("🎨  Split Tone")
@@ -1609,95 +1700,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .prefs
             .tools_open
             .insert("split_tone".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Sharpen ──────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("sharpen");
-    let resp = egui::CollapsingHeader::new("◈  Sharpen")
-        .id_salt("sharpen")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut state.sharpen_strength, 0.0..=10.0)
-                        .step_by(0.05)
-                        .text("Strength"),
-                )
-                .changed();
-            if changed && has_image {
-                state.update_sharpen_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Sharpen"))
-                    .clicked()
-                {
-                    state.push_sharpen();
-                }
-                if state.sharpen_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_sharpen_preview();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("sharpen".to_string(), !default_open);
-    }
-
-    ui.separator();
-
-    // ── Clarity / Texture ─────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("clarity_texture");
-    let resp = egui::CollapsingHeader::new("◈  Clarity / Texture")
-        .id_salt("clarity_texture")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            let c_changed = ui
-                .add(
-                    egui::Slider::new(&mut state.clarity, -1.0..=1.0)
-                        .step_by(0.01)
-                        .text("Clarity"),
-                )
-                .changed();
-            let t_changed = ui
-                .add(
-                    egui::Slider::new(&mut state.texture, -1.0..=1.0)
-                        .step_by(0.01)
-                        .text("Texture"),
-                )
-                .changed();
-            if (c_changed || t_changed) && has_image {
-                state.update_clarity_texture_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_clarity_texture();
-                }
-                if state.clarity_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_clarity_texture_preview();
-                }
-            });
-        });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("clarity_texture".to_string(), !default_open);
     }
 
     ui.separator();
