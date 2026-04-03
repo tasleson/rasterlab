@@ -1,6 +1,6 @@
 use std::sync::{Arc, mpsc};
 
-use crate::prefs::Prefs;
+use crate::{prefs::Prefs, state::VirtualCopyStore};
 
 use egui::Context;
 use rasterlab_core::{
@@ -69,7 +69,11 @@ pub struct AppState {
     /// Persistent GUI preferences (tool panel open/closed states, etc.).
     pub prefs: Prefs,
     pub registry: FormatRegistry,
-    pub pipeline: Option<EditPipeline>,
+    /// All virtual copies for the open image.  `None` when no image is loaded.
+    pub copies: Option<VirtualCopyStore>,
+    /// When `Some`, a rename dialog is open for the copy at that index.
+    /// The `String` is the live text being edited.
+    pub rename_pending: Option<(usize, String)>,
     pub rendered: Option<Arc<Image>>,
     /// True while the canvas is displaying a downsampled preview render.
     pub rendered_is_preview: bool,
@@ -309,7 +313,8 @@ impl AppState {
         Self {
             prefs: Prefs::load(),
             registry: FormatRegistry::with_builtins(),
-            pipeline: None,
+            copies: None,
+            rename_pending: None,
             rendered: None,
             rendered_is_preview: false,
             rendered_scale: 1.0,
@@ -463,7 +468,11 @@ impl AppState {
                     self.is_dirty = false;
                     self.project_created_at = None;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
-                    self.pipeline = Some(EditPipeline::new(image));
+                    self.copies = Some(VirtualCopyStore::new(
+                        "Copy 1".into(),
+                        EditPipeline::new(image),
+                    ));
+                    self.rename_pending = None;
                     self.loading = false;
                     self.image_generation += 1;
                     self.request_render();
@@ -486,11 +495,17 @@ impl AppState {
                     self.project_path = Some(path.clone());
                     self.is_dirty = false;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
-                    let mut pipeline = EditPipeline::new(image);
-                    if let Err(e) = pipeline.load_state(rlab.pipeline_state) {
-                        self.status = format!("Warning: could not restore edit stack: {}", e);
+                    self.rename_pending = None;
+                    match VirtualCopyStore::load_from_saved(
+                        Arc::new(image),
+                        rlab.copies,
+                        rlab.active_copy_index,
+                    ) {
+                        Ok(store) => self.copies = Some(store),
+                        Err(e) => {
+                            self.status = format!("Warning: could not restore edit stack: {}", e);
+                        }
                     }
-                    self.pipeline = Some(pipeline);
                     self.loading = false;
                     self.image_generation += 1;
                     self.request_render();
@@ -532,7 +547,7 @@ impl AppState {
                             .map(|t| t.elapsed().as_millis())
                             .unwrap_or(0);
                         self.status = format!("Ready  ({} ms)", elapsed_ms);
-                        if let Some(pipeline) = &mut self.pipeline
+                        if let Some(pipeline) = self.pipeline_mut()
                             && cache_gen == pipeline.step_cache_gen()
                         {
                             pipeline.store_steps(start_index, intermediates);
@@ -667,7 +682,7 @@ impl AppState {
     /// or `rasterlab batch --load-pipeline <path>` to replay the same edits on
     /// any image without opening the GUI.
     pub fn export_edit_stack_json(&mut self, path: std::path::PathBuf) {
-        let Some(pipeline) = &self.pipeline else {
+        let Some(pipeline) = self.pipeline() else {
             self.status = "No edit stack to export".into();
             return;
         };
@@ -697,12 +712,12 @@ impl AppState {
             self.status = "Nothing to save — open an image first".into();
             return;
         };
-        let Some(pipeline) = &self.pipeline else {
+        let Some(store) = &self.copies else {
             self.status = "Nothing to save — no active pipeline".into();
             return;
         };
 
-        let pipeline_state = match pipeline.save_state() {
+        let (copies_saved, active_idx) = match store.save_states() {
             Ok(s) => s,
             Err(e) => {
                 self.status = format!("Save failed (pipeline): {}", e);
@@ -710,7 +725,7 @@ impl AppState {
             }
         };
 
-        let source = pipeline.source();
+        let source = store.source();
         let (w, h) = (source.width, source.height);
         let source_path = self
             .last_path
@@ -727,7 +742,7 @@ impl AppState {
         meta = meta.touch();
 
         let created_at = meta.created_at;
-        let rlab = RlabFile::new(meta, original_bytes, pipeline_state, None);
+        let rlab = RlabFile::new(meta, original_bytes, copies_saved, active_idx, None);
         match rlab.write(&path) {
             Ok(()) => {
                 self.project_created_at = Some(created_at);
@@ -803,11 +818,14 @@ impl AppState {
         };
 
         self.cancel_all_previews();
-        if let Some(p) = &mut self.pipeline {
+        if let Some(store) = &mut self.copies {
+            let p = store.active_pipeline_mut();
             p.push_op(Box::new(RotateOp::arbitrary(angle)));
             if let Some(crop) = crop_op {
                 p.push_op(Box::new(crop));
             }
+        }
+        if self.copies.is_some() {
             self.is_dirty = true;
             self.request_render();
         }
@@ -1398,36 +1416,32 @@ impl AppState {
     }
 
     pub fn remove_op(&mut self, index: usize) {
-        if self.pipeline.as_mut().is_some_and(|p| p.remove_op(index)) {
+        if self.pipeline_mut().is_some_and(|p| p.remove_op(index)) {
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn reorder_op(&mut self, from: usize, to: usize) {
-        if self
-            .pipeline
-            .as_mut()
-            .is_some_and(|p| p.reorder_op(from, to))
-        {
+        if self.pipeline_mut().is_some_and(|p| p.reorder_op(from, to)) {
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn toggle_op(&mut self, index: usize) {
-        if self.pipeline.as_mut().is_some_and(|p| p.toggle_op(index)) {
+        if self.pipeline_mut().is_some_and(|p| p.toggle_op(index)) {
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn undo(&mut self) {
-        if self.pipeline.as_mut().is_some_and(|p| p.undo()) {
+        if self.pipeline_mut().is_some_and(|p| p.undo()) {
             self.is_dirty = true;
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn redo(&mut self) {
-        if self.pipeline.as_mut().is_some_and(|p| p.redo()) {
+        if self.pipeline_mut().is_some_and(|p| p.redo()) {
             self.is_dirty = true;
             self.cancel_all_previews();
             self.request_render();
@@ -1463,8 +1477,8 @@ impl AppState {
             None => op,
         };
         self.cancel_all_previews();
-        if let Some(p) = &mut self.pipeline {
-            p.push_op(op);
+        if let Some(store) = &mut self.copies {
+            store.active_pipeline_mut().push_op(op);
             self.is_dirty = true;
             self.request_render();
         }
@@ -1474,20 +1488,22 @@ impl AppState {
     /// boost saturation slightly, apply a mild sharpen.  Pushes three ops
     /// as a single atomic batch (one render fired at the end).
     pub fn push_classic_bw(&mut self) {
-        if self.pipeline.is_none() {
+        if self.copies.is_none() {
             return;
         }
         self.cancel_all_previews();
-        let pipeline = self.pipeline.as_mut().unwrap();
-        pipeline.push_op(Box::new(BlackAndWhiteOp::channel_mixer(0.45, 0.35, 0.13)));
-        pipeline.push_op(Box::new(BrightnessContrastOp::new(0.03, 0.08)));
-        pipeline.push_op(Box::new(VignetteOp::new(0.52, 0.28, 1.0)));
+        if let Some(store) = &mut self.copies {
+            let p = store.active_pipeline_mut();
+            p.push_op(Box::new(BlackAndWhiteOp::channel_mixer(0.45, 0.35, 0.13)));
+            p.push_op(Box::new(BrightnessContrastOp::new(0.03, 0.08)));
+            p.push_op(Box::new(VignetteOp::new(0.52, 0.28, 1.0)));
+        }
         self.is_dirty = true;
         self.request_render();
     }
 
     pub fn push_auto_enhance(&mut self) {
-        if self.pipeline.is_none() || self.histogram.is_none() {
+        if self.copies.is_none() || self.histogram.is_none() {
             return;
         }
         let (black, white) = {
@@ -1495,10 +1511,12 @@ impl AppState {
             percentile_levels(&hist.luma, 0.005, 0.995)
         };
         self.cancel_all_previews();
-        let pipeline = self.pipeline.as_mut().unwrap();
-        pipeline.push_op(Box::new(LevelsOp::new(black, white, 1.0)));
-        pipeline.push_op(Box::new(SaturationOp::new(1.1)));
-        pipeline.push_op(Box::new(SharpenOp::new(0.5)));
+        if let Some(store) = &mut self.copies {
+            let p = store.active_pipeline_mut();
+            p.push_op(Box::new(LevelsOp::new(black, white, 1.0)));
+            p.push_op(Box::new(SaturationOp::new(1.1)));
+            p.push_op(Box::new(SharpenOp::new(0.5)));
+        }
         self.is_dirty = true;
         self.request_render();
     }
@@ -1551,7 +1569,7 @@ impl AppState {
     /// preview op is active.  Used internally to follow up a preview render
     /// with a full-resolution render.
     fn request_render_inner(&mut self, force_full_res: bool) {
-        if self.pipeline.is_none() {
+        if self.copies.is_none() {
             return;
         }
         if self.loading {
@@ -1591,7 +1609,7 @@ impl AppState {
         // Collect all pipeline-derived data in a scoped borrow so the borrow
         // is dropped before we call self methods (e.g. make_bw_op) below.
         let (start_idx, cache_gen, committed_ops, pipeline_cursor) = {
-            let pipeline = self.pipeline.as_ref().unwrap();
+            let pipeline = self.pipeline().unwrap();
             let (si, _) = pipeline.best_cached_start();
             let cg = pipeline.step_cache_gen();
             let co: Vec<Option<Box<dyn Operation>>> = pipeline.ops()[si..pipeline.cursor()]
@@ -1616,9 +1634,9 @@ impl AppState {
         // the read-only path because they downsample first and never write
         // back to the step cache.
         let start_image = if is_preview {
-            self.pipeline.as_ref().unwrap().best_cached_start().1
+            self.pipeline().unwrap().best_cached_start().1
         } else {
-            self.pipeline.as_mut().unwrap().take_start_for_render().1
+            self.pipeline_mut().unwrap().take_start_for_render().1
         };
 
         // Preview op — applied on top of committed result but NOT cached.
@@ -1762,11 +1780,80 @@ impl AppState {
     // Accessors
     // -----------------------------------------------------------------------
 
+    /// Borrow the active pipeline, if any image is loaded.
+    pub fn pipeline(&self) -> Option<&EditPipeline> {
+        self.copies.as_ref().map(|s| s.active_pipeline())
+    }
+
+    /// Mutably borrow the active pipeline, if any image is loaded.
+    fn pipeline_mut(&mut self) -> Option<&mut EditPipeline> {
+        self.copies.as_mut().map(|s| s.active_pipeline_mut())
+    }
+
     pub fn can_undo(&self) -> bool {
-        self.pipeline.as_ref().is_some_and(|p| p.can_undo())
+        self.pipeline().is_some_and(|p| p.can_undo())
     }
     pub fn can_redo(&self) -> bool {
-        self.pipeline.as_ref().is_some_and(|p| p.can_redo())
+        self.pipeline().is_some_and(|p| p.can_redo())
+    }
+
+    // -----------------------------------------------------------------------
+    // Virtual copy management
+    // -----------------------------------------------------------------------
+
+    /// Add a new empty virtual copy and make it active.
+    pub fn add_virtual_copy(&mut self) {
+        if let Some(store) = &mut self.copies {
+            let n = store.len() + 1;
+            store.add_copy(format!("Copy {}", n));
+        }
+        self.cancel_all_previews();
+        self.is_dirty = true;
+        self.request_render();
+    }
+
+    /// Duplicate the active copy (same ops) and make it active.
+    pub fn duplicate_virtual_copy(&mut self) {
+        if let Some(store) = &mut self.copies {
+            let n = store.len() + 1;
+            if let Err(e) = store.duplicate_active(format!("Copy {}", n)) {
+                self.status = format!("Duplicate failed: {}", e);
+                return;
+            }
+        }
+        self.cancel_all_previews();
+        self.is_dirty = true;
+        self.request_render();
+    }
+
+    /// Switch to the copy at `index` and re-render.
+    pub fn switch_copy(&mut self, index: usize) {
+        if let Some(store) = &mut self.copies {
+            if index == store.active_index() {
+                return;
+            }
+            store.set_active(index);
+        }
+        self.cancel_all_previews();
+        self.request_render();
+    }
+
+    /// Remove the copy at `index` (refused silently when only one copy exists).
+    pub fn remove_virtual_copy(&mut self, index: usize) {
+        let removed = self.copies.as_mut().is_some_and(|s| s.remove(index));
+        if removed {
+            self.cancel_all_previews();
+            self.is_dirty = true;
+            self.request_render();
+        }
+    }
+
+    /// Rename the copy at `index`.
+    pub fn rename_virtual_copy(&mut self, index: usize, name: String) {
+        if let Some(store) = &mut self.copies {
+            store.rename(index, name);
+        }
+        self.is_dirty = true;
     }
 }
 

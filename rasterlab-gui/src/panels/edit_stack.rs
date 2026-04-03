@@ -1,20 +1,22 @@
 //! Edit stack panel — shows all pipeline operations with enable/disable, delete,
-//! and drag-to-reorder controls.
+//! and drag-to-reorder controls.  A tab bar at the top lets the user switch
+//! between virtual copies of the same source image.
 
 use egui::{Color32, RichText, Ui};
 
 use crate::state::AppState;
 
 /// Renders the edit stack panel.
-///
-/// Returns `(remove_idx, reorder_from_to, toggle_idx)` — mutations to apply
-/// after the panel finishes drawing so we don't borrow `state` mutably while
-/// iterating.
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.heading("Edit Stack");
     ui.separator();
 
-    // Undo / Redo controls
+    // ── Virtual copy tab bar ──────────────────────────────────────────────
+    virtual_copy_tabs(ui, state);
+
+    ui.separator();
+
+    // ── Undo / Redo controls ──────────────────────────────────────────────
     ui.horizontal(|ui| {
         let can_undo = state.can_undo();
         let can_redo = state.can_redo();
@@ -34,7 +36,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
-    let Some(pipeline) = &state.pipeline else {
+    // ── Rename popup (shown when rename_pending is set) ───────────────────
+    rename_popup(ui, state);
+
+    // ── Op list ──────────────────────────────────────────────────────────
+    let Some(pipeline) = state.pipeline() else {
         ui.label(
             RichText::new("No image loaded")
                 .color(Color32::from_gray(150))
@@ -119,5 +125,131 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         state.reorder_op(from, to);
     } else if let Some(idx) = toggle_idx {
         state.toggle_op(idx);
+    }
+}
+
+// ── Tab bar ──────────────────────────────────────────────────────────────────
+
+fn virtual_copy_tabs(ui: &mut Ui, state: &mut AppState) {
+    let Some(store) = &state.copies else {
+        return;
+    };
+
+    let count = store.len();
+    let active = store.active_index();
+    let names: Vec<String> = store.names().map(String::from).collect();
+
+    let mut switch_to: Option<usize> = None;
+    let mut remove_idx: Option<usize> = None;
+    let mut rename_idx: Option<usize> = None;
+    let mut add_copy = false;
+    let mut duplicate = false;
+
+    ui.horizontal(|ui| {
+        for (i, name) in names.iter().enumerate() {
+            let selected = i == active;
+
+            let label_color = if selected {
+                Color32::WHITE
+            } else {
+                Color32::from_gray(170)
+            };
+
+            let resp = ui.add(
+                egui::Button::new(RichText::new(name).color(label_color))
+                    .selected(selected)
+                    .min_size(egui::vec2(0.0, 0.0)),
+            );
+
+            if resp.clicked() && !selected {
+                switch_to = Some(i);
+            }
+
+            resp.context_menu(|ui| {
+                if ui.button("Rename…").clicked() {
+                    rename_idx = Some(i);
+                    ui.close();
+                }
+                if ui.button("Duplicate").clicked() {
+                    duplicate = true;
+                    ui.close();
+                }
+                if count > 1 && ui.button("Delete").clicked() {
+                    remove_idx = Some(i);
+                    ui.close();
+                }
+            });
+        }
+
+        if ui.button("+").on_hover_text("Add virtual copy").clicked() {
+            add_copy = true;
+        }
+    });
+
+    // ── Deferred mutations ────────────────────────────────────────────────
+    if let Some(idx) = switch_to {
+        state.switch_copy(idx);
+    }
+    if let Some(idx) = remove_idx {
+        state.remove_virtual_copy(idx);
+    }
+    if add_copy {
+        state.add_virtual_copy();
+    }
+    if duplicate {
+        state.duplicate_virtual_copy();
+    }
+    if let Some(idx) = rename_idx {
+        // Seed the rename dialog with the current name.
+        let current = state
+            .copies
+            .as_ref()
+            .and_then(|s| s.names().nth(idx))
+            .unwrap_or("")
+            .to_string();
+        state.rename_pending = Some((idx, current));
+    }
+}
+
+// ── Inline rename dialog ──────────────────────────────────────────────────────
+
+fn rename_popup(ui: &mut Ui, state: &mut AppState) {
+    let Some((idx, _)) = state.rename_pending.clone() else {
+        return;
+    };
+
+    let mut commit_name: Option<String> = None;
+    let mut do_cancel = false;
+    let mut open = true;
+
+    egui::Window::new("Rename copy")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            // Borrow the text field, edit it, then drop the borrow before
+            // the inner closures so `state` is not held across button checks.
+            let name = {
+                let Some((_, text)) = &mut state.rename_pending else {
+                    return;
+                };
+                ui.text_edit_singleline(text);
+                text.clone()
+            };
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    commit_name = Some(name.clone());
+                }
+                if ui.button("Cancel").clicked() {
+                    do_cancel = true;
+                }
+            });
+        });
+
+    if let Some(name) = commit_name {
+        state.rename_virtual_copy(idx, name);
+        state.rename_pending = None;
+    } else if do_cancel || !open {
+        state.rename_pending = None;
     }
 }

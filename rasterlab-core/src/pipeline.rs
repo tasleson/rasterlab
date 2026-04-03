@@ -30,7 +30,7 @@ impl std::fmt::Debug for EditEntry {
 }
 
 /// Serialisable snapshot of a pipeline (used for save/load).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineState {
     /// Serialised edit entries (each includes operation type + parameters).
     pub entries: Vec<serde_json::Value>,
@@ -78,6 +78,22 @@ impl EditPipeline {
     pub fn new(source: Image) -> Self {
         Self {
             source: Arc::new(source),
+            ops: Vec::new(),
+            cursor: 0,
+            next_id: 1,
+            cache: RenderCache::new(),
+            geo_gen: 0,
+        }
+    }
+
+    /// Create a virtual copy that shares the source image with an existing pipeline.
+    ///
+    /// Uses `Arc::clone` so no pixel data is copied — both the original pipeline
+    /// and this copy point at the same source allocation.  The new copy starts
+    /// with an empty op list and a cold step cache.
+    pub fn new_virtual_copy(source: Arc<Image>) -> Self {
+        Self {
+            source,
             ops: Vec::new(),
             cursor: 0,
             next_id: 1,

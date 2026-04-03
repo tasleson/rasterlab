@@ -47,7 +47,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.heading("Tools");
     ui.separator();
 
-    let has_image = state.pipeline.is_some();
+    let has_image = state.pipeline().is_some();
 
     // ── Auto Enhance ──────────────────────────────────────────────────────
     let btn = egui::Button::new("✨  Auto Enhance").min_size(Vec2::new(ui.available_width(), 0.0));
@@ -1165,9 +1165,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
             // Source image dims for preset filtering and aspect-ratio math.
             let src_dims = state
-                .pipeline
-                .as_ref()
-                .map(|p| (p.source().width, p.source().height));
+                .pipeline()
+                .map(|p: &rasterlab_core::pipeline::EditPipeline| {
+                    (p.source().width, p.source().height)
+                });
 
             // ── MP preset dropdown ────────────────────────────────────
             // (label, total target pixels)
@@ -1865,7 +1866,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 // ---------------------------------------------------------------------------
 
 fn curves_ui(ui: &mut Ui, state: &mut AppState) {
-    let has_image = state.pipeline.is_some();
+    let has_image = state.pipeline().is_some();
 
     // Square canvas — fill available width up to 200 px.
     let size = ui.available_width().min(200.0);
@@ -2035,7 +2036,7 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
 // ---------------------------------------------------------------------------
 
 fn levels_ui(ui: &mut Ui, state: &mut AppState) {
-    let has_image = state.pipeline.is_some();
+    let has_image = state.pipeline().is_some();
 
     // Combined histogram
     draw_combined_histogram(ui, state);
@@ -2115,7 +2116,7 @@ fn levels_ui(ui: &mut Ui, state: &mut AppState) {
 // ---------------------------------------------------------------------------
 
 fn grain_ui(ui: &mut Ui, state: &mut AppState) {
-    let has_image = state.pipeline.is_some();
+    let has_image = state.pipeline().is_some();
 
     // Film preset buttons.
     ui.label("Film presets:");

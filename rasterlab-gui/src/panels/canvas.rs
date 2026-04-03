@@ -133,7 +133,7 @@ impl CanvasState {
         // "Before" is the source image with only geometric ops applied (rotate,
         // flip, crop) so both sides of the split share the same orientation.
         if state.split_view {
-            if let Some(pipeline) = &state.pipeline {
+            if let Some(pipeline) = state.pipeline() {
                 let geo_gen = pipeline.geometric_gen();
                 if self.before_texture.is_none() || geo_gen != self.before_hash {
                     match pipeline.render_geometric_only() {

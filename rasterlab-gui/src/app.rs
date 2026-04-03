@@ -129,7 +129,7 @@ impl eframe::App for RasterLabApp {
                     p.file_name().unwrap_or_default().to_string_lossy(),
                     dirty_marker
                 ),
-                None if self.state.pipeline.is_some() => {
+                None if self.state.pipeline().is_some() => {
                     format!("RasterLab — Unsaved Project{}", dirty_marker)
                 }
                 None => "RasterLab".to_string(),
@@ -151,7 +151,7 @@ impl eframe::App for RasterLabApp {
                         ui.separator();
                         if ui
                             .add_enabled(
-                                self.state.pipeline.is_some(),
+                                self.state.pipeline().is_some(),
                                 egui::Button::new("Save  (Ctrl+S)"),
                             )
                             .clicked()
@@ -162,7 +162,7 @@ impl eframe::App for RasterLabApp {
                         if self.state.project_path.is_some()
                             && ui
                                 .add_enabled(
-                                    self.state.pipeline.is_some(),
+                                    self.state.pipeline().is_some(),
                                     egui::Button::new("Save As…  (Ctrl+⇧S)"),
                                 )
                                 .clicked()
@@ -173,7 +173,7 @@ impl eframe::App for RasterLabApp {
                         ui.separator();
                         if ui
                             .add_enabled(
-                                self.state.pipeline.is_some(),
+                                self.state.pipeline().is_some(),
                                 egui::Button::new("Export…  (Ctrl+E)"),
                             )
                             .clicked()
@@ -183,7 +183,7 @@ impl eframe::App for RasterLabApp {
                         }
                         if ui
                             .add_enabled(
-                                self.state.pipeline.is_some(),
+                                self.state.pipeline().is_some(),
                                 egui::Button::new("Export Edit Stack as JSON…"),
                             )
                             .clicked()

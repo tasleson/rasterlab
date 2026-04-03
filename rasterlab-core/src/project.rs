@@ -19,13 +19,15 @@
 //!
 //! ## Defined chunks (in write order)
 //!
-//! | Tag    | Required | Contents                                  |
-//! |--------|----------|-------------------------------------------|
-//! | `META` | yes      | JSON-encoded [`RlabMeta`]                 |
-//! | `ORIG` | yes      | Verbatim original source-file bytes       |
-//! | `EDIT` | yes      | JSON-encoded [`PipelineState`]            |
-//! | `PREV` | no       | JPEG thumbnail of the rendered result     |
+//! | Tag    | Ver | Required | Contents                                        |
+//! |--------|-----|----------|-------------------------------------------------|
+//! | `META` | 1+  | yes      | JSON-encoded [`RlabMeta`]                       |
+//! | `ORIG` | 1+  | yes      | Verbatim original source-file bytes             |
+//! | `EDIT` | 1   | yes      | JSON-encoded [`PipelineState`] (single copy)    |
+//! | `VCPS` | 2+  | yes      | JSON-encoded [`VcpsChunk`] (all virtual copies) |
+//! | `PREV` | 1+  | no       | JPEG thumbnail of the rendered result           |
 //!
+//! Version 1 files have an `EDIT` chunk; version 2+ files use `VCPS` instead.
 //! Unknown chunks are skipped on read, enabling forward compatibility.
 
 use std::{
@@ -47,14 +49,33 @@ use crate::{
 const MAGIC: &[u8; 8] = b"RLAB\x00\x01\r\n";
 
 /// Current file format version.  Bump when the layout changes incompatibly.
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 
 const TAG_META: &[u8; 4] = b"META";
 const TAG_ORIG: &[u8; 4] = b"ORIG";
+#[allow(dead_code)] // v1 only — used as a literal in the read match arm
 const TAG_EDIT: &[u8; 4] = b"EDIT";
+const TAG_VCPS: &[u8; 4] = b"VCPS"; // v2+ — replaces EDIT
 const TAG_PREV: &[u8; 4] = b"PREV";
 
 // ── Public types ─────────────────────────────────────────────────────────────
+
+/// One virtual copy stored in a `.rlab` file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedCopy {
+    /// Display name shown in the tab bar (e.g. "Copy 1", "B&W version").
+    pub name: String,
+    /// Serialised edit stack and undo cursor for this copy.
+    pub pipeline_state: PipelineState,
+}
+
+/// JSON payload for the `VCPS` chunk.
+#[derive(Debug, Serialize, Deserialize)]
+struct VcpsChunk {
+    /// Index of the copy that was active at save time.
+    active: usize,
+    copies: Vec<SavedCopy>,
+}
 
 /// Metadata stored in the `META` chunk of every `.rlab` file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,8 +130,10 @@ pub struct RlabFile {
     pub original_bytes: Vec<u8>,
     /// Blake3 hash of [`original_bytes`](Self::original_bytes), verified on load.
     pub original_hash: [u8; 32],
-    /// Serialised edit stack and undo cursor.
-    pub pipeline_state: PipelineState,
+    /// All virtual copies, in tab order.  Always non-empty.
+    pub copies: Vec<SavedCopy>,
+    /// Index of the copy that was active at save time.
+    pub active_copy_index: usize,
     /// Embedded JPEG thumbnail of the rendered result, if present.
     pub thumbnail: Option<Vec<u8>>,
 }
@@ -119,11 +142,14 @@ impl RlabFile {
     /// Construct a new [`RlabFile`] ready for writing.
     ///
     /// `original_bytes` should be the verbatim bytes of the source image file.
+    /// `copies` is the ordered list of virtual copies (must be non-empty).
+    /// `active_copy_index` is the index of the currently selected copy.
     /// `thumbnail` is an optional JPEG of the rendered result (e.g. 512 px wide).
     pub fn new(
         meta: RlabMeta,
         original_bytes: Vec<u8>,
-        pipeline_state: PipelineState,
+        copies: Vec<SavedCopy>,
+        active_copy_index: usize,
         thumbnail: Option<Vec<u8>>,
     ) -> Self {
         let original_hash = *blake3::hash(&original_bytes).as_bytes();
@@ -132,7 +158,8 @@ impl RlabFile {
             meta,
             original_bytes,
             original_hash,
-            pipeline_state,
+            copies,
+            active_copy_index,
             thumbnail,
         }
     }
@@ -155,10 +182,14 @@ impl RlabFile {
         // ORIG
         write_chunk(&mut buf, TAG_ORIG, &self.original_bytes);
 
-        // EDIT
-        let edit_json = serde_json::to_vec(&self.pipeline_state)
-            .map_err(|e| RasterError::Serialization(e.to_string()))?;
-        write_chunk(&mut buf, TAG_EDIT, &edit_json);
+        // VCPS — all virtual copies + active index
+        let vcps = VcpsChunk {
+            active: self.active_copy_index,
+            copies: self.copies.clone(),
+        };
+        let vcps_json =
+            serde_json::to_vec(&vcps).map_err(|e| RasterError::Serialization(e.to_string()))?;
+        write_chunk(&mut buf, TAG_VCPS, &vcps_json);
 
         // PREV (optional)
         if let Some(thumb) = &self.thumbnail {
@@ -229,7 +260,10 @@ impl RlabFile {
         let mut meta: Option<RlabMeta> = None;
         let mut original_bytes: Option<Vec<u8>> = None;
         let mut original_hash: Option<[u8; 32]> = None;
-        let mut pipeline_state: Option<PipelineState> = None;
+        // v1 fallback: a single PipelineState from the EDIT chunk
+        let mut edit_v1: Option<PipelineState> = None;
+        // v2+: all copies from the VCPS chunk
+        let mut vcps: Option<VcpsChunk> = None;
         let mut thumbnail: Option<Vec<u8>> = None;
 
         loop {
@@ -278,9 +312,15 @@ impl RlabFile {
                     original_bytes = Some(chunk_data);
                 }
                 b"EDIT" => {
+                    // Version 1 files only — synthesised into a single SavedCopy on load.
                     let state: PipelineState = serde_json::from_slice(&chunk_data)
                         .map_err(|e| RasterError::Serialization(e.to_string()))?;
-                    pipeline_state = Some(state);
+                    edit_v1 = Some(state);
+                }
+                b"VCPS" => {
+                    let v: VcpsChunk = serde_json::from_slice(&chunk_data)
+                        .map_err(|e| RasterError::Serialization(e.to_string()))?;
+                    vcps = Some(v);
                 }
                 b"PREV" => {
                     thumbnail = Some(chunk_data);
@@ -297,15 +337,31 @@ impl RlabFile {
             original_bytes.ok_or_else(|| RasterError::decode("rlab", "missing ORIG chunk"))?;
         let original_hash =
             original_hash.ok_or_else(|| RasterError::decode("rlab", "missing ORIG chunk"))?;
-        let pipeline_state =
-            pipeline_state.ok_or_else(|| RasterError::decode("rlab", "missing EDIT chunk"))?;
+
+        // Version 1: synthesise a single copy from the EDIT chunk.
+        // Version 2+: use the VCPS chunk directly.
+        let (copies, active_copy_index) = if format_version == 1 {
+            let ps = edit_v1.ok_or_else(|| RasterError::decode("rlab", "missing EDIT chunk"))?;
+            (
+                vec![SavedCopy {
+                    name: "Copy 1".into(),
+                    pipeline_state: ps,
+                }],
+                0usize,
+            )
+        } else {
+            let v = vcps.ok_or_else(|| RasterError::decode("rlab", "missing VCPS chunk"))?;
+            let active = v.active.min(v.copies.len().saturating_sub(1));
+            (v.copies, active)
+        };
 
         Ok(Self {
             format_version,
             meta,
             original_bytes,
             original_hash,
-            pipeline_state,
+            copies,
+            active_copy_index,
             thumbnail,
         })
     }
