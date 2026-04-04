@@ -169,6 +169,15 @@ impl CanvasState {
             self.pan_offset = Vec2::ZERO;
             self.crop_start = None;
             self.crop_end = None;
+            if img_gen != self.last_generation {
+                // New file opened — drop the cached before-texture so split
+                // view doesn't show the previous image's pixels.  A fresh
+                // pipeline starts at geometric_gen() == 0, which would
+                // otherwise collide with the previous image's cached hash.
+                self.before_texture = None;
+                self.before_hash = 0;
+                self.before_logical_size = (0, 0);
+            }
             self.last_generation = img_gen;
             self.last_img_dims = (img_w, img_h);
         }
