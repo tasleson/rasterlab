@@ -1,7 +1,12 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::RasterResult, image::Image, traits::operation::Operation};
+use crate::{
+    cancel,
+    error::{RasterError, RasterResult},
+    image::Image,
+    traits::operation::Operation,
+};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -336,6 +341,12 @@ struct NlmParams {
 
 /// Apply NLM to three YCbCr planes simultaneously.
 /// Returns denoised (Y, Cb, Cr) planes.
+///
+/// Polls [`cancel::is_requested`] at the start of every output row.  When a
+/// cancel is pending, the remaining rows return a zero-filled placeholder and
+/// the caller detects this via the post-collect `is_requested` check and
+/// returns `RasterError::Cancelled`.  This keeps the rayon workers from
+/// finishing a full minute of work after the user has asked to abort.
 fn apply_nlm(
     y_in: &[f32],
     cb_in: &[f32],
@@ -343,7 +354,7 @@ fn apply_nlm(
     w: usize,
     h: usize,
     params: &NlmParams,
-) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+) -> RasterResult<(Vec<f32>, Vec<f32>, Vec<f32>)> {
     let luma_h = params.luma_h;
     let color_h = params.color_h;
     let patch_r = params.patch_r;
@@ -367,6 +378,11 @@ fn apply_nlm(
     let rows: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = (0..h)
         .into_par_iter()
         .map(|py| {
+            // Cooperative cancellation: bail out of this row immediately and
+            // let the caller detect the cancel after the parallel collect.
+            if cancel::is_requested() {
+                return (vec![0.0f32; w], vec![0.0f32; w], vec![0.0f32; w]);
+            }
             let mut row_y = vec![0.0f32; w];
             let mut row_cb = vec![0.0f32; w];
             let mut row_cr = vec![0.0f32; w];
@@ -438,6 +454,10 @@ fn apply_nlm(
         })
         .collect();
 
+    if cancel::is_requested() {
+        return Err(RasterError::Cancelled);
+    }
+
     for (py, (ry, rcb, rcr)) in rows.into_iter().enumerate() {
         let base = py * w;
         out_y[base..base + w].copy_from_slice(&ry);
@@ -445,7 +465,7 @@ fn apply_nlm(
         out_cr[base..base + w].copy_from_slice(&rcr);
     }
 
-    (out_y, out_cb, out_cr)
+    Ok((out_y, out_cb, out_cr))
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +503,13 @@ impl NoiseReductionOp {
                 let mut cb = cb_plane.clone();
                 let mut cr = cr_plane.clone();
                 apply_wavelet_nr(&mut y, w, h, self.luma_strength, true);
+                if cancel::is_requested() {
+                    return Err(RasterError::Cancelled);
+                }
                 apply_wavelet_nr(&mut cb, w, h, self.color_strength, false);
+                if cancel::is_requested() {
+                    return Err(RasterError::Cancelled);
+                }
                 apply_wavelet_nr(&mut cr, w, h, self.color_strength, false);
                 (y, cb, cr)
             }
@@ -494,9 +520,13 @@ impl NoiseReductionOp {
                     patch_r: 3,
                     search_r: 7,
                 };
-                apply_nlm(&y_plane, &cb_plane, &cr_plane, w, h, &nlm_params)
+                apply_nlm(&y_plane, &cb_plane, &cr_plane, w, h, &nlm_params)?
             }
         };
+
+        if cancel::is_requested() {
+            return Err(RasterError::Cancelled);
+        }
 
         // Detail preservation masking.
         // Gradient is computed from the *denoised* Y plane so that real edges

@@ -31,6 +31,7 @@
 //! std::fs::write("output.png", bytes).unwrap();
 //! ```
 
+pub mod cancel;
 pub mod error;
 pub mod formats;
 pub mod image;

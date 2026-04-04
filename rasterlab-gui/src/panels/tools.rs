@@ -1249,7 +1249,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_noise_reduction();
                 }
-                if state.tools.nr_preview_active
+                // Cancel is visible both while a preview is active and while
+                // a (potentially slow) noise-reduction render is in flight so
+                // the user can abort an NLM pass that has already started.
+                if (state.tools.nr_preview_active || state.nr_in_flight())
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()

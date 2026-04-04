@@ -4,7 +4,7 @@ use crate::{prefs::Prefs, state::VirtualCopyStore};
 
 use egui::Context;
 use rasterlab_core::{
-    Image,
+    Image, cancel as core_cancel,
     formats::FormatRegistry,
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
@@ -59,6 +59,8 @@ enum BgMessage {
         overlay_rect: Option<[u32; 4]>,
     },
     Error(String),
+    /// The render thread aborted because [`core_cancel::request`] was called.
+    Cancelled,
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +125,10 @@ pub struct AppState {
     needs_rerender: bool,
     /// Wall-clock time at which the most recent render thread was spawned.
     render_start: Option<std::time::Instant>,
+    /// True when the in-flight render includes a noise-reduction op (either
+    /// as the active preview or as a committed pipeline step).  Drives the
+    /// visibility of the NR Cancel button so the user can abort a slow NLM run.
+    nr_in_flight: bool,
 }
 
 impl AppState {
@@ -155,6 +161,7 @@ impl AppState {
             tools: ToolState::new(),
             needs_rerender: false,
             render_start: None,
+            nr_in_flight: false,
         }
     }
 
@@ -239,6 +246,7 @@ impl AppState {
                 } => {
                     self.histogram = Some(*hist);
                     self.loading = false;
+                    self.nr_in_flight = false;
 
                     if let Some(rect) = overlay_rect {
                         // Viewport overlay — draw on top of the existing base render.
@@ -283,6 +291,22 @@ impl AppState {
                 BgMessage::Error(e) => {
                     self.status = format!("Error: {}", e);
                     self.loading = false;
+                    self.nr_in_flight = false;
+                }
+                BgMessage::Cancelled => {
+                    self.loading = false;
+                    self.nr_in_flight = false;
+                    self.render_start = None;
+                    self.status = "Cancelled".into();
+                    // A follow-up render may already be queued (the Cancel
+                    // button clears the NR preview flag and calls
+                    // request_render, which sets needs_rerender while the
+                    // aborted render was still in flight).  Honour it now so
+                    // the canvas returns to the committed state.
+                    if self.needs_rerender {
+                        self.needs_rerender = false;
+                        self.request_render_inner(false);
+                    }
                 }
             }
         }
@@ -883,10 +907,39 @@ impl AppState {
     }
 
     pub fn cancel_nr_preview(&mut self) {
-        if self.tools.nr_preview_active {
-            self.tools.nr_preview_active = false;
-            self.request_render();
+        let had_preview = self.tools.nr_preview_active;
+        // Ask any in-flight noise-reduction op to abort promptly.  This is a
+        // no-op when nothing is running, and the cleared flag will be reset
+        // the next time a render is spawned.
+        if self.loading && self.nr_in_flight {
+            core_cancel::request();
+            // If the user cancelled a render for a noise-reduction op they
+            // had already committed via Apply, roll that op back off the
+            // pipeline so the canvas returns to the pre-NR state.  The
+            // preview case needs no pipeline mutation.
+            if !had_preview
+                && let Some(p) = self.pipeline_mut()
+                && p.cursor() > 0
+                && p.ops()[p.cursor() - 1].operation.name() == "noise_reduction"
+            {
+                p.undo();
+                self.is_dirty = true;
+            }
         }
+        if had_preview {
+            self.tools.nr_preview_active = false;
+        }
+        // Always kick a re-render so the canvas reflects whatever the current
+        // (post-cancel) pipeline state is.  When a render is already in flight
+        // this only sets needs_rerender; the post-cancel handler will honour
+        // it once the aborted render returns.
+        self.request_render();
+    }
+
+    /// True while a render that includes a noise-reduction op is running.
+    /// Used by the tools panel to decide whether to show the NR Cancel button.
+    pub fn nr_in_flight(&self) -> bool {
+        self.nr_in_flight && self.loading
     }
 
     pub fn push_noise_reduction(&mut self) {
@@ -1415,7 +1468,22 @@ impl AppState {
         // Preview op — applied on top of committed result but NOT cached.
         let preview_op: Option<Box<dyn Operation>> = self.tools.preview_op();
 
+        // Track whether the upcoming render involves noise reduction so the UI
+        // can show a Cancel button while the (potentially slow) NLM runs.
+        let nr_in_flight = self.tools.nr_preview_active
+            || preview_op
+                .as_deref()
+                .is_some_and(|op| op.name() == "noise_reduction")
+            || committed_ops
+                .iter()
+                .flatten()
+                .any(|op| op.name() == "noise_reduction");
+
+        // Clear any cancel request left over from a previous render.
+        core_cancel::reset();
+
         self.loading = true;
+        self.nr_in_flight = nr_in_flight;
         self.status = "Rendering…".into();
         self.render_start = Some(std::time::Instant::now());
 
@@ -1459,7 +1527,16 @@ impl AppState {
                         is_preview,
                         overlay_rect,
                     },
-                    Err(e) => BgMessage::Error(e),
+                    Err(e) => {
+                        // If a cancel was requested, the op returned
+                        // RasterError::Cancelled — surface it as a clean
+                        // BgMessage::Cancelled rather than a red error.
+                        if core_cancel::is_requested() {
+                            BgMessage::Cancelled
+                        } else {
+                            BgMessage::Error(e)
+                        }
+                    }
                 };
                 let _ = tx.send(msg);
                 ctx.request_repaint();
