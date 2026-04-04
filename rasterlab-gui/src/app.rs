@@ -10,6 +10,17 @@ use crate::{
     state::AppState,
 };
 
+/// What to do once the user confirms discarding unsaved changes on open.
+#[cfg(not(target_arch = "wasm32"))]
+enum PendingOpen {
+    /// Show the OS / built-in file picker.
+    Dialog,
+    /// Open a specific path directly (Open Recent, drag-and-drop, etc.).
+    Path(PathBuf),
+    /// Restore an autosave session.
+    Autosave(crate::autosave::AutosaveEntry),
+}
+
 pub struct RasterLabApp {
     state: AppState,
     canvas: CanvasState,
@@ -21,6 +32,12 @@ pub struct RasterLabApp {
     /// Set to true once the user has confirmed discarding unsaved changes,
     /// so the next close request is allowed through without re-prompting.
     allow_close: bool,
+    /// True while the "discard changes and open?" confirmation dialog is shown.
+    #[cfg(not(target_arch = "wasm32"))]
+    open_confirm_open: bool,
+    /// The action to execute once the user confirms the open-discard dialog.
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_open: Option<PendingOpen>,
 }
 
 impl RasterLabApp {
@@ -47,6 +64,10 @@ impl RasterLabApp {
             about_open: false,
             exit_confirm_open: false,
             allow_close: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            open_confirm_open: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_open: None,
         }
     }
 
@@ -60,7 +81,7 @@ impl RasterLabApp {
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::O) {
-                self.chooser.open_image(ctx);
+                self.request_open_dialog(ctx);
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::S) {
@@ -75,6 +96,39 @@ impl RasterLabApp {
                 self.chooser.export_image(ctx);
             }
         });
+    }
+
+    /// Open the file picker, prompting to discard unsaved changes first if needed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_open_dialog(&mut self, ctx: &Context) {
+        if self.state.is_dirty {
+            self.pending_open = Some(PendingOpen::Dialog);
+            self.open_confirm_open = true;
+        } else {
+            self.chooser.open_image(ctx);
+        }
+    }
+
+    /// Open a specific path, prompting to discard unsaved changes first if needed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_open_path(&mut self, path: PathBuf) {
+        if self.state.is_dirty {
+            self.pending_open = Some(PendingOpen::Path(path));
+            self.open_confirm_open = true;
+        } else {
+            self.state.open_file(path);
+        }
+    }
+
+    /// Restore an autosave session, prompting to discard unsaved changes first if needed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_restore_autosave(&mut self, entry: crate::autosave::AutosaveEntry) {
+        if self.state.is_dirty {
+            self.pending_open = Some(PendingOpen::Autosave(entry));
+            self.open_confirm_open = true;
+        } else {
+            self.state.restore_autosave(entry);
+        }
     }
 
     /// Save in-place if a project path is already known; otherwise open Save As.
@@ -160,7 +214,7 @@ impl eframe::App for RasterLabApp {
                     #[cfg(not(target_arch = "wasm32"))]
                     if ui.button("Open…  (Ctrl+O)").clicked() {
                         ui.close_kind(egui::UiKind::Menu);
-                        self.chooser.open_image(&ctx);
+                        self.request_open_dialog(&ctx);
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -178,7 +232,7 @@ impl eframe::App for RasterLabApp {
                                         .clicked()
                                     {
                                         ui.close_kind(egui::UiKind::Menu);
-                                        self.state.open_file(path.clone());
+                                        self.request_open_path(path.clone());
                                     }
                                 }
                                 ui.separator();
@@ -214,7 +268,7 @@ impl eframe::App for RasterLabApp {
                                         .unwrap_or(&entry.data.source_path);
                                     if ui.button(label).on_hover_text(hover).clicked() {
                                         ui.close_kind(egui::UiKind::Menu);
-                                        self.state.restore_autosave(entry);
+                                        self.request_restore_autosave(entry);
                                     }
                                 }
                                 ui.separator();
@@ -397,6 +451,10 @@ impl eframe::App for RasterLabApp {
         // ── About dialog ─────────────────────────────────────────────────
         self.show_about_window(&ctx);
 
+        // ── Unsaved-changes-on-open confirmation ──────────────────────────
+        #[cfg(not(target_arch = "wasm32"))]
+        self.show_open_confirm_window(&ctx);
+
         // ── Unsaved-changes-on-exit confirmation ─────────────────────────
         self.show_exit_confirm_window(&ctx);
     }
@@ -548,6 +606,46 @@ impl RasterLabApp {
             });
         if !open {
             self.exit_confirm_open = false;
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn show_open_confirm_window(&mut self, ctx: &Context) {
+        if !self.open_confirm_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(
+                    "You have unsaved changes that haven't been saved as a \
+                     project or exported.",
+                );
+                ui.label("Open anyway and discard changes?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.open_confirm_open = false;
+                        self.pending_open = None;
+                    }
+                    if ui.button("Discard & Open").clicked() {
+                        self.open_confirm_open = false;
+                        match self.pending_open.take() {
+                            Some(PendingOpen::Dialog) => self.chooser.open_image(ctx),
+                            Some(PendingOpen::Path(p)) => self.state.open_file(p),
+                            Some(PendingOpen::Autosave(e)) => self.state.restore_autosave(e),
+                            None => {}
+                        }
+                    }
+                });
+            });
+        if !open {
+            self.open_confirm_open = false;
+            self.pending_open = None;
         }
     }
 }
