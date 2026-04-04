@@ -62,22 +62,10 @@ fn sample_bilinear(src: &Image, sx: f32, sy: f32) -> [u8; 4] {
     let w = src.width as i64;
     let h = src.height as i64;
 
-    let px = |xi: i64, yi: i64| -> [f32; 4] {
-        let xi = xi.clamp(0, w - 1) as usize;
-        let yi = yi.clamp(0, h - 1) as usize;
-        let off = (yi * w as usize + xi) * 4;
-        [
-            src.data[off] as f32,
-            src.data[off + 1] as f32,
-            src.data[off + 2] as f32,
-            src.data[off + 3] as f32,
-        ]
-    };
-
-    let p00 = px(x0, y0);
-    let p10 = px(x0 + 1, y0);
-    let p01 = px(x0, y0 + 1);
-    let p11 = px(x0 + 1, y0 + 1);
+    let p00 = get_pixel(src, x0, y0, w, h);
+    let p10 = get_pixel(src, x0 + 1, y0, w, h);
+    let p01 = get_pixel(src, x0, y0 + 1, w, h);
+    let p11 = get_pixel(src, x0 + 1, y0 + 1, w, h);
 
     let mut out = [0u8; 4];
     for i in 0..4 {
@@ -88,6 +76,20 @@ fn sample_bilinear(src: &Image, sx: f32, sy: f32) -> [u8; 4] {
         out[i] = v.clamp(0.0, 255.0) as u8;
     }
     out
+}
+
+/// Fetch a clamped pixel from `src` as `[f32; 4]`.
+#[inline]
+fn get_pixel(src: &Image, xi: i64, yi: i64, w: i64, h: i64) -> [f32; 4] {
+    let xi = xi.clamp(0, w - 1) as usize;
+    let yi = yi.clamp(0, h - 1) as usize;
+    let off = (yi * w as usize + xi) * 4;
+    [
+        src.data[off] as f32,
+        src.data[off + 1] as f32,
+        src.data[off + 2] as f32,
+        src.data[off + 3] as f32,
+    ]
 }
 
 /// Catmull-Rom cubic weight.
@@ -113,24 +115,12 @@ fn sample_bicubic(src: &Image, sx: f32, sy: f32) -> [u8; 4] {
     let w = src.width as i64;
     let h = src.height as i64;
 
-    let px = |xi: i64, yi: i64| -> [f32; 4] {
-        let xi = xi.clamp(0, w - 1) as usize;
-        let yi = yi.clamp(0, h - 1) as usize;
-        let off = (yi * w as usize + xi) * 4;
-        [
-            src.data[off] as f32,
-            src.data[off + 1] as f32,
-            src.data[off + 2] as f32,
-            src.data[off + 3] as f32,
-        ]
-    };
-
     let mut acc = [0.0f32; 4];
     for ky in -1..=2i64 {
         let wy = cubic_weight(ky as f32 - fy);
         for kx in -1..=2i64 {
             let wx = cubic_weight(kx as f32 - fx);
-            let p = px(x0 + kx, y0 + ky);
+            let p = get_pixel(src, x0 + kx, y0 + ky, w, h);
             for i in 0..4 {
                 acc[i] += p[i] * wx * wy;
             }
