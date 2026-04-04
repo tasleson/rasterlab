@@ -316,8 +316,12 @@ impl CanvasState {
                 self.pan_offset = Vec2::ZERO;
             }
             if ui.small_button("1:1").clicked() {
+                let old_zoom = self.zoom;
                 self.zoom = 1.0;
-                self.pan_offset = Vec2::ZERO;
+                // Keep the current view center at the same image location.
+                let center = canvas_size * 0.5;
+                let img_center = (center - self.pan_offset) / old_zoom;
+                self.pan_offset = center - img_center * self.zoom;
             }
         });
     }
