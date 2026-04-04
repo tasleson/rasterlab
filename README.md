@@ -112,6 +112,35 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 # Week 2
 
+## 2026-04-04 (98% of our weekly usage)
+
+### Features
+
+- **Unsaved-changes protection** — opening a new file now prompts to discard unsaved changes. Pipeline state is autosaved after every edit so a crash or forced close never loses work; confirmation dialogs guard all destructive open actions.
+- **Preview, cancel, and reset on all parameter tools** — every slider-based tool now has a consistent preview/cancel/reset workflow. Live 1/4-scale preview while adjusting; Cancel restores the previous state; Reset returns to defaults.
+- **Cancel in-flight noise reduction** — long-running NR renders can now be cancelled mid-flight without waiting for completion.
+- **Recently opened files** — File menu now lists recently opened images for quick re-access.
+- **Build metadata in About dialog** — Help → About RasterLab now shows the exact build version and metadata.
+
+### Tools Panel
+
+- Reordered to enforce Auto Enhance first, Looks second, all others strictly alphabetical.
+
+### Bug Fixes
+
+- Edit stack panel now uses theme-aware colors; virtual-copy rename dialog anchors to its tab instead of the window.
+- 1:1 zoom now centers on the current view center instead of jumping to the top-left corner.
+- Cleared stale cached before-texture when opening a new image, preventing ghost pixels from the previous file bleeding through.
+- Scaled crop coordinates correctly for the downsampled preview path, fixing misaligned crops at reduced resolution.
+- Linux: capped wgpu `max_color_attachments` and used adapter limits to prevent `LimitsExceeded` panics on some drivers.
+
+### Refactoring, don't repeast yourself aka. DRY
+
+- Extracted `ToolState` from `AppState` to reduce coupling and improve testability.
+- Consolidated HSL helpers, extracted `get_pixel`, and unified sample closures (DRY pass).
+- I should also try to target the test code, lots of duplicates there
+
+
 ## 2026-04-02 (55% of our weekly usage)
 
 ### Virtual Copies
