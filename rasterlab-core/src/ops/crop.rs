@@ -97,6 +97,15 @@ impl Operation for CropOp {
     fn is_geometric(&self) -> bool {
         true
     }
+
+    fn scaled_for_preview(&self, scale: f32) -> Box<dyn Operation> {
+        Box::new(CropOp {
+            x: (self.x as f32 * scale) as u32,
+            y: (self.y as f32 * scale) as u32,
+            width: ((self.width as f32 * scale).ceil() as u32).max(1),
+            height: ((self.height as f32 * scale).ceil() as u32).max(1),
+        })
+    }
 }
 
 #[cfg(test)]

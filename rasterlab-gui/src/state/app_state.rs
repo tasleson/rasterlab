@@ -1597,6 +1597,12 @@ fn render_in_thread(
 
     for maybe_op in committed_ops {
         if let Some(op) = maybe_op {
+            // Scale geometric ops (e.g. crop) so their pixel coordinates
+            // match the downsampled image dimensions.
+            let op = match preview_scale {
+                Some(s) => op.scaled_for_preview(s),
+                None => op,
+            };
             let img = match Arc::try_unwrap(current) {
                 Ok(img) => img,
                 Err(a) => a.as_ref().deep_clone(),

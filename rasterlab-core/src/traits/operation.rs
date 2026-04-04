@@ -68,4 +68,14 @@ pub trait Operation: Send + Sync {
     fn is_geometric(&self) -> bool {
         false
     }
+
+    /// Return a version of this operation with pixel coordinates scaled by
+    /// `scale`.  Used by the downsampled preview path so that geometric ops
+    /// (e.g. crop) match the smaller image dimensions.
+    ///
+    /// The default implementation returns `self.clone_box()` unchanged, which
+    /// is correct for operations without absolute pixel coordinates.
+    fn scaled_for_preview(&self, _scale: f32) -> Box<dyn Operation> {
+        self.clone_box()
+    }
 }
