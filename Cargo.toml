@@ -30,10 +30,10 @@ members = [
 ]
 
 [workspace.package]
-version   = "0.1.0"
+version   = "0.2.0"
 edition   = "2024"
 license   = "MIT OR Apache-2.0"
-authors   = ["RasterLab Contributors"]
+authors   = ["RasterLab Contributors, mainly Claude right now..,"]
 
 [workspace.dependencies]
 # Serialization
