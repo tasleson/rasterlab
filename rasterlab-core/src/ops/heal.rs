@@ -40,40 +40,30 @@ impl HealOp {
         let mut sum = 0.0_f32;
         let mut count = 0u32;
 
+        let mut sample = |dx: i32, dy: i32| {
+            let pa = image.pixel(
+                (ax + dx).clamp(0, w - 1) as u32,
+                (ay + dy).clamp(0, h - 1) as u32,
+            );
+            let pb = image.pixel(
+                (bx + dx).clamp(0, w - 1) as u32,
+                (by + dy).clamp(0, h - 1) as u32,
+            );
+            for c in 0..3 {
+                let diff = pa[c] as f32 - pb[c] as f32;
+                sum += diff * diff;
+            }
+            count += 1;
+        };
+
         for d in -r..=r {
             // Top and bottom rows
-            for &(dx, dy) in &[(d, -r), (d, r)] {
-                let pax = (ax + dx).clamp(0, w - 1);
-                let pay = (ay + dy).clamp(0, h - 1);
-                let pbx = (bx + dx).clamp(0, w - 1);
-                let pby = (by + dy).clamp(0, h - 1);
-
-                let pa = image.pixel(pax as u32, pay as u32);
-                let pb = image.pixel(pbx as u32, pby as u32);
-
-                for c in 0..3 {
-                    let diff = pa[c] as f32 - pb[c] as f32;
-                    sum += diff * diff;
-                }
-                count += 1;
-            }
+            sample(d, -r);
+            sample(d, r);
             // Left and right columns (excluding corners already counted above)
             if d > -r && d < r {
-                for &(dx, dy) in &[(-r, d), (r, d)] {
-                    let pax = (ax + dx).clamp(0, w - 1);
-                    let pay = (ay + dy).clamp(0, h - 1);
-                    let pbx = (bx + dx).clamp(0, w - 1);
-                    let pby = (by + dy).clamp(0, h - 1);
-
-                    let pa = image.pixel(pax as u32, pay as u32);
-                    let pb = image.pixel(pbx as u32, pby as u32);
-
-                    for c in 0..3 {
-                        let diff = pa[c] as f32 - pb[c] as f32;
-                        sum += diff * diff;
-                    }
-                    count += 1;
-                }
+                sample(-r, d);
+                sample(r, d);
             }
         }
 
