@@ -15,6 +15,7 @@ pub struct RasterLabApp {
     canvas: CanvasState,
     #[cfg(not(target_arch = "wasm32"))]
     chooser: FileChooser,
+    about_open: bool,
 }
 
 impl RasterLabApp {
@@ -38,6 +39,7 @@ impl RasterLabApp {
             canvas: CanvasState::default(),
             #[cfg(not(target_arch = "wasm32"))]
             chooser: FileChooser::new(use_native),
+            about_open: false,
         }
     }
 
@@ -283,6 +285,7 @@ impl eframe::App for RasterLabApp {
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About RasterLab").clicked() {
+                        self.about_open = true;
                         ui.close_kind(egui::UiKind::Menu);
                     }
                 });
@@ -341,5 +344,125 @@ impl eframe::App for RasterLabApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.canvas.ui(ui, &mut self.state);
         });
+
+        // ── About dialog ─────────────────────────────────────────────────
+        self.show_about_window(&ctx);
+    }
+}
+
+/// Build-time metadata embedded via `build.rs`.
+mod build_info {
+    pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
+    pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
+    pub const GIT_HASH: &str = env!("GIT_HASH");
+    pub const GIT_DIRTY: &str = env!("GIT_DIRTY");
+    pub const BUILD_DATE: &str = env!("BUILD_DATE");
+    pub const RUSTC_VERSION: &str = env!("RUSTC_VERSION_STR");
+    pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
+    pub const PROFILE: &str = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+}
+
+impl RasterLabApp {
+    fn show_about_window(&mut self, ctx: &Context) {
+        if !self.about_open {
+            return;
+        }
+        let mut open = self.about_open;
+        egui::Window::new("About RasterLab")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.heading("RasterLab");
+                ui.label("Cross-platform raster image editor");
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                egui::Grid::new("about_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Version:");
+                        ui.monospace(build_info::PKG_VERSION);
+                        ui.end_row();
+
+                        ui.label("Package:");
+                        ui.monospace(build_info::PKG_NAME);
+                        ui.end_row();
+
+                        ui.label("Git commit:");
+                        let dirty_suffix = if build_info::GIT_DIRTY == "yes" {
+                            " (dirty)"
+                        } else {
+                            ""
+                        };
+                        ui.monospace(format!("{}{}", build_info::GIT_HASH, dirty_suffix));
+                        ui.end_row();
+
+                        ui.label("Source tree:");
+                        ui.monospace(if build_info::GIT_DIRTY == "yes" {
+                            "dirty"
+                        } else {
+                            "clean"
+                        });
+                        ui.end_row();
+
+                        ui.label("Built:");
+                        ui.monospace(build_info::BUILD_DATE);
+                        ui.end_row();
+
+                        ui.label("Profile:");
+                        ui.monospace(build_info::PROFILE);
+                        ui.end_row();
+
+                        ui.label("Target:");
+                        ui.monospace(build_info::TARGET_TRIPLE);
+                        ui.end_row();
+
+                        ui.label("Compiler:");
+                        ui.monospace(build_info::RUSTC_VERSION);
+                        ui.end_row();
+                    });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        let text = format!(
+                            "RasterLab {}\n\
+                             git: {}{}\n\
+                             built: {}\n\
+                             profile: {}\n\
+                             target: {}\n\
+                             compiler: {}",
+                            build_info::PKG_VERSION,
+                            build_info::GIT_HASH,
+                            if build_info::GIT_DIRTY == "yes" {
+                                " (dirty)"
+                            } else {
+                                ""
+                            },
+                            build_info::BUILD_DATE,
+                            build_info::PROFILE,
+                            build_info::TARGET_TRIPLE,
+                            build_info::RUSTC_VERSION,
+                        );
+                        ui.ctx().copy_text(text);
+                    }
+                    if ui.button("Close").clicked() {
+                        self.about_open = false;
+                    }
+                });
+            });
+        if !open {
+            self.about_open = false;
+        }
     }
 }
