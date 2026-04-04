@@ -70,11 +70,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
         // Dimmed rows are in the "redo" area (after the cursor)
         let row_color = if !is_active {
-            Color32::from_gray(100)
+            ui.visuals().text_color().gamma_multiply(0.35)
         } else if entry.enabled {
-            Color32::from_rgb(220, 220, 220)
+            ui.visuals().text_color()
         } else {
-            Color32::from_gray(130) // disabled
+            ui.visuals().text_color().gamma_multiply(0.55) // disabled
         };
 
         ui.horizontal(|ui| {
@@ -141,7 +141,7 @@ fn virtual_copy_tabs(ui: &mut Ui, state: &mut AppState) {
 
     let mut switch_to: Option<usize> = None;
     let mut remove_idx: Option<usize> = None;
-    let mut rename_idx: Option<usize> = None;
+    let mut rename_idx: Option<(usize, egui::Pos2)> = None;
     let mut add_copy = false;
     let mut duplicate = false;
 
@@ -165,9 +165,10 @@ fn virtual_copy_tabs(ui: &mut Ui, state: &mut AppState) {
                 switch_to = Some(i);
             }
 
+            let tab_pos = resp.rect.left_bottom();
             resp.context_menu(|ui| {
                 if ui.button("Rename…").clicked() {
-                    rename_idx = Some(i);
+                    rename_idx = Some((i, tab_pos));
                     ui.close();
                 }
                 if ui.button("Duplicate").clicked() {
@@ -199,7 +200,7 @@ fn virtual_copy_tabs(ui: &mut Ui, state: &mut AppState) {
     if duplicate {
         state.duplicate_virtual_copy();
     }
-    if let Some(idx) = rename_idx {
+    if let Some((idx, pos)) = rename_idx {
         // Seed the rename dialog with the current name.
         let current = state
             .copies
@@ -207,14 +208,14 @@ fn virtual_copy_tabs(ui: &mut Ui, state: &mut AppState) {
             .and_then(|s| s.names().nth(idx))
             .unwrap_or("")
             .to_string();
-        state.rename_pending = Some((idx, current));
+        state.rename_pending = Some((idx, current, pos));
     }
 }
 
 // ── Inline rename dialog ──────────────────────────────────────────────────────
 
 fn rename_popup(ui: &mut Ui, state: &mut AppState) {
-    let Some((idx, _)) = state.rename_pending.clone() else {
+    let Some((idx, _, anchor)) = state.rename_pending.clone() else {
         return;
     };
 
@@ -225,19 +226,24 @@ fn rename_popup(ui: &mut Ui, state: &mut AppState) {
     egui::Window::new("Rename copy")
         .collapsible(false)
         .resizable(false)
+        .fixed_pos(anchor)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
             // Borrow the text field, edit it, then drop the borrow before
             // the inner closures so `state` is not held across button checks.
-            let name = {
-                let Some((_, text)) = &mut state.rename_pending else {
+            let (name, response) = {
+                let Some((_, text, _)) = &mut state.rename_pending else {
                     return;
                 };
-                ui.text_edit_singleline(text);
-                text.clone()
+                let resp = ui.text_edit_singleline(text);
+                (text.clone(), resp)
             };
+
+            let pressed_enter =
+                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
             ui.horizontal(|ui| {
-                if ui.button("OK").clicked() {
+                if ui.button("OK").clicked() || pressed_enter {
                     commit_name = Some(name.clone());
                 }
                 if ui.button("Cancel").clicked() {

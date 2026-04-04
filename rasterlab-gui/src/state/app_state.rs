@@ -74,8 +74,9 @@ pub struct AppState {
     /// All virtual copies for the open image.  `None` when no image is loaded.
     pub copies: Option<VirtualCopyStore>,
     /// When `Some`, a rename dialog is open for the copy at that index.
-    /// The `String` is the live text being edited.
-    pub rename_pending: Option<(usize, String)>,
+    /// The `String` is the live text being edited; `Pos2` is the screen
+    /// position of the tab that triggered the rename, used to anchor the dialog.
+    pub rename_pending: Option<(usize, String, egui::Pos2)>,
     pub rendered: Option<Arc<Image>>,
     /// True while the canvas is displaying a downsampled preview render.
     pub rendered_is_preview: bool,
