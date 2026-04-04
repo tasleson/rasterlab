@@ -269,7 +269,7 @@ impl CanvasState {
         // ── Mask overlay ──────────────────────────────────────────────────────
         // Rendered at 256×256 and scaled to the image area so the user can see
         // where the next masked Apply will take effect.
-        if state.mask_sel > 0 {
+        if state.tools.mask_sel > 0 {
             let mh = mask_params_hash(state);
             if self.mask_overlay_texture.is_none() || mh != self.mask_overlay_hash {
                 self.mask_overlay_texture = Some(ui.ctx().load_texture(
@@ -503,7 +503,7 @@ impl CanvasState {
         over_canvas: bool,
     ) {
         // ── Cursor icon ──────────────────────────────────────────────────────
-        if state.mask_sel > 0 && over_canvas {
+        if state.tools.mask_sel > 0 && over_canvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         } else if middle_down {
             ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
@@ -512,7 +512,7 @@ impl CanvasState {
         }
 
         // ── Straighten line reset when tool is deactivated ───────────────────
-        if !state.straighten_active {
+        if !state.tools.straighten_active {
             self.straighten_line = None;
         }
 
@@ -553,7 +553,7 @@ impl CanvasState {
             self.overlay_last_hash = 0;
         }
 
-        if state.mask_sel > 0 {
+        if state.tools.mask_sel > 0 {
             // ── Mask drag: click-drag on canvas to define the mask ────────────
             // Clear any stale crop selection while mask mode is active.
             self.crop_start = None;
@@ -576,7 +576,7 @@ impl CanvasState {
             if primary_down {
                 if let (Some(start), Some(p)) = (self.mask_drag_start, ptr_pos) {
                     let end = screen_to_norm(p, image_tl, display_size);
-                    match state.mask_sel {
+                    match state.tools.mask_sel {
                         1 => update_linear_mask(state, start, end),
                         2 => update_radial_mask(state, start, end),
                         _ => {}
@@ -587,12 +587,12 @@ impl CanvasState {
             }
 
             // ── Draw mask handles ────────────────────────────────────────────
-            match state.mask_sel {
+            match state.tools.mask_sel {
                 1 => draw_linear_mask_handles(painter, state, image_tl, display_size, canvas_rect),
                 2 => draw_radial_mask_handles(painter, state, image_tl, display_size, canvas_rect),
                 _ => {}
             }
-        } else if state.heal_active {
+        } else if state.tools.heal_active {
             // ── Heal tool ─────────────────────────────────────────────────────
             // Clear crop selection while heal mode is active.
             self.crop_start = None;
@@ -617,7 +617,7 @@ impl CanvasState {
             if let Some(ptr) = ptr_pos
                 && over_canvas
             {
-                let r_screen = state.heal_radius as f32 * self.zoom;
+                let r_screen = state.tools.heal_radius as f32 * self.zoom;
                 painter.circle_stroke(
                     ptr,
                     r_screen,
@@ -633,18 +633,23 @@ impl CanvasState {
             // Hit-test existing spots for drag / remove
             let hit_spot = ptr_pos.and_then(|ptr| {
                 let img_pos = screen_to_image(ptr, image_tl, self.zoom);
-                let handle_r_img = (8.0 / self.zoom).max(state.heal_radius as f32 * 0.4);
-                state.heal_spots.iter().enumerate().find_map(|(i, spot)| {
-                    let dst = Pos2::new(spot.dest_x as f32, spot.dest_y as f32);
-                    let src = Pos2::new(spot.src_x as f32, spot.src_y as f32);
-                    if (img_pos - dst).length() < handle_r_img {
-                        Some((i, false))
-                    } else if (img_pos - src).length() < handle_r_img {
-                        Some((i, true))
-                    } else {
-                        None
-                    }
-                })
+                let handle_r_img = (8.0 / self.zoom).max(state.tools.heal_radius as f32 * 0.4);
+                state
+                    .tools
+                    .heal_spots
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, spot)| {
+                        let dst = Pos2::new(spot.dest_x as f32, spot.dest_y as f32);
+                        let src = Pos2::new(spot.src_x as f32, spot.src_y as f32);
+                        if (img_pos - dst).length() < handle_r_img {
+                            Some((i, false))
+                        } else if (img_pos - src).length() < handle_r_img {
+                            Some((i, true))
+                        } else {
+                            None
+                        }
+                    })
             });
 
             // Start drag on mouse-down; hitting an existing spot begins a drag
@@ -656,7 +661,7 @@ impl CanvasState {
             if primary_down && let (Some((idx, is_src)), Some(ptr)) = (self.heal_dragging, ptr_pos)
             {
                 let img_pos = screen_to_image(ptr, image_tl, self.zoom);
-                if let Some(spot) = state.heal_spots.get_mut(idx) {
+                if let Some(spot) = state.tools.heal_spots.get_mut(idx) {
                     if is_src {
                         spot.src_x = img_pos.x as i32;
                         spot.src_y = img_pos.y as i32;
@@ -686,11 +691,11 @@ impl CanvasState {
 
             // Right-click removes nearest spot
             if secondary_clicked && let Some((idx, _)) = hit_spot {
-                state.heal_spots.remove(idx);
+                state.tools.heal_spots.remove(idx);
             }
 
             // Draw spot overlays
-            for (i, spot) in state.heal_spots.iter().enumerate() {
+            for (i, spot) in state.tools.heal_spots.iter().enumerate() {
                 let dst_screen = image_to_screen(
                     Pos2::new(spot.dest_x as f32, spot.dest_y as f32),
                     image_tl,
@@ -735,7 +740,7 @@ impl CanvasState {
                 );
                 painter.circle_filled(dst_screen, 4.0, Color32::from_rgb(220, 60, 60));
             }
-        } else if state.straighten_active {
+        } else if state.tools.straighten_active {
             // ── Straighten tool ──────────────────────────────────────────────
             // Clear crop selection while straighten mode is active.
             self.crop_start = None;
@@ -752,7 +757,7 @@ impl CanvasState {
                 let half_w = img_w as f32 * 0.35;
                 self.straighten_line =
                     Some([Pos2::new(cx - half_w, cy), Pos2::new(cx + half_w, cy)]);
-                state.straighten_angle = 0.0;
+                state.tools.straighten_angle = 0.0;
             }
 
             let (ptr_pos, primary_pressed, primary_down, primary_released) = ui.input(|i| {
@@ -795,7 +800,7 @@ impl CanvasState {
                 let dx = p1.x - p0.x;
                 let dy = p1.y - p0.y;
                 let line_angle = dy.atan2(dx).to_degrees();
-                state.straighten_angle = -line_angle;
+                state.tools.straighten_angle = -line_angle;
             }
 
             // ── Grid overlay ─────────────────────────────────────────────────
@@ -830,7 +835,7 @@ impl CanvasState {
                 }
                 // Angle label near midpoint
                 let mid = Pos2::new((s0.x + s1.x) / 2.0, (s0.y + s1.y) / 2.0 - 14.0);
-                let angle_text = format!("{:.2}°", state.straighten_angle);
+                let angle_text = format!("{:.2}°", state.tools.straighten_angle);
                 painter.text(
                     mid,
                     egui::Align2::CENTER_BOTTOM,
@@ -856,7 +861,7 @@ impl CanvasState {
                 self.crop_end = Some(constrain_drag_end(
                     self.crop_start.unwrap_or(raw_end),
                     raw_end,
-                    state.crop_aspect_ratio(),
+                    state.tools.crop_aspect_ratio(),
                 ));
             }
             if resp.drag_stopped_by(egui::PointerButton::Primary)
@@ -864,11 +869,11 @@ impl CanvasState {
             {
                 let (x, y, w, h) = image_to_crop(start, end, img_w, img_h);
                 let (cx, cy, cw, ch) =
-                    constrain_aspect(x, y, w, h, img_w, img_h, state.crop_aspect_ratio());
-                state.crop_x = cx;
-                state.crop_y = cy;
-                state.crop_w = cw;
-                state.crop_h = ch;
+                    constrain_aspect(x, y, w, h, img_w, img_h, state.tools.crop_aspect_ratio());
+                state.tools.crop_x = cx;
+                state.tools.crop_y = cy;
+                state.tools.crop_w = cw;
+                state.tools.crop_h = ch;
             }
 
             // ── Clear selection: right-click or Escape ───────────────────────
@@ -1054,19 +1059,19 @@ fn update_linear_mask(state: &mut AppState, start: Pos2, end: Pos2) {
     if len < 1e-4 {
         return; // Too short — skip to avoid a degenerate angle.
     }
-    state.mask_lin_cx = (start.x + end.x) * 0.5;
-    state.mask_lin_cy = (start.y + end.y) * 0.5;
-    state.mask_lin_angle = dy.atan2(dx).to_degrees();
-    state.mask_lin_feather = len;
+    state.tools.mask_lin_cx = (start.x + end.x) * 0.5;
+    state.tools.mask_lin_cy = (start.y + end.y) * 0.5;
+    state.tools.mask_lin_angle = dy.atan2(dx).to_degrees();
+    state.tools.mask_lin_feather = len;
 }
 
 /// Update radial mask from a drag: start is the centre, end defines the radius.
 fn update_radial_mask(state: &mut AppState, start: Pos2, end: Pos2) {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
-    state.mask_rad_cx = start.x;
-    state.mask_rad_cy = start.y;
-    state.mask_rad_radius = (dx * dx + dy * dy).sqrt();
+    state.tools.mask_rad_cx = start.x;
+    state.tools.mask_rad_cy = start.y;
+    state.tools.mask_rad_radius = (dx * dx + dy * dy).sqrt();
 }
 
 /// Draw handles showing the current linear gradient mask extent.
@@ -1078,11 +1083,11 @@ fn draw_linear_mask_handles(
     canvas_rect: Rect,
 ) {
     let painter = painter.with_clip_rect(canvas_rect);
-    let rad = state.mask_lin_angle.to_radians();
+    let rad = state.tools.mask_lin_angle.to_radians();
     let (cos_a, sin_a) = (rad.cos(), rad.sin());
-    let half = state.mask_lin_feather * 0.5;
+    let half = state.tools.mask_lin_feather * 0.5;
 
-    let center = Pos2::new(state.mask_lin_cx, state.mask_lin_cy);
+    let center = Pos2::new(state.tools.mask_lin_cx, state.tools.mask_lin_cy);
     let a_norm = Pos2::new(center.x - cos_a * half, center.y - sin_a * half);
     let b_norm = Pos2::new(center.x + cos_a * half, center.y + sin_a * half);
 
@@ -1111,12 +1116,12 @@ fn draw_radial_mask_handles(
     canvas_rect: Rect,
 ) {
     let painter = painter.with_clip_rect(canvas_rect);
-    let center_norm = Pos2::new(state.mask_rad_cx, state.mask_rad_cy);
+    let center_norm = Pos2::new(state.tools.mask_rad_cx, state.tools.mask_rad_cy);
     let center_s = norm_to_screen(center_norm, image_tl, display_size);
 
     // Convert radius from normalised space to screen pixels per axis.
-    let rx = state.mask_rad_radius * display_size.x;
-    let ry = state.mask_rad_radius * display_size.y;
+    let rx = state.tools.mask_rad_radius * display_size.x;
+    let ry = state.tools.mask_rad_radius * display_size.y;
 
     draw_ellipse_stroke(
         &painter,
@@ -1170,25 +1175,25 @@ fn draw_ellipse_stroke(painter: &egui::Painter, center: Pos2, rx: f32, ry: f32, 
 fn mask_params_hash(state: &crate::state::AppState) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    state.mask_sel.hash(&mut h);
+    state.tools.mask_sel.hash(&mut h);
     // Hash float bits — NaN-safe for UI values.
-    state.mask_lin_cx.to_bits().hash(&mut h);
-    state.mask_lin_cy.to_bits().hash(&mut h);
-    state.mask_lin_angle.to_bits().hash(&mut h);
-    state.mask_lin_feather.to_bits().hash(&mut h);
-    state.mask_lin_invert.hash(&mut h);
-    state.mask_rad_cx.to_bits().hash(&mut h);
-    state.mask_rad_cy.to_bits().hash(&mut h);
-    state.mask_rad_radius.to_bits().hash(&mut h);
-    state.mask_rad_feather.to_bits().hash(&mut h);
-    state.mask_rad_invert.hash(&mut h);
+    state.tools.mask_lin_cx.to_bits().hash(&mut h);
+    state.tools.mask_lin_cy.to_bits().hash(&mut h);
+    state.tools.mask_lin_angle.to_bits().hash(&mut h);
+    state.tools.mask_lin_feather.to_bits().hash(&mut h);
+    state.tools.mask_lin_invert.hash(&mut h);
+    state.tools.mask_rad_cx.to_bits().hash(&mut h);
+    state.tools.mask_rad_cy.to_bits().hash(&mut h);
+    state.tools.mask_rad_radius.to_bits().hash(&mut h);
+    state.tools.mask_rad_feather.to_bits().hash(&mut h);
+    state.tools.mask_rad_invert.hash(&mut h);
     h.finish()
 }
 
 /// Build a small `ColorImage` that visualises the current mask as a
 /// semi-transparent blue overlay.  Opacity of each pixel = mask opacity.
 fn build_mask_preview(state: &crate::state::AppState, w: usize, h: usize) -> ColorImage {
-    let shape = match state.current_mask_shape() {
+    let shape = match state.tools.current_mask_shape() {
         Some(s) => s,
         None => return ColorImage::new([w, h], vec![Color32::TRANSPARENT; w * h]),
     };

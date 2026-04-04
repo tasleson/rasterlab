@@ -79,20 +79,20 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("bw")
         .default_open(default_open)
         .show(ui, |ui| {
-            let old_idx = state.bw_mode_idx;
+            let old_idx = state.tools.bw_mode_idx;
             let combo_resp = ComboBox::from_label("Mode")
-                .selected_text(BW_MODES[state.bw_mode_idx])
+                .selected_text(BW_MODES[state.tools.bw_mode_idx])
                 .show_ui(ui, |ui| {
                     for (i, &label) in BW_MODES.iter().enumerate() {
-                        ui.selectable_value(&mut state.bw_mode_idx, i, label);
+                        ui.selectable_value(&mut state.tools.bw_mode_idx, i, label);
                     }
                 });
-            if (combo_resp.response.changed() || state.bw_mode_idx != old_idx) && has_image {
+            if (combo_resp.response.changed() || state.tools.bw_mode_idx != old_idx) && has_image {
                 state.update_bw_preview();
             }
 
             // Channel mixer sliders — only shown when that mode is selected.
-            if state.bw_mode_idx == 3 {
+            if state.tools.bw_mode_idx == 3 {
                 let mut changed = false;
 
                 // Preset buttons — clicking one loads the weights and previews.
@@ -100,9 +100,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 ui.horizontal_wrapped(|ui| {
                     for &(label, r, g, b) in BW_PRESETS {
                         if ui.small_button(label).clicked() && has_image {
-                            state.bw_mixer_r = r;
-                            state.bw_mixer_g = g;
-                            state.bw_mixer_b = b;
+                            state.tools.bw_mixer_r = r;
+                            state.tools.bw_mixer_g = g;
+                            state.tools.bw_mixer_b = b;
                             state.update_bw_preview();
                         }
                     }
@@ -116,7 +116,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         ui.label("R");
                         changed |= ui
                             .add(
-                                DragValue::new(&mut state.bw_mixer_r)
+                                DragValue::new(&mut state.tools.bw_mixer_r)
                                     .speed(0.01)
                                     .range(-2.0..=2.0),
                             )
@@ -125,7 +125,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         ui.label("G");
                         changed |= ui
                             .add(
-                                DragValue::new(&mut state.bw_mixer_g)
+                                DragValue::new(&mut state.tools.bw_mixer_g)
                                     .speed(0.01)
                                     .range(-2.0..=2.0),
                             )
@@ -134,7 +134,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         ui.label("B");
                         changed |= ui
                             .add(
-                                DragValue::new(&mut state.bw_mixer_b)
+                                DragValue::new(&mut state.tools.bw_mixer_b)
                                     .speed(0.01)
                                     .range(-2.0..=2.0),
                             )
@@ -153,7 +153,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_bw();
                 }
-                if state.bw_preview_active
+                if state.tools.bw_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -180,7 +180,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.label("Radius (σ):");
                 ui.add(
-                    DragValue::new(&mut state.blur_radius)
+                    DragValue::new(&mut state.tools.blur_radius)
                         .speed(0.1)
                         .range(0.1..=100.0_f32)
                         .suffix(" px"),
@@ -215,12 +215,18 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.label("Brightness");
                     changed |= ui
-                        .add(egui::Slider::new(&mut state.bc_brightness, -1.0..=1.0).step_by(0.01))
+                        .add(
+                            egui::Slider::new(&mut state.tools.bc_brightness, -1.0..=1.0)
+                                .step_by(0.01),
+                        )
                         .changed();
                     ui.end_row();
                     ui.label("Contrast");
                     changed |= ui
-                        .add(egui::Slider::new(&mut state.bc_contrast, -1.0..=1.0).step_by(0.01))
+                        .add(
+                            egui::Slider::new(&mut state.tools.bc_contrast, -1.0..=1.0)
+                                .step_by(0.01),
+                        )
                         .changed();
                     ui.end_row();
                 });
@@ -234,7 +240,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_bc();
                 }
-                if state.bc_preview_active
+                if state.tools.bc_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -263,14 +269,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .show(ui, |ui| {
             let c_changed = ui
                 .add(
-                    egui::Slider::new(&mut state.clarity, -1.0..=1.0)
+                    egui::Slider::new(&mut state.tools.clarity, -1.0..=1.0)
                         .step_by(0.01)
                         .text("Clarity"),
                 )
                 .changed();
             let t_changed = ui
                 .add(
-                    egui::Slider::new(&mut state.texture, -1.0..=1.0)
+                    egui::Slider::new(&mut state.tools.texture, -1.0..=1.0)
                         .step_by(0.01)
                         .text("Texture"),
                 )
@@ -285,7 +291,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_clarity_texture();
                 }
-                if state.clarity_preview_active
+                if state.tools.clarity_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -321,7 +327,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             ui.label(*zone);
                             changed |= ui
                                 .add(
-                                    egui::Slider::new(&mut state.cb_cyan_red[i], -1.0..=1.0)
+                                    egui::Slider::new(&mut state.tools.cb_cyan_red[i], -1.0..=1.0)
                                         .step_by(0.01),
                                 )
                                 .changed();
@@ -338,8 +344,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             ui.label(*zone);
                             changed |= ui
                                 .add(
-                                    egui::Slider::new(&mut state.cb_magenta_green[i], -1.0..=1.0)
-                                        .step_by(0.01),
+                                    egui::Slider::new(
+                                        &mut state.tools.cb_magenta_green[i],
+                                        -1.0..=1.0,
+                                    )
+                                    .step_by(0.01),
                                 )
                                 .changed();
                             ui.end_row();
@@ -355,8 +364,11 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             ui.label(*zone);
                             changed |= ui
                                 .add(
-                                    egui::Slider::new(&mut state.cb_yellow_blue[i], -1.0..=1.0)
-                                        .step_by(0.01),
+                                    egui::Slider::new(
+                                        &mut state.tools.cb_yellow_blue[i],
+                                        -1.0..=1.0,
+                                    )
+                                    .step_by(0.01),
                                 )
                                 .changed();
                             ui.end_row();
@@ -374,7 +386,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_cb();
                 }
-                if state.cb_preview_active
+                if state.tools.cb_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -403,18 +415,18 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .show(ui, |ui| {
             use rasterlab_core::ops::ColorSpaceConversion;
             egui::ComboBox::from_id_salt("color_space_combo")
-                .selected_text(match state.color_space_conversion {
+                .selected_text(match state.tools.color_space_conversion {
                     ColorSpaceConversion::SrgbToDisplayP3 => "sRGB → Display P3",
                     ColorSpaceConversion::DisplayP3ToSrgb => "Display P3 → sRGB",
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
-                        &mut state.color_space_conversion,
+                        &mut state.tools.color_space_conversion,
                         ColorSpaceConversion::SrgbToDisplayP3,
                         "sRGB → Display P3",
                     );
                     ui.selectable_value(
-                        &mut state.color_space_conversion,
+                        &mut state.tools.color_space_conversion,
                         ColorSpaceConversion::DisplayP3ToSrgb,
                         "Display P3 → sRGB",
                     );
@@ -449,18 +461,18 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     const ASPECT_LABELS: &[&str] =
                         &["Free", "3:2", "4:3", "1:1", "16:9", "9:16", "Custom"];
                     egui::ComboBox::from_id_salt("crop_aspect")
-                        .selected_text(ASPECT_LABELS[state.crop_aspect_idx])
+                        .selected_text(ASPECT_LABELS[state.tools.crop_aspect_idx])
                         .show_ui(ui, |ui| {
                             for (i, &label) in ASPECT_LABELS.iter().enumerate() {
-                                ui.selectable_value(&mut state.crop_aspect_idx, i, label);
+                                ui.selectable_value(&mut state.tools.crop_aspect_idx, i, label);
                             }
                         });
                     ui.end_row();
 
-                    if state.crop_aspect_idx == 6 {
+                    if state.tools.crop_aspect_idx == 6 {
                         ui.label("Ratio W:H");
                         ui.add(
-                            DragValue::new(&mut state.crop_custom_ratio)
+                            DragValue::new(&mut state.tools.crop_custom_ratio)
                                 .speed(0.01)
                                 .range(0.1..=20.0_f32),
                         );
@@ -468,21 +480,21 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     }
 
                     ui.label("X");
-                    ui.add(DragValue::new(&mut state.crop_x).speed(1));
+                    ui.add(DragValue::new(&mut state.tools.crop_x).speed(1));
                     ui.end_row();
                     ui.label("Y");
-                    ui.add(DragValue::new(&mut state.crop_y).speed(1));
+                    ui.add(DragValue::new(&mut state.tools.crop_y).speed(1));
                     ui.end_row();
                     ui.label("W");
                     ui.add(
-                        DragValue::new(&mut state.crop_w)
+                        DragValue::new(&mut state.tools.crop_w)
                             .speed(1)
                             .range(1..=u32::MAX),
                     );
                     ui.end_row();
                     ui.label("H");
                     ui.add(
-                        DragValue::new(&mut state.crop_h)
+                        DragValue::new(&mut state.tools.crop_h)
                             .speed(1)
                             .range(1..=u32::MAX),
                     );
@@ -533,14 +545,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.label("Strength:");
                     ui.add(
-                        DragValue::new(&mut state.denoise_strength)
+                        DragValue::new(&mut state.tools.denoise_strength)
                             .speed(0.01)
                             .range(0.01..=1.0_f32),
                     );
                     ui.end_row();
                     ui.label("Radius:");
                     ui.add(
-                        DragValue::new(&mut state.denoise_radius)
+                        DragValue::new(&mut state.tools.denoise_radius)
                             .speed(1)
                             .range(1..=10_u32)
                             .suffix(" px"),
@@ -574,52 +586,56 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("JPEG quality:");
-                    ui.add(DragValue::new(&mut state.encode_opts.jpeg_quality).range(1..=100u8));
+                    ui.add(
+                        DragValue::new(&mut state.tools.encode_opts.jpeg_quality).range(1..=100u8),
+                    );
                     ui.end_row();
                     ui.label("PNG compression:");
-                    ui.add(DragValue::new(&mut state.encode_opts.png_compression).range(0..=9u8));
+                    ui.add(
+                        DragValue::new(&mut state.tools.encode_opts.png_compression).range(0..=9u8),
+                    );
                     ui.end_row();
                 });
 
             ui.separator();
             ui.label("Resize on export:");
-            ui.checkbox(&mut state.export_resize_enabled, "Enable");
-            if state.export_resize_enabled {
+            ui.checkbox(&mut state.tools.export_resize_enabled, "Enable");
+            if state.tools.export_resize_enabled {
                 egui::Grid::new("export_resize_grid")
                     .num_columns(2)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Width:");
                         ui.add(
-                            DragValue::new(&mut state.export_resize_w)
+                            DragValue::new(&mut state.tools.export_resize_w)
                                 .range(1..=65535u32)
                                 .suffix(" px"),
                         );
                         ui.end_row();
                         ui.label("Height:");
                         ui.add(
-                            DragValue::new(&mut state.export_resize_h)
+                            DragValue::new(&mut state.tools.export_resize_h)
                                 .range(1..=65535u32)
                                 .suffix(" px"),
                         );
                         ui.end_row();
                         ui.label("Mode:");
                         egui::ComboBox::from_id_salt("export_resize_mode")
-                            .selected_text(format!("{:?}", state.export_resize_mode))
+                            .selected_text(format!("{:?}", state.tools.export_resize_mode))
                             .show_ui(ui, |ui| {
                                 use rasterlab_core::ops::ResampleMode;
                                 ui.selectable_value(
-                                    &mut state.export_resize_mode,
+                                    &mut state.tools.export_resize_mode,
                                     ResampleMode::NearestNeighbour,
                                     "Nearest",
                                 );
                                 ui.selectable_value(
-                                    &mut state.export_resize_mode,
+                                    &mut state.tools.export_resize_mode,
                                     ResampleMode::Bilinear,
                                     "Bilinear",
                                 );
                                 ui.selectable_value(
-                                    &mut state.export_resize_mode,
+                                    &mut state.tools.export_resize_mode,
                                     ResampleMode::Bicubic,
                                     "Bicubic",
                                 );
@@ -650,7 +666,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             ui.add_space(2.0);
             let changed = ui
                 .add(
-                    egui::Slider::new(&mut state.hdr_strength, 0.0..=1.0)
+                    egui::Slider::new(&mut state.tools.hdr_strength, 0.0..=1.0)
                         .text("Strength")
                         .step_by(0.01),
                 )
@@ -665,7 +681,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_hdr();
                 }
-                if state.hdr_preview_active
+                if state.tools.hdr_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -706,11 +722,15 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // ── Spot Heal ─────────────────────────────────────────────────────────
     {
         let default_open = state.prefs.is_tool_open("heal");
-        let heal_label = if state.heal_active {
+        let heal_label = if state.tools.heal_active {
             format!(
                 "✦  Spot Heal  [ACTIVE \u{2014} {} spot{}]",
-                state.heal_spots.len(),
-                if state.heal_spots.len() == 1 { "" } else { "s" }
+                state.tools.heal_spots.len(),
+                if state.tools.heal_spots.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
             )
         } else {
             "✦  Spot Heal".to_string()
@@ -725,14 +745,14 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     .show(ui, |ui| {
                         ui.label("Radius:");
                         ui.add(
-                            DragValue::new(&mut state.heal_radius)
+                            DragValue::new(&mut state.tools.heal_radius)
                                 .speed(1)
                                 .range(5_u32..=300_u32),
                         );
                         ui.end_row();
                     });
 
-                let mode_btn_text = if state.heal_active {
+                let mode_btn_text = if state.tools.heal_active {
                     "Stop Painting"
                 } else {
                     "Start Painting"
@@ -745,13 +765,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     )
                     .clicked()
                 {
-                    state.heal_active = !state.heal_active;
+                    state.tools.heal_active = !state.tools.heal_active;
                 }
 
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(
-                            has_image && !state.heal_spots.is_empty(),
+                            has_image && !state.tools.heal_spots.is_empty(),
                             egui::Button::new("Apply Heal"),
                         )
                         .clicked()
@@ -759,14 +779,17 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         state.push_heal();
                     }
                     if ui
-                        .add_enabled(!state.heal_spots.is_empty(), egui::Button::new("Clear"))
+                        .add_enabled(
+                            !state.tools.heal_spots.is_empty(),
+                            egui::Button::new("Clear"),
+                        )
                         .clicked()
                     {
-                        state.heal_spots.clear();
+                        state.tools.heal_spots.clear();
                     }
                 });
 
-                if state.heal_active {
+                if state.tools.heal_active {
                     ui.label(
                         egui::RichText::new(
                             "Click on blemishes to heal them.\nRight-click a spot to remove it.",
@@ -799,12 +822,18 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.label("Highlights");
                     changed |= ui
-                        .add(egui::Slider::new(&mut state.hl_highlights, -1.0..=1.0).step_by(0.01))
+                        .add(
+                            egui::Slider::new(&mut state.tools.hl_highlights, -1.0..=1.0)
+                                .step_by(0.01),
+                        )
                         .changed();
                     ui.end_row();
                     ui.label("Shadows");
                     changed |= ui
-                        .add(egui::Slider::new(&mut state.hl_shadows, -1.0..=1.0).step_by(0.01))
+                        .add(
+                            egui::Slider::new(&mut state.tools.hl_shadows, -1.0..=1.0)
+                                .step_by(0.01),
+                        )
                         .changed();
                     ui.end_row();
                 });
@@ -818,7 +847,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_hl();
                 }
-                if state.hl_preview_active
+                if state.tools.hl_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -864,7 +893,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .show(ui, |ui| {
             let changed = ui
                 .add(
-                    egui::Slider::new(&mut state.hue_degrees, -180.0..=180.0)
+                    egui::Slider::new(&mut state.tools.hue_degrees, -180.0..=180.0)
                         .text("Degrees")
                         .step_by(1.0),
                 )
@@ -879,7 +908,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_hue();
                 }
-                if state.hue_preview_active
+                if state.tools.hue_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -922,9 +951,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // operation in a MaskedOp that restricts the effect to the masked region.
     const MASK_LABELS: &[&str] = &["None", "Linear Gradient", "Radial Gradient"];
     let mask_default_open = state.prefs.is_tool_open("masking");
-    let mask_active = state.mask_sel > 0;
+    let mask_active = state.tools.mask_sel > 0;
     let mask_header = if mask_active {
-        format!("◈  Masking  [{}]", MASK_LABELS[state.mask_sel])
+        format!("◈  Masking  [{}]", MASK_LABELS[state.tools.mask_sel])
     } else {
         "◈  Masking".to_string()
     };
@@ -938,16 +967,16 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.label("Type:");
                     egui::ComboBox::from_id_salt("mask_type_combo")
-                        .selected_text(MASK_LABELS[state.mask_sel])
+                        .selected_text(MASK_LABELS[state.tools.mask_sel])
                         .show_ui(ui, |ui| {
                             for (i, &label) in MASK_LABELS.iter().enumerate() {
-                                ui.selectable_value(&mut state.mask_sel, i, label);
+                                ui.selectable_value(&mut state.tools.mask_sel, i, label);
                             }
                         });
                     ui.end_row();
                 });
 
-            if state.mask_sel == 1 {
+            if state.tools.mask_sel == 1 {
                 // Linear gradient controls
                 ui.separator();
                 egui::Grid::new("mask_lin_grid")
@@ -956,30 +985,36 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     .show(ui, |ui| {
                         ui.label("Angle:");
                         ui.add(
-                            egui::Slider::new(&mut state.mask_lin_angle, 0.0..=360.0)
+                            egui::Slider::new(&mut state.tools.mask_lin_angle, 0.0..=360.0)
                                 .suffix("°")
                                 .step_by(1.0),
                         );
                         ui.end_row();
                         ui.label("Center X:");
-                        ui.add(egui::Slider::new(&mut state.mask_lin_cx, 0.0..=1.0).step_by(0.01));
+                        ui.add(
+                            egui::Slider::new(&mut state.tools.mask_lin_cx, 0.0..=1.0)
+                                .step_by(0.01),
+                        );
                         ui.end_row();
                         ui.label("Center Y:");
-                        ui.add(egui::Slider::new(&mut state.mask_lin_cy, 0.0..=1.0).step_by(0.01));
+                        ui.add(
+                            egui::Slider::new(&mut state.tools.mask_lin_cy, 0.0..=1.0)
+                                .step_by(0.01),
+                        );
                         ui.end_row();
                         ui.label("Feather:");
                         ui.add(
-                            egui::Slider::new(&mut state.mask_lin_feather, 0.01..=1.0)
+                            egui::Slider::new(&mut state.tools.mask_lin_feather, 0.01..=1.0)
                                 .step_by(0.01),
                         );
                         ui.end_row();
                         ui.label("Invert:");
-                        ui.checkbox(&mut state.mask_lin_invert, "");
+                        ui.checkbox(&mut state.tools.mask_lin_invert, "");
                         ui.end_row();
                     });
             }
 
-            if state.mask_sel == 2 {
+            if state.tools.mask_sel == 2 {
                 // Radial gradient controls
                 ui.separator();
                 egui::Grid::new("mask_rad_grid")
@@ -987,24 +1022,31 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Center X:");
-                        ui.add(egui::Slider::new(&mut state.mask_rad_cx, 0.0..=1.0).step_by(0.01));
+                        ui.add(
+                            egui::Slider::new(&mut state.tools.mask_rad_cx, 0.0..=1.0)
+                                .step_by(0.01),
+                        );
                         ui.end_row();
                         ui.label("Center Y:");
-                        ui.add(egui::Slider::new(&mut state.mask_rad_cy, 0.0..=1.0).step_by(0.01));
+                        ui.add(
+                            egui::Slider::new(&mut state.tools.mask_rad_cy, 0.0..=1.0)
+                                .step_by(0.01),
+                        );
                         ui.end_row();
                         ui.label("Radius:");
                         ui.add(
-                            egui::Slider::new(&mut state.mask_rad_radius, 0.01..=1.5).step_by(0.01),
+                            egui::Slider::new(&mut state.tools.mask_rad_radius, 0.01..=1.5)
+                                .step_by(0.01),
                         );
                         ui.end_row();
                         ui.label("Feather:");
                         ui.add(
-                            egui::Slider::new(&mut state.mask_rad_feather, 0.01..=2.0)
+                            egui::Slider::new(&mut state.tools.mask_rad_feather, 0.01..=2.0)
                                 .step_by(0.01),
                         );
                         ui.end_row();
                         ui.label("Invert:");
-                        ui.checkbox(&mut state.mask_rad_invert, "");
+                        ui.checkbox(&mut state.tools.mask_rad_invert, "");
                         ui.end_row();
                     });
             }
@@ -1017,7 +1059,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .color(egui::Color32::from_rgb(220, 160, 40)),
                 );
                 if ui.small_button("Clear mask").clicked() {
-                    state.mask_sel = 0;
+                    state.tools.mask_sel = 0;
                 }
             }
         });
@@ -1037,13 +1079,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .default_open(default_open)
         .show(ui, |ui| {
             if ui.button("Load .cube LUT…").clicked() {
-                state.lut_dialog_requested = true;
+                state.tools.lut_dialog_requested = true;
             }
-            if !state.lut_name.is_empty() {
-                ui.label(format!("Loaded: {}", state.lut_name));
+            if !state.tools.lut_name.is_empty() {
+                ui.label(format!("Loaded: {}", state.tools.lut_name));
                 let changed = ui
                     .add(
-                        egui::Slider::new(&mut state.lut_strength, 0.0..=1.0)
+                        egui::Slider::new(&mut state.tools.lut_strength, 0.0..=1.0)
                             .step_by(0.01)
                             .text("Strength"),
                     )
@@ -1058,7 +1100,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     {
                         state.push_lut();
                     }
-                    if state.lut_preview_active
+                    if state.tools.lut_preview_active
                         && ui
                             .add_enabled(has_image, egui::Button::new("Cancel"))
                             .clicked()
@@ -1091,18 +1133,18 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.label("Method:");
                     egui::ComboBox::from_id_salt("nr_method")
-                        .selected_text(match state.nr_method {
+                        .selected_text(match state.tools.nr_method {
                             NrMethod::Wavelet => "Wavelet (fast)",
                             NrMethod::NonLocalMeans => "Non-Local Means",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
-                                &mut state.nr_method,
+                                &mut state.tools.nr_method,
                                 NrMethod::Wavelet,
                                 "Wavelet (fast)",
                             );
                             ui.selectable_value(
-                                &mut state.nr_method,
+                                &mut state.tools.nr_method,
                                 NrMethod::NonLocalMeans,
                                 "Non-Local Means",
                             );
@@ -1110,19 +1152,27 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.end_row();
 
                     ui.label("Luminance:");
-                    ui.add(egui::Slider::new(&mut state.nr_luma, 0.0..=1.0_f32).show_value(true));
+                    ui.add(
+                        egui::Slider::new(&mut state.tools.nr_luma, 0.0..=1.0_f32).show_value(true),
+                    );
                     ui.end_row();
 
                     ui.label("Color:");
-                    ui.add(egui::Slider::new(&mut state.nr_color, 0.0..=1.0_f32).show_value(true));
+                    ui.add(
+                        egui::Slider::new(&mut state.tools.nr_color, 0.0..=1.0_f32)
+                            .show_value(true),
+                    );
                     ui.end_row();
 
                     ui.label("Detail:");
-                    ui.add(egui::Slider::new(&mut state.nr_detail, 0.0..=1.0_f32).show_value(true));
+                    ui.add(
+                        egui::Slider::new(&mut state.tools.nr_detail, 0.0..=1.0_f32)
+                            .show_value(true),
+                    );
                     ui.end_row();
                 });
 
-            if state.nr_method == NrMethod::NonLocalMeans {
+            if state.tools.nr_method == NrMethod::NonLocalMeans {
                 ui.label(
                     egui::RichText::new("⚠ NLM is slow on large images (30s+)")
                         .small()
@@ -1169,12 +1219,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     for (label, i) in corner_labels {
                         ui.label(label);
                         ui.add(
-                            DragValue::new(&mut state.perspective_corners[i][0])
+                            DragValue::new(&mut state.tools.perspective_corners[i][0])
                                 .speed(0.005)
                                 .range(-1.0..=1.0_f32),
                         );
                         ui.add(
-                            DragValue::new(&mut state.perspective_corners[i][1])
+                            DragValue::new(&mut state.tools.perspective_corners[i][1])
                                 .speed(0.005)
                                 .range(-1.0..=1.0_f32),
                         );
@@ -1210,8 +1260,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .show(ui, |ui| {
             use rasterlab_core::ops::ResampleMode;
 
-            let orig_w = state.resize_w;
-            let orig_h = state.resize_h;
+            let orig_w = state.tools.resize_w;
+            let orig_h = state.tools.resize_h;
 
             // Source image dims for preset filtering and aspect-ratio math.
             let src_dims = state
@@ -1272,8 +1322,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                                     let h = (w as f64 * aspect).round() as u32;
                                     let hint = format!("{lbl}  ({w}×{h})");
                                     if ui.selectable_label(selected_label == *lbl, hint).clicked() {
-                                        state.resize_w = w;
-                                        state.resize_h = h;
+                                        state.tools.resize_w = w;
+                                        state.tools.resize_h = h;
                                     }
                                 }
                             });
@@ -1288,7 +1338,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.label("Width");
                     let w_resp = ui.add(
-                        DragValue::new(&mut state.resize_w)
+                        DragValue::new(&mut state.tools.resize_w)
                             .speed(1)
                             .range(1..=32000_u32)
                             .suffix(" px"),
@@ -1296,7 +1346,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.end_row();
                     ui.label("Height");
                     let h_resp = ui.add(
-                        DragValue::new(&mut state.resize_h)
+                        DragValue::new(&mut state.tools.resize_h)
                             .speed(1)
                             .range(1..=32000_u32)
                             .suffix(" px"),
@@ -1304,43 +1354,43 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.end_row();
                     ui.label("Method");
                     egui::ComboBox::from_id_salt("resize_mode")
-                        .selected_text(match state.resize_mode {
+                        .selected_text(match state.tools.resize_mode {
                             ResampleMode::NearestNeighbour => "Nearest",
                             ResampleMode::Bilinear => "Bilinear",
                             ResampleMode::Bicubic => "Bicubic",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
-                                &mut state.resize_mode,
+                                &mut state.tools.resize_mode,
                                 ResampleMode::NearestNeighbour,
                                 "Nearest",
                             );
                             ui.selectable_value(
-                                &mut state.resize_mode,
+                                &mut state.tools.resize_mode,
                                 ResampleMode::Bilinear,
                                 "Bilinear",
                             );
                             ui.selectable_value(
-                                &mut state.resize_mode,
+                                &mut state.tools.resize_mode,
                                 ResampleMode::Bicubic,
                                 "Bicubic",
                             );
                         });
                     ui.end_row();
                     ui.label("Lock aspect");
-                    ui.checkbox(&mut state.resize_lock_aspect, "");
+                    ui.checkbox(&mut state.tools.resize_lock_aspect, "");
                     ui.end_row();
 
                     // Propagate aspect-ratio constraint after editing.
-                    if state.resize_lock_aspect && orig_w > 0 && orig_h > 0 {
-                        if w_resp.changed() && orig_w != state.resize_w {
+                    if state.tools.resize_lock_aspect && orig_w > 0 && orig_h > 0 {
+                        if w_resp.changed() && orig_w != state.tools.resize_w {
                             let ratio = orig_h as f64 / orig_w as f64;
-                            state.resize_h =
-                                ((state.resize_w as f64 * ratio).round() as u32).max(1);
-                        } else if h_resp.changed() && orig_h != state.resize_h {
+                            state.tools.resize_h =
+                                ((state.tools.resize_w as f64 * ratio).round() as u32).max(1);
+                        } else if h_resp.changed() && orig_h != state.tools.resize_h {
                             let ratio = orig_w as f64 / orig_h as f64;
-                            state.resize_w =
-                                ((state.resize_h as f64 * ratio).round() as u32).max(1);
+                            state.tools.resize_w =
+                                ((state.tools.resize_h as f64 * ratio).round() as u32).max(1);
                         }
                     }
                 });
@@ -1390,7 +1440,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.label("Angle:");
                 ui.add(
-                    DragValue::new(&mut state.rotate_deg)
+                    DragValue::new(&mut state.tools.rotate_deg)
                         .speed(0.5)
                         .suffix("°")
                         .range(-360.0..=360.0),
@@ -1428,8 +1478,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Straighten ───────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("straighten");
-    let straight_label = if state.straighten_active {
-        format!("⟳  Straighten  [{:.2}°]", state.straighten_angle)
+    let straight_label = if state.tools.straighten_active {
+        format!("⟳  Straighten  [{:.2}°]", state.tools.straighten_angle)
     } else {
         "⟳  Straighten".to_string()
     };
@@ -1442,13 +1492,16 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("Angle:");
-                    ui.label(format!("{:.2}°", state.straighten_angle));
+                    ui.label(format!("{:.2}°", state.tools.straighten_angle));
                     ui.end_row();
                 });
 
-            ui.checkbox(&mut state.straighten_crop, "Crop to rectangle after apply");
+            ui.checkbox(
+                &mut state.tools.straighten_crop,
+                "Crop to rectangle after apply",
+            );
 
-            let toggle_text = if state.straighten_active {
+            let toggle_text = if state.tools.straighten_active {
                 "Hide Horizon Line"
             } else {
                 "Show Horizon Line"
@@ -1460,7 +1513,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 )
                 .clicked()
             {
-                state.straighten_active = !state.straighten_active;
+                state.tools.straighten_active = !state.tools.straighten_active;
             }
 
             if ui
@@ -1474,7 +1527,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.push_straighten();
             }
 
-            if state.straighten_active {
+            if state.tools.straighten_active {
                 ui.label(
                     egui::RichText::new(
                         "Drag the horizon line to match a level reference in the image.",
@@ -1500,7 +1553,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .default_open(default_open)
         .show(ui, |ui| {
             let changed = ui
-                .add(egui::Slider::new(&mut state.saturation, 0.0..=4.0).step_by(0.01))
+                .add(egui::Slider::new(&mut state.tools.saturation, 0.0..=4.0).step_by(0.01))
                 .changed();
             if changed && has_image {
                 state.update_sat_preview();
@@ -1512,7 +1565,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_saturation();
                 }
-                if state.sat_preview_active
+                if state.tools.sat_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -1540,7 +1593,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .default_open(default_open)
         .show(ui, |ui| {
             let changed = ui
-                .add(egui::Slider::new(&mut state.sepia_strength, 0.0..=1.0).step_by(0.01))
+                .add(egui::Slider::new(&mut state.tools.sepia_strength, 0.0..=1.0).step_by(0.01))
                 .changed();
             if changed && has_image {
                 state.update_sepia_preview();
@@ -1552,7 +1605,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_sepia();
                 }
-                if state.sepia_preview_active
+                if state.tools.sepia_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -1581,7 +1634,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .show(ui, |ui| {
             let changed = ui
                 .add(
-                    egui::Slider::new(&mut state.sharpen_strength, 0.0..=10.0)
+                    egui::Slider::new(&mut state.tools.sharpen_strength, 0.0..=10.0)
                         .step_by(0.05)
                         .text("Strength"),
                 )
@@ -1596,7 +1649,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_sharpen();
                 }
-                if state.sharpen_preview_active
+                if state.tools.sharpen_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -1629,7 +1682,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.label("Shadow hue");
                     changed |= ui
                         .add(
-                            DragValue::new(&mut state.split_shadow_hue)
+                            DragValue::new(&mut state.tools.split_shadow_hue)
                                 .speed(1.0)
                                 .range(0.0..=359.9_f32)
                                 .suffix("°"),
@@ -1640,7 +1693,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.label("Shadow sat");
                     changed |= ui
                         .add(
-                            egui::Slider::new(&mut state.split_shadow_sat, 0.0..=1.0).step_by(0.01),
+                            egui::Slider::new(&mut state.tools.split_shadow_sat, 0.0..=1.0)
+                                .step_by(0.01),
                         )
                         .changed();
                     ui.end_row();
@@ -1648,7 +1702,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.label("Highlight hue");
                     changed |= ui
                         .add(
-                            DragValue::new(&mut state.split_highlight_hue)
+                            DragValue::new(&mut state.tools.split_highlight_hue)
                                 .speed(1.0)
                                 .range(0.0..=359.9_f32)
                                 .suffix("°"),
@@ -1659,7 +1713,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.label("Highlight sat");
                     changed |= ui
                         .add(
-                            egui::Slider::new(&mut state.split_highlight_sat, 0.0..=1.0)
+                            egui::Slider::new(&mut state.tools.split_highlight_sat, 0.0..=1.0)
                                 .step_by(0.01),
                         )
                         .changed();
@@ -1667,7 +1721,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
                     ui.label("Balance");
                     changed |= ui
-                        .add(egui::Slider::new(&mut state.split_balance, -1.0..=1.0).step_by(0.01))
+                        .add(
+                            egui::Slider::new(&mut state.tools.split_balance, -1.0..=1.0)
+                                .step_by(0.01),
+                        )
                         .changed();
                     ui.end_row();
                 });
@@ -1686,7 +1743,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 if ui.button("Reset").clicked() {
                     state.reset_split_tone();
                 }
-                if state.split_preview_active
+                if state.tools.split_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -1711,7 +1768,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .default_open(default_open)
         .show(ui, |ui| {
             let changed = ui
-                .add(egui::Slider::new(&mut state.vibrance, -1.0..=1.0).step_by(0.01))
+                .add(egui::Slider::new(&mut state.tools.vibrance, -1.0..=1.0).step_by(0.01))
                 .changed();
             if changed && has_image {
                 state.update_vibrance_preview();
@@ -1723,7 +1780,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_vibrance();
                 }
-                if state.vibrance_preview_active
+                if state.tools.vibrance_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -1758,7 +1815,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.label("Strength");
                     changed |= ui
                         .add(
-                            DragValue::new(&mut state.vignette_strength)
+                            DragValue::new(&mut state.tools.vignette_strength)
                                 .speed(0.01)
                                 .range(0.0..=1.0),
                         )
@@ -1767,7 +1824,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.label("Radius");
                     changed |= ui
                         .add(
-                            DragValue::new(&mut state.vignette_radius)
+                            DragValue::new(&mut state.tools.vignette_radius)
                                 .speed(0.01)
                                 .range(0.0..=1.0),
                         )
@@ -1776,7 +1833,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.label("Feather");
                     changed |= ui
                         .add(
-                            DragValue::new(&mut state.vignette_feather)
+                            DragValue::new(&mut state.tools.vignette_feather)
                                 .speed(0.01)
                                 .range(0.0..=1.0),
                         )
@@ -1793,7 +1850,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_vignette();
                 }
-                if state.vignette_preview_active
+                if state.tools.vignette_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -1824,12 +1881,15 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 .show(ui, |ui| {
                     ui.label("Temperature");
                     changed |= ui
-                        .add(egui::Slider::new(&mut state.wb_temperature, -1.0..=1.0).step_by(0.01))
+                        .add(
+                            egui::Slider::new(&mut state.tools.wb_temperature, -1.0..=1.0)
+                                .step_by(0.01),
+                        )
                         .changed();
                     ui.end_row();
                     ui.label("Tint");
                     changed |= ui
-                        .add(egui::Slider::new(&mut state.wb_tint, -1.0..=1.0).step_by(0.01))
+                        .add(egui::Slider::new(&mut state.tools.wb_tint, -1.0..=1.0).step_by(0.01))
                         .changed();
                     ui.end_row();
                 });
@@ -1843,7 +1903,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.push_wb();
                 }
-                if state.wb_preview_active
+                if state.tools.wb_preview_active
                     && ui
                         .add_enabled(has_image, egui::Button::new("Cancel"))
                         .clicked()
@@ -1903,7 +1963,7 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
     );
 
     // Build and draw the curve.
-    let lut = CurvesOp::build_lut(&state.curve_points);
+    let lut = CurvesOp::build_lut(&state.tools.curve_points);
     {
         let mut prev: Option<Pos2> = None;
         for (i, &y_val) in lut.iter().enumerate() {
@@ -1919,10 +1979,10 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
 
     // Draw control point handles.
     const PT_R: f32 = 5.0;
-    for (i, &[px, py]) in state.curve_points.iter().enumerate() {
+    for (i, &[px, py]) in state.tools.curve_points.iter().enumerate() {
         let sx = rect.min.x + px * w;
         let sy = rect.max.y - py * h;
-        let col = if state.curve_dragging_idx == Some(i) {
+        let col = if state.tools.curve_dragging_idx == Some(i) {
             Color32::from_rgb(255, 200, 0)
         } else {
             Color32::WHITE
@@ -1943,7 +2003,7 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
 
     // Release drag.
     if !primary_down {
-        state.curve_dragging_idx = None;
+        state.tools.curve_dragging_idx = None;
     }
 
     if let Some(pos) = mouse_pos {
@@ -1952,38 +2012,39 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
         let cy = (1.0 - (pos.y - rect.min.y) / h).clamp(0.0, 1.0);
 
         // Continue existing drag.
-        if primary_down && let Some(drag_idx) = state.curve_dragging_idx {
-            let npts = state.curve_points.len();
+        if primary_down && let Some(drag_idx) = state.tools.curve_dragging_idx {
+            let npts = state.tools.curve_points.len();
             let new_x = if drag_idx == 0 {
                 0.0
             } else if drag_idx == npts - 1 {
                 1.0
             } else {
                 // Constrain x between neighbours so sort order is preserved.
-                let lo = state.curve_points[drag_idx - 1][0] + 0.005;
-                let hi = state.curve_points[drag_idx + 1][0] - 0.005;
+                let lo = state.tools.curve_points[drag_idx - 1][0] + 0.005;
+                let hi = state.tools.curve_points[drag_idx + 1][0] - 0.005;
                 cx.clamp(lo, hi)
             };
-            let old = state.curve_points[drag_idx];
-            state.curve_points[drag_idx] = [new_x, cy];
-            if state.curve_points[drag_idx] != old && has_image {
+            let old = state.tools.curve_points[drag_idx];
+            state.tools.curve_points[drag_idx] = [new_x, cy];
+            if state.tools.curve_points[drag_idx] != old && has_image {
                 state.update_curve_preview();
             }
         }
 
         if primary_pressed && rect.contains(pos) {
             // Find a control point close enough to start a drag.
-            let hit = state.curve_points.iter().position(|&[px, py]| {
+            let hit = state.tools.curve_points.iter().position(|&[px, py]| {
                 let sx = rect.min.x + px * w;
                 let sy = rect.max.y - py * h;
                 ((pos.x - sx).powi(2) + (pos.y - sy).powi(2)).sqrt() < PT_R + 3.0
             });
             if let Some(idx) = hit {
-                state.curve_dragging_idx = Some(idx);
+                state.tools.curve_dragging_idx = Some(idx);
             } else {
                 // Click on empty area → add a new point.
-                state.curve_points.push([cx, cy]);
+                state.tools.curve_points.push([cx, cy]);
                 state
+                    .tools
                     .curve_points
                     .sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap());
                 if has_image {
@@ -1994,7 +2055,7 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
 
         if secondary_pressed && rect.contains(pos) {
             // Right-click → remove the nearest non-endpoint control point.
-            let hit = state.curve_points[1..state.curve_points.len() - 1]
+            let hit = state.tools.curve_points[1..state.tools.curve_points.len() - 1]
                 .iter()
                 .enumerate()
                 .find(|(_, pt)| {
@@ -2004,7 +2065,7 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
                 })
                 .map(|(i, _)| i + 1); // offset by 1 for the slice starting at index 1
             if let Some(idx) = hit {
-                state.curve_points.remove(idx);
+                state.tools.curve_points.remove(idx);
                 if has_image {
                     state.update_curve_preview();
                 }
@@ -2020,7 +2081,7 @@ fn curves_ui(ui: &mut Ui, state: &mut AppState) {
         {
             state.push_curves();
         }
-        if state.curve_preview_active
+        if state.tools.curve_preview_active
             && ui
                 .add_enabled(has_image, egui::Button::new("Cancel"))
                 .clicked()
@@ -2054,14 +2115,14 @@ fn levels_ui(ui: &mut Ui, state: &mut AppState) {
         .show(ui, |ui| {
             ui.label("Black:");
             let r = ui.add(
-                egui::Slider::new(&mut state.levels_black, 0.0..=1.0)
+                egui::Slider::new(&mut state.tools.levels_black, 0.0..=1.0)
                     .clamping(egui::SliderClamping::Always)
                     .step_by(0.001),
             );
             if r.changed() {
                 // Black point must not exceed white point
-                if state.levels_black >= state.levels_white {
-                    state.levels_black = (state.levels_white - 0.001).max(0.0);
+                if state.tools.levels_black >= state.tools.levels_white {
+                    state.tools.levels_black = (state.tools.levels_white - 0.001).max(0.0);
                 }
                 changed = true;
             }
@@ -2069,7 +2130,7 @@ fn levels_ui(ui: &mut Ui, state: &mut AppState) {
 
             ui.label("Mid:");
             let r = ui.add(
-                egui::Slider::new(&mut state.levels_mid, 0.10..=10.0)
+                egui::Slider::new(&mut state.tools.levels_mid, 0.10..=10.0)
                     .clamping(egui::SliderClamping::Always)
                     .step_by(0.01)
                     .logarithmic(true),
@@ -2081,14 +2142,14 @@ fn levels_ui(ui: &mut Ui, state: &mut AppState) {
 
             ui.label("White:");
             let r = ui.add(
-                egui::Slider::new(&mut state.levels_white, 0.0..=1.0)
+                egui::Slider::new(&mut state.tools.levels_white, 0.0..=1.0)
                     .clamping(egui::SliderClamping::Always)
                     .step_by(0.001),
             );
             if r.changed() {
                 // White point must not go below black point
-                if state.levels_white <= state.levels_black {
-                    state.levels_white = (state.levels_black + 0.001).min(1.0);
+                if state.tools.levels_white <= state.tools.levels_black {
+                    state.tools.levels_white = (state.tools.levels_black + 0.001).min(1.0);
                 }
                 changed = true;
             }
@@ -2125,8 +2186,8 @@ fn grain_ui(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal_wrapped(|ui| {
         for &(label, strength, size) in GRAIN_PRESETS {
             if ui.small_button(label).clicked() && has_image {
-                state.grain_strength = strength;
-                state.grain_size = size;
+                state.tools.grain_strength = strength;
+                state.tools.grain_size = size;
                 state.update_grain_preview();
             }
         }
@@ -2141,16 +2202,18 @@ fn grain_ui(ui: &mut Ui, state: &mut AppState) {
         .show(ui, |ui| {
             ui.label("Strength");
             changed |= ui
-                .add(egui::Slider::new(&mut state.grain_strength, 0.0..=1.0).step_by(0.01))
+                .add(egui::Slider::new(&mut state.tools.grain_strength, 0.0..=1.0).step_by(0.01))
                 .changed();
             ui.end_row();
             ui.label("Size");
             changed |= ui
-                .add(egui::Slider::new(&mut state.grain_size, 1.0..=32.0).step_by(0.1))
+                .add(egui::Slider::new(&mut state.tools.grain_size, 1.0..=32.0).step_by(0.1))
                 .changed();
             ui.end_row();
             ui.label("Seed");
-            changed |= ui.add(DragValue::new(&mut state.grain_seed)).changed();
+            changed |= ui
+                .add(DragValue::new(&mut state.tools.grain_seed))
+                .changed();
             ui.end_row();
         });
     if changed && has_image {
@@ -2164,7 +2227,7 @@ fn grain_ui(ui: &mut Ui, state: &mut AppState) {
         {
             state.push_grain();
         }
-        if state.grain_preview_active
+        if state.tools.grain_preview_active
             && ui
                 .add_enabled(has_image, egui::Button::new("Cancel"))
                 .clicked()
@@ -2201,7 +2264,7 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                         ui.label(*name);
                         changed |= ui
                             .add(
-                                egui::Slider::new(&mut state.hsl_hue[i], -180.0..=180.0)
+                                egui::Slider::new(&mut state.tools.hsl_hue[i], -180.0..=180.0)
                                     .text("°")
                                     .step_by(1.0),
                             )
@@ -2229,7 +2292,10 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     for (i, name) in HSL_BAND_NAMES.iter().enumerate() {
                         ui.label(*name);
                         changed |= ui
-                            .add(egui::Slider::new(&mut state.hsl_sat[i], -1.0..=1.0).step_by(0.01))
+                            .add(
+                                egui::Slider::new(&mut state.tools.hsl_sat[i], -1.0..=1.0)
+                                    .step_by(0.01),
+                            )
                             .changed();
                         ui.end_row();
                     }
@@ -2254,7 +2320,10 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     for (i, name) in HSL_BAND_NAMES.iter().enumerate() {
                         ui.label(*name);
                         changed |= ui
-                            .add(egui::Slider::new(&mut state.hsl_lum[i], -0.5..=0.5).step_by(0.01))
+                            .add(
+                                egui::Slider::new(&mut state.tools.hsl_lum[i], -0.5..=0.5)
+                                    .step_by(0.01),
+                            )
                             .changed();
                         ui.end_row();
                     }
@@ -2278,7 +2347,7 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
         {
             state.push_hsl();
         }
-        if state.hsl_preview_active
+        if state.tools.hsl_preview_active
             && ui
                 .add_enabled(has_image, egui::Button::new("Cancel"))
                 .clicked()
@@ -2363,7 +2432,7 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
     }
 
     // Black-point marker (left, dark handle)
-    let bx = rect.left() + state.levels_black * width;
+    let bx = rect.left() + state.tools.levels_black * width;
     painter.line_segment(
         [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
         egui::Stroke::new(1.5, Color32::from_gray(60)),
@@ -2381,7 +2450,7 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
     ));
 
     // White-point marker (right, bright handle)
-    let wx = rect.left() + state.levels_white * width;
+    let wx = rect.left() + state.tools.levels_white * width;
     painter.line_segment(
         [egui::pos2(wx, rect.top()), egui::pos2(wx, rect.bottom())],
         egui::Stroke::new(1.5, Color32::from_gray(220)),
@@ -2398,7 +2467,8 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
     ));
 
     // Midtone marker — positioned at the geometric midpoint between black/white
-    let mid_frac = state.levels_black + (state.levels_white - state.levels_black) * 0.5;
+    let mid_frac =
+        state.tools.levels_black + (state.tools.levels_white - state.tools.levels_black) * 0.5;
     let mx = rect.left() + mid_frac * width;
     painter.line_segment(
         [egui::pos2(mx, rect.top()), egui::pos2(mx, rect.bottom())],

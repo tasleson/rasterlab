@@ -113,8 +113,8 @@ impl eframe::App for RasterLabApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_dialogs(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
-        if self.state.lut_dialog_requested {
-            self.state.lut_dialog_requested = false;
+        if self.state.tools.lut_dialog_requested {
+            self.state.tools.lut_dialog_requested = false;
             self.chooser.load_lut(&ctx);
         }
 
