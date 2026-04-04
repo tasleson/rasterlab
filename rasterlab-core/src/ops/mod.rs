@@ -13,6 +13,7 @@ pub mod grain;
 pub mod heal;
 pub mod highlights_shadows;
 pub mod histogram;
+mod hsl;
 pub mod hsl_panel;
 pub mod hue_shift;
 pub mod levels;
