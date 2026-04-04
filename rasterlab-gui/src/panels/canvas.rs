@@ -801,6 +801,7 @@ impl CanvasState {
                 let dy = p1.y - p0.y;
                 let line_angle = dy.atan2(dx).to_degrees();
                 state.tools.straighten_angle = -line_angle;
+                state.update_straighten_preview();
             }
 
             // ── Grid overlay ─────────────────────────────────────────────────

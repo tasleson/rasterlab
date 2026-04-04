@@ -160,6 +160,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 {
                     state.cancel_bw_preview();
                 }
+                if ui.button("Reset").clicked() {
+                    state.reset_bw();
+                }
             });
         });
     if resp.header_response.clicked() {
@@ -177,21 +180,39 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("blur")
         .default_open(default_open)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Radius (σ):");
-                ui.add(
-                    DragValue::new(&mut state.tools.blur_radius)
-                        .speed(0.1)
-                        .range(0.1..=100.0_f32)
-                        .suffix(" px"),
-                );
-            });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Blur"))
-                .clicked()
-            {
-                state.push_blur();
+            let changed = ui
+                .horizontal(|ui| {
+                    ui.label("Radius (σ):");
+                    ui.add(
+                        DragValue::new(&mut state.tools.blur_radius)
+                            .speed(0.1)
+                            .range(0.1..=100.0_f32)
+                            .suffix(" px"),
+                    )
+                    .changed()
+                })
+                .inner;
+            if changed && has_image {
+                state.update_blur_preview();
             }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply Blur"))
+                    .clicked()
+                {
+                    state.push_blur();
+                }
+                if state.tools.blur_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_blur_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_blur();
+                }
+            });
         });
     if resp.header_response.clicked() {
         state
@@ -297,6 +318,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .clicked()
                 {
                     state.cancel_clarity_texture_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_clarity_texture();
                 }
             });
         });
@@ -539,32 +563,52 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("denoise")
         .default_open(default_open)
         .show(ui, |ui| {
+            let mut changed = false;
             egui::Grid::new("denoise_grid")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("Strength:");
-                    ui.add(
-                        DragValue::new(&mut state.tools.denoise_strength)
-                            .speed(0.01)
-                            .range(0.01..=1.0_f32),
-                    );
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.tools.denoise_strength)
+                                .speed(0.01)
+                                .range(0.01..=1.0_f32),
+                        )
+                        .changed();
                     ui.end_row();
                     ui.label("Radius:");
-                    ui.add(
-                        DragValue::new(&mut state.tools.denoise_radius)
-                            .speed(1)
-                            .range(1..=10_u32)
-                            .suffix(" px"),
-                    );
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.tools.denoise_radius)
+                                .speed(1)
+                                .range(1..=10_u32)
+                                .suffix(" px"),
+                        )
+                        .changed();
                     ui.end_row();
                 });
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Denoise"))
-                .clicked()
-            {
-                state.push_denoise();
+            if changed && has_image {
+                state.update_denoise_preview();
             }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply Denoise"))
+                    .clicked()
+                {
+                    state.push_denoise();
+                }
+                if state.tools.denoise_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_denoise_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_denoise();
+                }
+            });
         });
     if resp.header_response.clicked() {
         state
@@ -1107,6 +1151,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     {
                         state.cancel_lut_preview();
                     }
+                    if ui.button("Reset").clicked() {
+                        state.reset_lut();
+                    }
                 });
             } else {
                 ui.label("No LUT loaded.");
@@ -1127,6 +1174,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("noise_reduction")
         .default_open(default_open)
         .show(ui, |ui| {
+            let mut changed = false;
+            let old_method = state.tools.nr_method.clone();
             egui::Grid::new("nr_grid")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
@@ -1150,25 +1199,35 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                             );
                         });
                     ui.end_row();
+                    if state.tools.nr_method != old_method {
+                        changed = true;
+                    }
 
                     ui.label("Luminance:");
-                    ui.add(
-                        egui::Slider::new(&mut state.tools.nr_luma, 0.0..=1.0_f32).show_value(true),
-                    );
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut state.tools.nr_luma, 0.0..=1.0_f32)
+                                .show_value(true),
+                        )
+                        .changed();
                     ui.end_row();
 
                     ui.label("Color:");
-                    ui.add(
-                        egui::Slider::new(&mut state.tools.nr_color, 0.0..=1.0_f32)
-                            .show_value(true),
-                    );
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut state.tools.nr_color, 0.0..=1.0_f32)
+                                .show_value(true),
+                        )
+                        .changed();
                     ui.end_row();
 
                     ui.label("Detail:");
-                    ui.add(
-                        egui::Slider::new(&mut state.tools.nr_detail, 0.0..=1.0_f32)
-                            .show_value(true),
-                    );
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut state.tools.nr_detail, 0.0..=1.0_f32)
+                                .show_value(true),
+                        )
+                        .changed();
                     ui.end_row();
                 });
 
@@ -1180,12 +1239,27 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 );
             }
 
-            if ui
-                .add_enabled(has_image, egui::Button::new("Apply Noise Reduction"))
-                .clicked()
-            {
-                state.push_noise_reduction();
+            if changed && has_image {
+                state.update_nr_preview();
             }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply Noise Reduction"))
+                    .clicked()
+                {
+                    state.push_noise_reduction();
+                }
+                if state.tools.nr_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_nr_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_noise_reduction();
+                }
+            });
         });
     if resp.header_response.clicked() {
         state
@@ -1208,6 +1282,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 ("Bottom-right", 2),
                 ("Bottom-left", 3),
             ];
+            let mut changed = false;
             egui::Grid::new("perspective_grid")
                 .num_columns(3)
                 .spacing([8.0, 4.0])
@@ -1218,25 +1293,39 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.end_row();
                     for (label, i) in corner_labels {
                         ui.label(label);
-                        ui.add(
-                            DragValue::new(&mut state.tools.perspective_corners[i][0])
-                                .speed(0.005)
-                                .range(-1.0..=1.0_f32),
-                        );
-                        ui.add(
-                            DragValue::new(&mut state.tools.perspective_corners[i][1])
-                                .speed(0.005)
-                                .range(-1.0..=1.0_f32),
-                        );
+                        changed |= ui
+                            .add(
+                                DragValue::new(&mut state.tools.perspective_corners[i][0])
+                                    .speed(0.005)
+                                    .range(-1.0..=1.0_f32),
+                            )
+                            .changed();
+                        changed |= ui
+                            .add(
+                                DragValue::new(&mut state.tools.perspective_corners[i][1])
+                                    .speed(0.005)
+                                    .range(-1.0..=1.0_f32),
+                            )
+                            .changed();
                         ui.end_row();
                     }
                 });
+            if changed && has_image {
+                state.update_perspective_preview();
+            }
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(has_image, egui::Button::new("Apply"))
                     .clicked()
                 {
                     state.push_perspective();
+                }
+                if state.tools.perspective_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_perspective_preview();
                 }
                 if ui.button("Reset").clicked() {
                     state.reset_perspective();
@@ -1487,14 +1576,17 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("straighten")
         .default_open(default_open)
         .show(ui, |ui| {
-            egui::Grid::new("straighten_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Angle:");
-                    ui.label(format!("{:.2}°", state.tools.straighten_angle));
-                    ui.end_row();
-                });
+            let changed = ui
+                .add(
+                    egui::Slider::new(&mut state.tools.straighten_angle, -45.0..=45.0)
+                        .step_by(0.1)
+                        .text("Angle")
+                        .suffix("°"),
+                )
+                .changed();
+            if changed && has_image {
+                state.update_straighten_preview();
+            }
 
             ui.checkbox(
                 &mut state.tools.straighten_crop,
@@ -1516,16 +1608,24 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 state.tools.straighten_active = !state.tools.straighten_active;
             }
 
-            if ui
-                .add_enabled(
-                    has_image,
-                    egui::Button::new("Apply Straighten")
-                        .min_size(Vec2::new(ui.available_width(), 0.0)),
-                )
-                .clicked()
-            {
-                state.push_straighten();
-            }
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(has_image, egui::Button::new("Apply Straighten"))
+                    .clicked()
+                {
+                    state.push_straighten();
+                }
+                if state.tools.straighten_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_straighten_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_straighten();
+                }
+            });
 
             if state.tools.straighten_active {
                 ui.label(
@@ -1655,6 +1755,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .clicked()
                 {
                     state.cancel_sharpen_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_sharpen();
                 }
             });
         });
@@ -1856,6 +1959,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .clicked()
                 {
                     state.cancel_vignette_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_vignette();
                 }
             });
         });
@@ -2167,6 +2273,13 @@ fn levels_ui(ui: &mut Ui, state: &mut AppState) {
             .clicked()
         {
             state.apply_levels();
+        }
+        if state.tools.levels_preview_active
+            && ui
+                .add_enabled(has_image, egui::Button::new("Cancel"))
+                .clicked()
+        {
+            state.cancel_levels_preview();
         }
         if ui.button("Reset").clicked() {
             state.reset_levels();

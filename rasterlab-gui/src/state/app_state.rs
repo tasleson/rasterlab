@@ -10,8 +10,8 @@ use rasterlab_core::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
         ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HealOp, HealSpot,
         HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LutOp, MaskedOp,
-        NoiseReductionOp, PerspectiveOp, ResizeOp, RotateOp, SaturationOp, SepiaOp, SharpenOp,
-        SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        NoiseReductionOp, NrMethod, PerspectiveOp, ResizeOp, RotateOp, SaturationOp, SepiaOp,
+        SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -509,10 +509,29 @@ impl AppState {
         });
     }
 
+    pub fn update_straighten_preview(&mut self) {
+        self.tools.straighten_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_straighten_preview(&mut self) {
+        if self.tools.straighten_preview_active {
+            self.tools.straighten_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn reset_straighten(&mut self) {
+        self.tools.straighten_angle = 0.0;
+        self.tools.straighten_active = false;
+        self.cancel_straighten_preview();
+    }
+
     pub fn push_straighten(&mut self) {
         if self.tools.straighten_angle.abs() < 0.001 {
             return;
         }
+        self.tools.straighten_preview_active = false;
         let angle = self.tools.straighten_angle;
         self.tools.straighten_angle = 0.0;
         self.tools.straighten_active = false;
@@ -579,6 +598,11 @@ impl AppState {
         }
     }
 
+    pub fn reset_sharpen(&mut self) {
+        self.tools.sharpen_strength = 1.0;
+        self.cancel_sharpen_preview();
+    }
+
     pub fn push_clarity_texture(&mut self) {
         self.tools.clarity_preview_active = false;
         self.push_op(Box::new(ClarityTextureOp::new(
@@ -597,6 +621,12 @@ impl AppState {
             self.tools.clarity_preview_active = false;
             self.request_render();
         }
+    }
+
+    pub fn reset_clarity_texture(&mut self) {
+        self.tools.clarity = 0.0;
+        self.tools.texture = 0.0;
+        self.cancel_clarity_texture_preview();
     }
 
     pub fn push_flip_horizontal(&mut self) {
@@ -705,6 +735,13 @@ impl AppState {
         )));
     }
 
+    pub fn reset_vignette(&mut self) {
+        self.tools.vignette_strength = 0.5;
+        self.tools.vignette_radius = 0.65;
+        self.tools.vignette_feather = 0.5;
+        self.cancel_vignette_preview();
+    }
+
     pub fn update_vibrance_preview(&mut self) {
         self.tools.vibrance_preview_active = true;
         self.request_render();
@@ -792,18 +829,68 @@ impl AppState {
         )));
     }
 
+    pub fn update_blur_preview(&mut self) {
+        self.tools.blur_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_blur_preview(&mut self) {
+        if self.tools.blur_preview_active {
+            self.tools.blur_preview_active = false;
+            self.request_render();
+        }
+    }
+
     pub fn push_blur(&mut self) {
+        self.tools.blur_preview_active = false;
         self.push_op(Box::new(BlurOp::new(self.tools.blur_radius)));
     }
 
+    pub fn reset_blur(&mut self) {
+        self.tools.blur_radius = 2.0;
+        self.cancel_blur_preview();
+    }
+
+    pub fn update_denoise_preview(&mut self) {
+        self.tools.denoise_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_denoise_preview(&mut self) {
+        if self.tools.denoise_preview_active {
+            self.tools.denoise_preview_active = false;
+            self.request_render();
+        }
+    }
+
     pub fn push_denoise(&mut self) {
+        self.tools.denoise_preview_active = false;
         self.push_op(Box::new(DenoiseOp::new(
             self.tools.denoise_strength,
             self.tools.denoise_radius,
         )));
     }
 
+    pub fn reset_denoise(&mut self) {
+        self.tools.denoise_strength = 0.1;
+        self.tools.denoise_radius = 3;
+        self.cancel_denoise_preview();
+    }
+
+    pub fn update_nr_preview(&mut self) {
+        self.tools.nr_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_nr_preview(&mut self) {
+        if self.tools.nr_preview_active {
+            self.tools.nr_preview_active = false;
+            self.request_render();
+        }
+    }
+
     pub fn push_noise_reduction(&mut self) {
+        self.tools.nr_preview_active = false;
         self.push_op(Box::new(NoiseReductionOp {
             method: self.tools.nr_method.clone(),
             luma_strength: self.tools.nr_luma,
@@ -812,13 +899,35 @@ impl AppState {
         }));
     }
 
+    pub fn reset_noise_reduction(&mut self) {
+        self.tools.nr_method = NrMethod::Wavelet;
+        self.tools.nr_luma = 0.3;
+        self.tools.nr_color = 0.5;
+        self.tools.nr_detail = 0.5;
+        self.cancel_nr_preview();
+    }
+
+    pub fn update_perspective_preview(&mut self) {
+        self.tools.perspective_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_perspective_preview(&mut self) {
+        if self.tools.perspective_preview_active {
+            self.tools.perspective_preview_active = false;
+            self.request_render();
+        }
+    }
+
     pub fn push_perspective(&mut self) {
+        self.tools.perspective_preview_active = false;
         self.push_op(Box::new(PerspectiveOp::new(self.tools.perspective_corners)));
         self.tools.perspective_corners = [[0.0; 2]; 4];
     }
 
     pub fn reset_perspective(&mut self) {
         self.tools.perspective_corners = [[0.0; 2]; 4];
+        self.cancel_perspective_preview();
     }
 
     pub fn push_color_space(&mut self) {
@@ -871,6 +980,11 @@ impl AppState {
             self.tools.lut_preview_active = false;
             self.request_render();
         }
+    }
+
+    pub fn reset_lut(&mut self) {
+        self.tools.lut_strength = 1.0;
+        self.cancel_lut_preview();
     }
 
     pub fn update_hue_preview(&mut self) {
@@ -1086,7 +1200,14 @@ impl AppState {
         self.tools.levels_white = 1.0;
     }
 
-    /// Discard the live levels preview without committing.
+    pub fn cancel_levels_preview(&mut self) {
+        if self.tools.levels_preview_active {
+            self.tools.levels_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    /// Discard the live levels preview and reset sliders.
     pub fn reset_levels(&mut self) {
         self.tools.levels_black = 0.0;
         self.tools.levels_mid = 1.0;
@@ -1116,6 +1237,14 @@ impl AppState {
         self.tools.bw_preview_active = false;
         let op = self.tools.make_bw_op();
         self.push_op(op);
+    }
+
+    pub fn reset_bw(&mut self) {
+        self.tools.bw_mode_idx = 0;
+        self.tools.bw_mixer_r = 0.2126;
+        self.tools.bw_mixer_g = 0.7152;
+        self.tools.bw_mixer_b = 0.0722;
+        self.cancel_bw_preview();
     }
 
     pub fn remove_op(&mut self, index: usize) {

@@ -1,10 +1,10 @@
 use rasterlab_core::{
     ops::{
-        BlackAndWhiteOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
-        ColorSpaceConversion, CurvesOp, FauxHdrOp, GrainOp, HealSpot, HighlightsShadowsOp,
-        HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp, MaskShape, NrMethod, RadialMask,
-        ResampleMode, SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
-        WhiteBalanceOp,
+        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
+        ColorSpaceConversion, CurvesOp, DenoiseOp, FauxHdrOp, GrainOp, HealSpot,
+        HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp, MaskShape,
+        NoiseReductionOp, NrMethod, PerspectiveOp, RadialMask, ResampleMode, RotateOp,
+        SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
@@ -36,6 +36,7 @@ pub struct ToolState {
     pub straighten_active: bool,
     /// When true, automatically crop after straighten to remove exposed corners.
     pub straighten_crop: bool,
+    pub straighten_preview_active: bool,
 
     // ── Sharpen ───────────────────────────────────────────────────────────
     pub sharpen_strength: f32,
@@ -102,16 +103,19 @@ pub struct ToolState {
 
     // ── Blur ──────────────────────────────────────────────────────────────
     pub blur_radius: f32,
+    pub blur_preview_active: bool,
 
     // ── Denoise ───────────────────────────────────────────────────────────
     pub denoise_strength: f32,
     pub denoise_radius: u32,
+    pub denoise_preview_active: bool,
 
     // ── Noise Reduction (advanced) ────────────────────────────────────────
     pub nr_method: NrMethod,
     pub nr_luma: f32,
     pub nr_color: f32,
     pub nr_detail: f32,
+    pub nr_preview_active: bool,
 
     // ── Heal / Clone stamp ────────────────────────────────────────────────
     /// Whether the heal tool is active (canvas interaction mode).
@@ -125,6 +129,7 @@ pub struct ToolState {
     /// Corner offsets `[[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]`
     /// as fractions of image width/height in `[-1, 1]`.
     pub perspective_corners: [[f32; 2]; 4],
+    pub perspective_preview_active: bool,
 
     // ── Color Space Conversion ────────────────────────────────────────────
     pub color_space_conversion: ColorSpaceConversion,
@@ -223,6 +228,7 @@ impl ToolState {
             straighten_angle: 0.0,
             straighten_active: false,
             straighten_crop: true,
+            straighten_preview_active: false,
             sharpen_strength: 1.0,
             sharpen_preview_active: false,
             clarity: 0.0,
@@ -256,16 +262,20 @@ impl ToolState {
             resize_mode: ResampleMode::Bicubic,
             resize_lock_aspect: true,
             blur_radius: 2.0,
+            blur_preview_active: false,
             denoise_strength: 0.1,
             denoise_radius: 3,
+            denoise_preview_active: false,
             nr_method: NrMethod::Wavelet,
             nr_luma: 0.3,
             nr_color: 0.5,
             nr_detail: 0.5,
+            nr_preview_active: false,
             heal_active: false,
             heal_radius: 30,
             heal_spots: Vec::new(),
             perspective_corners: [[0.0; 2]; 4],
+            perspective_preview_active: false,
             color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,
             lut_op: None,
             lut_strength: 1.0,
@@ -341,6 +351,11 @@ impl ToolState {
             || self.vibrance_preview_active
             || self.cb_preview_active
             || self.hsl_preview_active
+            || self.blur_preview_active
+            || self.denoise_preview_active
+            || self.nr_preview_active
+            || self.straighten_preview_active
+            || self.perspective_preview_active
     }
 
     /// Build the preview operation from current tool state, if any preview is
@@ -426,6 +441,24 @@ impl ToolState {
                 self.hsl_sat,
                 self.hsl_lum,
             )))
+        } else if self.blur_preview_active {
+            Some(Box::new(BlurOp::new(self.blur_radius)))
+        } else if self.denoise_preview_active {
+            Some(Box::new(DenoiseOp::new(
+                self.denoise_strength,
+                self.denoise_radius,
+            )))
+        } else if self.nr_preview_active {
+            Some(Box::new(NoiseReductionOp {
+                method: self.nr_method.clone(),
+                luma_strength: self.nr_luma,
+                color_strength: self.nr_color,
+                detail_preservation: self.nr_detail,
+            }))
+        } else if self.straighten_preview_active {
+            Some(Box::new(RotateOp::arbitrary(self.straighten_angle)))
+        } else if self.perspective_preview_active {
+            Some(Box::new(PerspectiveOp::new(self.perspective_corners)))
         } else {
             None
         }
@@ -458,6 +491,11 @@ impl ToolState {
         self.grain_preview_active = false;
         self.cb_preview_active = false;
         self.hsl_preview_active = false;
+        self.blur_preview_active = false;
+        self.denoise_preview_active = false;
+        self.nr_preview_active = false;
+        self.straighten_preview_active = false;
+        self.perspective_preview_active = false;
     }
 
     /// Build a `MaskShape` from the current mask UI state, or `None` if masking
