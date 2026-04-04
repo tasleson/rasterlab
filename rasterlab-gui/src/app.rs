@@ -16,6 +16,11 @@ pub struct RasterLabApp {
     #[cfg(not(target_arch = "wasm32"))]
     chooser: FileChooser,
     about_open: bool,
+    /// True while the "unsaved changes on exit" confirmation dialog is shown.
+    exit_confirm_open: bool,
+    /// Set to true once the user has confirmed discarding unsaved changes,
+    /// so the next close request is allowed through without re-prompting.
+    allow_close: bool,
 }
 
 impl RasterLabApp {
@@ -40,6 +45,8 @@ impl RasterLabApp {
             #[cfg(not(target_arch = "wasm32"))]
             chooser: FileChooser::new(use_native),
             about_open: false,
+            exit_confirm_open: false,
+            allow_close: false,
         }
     }
 
@@ -105,10 +112,17 @@ impl eframe::App for RasterLabApp {
         // passing `ui` to panel builders (both need access simultaneously).
         let ctx = ui.ctx().clone();
 
-        // Save prefs when the window close is requested (more reliable than
-        // on_exit alone, which may not fire on all platforms/close paths).
+        // Intercept close requests: if there are unsaved changes and the user
+        // hasn't already confirmed, cancel the close and show a confirmation
+        // dialog.  Also save prefs on the real close path — this is more
+        // reliable than `on_exit` alone, which may not fire on all platforms.
         if ctx.input(|i| i.viewport().close_requested()) {
-            self.state.prefs.save();
+            if self.state.is_dirty && !self.allow_close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.exit_confirm_open = true;
+            } else {
+                self.state.prefs.save();
+            }
         }
 
         self.state.poll_background();
@@ -347,6 +361,9 @@ impl eframe::App for RasterLabApp {
 
         // ── About dialog ─────────────────────────────────────────────────
         self.show_about_window(&ctx);
+
+        // ── Unsaved-changes-on-exit confirmation ─────────────────────────
+        self.show_exit_confirm_window(&ctx);
     }
 }
 
@@ -463,6 +480,39 @@ impl RasterLabApp {
             });
         if !open {
             self.about_open = false;
+        }
+    }
+
+    fn show_exit_confirm_window(&mut self, ctx: &Context) {
+        if !self.exit_confirm_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(
+                    "You have unsaved changes that haven't been saved as a \
+                     project or exported.",
+                );
+                ui.label("Are you sure you want to quit?");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.exit_confirm_open = false;
+                    }
+                    if ui.button("Discard & Quit").clicked() {
+                        self.exit_confirm_open = false;
+                        self.allow_close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
+        if !open {
+            self.exit_confirm_open = false;
         }
     }
 }

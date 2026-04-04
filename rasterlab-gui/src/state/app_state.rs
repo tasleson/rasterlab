@@ -415,6 +415,10 @@ impl AppState {
                     self.status = format!("Write failed: {}", e);
                 } else {
                     self.status = format!("Saved {} bytes → {}", bytes.len(), path.display());
+                    // Exporting a rendered image counts as preserving the
+                    // user's work, so clear the dirty flag — this keeps the
+                    // exit confirmation from firing after a successful export.
+                    self.is_dirty = false;
                 }
             }
             Err(e) => {
