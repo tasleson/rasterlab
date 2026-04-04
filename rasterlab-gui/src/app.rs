@@ -192,6 +192,41 @@ impl eframe::App for RasterLabApp {
                     }
                     #[cfg(not(target_arch = "wasm32"))]
                     {
+                        let current_session = self.state.autosave_session_id;
+                        let autosave_entries = crate::autosave::list_entries()
+                            .into_iter()
+                            // Exclude the currently active session — it isn't "previous" work.
+                            .filter(|e| Some(e.data.started_at) != current_session)
+                            .collect::<Vec<_>>();
+                        ui.add_enabled_ui(!autosave_entries.is_empty(), |ui| {
+                            ui.menu_button("Previous Unsaved Work", |ui| {
+                                for entry in autosave_entries {
+                                    let name = crate::autosave::display_name(&entry.data);
+                                    let label = format!(
+                                        "{}  —  {}",
+                                        name,
+                                        crate::autosave::format_age(entry.data.saved_at),
+                                    );
+                                    let hover = entry
+                                        .data
+                                        .project_path
+                                        .as_deref()
+                                        .unwrap_or(&entry.data.source_path);
+                                    if ui.button(label).on_hover_text(hover).clicked() {
+                                        ui.close_kind(egui::UiKind::Menu);
+                                        self.state.restore_autosave(entry);
+                                    }
+                                }
+                                ui.separator();
+                                if ui.button("Clear All Previous Work").clicked() {
+                                    ui.close_kind(egui::UiKind::Menu);
+                                    crate::autosave::delete_all();
+                                }
+                            });
+                        });
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
                         ui.separator();
                         if ui
                             .add_enabled(

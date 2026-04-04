@@ -129,6 +129,21 @@ pub struct AppState {
     /// as the active preview or as a committed pipeline step).  Drives the
     /// visibility of the NR Cancel button so the user can abort a slow NLM run.
     nr_in_flight: bool,
+
+    // ── Autosave ────────────────────────────────────────────────────────────
+    /// Unix timestamp identifying the current editing session.  Used as the
+    /// autosave filename stem.  Set when a source image is opened; cleared
+    /// when a project is loaded (which has its own save path).
+    pub autosave_session_id: Option<u64>,
+    /// Set to `true` by every pipeline mutation; cleared once the autosave
+    /// has been written.  Checked in `poll_background` each frame.
+    autosave_pending: bool,
+    /// When `Some`, the next `ImageLoaded` message will restore these virtual
+    /// copy states rather than starting a fresh pipeline.
+    autosave_restore: Option<(Vec<rasterlab_core::project::SavedCopy>, usize)>,
+    /// Session ID to reuse when performing an autosave restore, so that the
+    /// original autosave file is correctly cleaned up on project save.
+    autosave_restore_session_id: Option<u64>,
 }
 
 impl AppState {
@@ -162,6 +177,10 @@ impl AppState {
             needs_rerender: false,
             render_start: None,
             nr_in_flight: false,
+            autosave_session_id: None,
+            autosave_pending: false,
+            autosave_restore: None,
+            autosave_restore_session_id: None,
         }
     }
 
@@ -189,11 +208,44 @@ impl AppState {
                     self.is_dirty = false;
                     self.project_created_at = None;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
-                    self.copies = Some(VirtualCopyStore::new(
-                        "Copy 1".into(),
-                        EditPipeline::new(image),
-                    ));
                     self.rename_pending = None;
+
+                    // Determine the session ID: reuse the one from an autosave
+                    // restore (for correct cleanup on save) or mint a fresh one.
+                    self.autosave_session_id = Some(
+                        self.autosave_restore_session_id
+                            .take()
+                            .unwrap_or_else(crate::autosave::unix_now),
+                    );
+                    self.autosave_pending = false;
+
+                    if let Some((saved_copies, saved_active)) = self.autosave_restore.take() {
+                        let image_arc = Arc::new(image);
+                        match VirtualCopyStore::load_from_saved(
+                            Arc::clone(&image_arc),
+                            saved_copies,
+                            saved_active,
+                        ) {
+                            Ok(store) => {
+                                self.copies = Some(store);
+                                self.mark_dirty();
+                            }
+                            Err(e) => {
+                                self.status =
+                                    format!("Warning: could not restore edit stack: {}", e);
+                                self.copies = Some(VirtualCopyStore::new(
+                                    "Copy 1".into(),
+                                    EditPipeline::new_virtual_copy(image_arc),
+                                ));
+                            }
+                        }
+                    } else {
+                        self.copies = Some(VirtualCopyStore::new(
+                            "Copy 1".into(),
+                            EditPipeline::new(image),
+                        ));
+                    }
+
                     self.prefs.push_recent(path);
                     self.prefs.save();
                     self.loading = false;
@@ -219,6 +271,11 @@ impl AppState {
                     self.is_dirty = false;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.rename_pending = None;
+                    // Mint a new autosave session so edits made after opening
+                    // a project are recoverable if the user quits without saving.
+                    // The autosave file is deleted on the next successful save.
+                    self.autosave_session_id = Some(crate::autosave::unix_now());
+                    self.autosave_pending = false;
                     match VirtualCopyStore::load_from_saved(
                         Arc::new(image),
                         rlab.copies,
@@ -310,6 +367,7 @@ impl AppState {
                 }
             }
         }
+        self.maybe_write_autosave();
     }
 
     // -----------------------------------------------------------------------
@@ -499,6 +557,11 @@ impl AppState {
                 self.project_created_at = Some(created_at);
                 self.project_path = Some(path.clone());
                 self.is_dirty = false;
+                self.autosave_pending = false;
+                // Clean up the autosave file now that the work is safely saved.
+                if let Some(session_id) = self.autosave_session_id.take() {
+                    crate::autosave::delete(session_id);
+                }
                 self.status = format!("Saved → {}", path.display());
             }
             Err(e) => {
@@ -584,7 +647,7 @@ impl AppState {
             }
         }
         if self.copies.is_some() {
-            self.is_dirty = true;
+            self.mark_dirty();
             self.request_render();
         }
     }
@@ -927,7 +990,7 @@ impl AppState {
                 && p.ops()[p.cursor() - 1].operation.name() == "noise_reduction"
             {
                 p.undo();
-                self.is_dirty = true;
+                self.mark_dirty();
             }
         }
         if had_preview {
@@ -1306,35 +1369,83 @@ impl AppState {
 
     pub fn remove_op(&mut self, index: usize) {
         if self.pipeline_mut().is_some_and(|p| p.remove_op(index)) {
+            self.mark_dirty();
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn reorder_op(&mut self, from: usize, to: usize) {
         if self.pipeline_mut().is_some_and(|p| p.reorder_op(from, to)) {
+            self.mark_dirty();
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn toggle_op(&mut self, index: usize) {
         if self.pipeline_mut().is_some_and(|p| p.toggle_op(index)) {
+            self.mark_dirty();
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn undo(&mut self) {
         if self.pipeline_mut().is_some_and(|p| p.undo()) {
-            self.is_dirty = true;
+            self.mark_dirty();
             self.cancel_all_previews();
             self.request_render();
         }
     }
     pub fn redo(&mut self) {
         if self.pipeline_mut().is_some_and(|p| p.redo()) {
-            self.is_dirty = true;
+            self.mark_dirty();
             self.cancel_all_previews();
             self.request_render();
         }
+    }
+
+    /// Mark the project as having unsaved changes and schedule an autosave.
+    fn mark_dirty(&mut self) {
+        self.is_dirty = true;
+        self.autosave_pending = true;
+    }
+
+    /// Write the autosave file if a change is pending.  Called every frame from
+    /// `poll_background`; is a no-op when nothing has changed.
+    fn maybe_write_autosave(&mut self) {
+        if !self.autosave_pending {
+            return;
+        }
+        let Some(session_id) = self.autosave_session_id else {
+            return;
+        };
+        let Some(source_path) = self.last_path.clone() else {
+            return;
+        };
+        let Some(store) = &self.copies else { return };
+        let Ok((copies, active)) = store.save_states() else {
+            return;
+        };
+        crate::autosave::write(
+            session_id,
+            &source_path,
+            self.project_path.as_deref(),
+            &copies,
+            active,
+        );
+        self.autosave_pending = false;
+    }
+
+    /// Begin restoring an autosave session.
+    ///
+    /// Stores the pipeline data from `entry` and opens the source image.
+    /// When the image finishes loading the pipeline state will be applied
+    /// automatically.  If the source file no longer exists, the error will
+    /// appear in the status bar.
+    pub fn restore_autosave(&mut self, entry: crate::autosave::AutosaveEntry) {
+        let source_path = std::path::PathBuf::from(&entry.data.source_path);
+        self.autosave_restore = Some((entry.data.copies, entry.data.active_copy));
+        self.autosave_restore_session_id = Some(entry.data.started_at);
+        self.open_file(source_path);
     }
 
     fn push_op(&mut self, op: Box<dyn Operation>) {
@@ -1346,7 +1457,7 @@ impl AppState {
         self.cancel_all_previews();
         if let Some(store) = &mut self.copies {
             store.active_pipeline_mut().push_op(op);
-            self.is_dirty = true;
+            self.mark_dirty();
             self.request_render();
         }
     }
@@ -1365,7 +1476,7 @@ impl AppState {
             p.push_op(Box::new(BrightnessContrastOp::new(0.03, 0.08)));
             p.push_op(Box::new(VignetteOp::new(0.52, 0.28, 1.0)));
         }
-        self.is_dirty = true;
+        self.mark_dirty();
         self.request_render();
     }
 
@@ -1384,7 +1495,7 @@ impl AppState {
             p.push_op(Box::new(SaturationOp::new(1.1)));
             p.push_op(Box::new(SharpenOp::new(0.5)));
         }
-        self.is_dirty = true;
+        self.mark_dirty();
         self.request_render();
     }
 
@@ -1580,7 +1691,7 @@ impl AppState {
             store.add_copy(format!("Copy {}", n));
         }
         self.cancel_all_previews();
-        self.is_dirty = true;
+        self.mark_dirty();
         self.request_render();
     }
 
@@ -1594,7 +1705,7 @@ impl AppState {
             }
         }
         self.cancel_all_previews();
-        self.is_dirty = true;
+        self.mark_dirty();
         self.request_render();
     }
 
@@ -1615,7 +1726,7 @@ impl AppState {
         let removed = self.copies.as_mut().is_some_and(|s| s.remove(index));
         if removed {
             self.cancel_all_previews();
-            self.is_dirty = true;
+            self.mark_dirty();
             self.request_render();
         }
     }
@@ -1625,7 +1736,7 @@ impl AppState {
         if let Some(store) = &mut self.copies {
             store.rename(index, name);
         }
-        self.is_dirty = true;
+        self.mark_dirty();
     }
 }
 
