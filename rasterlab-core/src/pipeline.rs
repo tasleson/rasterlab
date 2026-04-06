@@ -60,6 +60,9 @@ pub struct PipelineState {
 /// The generation counter lets the GUI render thread detect whether the cache
 /// was dirtied between the moment it took a snapshot and the moment it tries
 /// to write new entries back, preventing stale data from being stored.
+/// Maximum number of undo snapshots retained.
+const MAX_UNDO: usize = 100;
+
 pub struct EditPipeline {
     source: Arc<Image>,
     ops: Vec<EditEntry>,
@@ -71,6 +74,11 @@ pub struct EditPipeline {
     /// reordered, or toggled so the GUI can detect when the "before" texture
     /// needs to be rebuilt for split view.
     geo_gen: u64,
+    /// Snapshot-based undo history.  Each entry is a serialised pipeline state
+    /// captured immediately before a mutation.
+    undo_stack: Vec<PipelineState>,
+    /// Forward history populated by `undo()`; cleared by any new mutation.
+    redo_stack: Vec<PipelineState>,
 }
 
 impl EditPipeline {
@@ -83,6 +91,8 @@ impl EditPipeline {
             next_id: 1,
             cache: RenderCache::new(),
             geo_gen: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -99,6 +109,8 @@ impl EditPipeline {
             next_id: 1,
             cache: RenderCache::new(),
             geo_gen: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -106,9 +118,13 @@ impl EditPipeline {
     // Mutation
     // -----------------------------------------------------------------------
 
-    /// Append an operation after the current cursor, truncating any redo history.
+    /// Append an operation after the current cursor.
+    ///
+    /// Saves an undo snapshot first, then truncates any redo history beyond the
+    /// cursor and appends the new entry.
     pub fn push_op(&mut self, operation: Box<dyn Operation>) {
-        // Discard redo history and its cached images.
+        self.save_snapshot();
+        // Discard ops and cache entries beyond the cursor.
         self.ops.truncate(self.cursor);
         self.cache.truncate(self.cursor);
         let id = self.next_id;
@@ -131,6 +147,7 @@ impl EditPipeline {
         if index >= self.ops.len() {
             return false;
         }
+        self.save_snapshot();
         if self.ops[index].operation.is_geometric() {
             self.geo_gen += 1;
         }
@@ -147,6 +164,7 @@ impl EditPipeline {
         if from >= self.ops.len() || to >= self.ops.len() {
             return false;
         }
+        self.save_snapshot();
         if self.ops[from].operation.is_geometric() || self.ops[to].operation.is_geometric() {
             self.geo_gen += 1;
         }
@@ -158,45 +176,47 @@ impl EditPipeline {
 
     /// Toggle the `enabled` flag of the operation at `index`.
     pub fn toggle_op(&mut self, index: usize) -> bool {
-        if let Some(entry) = self.ops.get_mut(index) {
-            if entry.operation.is_geometric() {
-                self.geo_gen += 1;
-            }
-            entry.enabled = !entry.enabled;
-            if index < self.cursor {
-                self.invalidate_steps_from(index);
-            }
-            true
-        } else {
-            false
+        if index >= self.ops.len() {
+            return false;
         }
+        self.save_snapshot();
+        let entry = &mut self.ops[index];
+        if entry.operation.is_geometric() {
+            self.geo_gen += 1;
+        }
+        entry.enabled = !entry.enabled;
+        if index < self.cursor {
+            self.invalidate_steps_from(index);
+        }
+        true
     }
 
     // -----------------------------------------------------------------------
     // Undo / Redo
     // -----------------------------------------------------------------------
 
-    /// Move the cursor one step back (undo).  Returns `false` if at the beginning.
-    ///
-    /// The step cache is **not** invalidated — cached images before the new
-    /// cursor remain valid and will be reused on the next render.
+    /// Restore the previous pipeline state.  Returns `false` if history is empty.
     pub fn undo(&mut self) -> bool {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            true
-        } else {
-            false
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return false;
+        };
+        if let Ok(current) = self.save_state() {
+            self.redo_stack.push(current);
         }
+        self.load_state_internal(snapshot);
+        true
     }
 
-    /// Move the cursor one step forward (redo).  Returns `false` if at the end.
+    /// Re-apply the next pipeline state.  Returns `false` if there is nothing to redo.
     pub fn redo(&mut self) -> bool {
-        if self.cursor < self.ops.len() {
-            self.cursor += 1;
-            true
-        } else {
-            false
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return false;
+        };
+        if let Ok(current) = self.save_state() {
+            self.undo_stack.push(current);
         }
+        self.load_state_internal(snapshot);
+        true
     }
 
     // -----------------------------------------------------------------------
@@ -348,17 +368,12 @@ impl EditPipeline {
     }
 
     /// Replace the current pipeline contents with a deserialised state.
+    ///
+    /// Clears the undo/redo history — used when loading a saved project.
     pub fn load_state(&mut self, state: PipelineState) -> RasterResult<()> {
-        let entries: Vec<EditEntry> = state
-            .entries
-            .into_iter()
-            .map(|v| {
-                serde_json::from_value(v).map_err(|e| RasterError::Serialization(e.to_string()))
-            })
-            .collect::<RasterResult<Vec<_>>>()?;
-        self.ops = entries;
-        self.cursor = state.cursor.min(self.ops.len());
-        self.cache.clear();
+        self.load_state_internal(state);
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         Ok(())
     }
 
@@ -377,10 +392,10 @@ impl EditPipeline {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.cursor > 0
+        !self.undo_stack.is_empty()
     }
     pub fn can_redo(&self) -> bool {
-        self.cursor < self.ops.len()
+        !self.redo_stack.is_empty()
     }
 
     /// Generation counter that increments whenever a geometric op (rotate, flip,
@@ -424,5 +439,39 @@ impl EditPipeline {
     /// generation counter so in-flight renders know their data is stale.
     fn invalidate_steps_from(&mut self, op_index: usize) {
         self.cache.invalidate_from(op_index);
+    }
+
+    /// Serialise current state onto the undo stack and clear the redo stack.
+    ///
+    /// Called at the start of every mutation so the state before the change can
+    /// be restored.  Silently skips the snapshot if serialisation fails (the
+    /// operation still proceeds, undo for that step just won't be available).
+    /// The stack is capped at `MAX_UNDO` entries; the oldest entry is dropped
+    /// when the cap is exceeded.
+    fn save_snapshot(&mut self) {
+        if let Ok(state) = self.save_state() {
+            self.redo_stack.clear();
+            self.undo_stack.push(state);
+            if self.undo_stack.len() > MAX_UNDO {
+                self.undo_stack.remove(0);
+            }
+        }
+    }
+
+    /// Deserialise `state` into the pipeline.  Does not touch the undo/redo stacks.
+    ///
+    /// Silently drops entries that fail to deserialise (corrupt snapshots would
+    /// otherwise make undo crash); in practice snapshots are always well-formed
+    /// because they were just serialised from live data.
+    fn load_state_internal(&mut self, state: PipelineState) {
+        let new_cursor = state.cursor;
+        let entries: Vec<EditEntry> = state
+            .entries
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
+        self.ops = entries;
+        self.cursor = new_cursor.min(self.ops.len());
+        self.cache.clear();
     }
 }
