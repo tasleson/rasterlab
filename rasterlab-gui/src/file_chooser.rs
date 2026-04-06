@@ -63,6 +63,7 @@ impl FileChooser {
             use_native,
             open_dlg: FileDialog::new()
                 .title("Open Image or Project")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .add_file_filter_extensions(
                     "All supported",
                     vec!["rlab", "jpg", "jpeg", "png", "nef"],
@@ -74,18 +75,22 @@ impl FileChooser {
                 .add_file_filter_extensions("NEF (Nikon RAW)", vec!["nef"]),
             export_dlg: FileDialog::new()
                 .title("Export Image")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
                 .add_file_filter_extensions("PNG", vec!["png"]),
             save_project_dlg: FileDialog::new()
                 .title("Save Project")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .add_file_filter_extensions("RasterLab Project", vec!["rlab"])
                 .default_file_name("project.rlab"),
             export_stack_dlg: FileDialog::new()
                 .title("Export Edit Stack")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .add_file_filter_extensions("JSON", vec!["json"])
                 .default_file_name("edit_stack.json"),
             lut_dlg: FileDialog::new()
                 .title("Load LUT")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .add_file_filter_extensions("CUBE LUT", vec!["cube"]),
             pending: None,
             rfd_rx: None,
