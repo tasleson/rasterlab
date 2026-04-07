@@ -38,6 +38,8 @@ pub struct RasterLabApp {
     /// The action to execute once the user confirms the open-discard dialog.
     #[cfg(not(target_arch = "wasm32"))]
     pending_open: Option<PendingOpen>,
+    /// The last title sent to the window; used to avoid redundant viewport commands.
+    last_title: String,
 }
 
 impl RasterLabApp {
@@ -72,6 +74,7 @@ impl RasterLabApp {
             open_confirm_open: false,
             #[cfg(not(target_arch = "wasm32"))]
             pending_open: None,
+            last_title: String::new(),
         }
     }
 
@@ -208,7 +211,10 @@ impl eframe::App for RasterLabApp {
                 }
                 None => "RasterLab".to_string(),
             };
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+            if title != self.last_title {
+                self.last_title = title.clone();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+            }
         }
 
         // ── Menu bar ─────────────────────────────────────────────────────
