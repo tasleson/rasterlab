@@ -51,6 +51,10 @@ impl RasterLabApp {
             o.theme_preference = state.prefs.theme.to_egui();
             o.fallback_theme = egui::Theme::Light;
         });
+        // Apply the stored UI scale override (if any).
+        if let Some(ppp) = state.prefs.ui_scale {
+            cc.egui_ctx.set_pixels_per_point(ppp);
+        }
         if let Some(path) = initial_file {
             state.open_file(path);
         }
@@ -358,6 +362,36 @@ impl eframe::App for RasterLabApp {
                             if ui.selectable_label(current == pref, label).clicked() {
                                 self.state.prefs.theme = pref;
                                 ctx.options_mut(|o| o.theme_preference = pref.to_egui());
+                                self.state.prefs.save();
+                                ui.close_kind(egui::UiKind::Menu);
+                            }
+                        }
+                    });
+                    ui.menu_button("UI Scale", |ui| {
+                        let current = self.state.prefs.ui_scale;
+                        if ui
+                            .selectable_label(current.is_none(), "Auto (system DPI)")
+                            .clicked()
+                        {
+                            self.state.prefs.ui_scale = None;
+                            ctx.set_zoom_factor(1.0);
+                            self.state.prefs.save();
+                            ui.close_kind(egui::UiKind::Menu);
+                        }
+                        for (label, ppp) in [
+                            ("75%", 0.75_f32),
+                            ("100%", 1.00_f32),
+                            ("125%", 1.25_f32),
+                            ("150%", 1.50_f32),
+                            ("175%", 1.75_f32),
+                            ("200%", 2.00_f32),
+                            ("250%", 2.50_f32),
+                            ("300%", 3.00_f32),
+                        ] {
+                            let selected = current.is_some_and(|v| (v - ppp).abs() < 0.01);
+                            if ui.selectable_label(selected, label).clicked() {
+                                self.state.prefs.ui_scale = Some(ppp);
+                                ctx.set_pixels_per_point(ppp);
                                 self.state.prefs.save();
                                 ui.close_kind(egui::UiKind::Menu);
                             }

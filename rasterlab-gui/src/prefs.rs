@@ -54,6 +54,11 @@ pub struct Prefs {
     /// Most-recently-opened files, newest first.  Capped at [`MAX_RECENT`].
     #[serde(default)]
     pub recent_files: Vec<PathBuf>,
+    /// UI scale override (pixels-per-point).  `None` means follow the OS/
+    /// display DPI automatically.  Stored values are restricted to the set
+    /// [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0].
+    #[serde(default)]
+    pub ui_scale: Option<f32>,
 }
 
 fn default_true() -> bool {
