@@ -209,10 +209,12 @@ impl CanvasState {
 
         let (resp, painter) = ui.allocate_painter(canvas_size, egui::Sense::click_and_drag());
 
-        // ── Middle-mouse pan + Ctrl+scroll-wheel zoom ────────────────────────
+        // ── Middle-mouse / right-mouse pan + Ctrl+scroll-wheel zoom ─────────
         // In egui 0.34 Ctrl+scroll is translated into zoom_delta() (not smooth_scroll_delta).
         ui.input(|i| {
-            if i.pointer.button_down(egui::PointerButton::Middle) {
+            if i.pointer.button_down(egui::PointerButton::Middle)
+                || i.pointer.button_down(egui::PointerButton::Secondary)
+            {
                 self.pan_offset += i.pointer.delta();
             }
             let zoom_factor = i.zoom_delta();
@@ -234,7 +236,8 @@ impl CanvasState {
 
         let (middle_down, ctrl_held, over_canvas) = ui.input(|i| {
             (
-                i.pointer.button_down(egui::PointerButton::Middle),
+                i.pointer.button_down(egui::PointerButton::Middle)
+                    || i.pointer.button_down(egui::PointerButton::Secondary),
                 i.modifiers.ctrl,
                 i.pointer
                     .hover_pos()
