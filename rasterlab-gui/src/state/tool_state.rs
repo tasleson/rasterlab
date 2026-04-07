@@ -1,7 +1,7 @@
 use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
-        ColorSpaceConversion, CurvesOp, DenoiseOp, FauxHdrOp, GrainOp, HealSpot,
+        ColorSpaceConversion, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HealSpot,
         HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp, MaskShape,
         NoiseReductionOp, NrMethod, PerspectiveOp, RadialMask, ResampleMode, RotateOp,
         SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
@@ -26,8 +26,14 @@ pub struct ToolState {
     /// Custom ratio (width / height), only used when crop_aspect_idx == 6.
     pub crop_custom_ratio: f32,
 
-    // ── Rotate ────────────────────────────────────────────────────────────
+    // ── Rotate / Flip ─────────────────────────────────────────────────────
     pub rotate_deg: f32,
+    pub rotate_preview_active: bool,
+    /// Pending horizontal flip waiting for Apply.
+    pub flip_h_pending: bool,
+    /// Pending vertical flip waiting for Apply.
+    pub flip_v_pending: bool,
+    pub flip_preview_active: bool,
 
     // ── Straighten ────────────────────────────────────────────────────────
     /// Angle in degrees for the straighten tool, range [-45, 45].
@@ -225,6 +231,10 @@ impl ToolState {
             crop_aspect_idx: 0,
             crop_custom_ratio: 1.5,
             rotate_deg: 0.0,
+            rotate_preview_active: false,
+            flip_h_pending: false,
+            flip_v_pending: false,
+            flip_preview_active: false,
             straighten_angle: 0.0,
             straighten_active: false,
             straighten_crop: true,
@@ -354,6 +364,8 @@ impl ToolState {
             || self.blur_preview_active
             || self.denoise_preview_active
             || self.nr_preview_active
+            || self.rotate_preview_active
+            || self.flip_preview_active
             || self.straighten_preview_active
             || self.perspective_preview_active
     }
@@ -455,6 +467,16 @@ impl ToolState {
                 color_strength: self.nr_color,
                 detail_preservation: self.nr_detail,
             }))
+        } else if self.rotate_preview_active {
+            Some(Box::new(RotateOp::arbitrary(self.rotate_deg)))
+        } else if self.flip_preview_active {
+            match (self.flip_h_pending, self.flip_v_pending) {
+                (true, false) => Some(Box::new(FlipOp::horizontal())),
+                (false, true) => Some(Box::new(FlipOp::vertical())),
+                // H then V is equivalent to a 180° rotation (lossless).
+                (true, true) => Some(Box::new(RotateOp::cw180())),
+                (false, false) => None,
+            }
         } else if self.straighten_preview_active {
             Some(Box::new(RotateOp::arbitrary(self.straighten_angle)))
         } else if self.perspective_preview_active {
@@ -494,6 +516,10 @@ impl ToolState {
         self.blur_preview_active = false;
         self.denoise_preview_active = false;
         self.nr_preview_active = false;
+        self.rotate_preview_active = false;
+        self.flip_h_pending = false;
+        self.flip_v_pending = false;
+        self.flip_preview_active = false;
         self.straighten_preview_active = false;
         self.perspective_preview_active = false;
     }

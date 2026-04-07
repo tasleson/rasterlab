@@ -662,16 +662,33 @@ impl AppState {
         )));
     }
     pub fn push_rotate_arbitrary(&mut self) {
-        self.push_op(Box::new(RotateOp::arbitrary(self.tools.rotate_deg)));
+        self.tools.rotate_preview_active = false;
+        // Use lossless pixel-transposition fast paths for exact right-angle
+        // rotations; fall back to bilinear for all other angles.
+        let op: Box<dyn Operation> = match self.tools.rotate_deg as i32 % 360 {
+            90 | -270 => Box::new(RotateOp::cw90()),
+            180 | -180 => Box::new(RotateOp::cw180()),
+            270 | -90 => Box::new(RotateOp::cw270()),
+            _ => Box::new(RotateOp::arbitrary(self.tools.rotate_deg)),
+        };
+        self.push_op(op);
     }
-    pub fn push_rotate_90(&mut self) {
-        self.push_op(Box::new(RotateOp::cw90()));
+
+    pub fn update_rotate_preview(&mut self) {
+        self.tools.rotate_preview_active = true;
+        self.request_render();
     }
-    pub fn push_rotate_180(&mut self) {
-        self.push_op(Box::new(RotateOp::cw180()));
+
+    pub fn cancel_rotate_preview(&mut self) {
+        if self.tools.rotate_preview_active {
+            self.tools.rotate_preview_active = false;
+            self.request_render();
+        }
     }
-    pub fn push_rotate_270(&mut self) {
-        self.push_op(Box::new(RotateOp::cw270()));
+
+    pub fn reset_rotate(&mut self) {
+        self.tools.rotate_deg = 0.0;
+        self.cancel_rotate_preview();
     }
     pub fn push_sharpen(&mut self) {
         self.tools.sharpen_preview_active = false;
@@ -721,12 +738,32 @@ impl AppState {
         self.cancel_clarity_texture_preview();
     }
 
-    pub fn push_flip_horizontal(&mut self) {
-        self.push_op(Box::new(FlipOp::horizontal()));
+    pub fn push_flip_pending(&mut self) {
+        let h = self.tools.flip_h_pending;
+        let v = self.tools.flip_v_pending;
+        self.tools.flip_h_pending = false;
+        self.tools.flip_v_pending = false;
+        self.tools.flip_preview_active = false;
+        if h {
+            self.push_op(Box::new(FlipOp::horizontal()));
+        }
+        if v {
+            self.push_op(Box::new(FlipOp::vertical()));
+        }
     }
 
-    pub fn push_flip_vertical(&mut self) {
-        self.push_op(Box::new(FlipOp::vertical()));
+    pub fn update_flip_preview(&mut self) {
+        self.tools.flip_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_flip_preview(&mut self) {
+        if self.tools.flip_preview_active {
+            self.tools.flip_h_pending = false;
+            self.tools.flip_v_pending = false;
+            self.tools.flip_preview_active = false;
+            self.request_render();
+        }
     }
 
     pub fn update_bc_preview(&mut self) {
@@ -1956,12 +1993,23 @@ fn render_in_thread(
                 .apply(crop)
                 .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
             debug_validate_image(&processed, op.name());
-            let mut base = match Arc::try_unwrap(current) {
+            let base = match Arc::try_unwrap(current) {
                 Ok(img) => img,
                 Err(a) => a.as_ref().deep_clone(),
             };
-            blit_region(&mut base, &processed, sx, sy);
-            current = Arc::new(base);
+            // If the op changed image dimensions (e.g. 90°/270° rotation) the
+            // crop-blit optimisation is invalid — fall back to full-image apply.
+            if processed.width == sw && processed.height == sh {
+                let mut base = base;
+                blit_region(&mut base, &processed, sx, sy);
+                current = Arc::new(base);
+            } else {
+                let result = op
+                    .apply(base)
+                    .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
+                debug_validate_image(&result, op.name());
+                current = Arc::new(result);
+            }
         } else {
             let img = match Arc::try_unwrap(current) {
                 Ok(img) => img,

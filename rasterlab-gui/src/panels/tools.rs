@@ -1510,54 +1510,95 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .default_open(default_open)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("90°"))
-                    .clicked()
-                {
-                    state.push_rotate_90();
-                }
-                if ui
-                    .add_enabled(has_image, egui::Button::new("180°"))
-                    .clicked()
-                {
-                    state.push_rotate_180();
-                }
-                if ui
-                    .add_enabled(has_image, egui::Button::new("270°"))
-                    .clicked()
-                {
-                    state.push_rotate_270();
+                for deg in [90.0_f32, 180.0, 270.0] {
+                    if ui
+                        .add_enabled(has_image, egui::Button::new(format!("{deg}°")))
+                        .clicked()
+                    {
+                        // Accumulate and normalise to (-360, 360].
+                        state.tools.rotate_deg = (state.tools.rotate_deg + deg) % 360.0;
+                        state.update_rotate_preview();
+                    }
                 }
             });
             ui.horizontal(|ui| {
                 ui.label("Angle:");
-                ui.add(
-                    DragValue::new(&mut state.tools.rotate_deg)
-                        .speed(0.5)
-                        .suffix("°")
-                        .range(-360.0..=360.0),
-                );
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_rotate_arbitrary();
+                let changed = ui
+                    .add(
+                        DragValue::new(&mut state.tools.rotate_deg)
+                            .speed(0.5)
+                            .suffix("°")
+                            .range(-360.0..=360.0),
+                    )
+                    .changed();
+                if changed && has_image {
+                    state.update_rotate_preview();
                 }
             });
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Flip H"))
-                    .clicked()
+                // Only offer Apply when there is a net non-zero rotation.
+                let has_rotation = state.tools.rotate_preview_active
+                    && (state.tools.rotate_deg % 360.0).abs() > 0.001;
+                if has_rotation
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Apply"))
+                        .clicked()
                 {
-                    state.push_flip_horizontal();
+                    state.push_rotate_arbitrary();
                 }
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Flip V"))
-                    .clicked()
+                if state.tools.rotate_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
                 {
-                    state.push_flip_vertical();
+                    state.cancel_rotate_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_rotate();
                 }
             });
+            ui.horizontal(|ui| {
+                let h_label = if state.tools.flip_h_pending {
+                    "Flip H ✓"
+                } else {
+                    "Flip H"
+                };
+                if ui
+                    .add_enabled(has_image, egui::Button::new(h_label))
+                    .clicked()
+                {
+                    state.tools.flip_h_pending = !state.tools.flip_h_pending;
+                    state.update_flip_preview();
+                }
+                let v_label = if state.tools.flip_v_pending {
+                    "Flip V ✓"
+                } else {
+                    "Flip V"
+                };
+                if ui
+                    .add_enabled(has_image, egui::Button::new(v_label))
+                    .clicked()
+                {
+                    state.tools.flip_v_pending = !state.tools.flip_v_pending;
+                    state.update_flip_preview();
+                }
+            });
+            if state.tools.flip_preview_active {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(has_image, egui::Button::new("Apply"))
+                        .clicked()
+                    {
+                        state.push_flip_pending();
+                    }
+                    if ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        state.cancel_flip_preview();
+                    }
+                });
+            }
         });
     if resp.header_response.clicked() {
         state
