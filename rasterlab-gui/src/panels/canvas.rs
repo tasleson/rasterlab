@@ -774,6 +774,7 @@ impl CanvasState {
                 self.straighten_line =
                     Some([Pos2::new(cx - half_w, cy), Pos2::new(cx + half_w, cy)]);
                 state.tools.straighten_angle = 0.0;
+                state.update_straighten_preview();
             }
 
             let (ptr_pos, primary_pressed, primary_down, primary_released) = ui.input(|i| {
@@ -805,19 +806,15 @@ impl CanvasState {
                 && let Some(pts) = &mut self.straighten_line
             {
                 pts[drag_idx] = screen_to_image(ptr, image_tl, self.zoom);
+                // Recompute angle and update preview only while dragging.
+                let [p0, p1] = *pts;
+                let line_angle = (p1.y - p0.y).atan2(p1.x - p0.x).to_degrees();
+                state.tools.straighten_angle = -line_angle;
+                state.update_straighten_preview();
             }
 
             if primary_released {
                 self.straighten_dragging = None;
-            }
-
-            // Recompute angle from current line.
-            if let Some([p0, p1]) = self.straighten_line {
-                let dx = p1.x - p0.x;
-                let dy = p1.y - p0.y;
-                let line_angle = dy.atan2(dx).to_degrees();
-                state.tools.straighten_angle = -line_angle;
-                state.update_straighten_preview();
             }
 
             // ── Grid overlay ─────────────────────────────────────────────────
