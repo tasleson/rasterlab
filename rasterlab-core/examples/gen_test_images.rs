@@ -320,6 +320,258 @@ fn gen_grey_color_pairs() -> RgbImage {
     })
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// PANORAMA TEST IMAGES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Deterministic xorshift64 — avoids pulling in the `rand` crate.
+fn xs64(x: u64) -> u64 {
+    let x = x ^ (x << 13);
+    let x = x ^ (x >> 7);
+    x ^ (x << 17)
+}
+
+/// Draw a filled axis-aligned rectangle into `img`.
+fn fill_rect(img: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 3]) {
+    for y in y0..y1.min(img.height()) {
+        for x in x0..x1.min(img.width()) {
+            img.put_pixel(x, y, Rgb(color));
+        }
+    }
+}
+
+/// Draw a 1-px border around a rectangle.
+fn draw_border(img: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 3]) {
+    for x in x0..x1.min(img.width()) {
+        if y0 < img.height() {
+            img.put_pixel(x, y0, Rgb(color));
+        }
+        let y1c = (y1 - 1).min(img.height() - 1);
+        img.put_pixel(x, y1c, Rgb(color));
+    }
+    for y in y0..y1.min(img.height()) {
+        if x0 < img.width() {
+            img.put_pixel(x0, y, Rgb(color));
+        }
+        let x1c = (x1 - 1).min(img.width() - 1);
+        img.put_pixel(x1c, y, Rgb(color));
+    }
+}
+
+/// Draw a filled circle (integer Bresenham).
+fn fill_circle(img: &mut RgbImage, cx: i32, cy: i32, r: i32, color: [u8; 3]) {
+    let r2 = r * r;
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r2 {
+                let px = cx + dx;
+                let py = cy + dy;
+                if px >= 0 && py >= 0 && px < img.width() as i32 && py < img.height() as i32 {
+                    img.put_pixel(px as u32, py as u32, Rgb(color));
+                }
+            }
+        }
+    }
+}
+
+/// Build the 3200×800 synthetic panorama scene.
+///
+/// The scene is deliberately **non-periodic** so that Harris + normalised
+/// patch descriptors produce unambiguous matches across overlapping tiles.
+/// It contains:
+///  • a diagonal two-tone gradient background (no axis-aligned symmetries)
+///  • many randomly placed filled circles with unique colours and radii
+///  • random filled rectangles at random orientations-by-position
+///  • a scattering of small "chip" clusters (distinctive local neighbourhoods)
+///
+/// Every visual element is placed at a unique random position, so a patch
+/// descriptor at any corner is distinguishable from every other corner.
+fn gen_panorama_scene() -> RgbImage {
+    let scene_w = 3200u32;
+    let scene_h = 800u32;
+
+    let mut img = RgbImage::new(scene_w, scene_h);
+
+    // ── background: diagonal two-tone gradient ──
+    // Varies slowly along both axes so every region has a unique tint.
+    for y in 0..scene_h {
+        for x in 0..scene_w {
+            let tx = x as f32 / scene_w as f32;
+            let ty = y as f32 / scene_h as f32;
+            let r = (40.0 + tx * 60.0 + ty * 30.0) as u8;
+            let g = (60.0 + tx * 30.0 + ty * 90.0) as u8;
+            let b = (110.0 + (1.0 - tx) * 80.0 + (1.0 - ty) * 40.0) as u8;
+            img.put_pixel(x, y, Rgb([r, g, b]));
+        }
+    }
+
+    // Rich 64-colour palette so nearby shapes rarely share colours.
+    let palette: [[u8; 3]; 32] = [
+        [220, 60, 60],
+        [60, 180, 60],
+        [60, 60, 220],
+        [220, 180, 40],
+        [220, 100, 40],
+        [140, 60, 200],
+        [40, 200, 200],
+        [220, 60, 160],
+        [100, 160, 60],
+        [60, 120, 200],
+        [200, 120, 80],
+        [80, 200, 140],
+        [180, 60, 100],
+        [100, 80, 160],
+        [200, 200, 80],
+        [80, 160, 180],
+        [255, 140, 0],
+        [128, 0, 128],
+        [0, 128, 128],
+        [255, 215, 0],
+        [127, 255, 0],
+        [255, 20, 147],
+        [70, 130, 180],
+        [240, 128, 128],
+        [34, 139, 34],
+        [218, 112, 214],
+        [255, 99, 71],
+        [0, 191, 255],
+        [154, 205, 50],
+        [199, 21, 133],
+        [47, 79, 79],
+        [255, 192, 203],
+    ];
+
+    // ── Dense non-periodic circles (~1200 of them) ──
+    // Coordinates jittered per-circle; radius, colour, and position all
+    // independent so no two local neighbourhoods are identical.
+    let mut rng = 0xDEAD_BEEF_1234_5678u64;
+    for _ in 0..1200 {
+        rng = xs64(rng);
+        let cx = (rng as u32 % scene_w) as i32;
+        rng = xs64(rng);
+        let cy = (rng as u32 % scene_h) as i32;
+        rng = xs64(rng);
+        let r = (4 + (rng as i32).unsigned_abs() as i32 % 18).min(22);
+        rng = xs64(rng);
+        let ci = (rng as usize) % palette.len();
+        let color = palette[ci];
+        fill_circle(&mut img, cx, cy, r, color);
+        // Inner highlight — creates a sharp corner pair around the circle.
+        let inner = [
+            (color[0] as u16 + 60).min(255) as u8,
+            (color[1] as u16 + 60).min(255) as u8,
+            (color[2] as u16 + 60).min(255) as u8,
+        ];
+        if r > 5 {
+            fill_circle(&mut img, cx - 1, cy - 1, r / 2, inner);
+        }
+    }
+
+    // ── Random axis-aligned rectangles (~400) ──
+    rng = 0xFACEFEED_0BADF00Du64;
+    for _ in 0..400 {
+        rng = xs64(rng);
+        let x0 = (rng as u32) % (scene_w - 40);
+        rng = xs64(rng);
+        let y0 = (rng as u32) % (scene_h - 40);
+        rng = xs64(rng);
+        let w = 8 + (rng as u32) % 34;
+        rng = xs64(rng);
+        let h = 8 + (rng as u32) % 34;
+        rng = xs64(rng);
+        let ci = (rng as usize) % palette.len();
+        let color = palette[ci];
+        let x1 = (x0 + w).min(scene_w - 1);
+        let y1 = (y0 + h).min(scene_h - 1);
+        fill_rect(&mut img, x0, y0, x1, y1, color);
+        draw_border(&mut img, x0, y0, x1, y1, [15, 15, 15]);
+    }
+
+    // ── Scattered "chip" clusters: a ring of 3–5 small circles around an
+    // anchor point.  Each cluster forms a distinctive local pattern that
+    // normalised-patch descriptors can match unambiguously.
+    rng = 0xABCD_1234_FEED_C0DEu64;
+    for _ in 0..120 {
+        rng = xs64(rng);
+        let ax = 40 + (rng as u32) % (scene_w - 80);
+        rng = xs64(rng);
+        let ay = 40 + (rng as u32) % (scene_h - 80);
+        rng = xs64(rng);
+        let n = 3 + (rng as usize) % 3;
+        for k in 0..n {
+            rng = xs64(rng);
+            let angle = (k as f32 / n as f32) * std::f32::consts::TAU;
+            let rr = 14.0 + (rng as u32 % 8) as f32;
+            let px = ax as f32 + angle.cos() * rr;
+            let py = ay as f32 + angle.sin() * rr;
+            let ci = (rng as usize) % palette.len();
+            fill_circle(&mut img, px as i32, py as i32, 5, palette[ci]);
+        }
+        // Centre dot in a contrasting colour.
+        rng = xs64(rng);
+        let ci = (rng as usize) % palette.len();
+        fill_circle(&mut img, ax as i32, ay as i32, 7, palette[ci]);
+        fill_circle(&mut img, ax as i32, ay as i32, 3, [250, 250, 250]);
+    }
+
+    img
+}
+
+/// Crop a sub-image from `src`, starting at `x0` with width `w`.
+fn crop_x(src: &RgbImage, x0: u32, w: u32) -> RgbImage {
+    let h = src.height();
+    ImageBuffer::from_fn(w, h, |x, y| *src.get_pixel(x0 + x, y))
+}
+
+/// Generate two overlapping tiles (left and right) from the scene.
+///
+///   pano_left.png  — columns 0   .. 2000  (62.5 % of scene)
+///   pano_right.png — columns 1200 .. 3200  (62.5 % of scene)
+///   overlap region — columns 1200 .. 2000  (800 px = 25 % of each tile)
+fn gen_panorama_2(scene: &RgbImage, dir: &Path) {
+    let sw = scene.width(); // 3200
+    let tile_w = (sw * 5 / 8) as u32; // 2000
+    let overlap = sw / 4; // 800
+
+    let left = crop_x(scene, 0, tile_w);
+    let right = crop_x(scene, sw - tile_w, tile_w);
+
+    save(left, dir, "pano_left.png");
+    save(right, dir, "pano_right.png");
+
+    println!(
+        "    overlap: {overlap} px ({:.0}% of tile width)",
+        overlap as f64 / tile_w as f64 * 100.0
+    );
+}
+
+/// Generate three overlapping tiles for a 3-image panorama test.
+///
+///   pano3_a.png — columns 0    .. 1400  (43.75 %)
+///   pano3_b.png — columns 900  .. 2300  (43.75 %)
+///   pano3_c.png — columns 1800 .. 3200  (43.75 %)
+///
+///  a↔b overlap 900..1400 = 500 px
+///  b↔c overlap 1800..2300 = 500 px
+fn gen_panorama_3(scene: &RgbImage, dir: &Path) {
+    let sw = scene.width(); // 3200
+    let tile_w = sw * 7 / 16; // 1400
+
+    let a = crop_x(scene, 0, tile_w);
+    let b = crop_x(scene, 900, tile_w);
+    let c = crop_x(scene, sw - tile_w, tile_w);
+
+    save(a, dir, "pano3_a.png");
+    save(b, dir, "pano3_b.png");
+    save(c, dir, "pano3_c.png");
+
+    let overlap = tile_w + 900 - sw / 2;
+    println!(
+        "    a↔b / b↔c overlap: ~{overlap} px ({:.0}% of tile width)",
+        overlap as f64 / tile_w as f64 * 100.0
+    );
+}
+
 // ─── main ───────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -351,6 +603,12 @@ fn main() {
     save(gen_skin_tone_ramp(), out_dir, "skin_tone_ramp.png");
     save(gen_grey_color_pairs(), out_dir, "grey_color_pairs.png");
 
+    println!("\n  [panorama test images]");
+    let scene = gen_panorama_scene();
+    save(scene.clone(), out_dir, "pano_scene_full.png");
+    gen_panorama_2(&scene, out_dir);
+    gen_panorama_3(&scene, out_dir);
+
     println!("\nDone.");
     println!("\nColour filter workflow:");
     println!("  hald_clut_identity_L8.png → apply filter → output IS the 3-D LUT");
@@ -361,4 +619,8 @@ fn main() {
     println!("  hue_primaries → read grey value of each band = per-hue luminance weight");
     println!("  grey_color_pairs → left/right should match for simple desaturate");
     println!("  skin_tone_ramp → shows warm-tone / sky response of film-emulation filters");
+    println!("\nPanorama test workflow:");
+    println!("  pano_scene_full.png  — full 3200×800 reference scene");
+    println!("  pano_left / pano_right — 2-tile test (open pano_left, stitch pano_right)");
+    println!("  pano3_a / pano3_b / pano3_c — 3-tile test (open pano3_a, stitch b then c)");
 }

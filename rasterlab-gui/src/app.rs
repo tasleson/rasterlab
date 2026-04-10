@@ -158,6 +158,7 @@ impl RasterLabApp {
                 DialogKind::SaveProject => self.state.save_project(path),
                 DialogKind::ExportEditStack => self.state.export_edit_stack_json(path),
                 DialogKind::LoadLut => self.state.load_lut(path),
+                DialogKind::PanoramaAddImage => self.state.panorama_add_image(path),
             }
         }
     }
@@ -193,6 +194,10 @@ impl eframe::App for RasterLabApp {
         if self.state.tools.lut_dialog_requested {
             self.state.tools.lut_dialog_requested = false;
             self.chooser.load_lut(&ctx);
+        }
+        if self.state.tools.panorama_dialog_requested {
+            self.state.tools.panorama_dialog_requested = false;
+            self.chooser.panorama_add_image(&ctx);
         }
 
         self.handle_keyboard(&ctx);

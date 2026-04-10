@@ -53,6 +53,7 @@ See change log below for status.
 | Local Adjustments | Linear or radial gradient mask applied to any op |
 | LUT / Color Grading | Apply a .cube 3D LUT with blend strength |
 | Noise Reduction | Wavelet (fast) or Non-Local Means (quality); independent luma/chroma strength |
+| Panorama | Stitch multiple images; Harris corners + normalised-patch matching + RANSAC homography + feather blend |
 | Perspective | Four-corner keystone/perspective correction |
 | Resize | Nearest-neighbour, bilinear, or bicubic resampling |
 | Rotate / Straighten | 90°/180°/270° lossless; arbitrary angle with bilinear interp; horizon-line straighten with auto-crop |

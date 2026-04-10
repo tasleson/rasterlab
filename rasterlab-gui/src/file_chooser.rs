@@ -31,6 +31,7 @@ pub enum DialogKind {
     SaveProject,
     ExportEditStack,
     LoadLut,
+    PanoramaAddImage,
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,7 @@ pub struct FileChooser {
     save_project_dlg: FileDialog,
     export_stack_dlg: FileDialog,
     lut_dlg: FileDialog,
+    panorama_dlg: FileDialog,
     /// Which kind is currently waiting for a result.
     pending: Option<DialogKind>,
 
@@ -92,6 +94,13 @@ impl FileChooser {
                 .title("Load LUT")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .add_file_filter_extensions("CUBE LUT", vec!["cube"]),
+            panorama_dlg: FileDialog::new()
+                .title("Add Image to Panorama")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .add_file_filter_extensions("Images", vec!["jpg", "jpeg", "png", "nef"])
+                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
+                .add_file_filter_extensions("PNG", vec!["png"])
+                .add_file_filter_extensions("NEF (Nikon RAW)", vec!["nef"]),
             pending: None,
             rfd_rx: None,
         }
@@ -121,6 +130,10 @@ impl FileChooser {
 
     pub fn load_lut(&mut self, ctx: &egui::Context) {
         self.open(ctx, DialogKind::LoadLut, false);
+    }
+
+    pub fn panorama_add_image(&mut self, ctx: &egui::Context) {
+        self.open(ctx, DialogKind::PanoramaAddImage, false);
     }
 
     // ── Per-frame polling ───────────────────────────────────────────────────
@@ -171,6 +184,7 @@ impl FileChooser {
             DialogKind::SaveProject => &mut self.save_project_dlg,
             DialogKind::ExportEditStack => &mut self.export_stack_dlg,
             DialogKind::LoadLut => &mut self.lut_dlg,
+            DialogKind::PanoramaAddImage => &mut self.panorama_dlg,
         }
     }
 
@@ -203,6 +217,12 @@ impl FileChooser {
                     .save_file(),
                 DialogKind::LoadLut => rfd::FileDialog::new()
                     .add_filter("CUBE LUT", &["cube"])
+                    .pick_file(),
+                DialogKind::PanoramaAddImage => rfd::FileDialog::new()
+                    .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
+                    .add_filter("JPEG", &["jpg", "jpeg"])
+                    .add_filter("PNG", &["png"])
+                    .add_filter("NEF (Nikon RAW)", &["nef"])
                     .pick_file(),
             };
             let _ = tx.send(path);

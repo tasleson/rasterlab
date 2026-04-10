@@ -3,7 +3,7 @@ use rasterlab_core::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
         ColorSpaceConversion, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HealSpot,
         HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp, MaskShape,
-        NoiseReductionOp, NrMethod, PerspectiveOp, RadialMask, ResampleMode, RotateOp,
+        NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, RadialMask, ResampleMode, RotateOp,
         SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::format_handler::EncodeOptions,
@@ -130,6 +130,15 @@ pub struct ToolState {
     pub heal_radius: u32,
     /// Spots placed by the user, pending commit to the pipeline.
     pub heal_spots: Vec<HealSpot>,
+
+    // ── Panorama ──────────────────────────────────────────────────────────
+    /// Absolute paths of the images to stitch (in order).
+    pub panorama_paths: Vec<String>,
+    /// Width of the feather-blend ramp at each seam (pixels).
+    pub panorama_feather_px: u32,
+    pub panorama_preview_active: bool,
+    /// Set to true by the tools panel to ask app.rs to open the image picker.
+    pub panorama_dialog_requested: bool,
 
     // ── Perspective ───────────────────────────────────────────────────────
     /// Corner offsets `[[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]`
@@ -284,6 +293,10 @@ impl ToolState {
             heal_active: false,
             heal_radius: 30,
             heal_spots: Vec::new(),
+            panorama_paths: Vec::new(),
+            panorama_feather_px: 80,
+            panorama_preview_active: false,
+            panorama_dialog_requested: false,
             perspective_corners: [[0.0; 2]; 4],
             perspective_preview_active: false,
             color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,
@@ -367,6 +380,7 @@ impl ToolState {
             || self.rotate_preview_active
             || self.flip_preview_active
             || self.straighten_preview_active
+            || self.panorama_preview_active
             || self.perspective_preview_active
     }
 
@@ -479,6 +493,11 @@ impl ToolState {
             }
         } else if self.straighten_preview_active {
             Some(Box::new(RotateOp::arbitrary(self.straighten_angle)))
+        } else if self.panorama_preview_active {
+            Some(Box::new(PanoramaOp::new(
+                self.panorama_paths.clone(),
+                self.panorama_feather_px,
+            )))
         } else if self.perspective_preview_active {
             Some(Box::new(PerspectiveOp::new(self.perspective_corners)))
         } else {
@@ -521,6 +540,7 @@ impl ToolState {
         self.flip_v_pending = false;
         self.flip_preview_active = false;
         self.straighten_preview_active = false;
+        self.panorama_preview_active = false;
         self.perspective_preview_active = false;
     }
 
