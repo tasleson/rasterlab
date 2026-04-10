@@ -54,6 +54,10 @@ typetag         = "0.2"
 image           = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 rawler          = "0.7"
 
+# EXIF / metadata
+kamadak-exif    = "0.6"       # pure-Rust EXIF parser for JPEG/TIFF/RAW
+img-parts       = "0.3"       # JPEG/PNG segment manipulation for metadata-preserving export
+
 # Plugin dynamic loading
 libloading      = "0.8"
 

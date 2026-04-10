@@ -255,7 +255,7 @@ mod tests {
         let img = solid(128, 128, 128, 200, 200);
         let (sx, sy) = HealOp::auto_detect_source(&img, 100, 100, 15);
         assert!(
-            sx >= 0 && sx < 200 && sy >= 0 && sy < 200,
+            (0..200).contains(&sx) && (0..200).contains(&sy),
             "auto-detect returned out-of-bounds ({sx}, {sy})"
         );
     }

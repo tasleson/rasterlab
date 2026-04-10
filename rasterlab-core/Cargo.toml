@@ -22,6 +22,10 @@ tempfile     = "3"
 # Feature-gated so the crate compiles without rawler if unavailable.
 rawler       = { workspace = true, optional = true }
 
+# EXIF / metadata
+kamadak-exif = { workspace = true }
+img-parts    = { workspace = true }
+
 [features]
 default = ["raw"]
 raw     = ["dep:rawler"]

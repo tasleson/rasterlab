@@ -1768,6 +1768,11 @@ impl AppState {
         self.copies.as_ref().map(|s| s.active_pipeline())
     }
 
+    /// Borrow the source image metadata for the active pipeline, if any.
+    pub fn image_metadata(&self) -> Option<&rasterlab_core::image::ImageMetadata> {
+        self.pipeline().map(|p| &p.source().metadata)
+    }
+
     /// Mutably borrow the active pipeline, if any image is loaded.
     fn pipeline_mut(&mut self) -> Option<&mut EditPipeline> {
         self.copies.as_mut().map(|s| s.active_pipeline_mut())

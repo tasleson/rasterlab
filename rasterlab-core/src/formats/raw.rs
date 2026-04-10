@@ -103,6 +103,10 @@ fn decode_raw_rawler(path: &Path) -> RasterResult<Image> {
     let rgba = dyn_image.to_rgba8();
     let (w, h) = rgba.dimensions();
     let mut image = Image::from_rgba8(w, h, rgba.into_raw())?;
+
+    // Populate EXIF metadata from the source file.
+    image.metadata = crate::formats::exif_util::read_exif_from_file(path);
     image.metadata.original_path = Some(path.to_path_buf());
+
     Ok(image)
 }

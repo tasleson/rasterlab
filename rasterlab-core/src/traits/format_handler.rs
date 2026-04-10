@@ -1,13 +1,18 @@
 use crate::{error::RasterResult, image::Image};
 use std::path::Path;
 
-/// Options controlling output encoding quality.
+/// Options controlling output encoding quality and metadata handling.
 #[derive(Debug, Clone)]
 pub struct EncodeOptions {
     /// JPEG quality 1–100 (default 90).
     pub jpeg_quality: u8,
     /// PNG compression level 0–9 (default 6).
     pub png_compression: u8,
+    /// When `true` (the default), the original EXIF metadata is re-attached to
+    /// the exported file if the source image carried EXIF data.  Set to `false`
+    /// to strip all metadata from the output (e.g. for privacy or file-size
+    /// reasons).
+    pub preserve_metadata: bool,
 }
 
 impl Default for EncodeOptions {
@@ -15,6 +20,7 @@ impl Default for EncodeOptions {
         Self {
             jpeg_quality: 90,
             png_compression: 6,
+            preserve_metadata: true,
         }
     }
 }

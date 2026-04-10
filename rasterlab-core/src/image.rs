@@ -11,18 +11,59 @@ pub enum PixelFormat {
 /// EXIF-derived metadata kept alongside the pixel buffer.
 #[derive(Debug, Clone, Default)]
 pub struct ImageMetadata {
+    // ── File ──────────────────────────────────────────────────────────────
     /// Original file path (if loaded from disk).
     pub original_path: Option<PathBuf>,
-    /// Camera make/model string from EXIF, if present.
+
+    // ── Camera ────────────────────────────────────────────────────────────
+    /// Camera manufacturer (EXIF Make).
+    pub camera_make: Option<String>,
+    /// Camera model (EXIF Model).
     pub camera_model: Option<String>,
-    /// ISO sensitivity from EXIF.
+    /// Lens description (LensModel / LensSpecification).
+    pub lens_model: Option<String>,
+    /// Software used to create the file (EXIF Software).
+    pub software: Option<String>,
+    /// Original capture date/time string (EXIF DateTimeOriginal).
+    pub date_time: Option<String>,
+
+    // ── Exposure ──────────────────────────────────────────────────────────
+    /// ISO speed rating.
     pub iso: Option<u32>,
-    /// Shutter speed as a human-readable fraction string (e.g. "1/250").
+    /// Shutter speed as a human-readable fraction (e.g. "1/250 s").
     pub shutter_speed: Option<String>,
     /// Aperture f-number.
     pub aperture: Option<f32>,
+    /// Focal length in millimetres.
+    pub focal_length: Option<f32>,
+    /// 35 mm equivalent focal length.
+    pub focal_length_35mm: Option<u32>,
+    /// Exposure bias in EV (e.g. -0.33).
+    pub exposure_bias: Option<f32>,
+    /// Exposure program description.
+    pub exposure_program: Option<String>,
+    /// Metering mode description.
+    pub metering_mode: Option<String>,
+    /// Flash description.
+    pub flash: Option<String>,
+
+    // ── GPS ───────────────────────────────────────────────────────────────
+    /// GPS latitude in decimal degrees (positive = North).
+    pub gps_lat: Option<f64>,
+    /// GPS longitude in decimal degrees (positive = East).
+    pub gps_lon: Option<f64>,
+    /// GPS altitude in metres above sea level.
+    pub gps_alt: Option<f32>,
+
+    // ── Colour / profile ──────────────────────────────────────────────────
     /// ICC profile bytes, if embedded.
     pub icc_profile: Option<Vec<u8>>,
+
+    // ── Raw bytes for metadata-preserving export ──────────────────────────
+    /// Original EXIF APP1 segment bytes (JPEG) or raw TIFF EXIF bytes (RAW).
+    /// Stored verbatim so they can be re-attached during export without
+    /// re-encoding or modifying any metadata.
+    pub raw_exif: Option<Vec<u8>>,
 }
 
 /// The central image type used throughout the engine.

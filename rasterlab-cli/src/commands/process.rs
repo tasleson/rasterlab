@@ -107,6 +107,7 @@ pub fn run(args: ProcessArgs) -> Result<()> {
     let options = EncodeOptions {
         jpeg_quality: args.jpeg_quality,
         png_compression: args.png_compression,
+        preserve_metadata: true,
     };
     let bytes = registry
         .encode_file(&rendered, &args.output, &options)

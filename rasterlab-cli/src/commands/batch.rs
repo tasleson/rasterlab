@@ -131,6 +131,7 @@ pub fn run(args: BatchArgs) -> Result<()> {
     let options = EncodeOptions {
         jpeg_quality: args.jpeg_quality,
         png_compression: args.png_compression,
+        preserve_metadata: true,
     };
 
     // Process files in parallel

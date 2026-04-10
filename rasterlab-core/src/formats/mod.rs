@@ -1,3 +1,4 @@
+pub mod exif_util;
 pub mod jpeg;
 pub mod png;
 pub mod raw;
