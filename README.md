@@ -8,7 +8,7 @@ We're here to find out!  This is still a work in progress!
 
 ## What is this?
 
-RasterLab is a non-destructive RAW image editor written in Rust, built almost entirely by Claude Code as an experiment in AI-assisted software development. It has a real-time preview pipeline, intermediate result caching, parallelized image processing, undo/redo, a histogram panel, and support for JPEG, PNG, and Nikon NEF files.
+RasterLab is a non-destructive RAW image editor written in Rust, built almost entirely by Claude Code as an experiment in AI-assisted software development. It has a real-time preview pipeline, intermediate result caching, parallelized image processing, undo/redo, a histogram panel, and support for JPEG, PNG, and a broad range of camera RAW formats (Nikon NEF/NRW, Canon CR2/CR3, Sony ARW, Fujifilm RAF, Panasonic RW2, Olympus ORF, Pentax PEF, Adobe DNG, and more).
 
 See change log below for status.
 

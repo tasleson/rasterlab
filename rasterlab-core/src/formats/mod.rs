@@ -1,10 +1,10 @@
 pub mod jpeg;
-pub mod nef;
 pub mod png;
+pub mod raw;
 
 pub use jpeg::JpegHandler;
-pub use nef::NefHandler;
 pub use png::PngHandler;
+pub use raw::RawHandler;
 
 use std::{
     collections::HashMap,
@@ -25,38 +25,55 @@ use crate::{
 /// Identify the format of `data` from its magic bytes, falling back to the
 /// extension of `hint_path` if magic bytes are inconclusive.
 ///
-/// Returns a lower-case format identifier string (e.g. `"jpeg"`, `"png"`, `"nef"`).
+/// Returns a lower-case extension string that matches a registered handler
+/// (e.g. `"jpeg"`, `"png"`, `"nef"`, `"arw"`, `"cr2"`).
 pub fn detect_format(data: &[u8], hint_path: Option<&Path>) -> Option<String> {
-    // Magic-byte checks (fast, no allocation)
+    // Normalised file extension — used both for disambiguation and fallback.
+    let ext_lc: Option<String> = hint_path
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+
+    // Magic-byte checks (fast, no allocation).
     if data.len() >= 3 && &data[..3] == b"\xff\xd8\xff" {
         return Some("jpeg".into());
     }
     if data.len() >= 8 && &data[..8] == b"\x89PNG\r\n\x1a\n" {
         return Some("png".into());
     }
-    // NEF / TIFF share the TIFF magic bytes (II or MM byte-order markers)
+    // Fujifilm RAF has its own magic.
+    if data.len() >= 16 && &data[..16] == b"FUJIFILMCCD-RAW " {
+        return Some("raf".into());
+    }
+    // TIFF magic (little-endian II or big-endian MM) — used by NEF, CR2, ARW,
+    // ORF, RW2, PEF, DNG, SRW, 3FR, IIQ, ERF, and generic TIFF.
     if data.len() >= 4 && ((&data[..4] == b"II\x2a\x00") || (&data[..4] == b"MM\x00\x2a")) {
-        // Distinguish NEF from generic TIFF via file extension
-        if let Some(ext) = hint_path
-            .and_then(|p| p.extension())
-            .and_then(|e| e.to_str())
-            && ext.eq_ignore_ascii_case("nef")
+        // Route to the correct RAW handler via extension; unknown extensions
+        // fall through to "tiff" (no registered handler — will return an error
+        // that's more informative than a silent failure).
+        if let Some(ref ext) = ext_lc
+            && raw::RAW_EXTENSIONS.contains(&ext.as_str())
         {
-            return Some("nef".into());
+            return Some(ext.clone());
         }
         return Some("tiff".into());
     }
+    // ISO Base Media File Format magic (CR3, HEIF, MP4…).  CR3 uses "ftyp"
+    // at byte 4; route to the raw handler so rawler can try to decode it.
+    if data.len() >= 8
+        && &data[4..8] == b"ftyp"
+        && let Some(ref ext) = ext_lc
+        && raw::RAW_EXTENSIONS.contains(&ext.as_str())
+    {
+        return Some(ext.clone());
+    }
 
-    // Extension fallback — normalise to lower-case
-    hint_path
-        .and_then(|p| p.extension())
-        .and_then(|e| e.to_str())
-        .map(|e| match e.to_lowercase().as_str() {
-            "jpg" | "jpeg" => "jpeg".into(),
-            "png" => "png".into(),
-            "nef" => "nef".into(),
-            other => other.to_owned(),
-        })
+    // Extension-only fallback for formats without distinctive magic bytes.
+    ext_lc.map(|e| match e.as_str() {
+        "jpg" | "jpeg" => "jpeg".into(),
+        "png" => "png".into(),
+        other => other.to_owned(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -73,12 +90,12 @@ pub struct FormatRegistry {
 }
 
 impl FormatRegistry {
-    /// Create a registry pre-loaded with the built-in handlers (JPEG, PNG, NEF).
+    /// Create a registry pre-loaded with the built-in handlers (JPEG, PNG, Camera RAW).
     pub fn with_builtins() -> Self {
         let reg = Self::default();
         reg.register(Arc::new(JpegHandler));
         reg.register(Arc::new(PngHandler));
-        reg.register(Arc::new(NefHandler));
+        reg.register(Arc::new(RawHandler));
         reg
     }
 

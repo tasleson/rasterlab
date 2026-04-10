@@ -17,6 +17,25 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use egui_file_dialog::{DialogState, FileDialog};
+use rasterlab_core::formats::raw::RAW_EXTENSIONS;
+
+// ---------------------------------------------------------------------------
+// Extension lists (kept as constants so both egui and rfd backends stay in sync)
+// ---------------------------------------------------------------------------
+
+/// All image extensions accepted by the open-file dialog (no project files).
+fn image_exts() -> Vec<&'static str> {
+    let mut v = vec!["jpg", "jpeg", "png"];
+    v.extend_from_slice(RAW_EXTENSIONS);
+    v
+}
+
+/// All extensions accepted by the open-file dialog (images + project files).
+fn all_supported_exts() -> Vec<&'static str> {
+    let mut v = vec!["rlab", "jpg", "jpeg", "png"];
+    v.extend_from_slice(RAW_EXTENSIONS);
+    v
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -68,15 +87,12 @@ impl FileChooser {
             open_dlg: FileDialog::new()
                 .title("Open Image or Project")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions(
-                    "All supported",
-                    vec!["rlab", "jpg", "jpeg", "png", "nef"],
-                )
+                .add_file_filter_extensions("All supported", all_supported_exts())
                 .add_file_filter_extensions("RasterLab Project", vec!["rlab"])
-                .add_file_filter_extensions("Images", vec!["jpg", "jpeg", "png", "nef"])
+                .add_file_filter_extensions("Images", image_exts())
                 .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
                 .add_file_filter_extensions("PNG", vec!["png"])
-                .add_file_filter_extensions("NEF (Nikon RAW)", vec!["nef"]),
+                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
             export_dlg: FileDialog::new()
                 .title("Export Image")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -99,17 +115,17 @@ impl FileChooser {
             panorama_dlg: FileDialog::new()
                 .title("Add Image to Panorama")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("Images", vec!["jpg", "jpeg", "png", "nef"])
+                .add_file_filter_extensions("Images", image_exts())
                 .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
                 .add_file_filter_extensions("PNG", vec!["png"])
-                .add_file_filter_extensions("NEF (Nikon RAW)", vec!["nef"]),
+                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
             focus_stack_dlg: FileDialog::new()
                 .title("Add Frame to Focus Stack")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("Images", vec!["jpg", "jpeg", "png", "nef"])
+                .add_file_filter_extensions("Images", image_exts())
                 .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
                 .add_file_filter_extensions("PNG", vec!["png"])
-                .add_file_filter_extensions("NEF (Nikon RAW)", vec!["nef"]),
+                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
             pending: None,
             rfd_rx: None,
         }
@@ -212,12 +228,12 @@ impl FileChooser {
         std::thread::spawn(move || {
             let path = match kind {
                 DialogKind::OpenFile => rfd::FileDialog::new()
-                    .add_filter("All supported", &["rlab", "jpg", "jpeg", "png", "nef"])
+                    .add_filter("All supported", &all_supported_exts())
                     .add_filter("RasterLab Project", &["rlab"])
-                    .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
+                    .add_filter("Images", &image_exts())
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])
-                    .add_filter("NEF (Nikon RAW)", &["nef"])
+                    .add_filter("Camera RAW", RAW_EXTENSIONS)
                     .pick_file(),
                 DialogKind::ExportImage => rfd::FileDialog::new()
                     .add_filter("JPEG", &["jpg", "jpeg"])
@@ -233,16 +249,16 @@ impl FileChooser {
                     .add_filter("CUBE LUT", &["cube"])
                     .pick_file(),
                 DialogKind::PanoramaAddImage => rfd::FileDialog::new()
-                    .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
+                    .add_filter("Images", &image_exts())
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])
-                    .add_filter("NEF (Nikon RAW)", &["nef"])
+                    .add_filter("Camera RAW", RAW_EXTENSIONS)
                     .pick_file(),
                 DialogKind::FocusStackAddImage => rfd::FileDialog::new()
-                    .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
+                    .add_filter("Images", &image_exts())
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])
-                    .add_filter("NEF (Nikon RAW)", &["nef"])
+                    .add_filter("Camera RAW", RAW_EXTENSIONS)
                     .pick_file(),
             };
             let _ = tx.send(path);

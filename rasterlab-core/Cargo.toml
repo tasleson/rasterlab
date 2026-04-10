@@ -18,13 +18,14 @@ image        = { workspace = true }
 libloading   = { workspace = true }
 tempfile     = "3"
 
-# NEF/RAW camera file decoding (Nikon, Canon, Sony, etc.)
+# Camera RAW decoding (Nikon, Canon, Sony, Fujifilm, etc.)
 # Feature-gated so the crate compiles without rawler if unavailable.
 rawler       = { workspace = true, optional = true }
 
 [features]
-default = ["nef"]
-nef     = ["dep:rawler"]
+default = ["raw"]
+raw     = ["dep:rawler"]
+nef     = ["raw"]   # backward-compat alias
 
 [dev-dependencies]
 # For integration tests and benchmarks
