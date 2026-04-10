@@ -1,10 +1,11 @@
 use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
-        ColorSpaceConversion, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HealSpot,
-        HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp, MaskShape,
-        NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, RadialMask, ResampleMode, RotateOp,
-        SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        ColorSpaceConversion, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, FocusStackOp, GrainOp,
+        HealSpot, HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp,
+        MaskShape, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, RadialMask, ResampleMode,
+        RotateOp, SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
+        WhiteBalanceOp,
     },
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
@@ -139,6 +140,13 @@ pub struct ToolState {
     pub panorama_preview_active: bool,
     /// Set to true by the tools panel to ask app.rs to open the image picker.
     pub panorama_dialog_requested: bool,
+
+    // ── Focus Stack ───────────────────────────────────────────────────────
+    /// Absolute paths of the frames to fuse (any order).
+    pub focus_stack_paths: Vec<String>,
+    pub focus_stack_preview_active: bool,
+    /// Set to true by the tools panel to ask app.rs to open the image picker.
+    pub focus_stack_dialog_requested: bool,
 
     // ── Perspective ───────────────────────────────────────────────────────
     /// Corner offsets `[[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]`
@@ -297,6 +305,9 @@ impl ToolState {
             panorama_feather_px: 80,
             panorama_preview_active: false,
             panorama_dialog_requested: false,
+            focus_stack_paths: Vec::new(),
+            focus_stack_preview_active: false,
+            focus_stack_dialog_requested: false,
             perspective_corners: [[0.0; 2]; 4],
             perspective_preview_active: false,
             color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,
@@ -381,6 +392,7 @@ impl ToolState {
             || self.flip_preview_active
             || self.straighten_preview_active
             || self.panorama_preview_active
+            || self.focus_stack_preview_active
             || self.perspective_preview_active
     }
 
@@ -498,6 +510,8 @@ impl ToolState {
                 self.panorama_paths.clone(),
                 self.panorama_feather_px,
             )))
+        } else if self.focus_stack_preview_active {
+            Some(Box::new(FocusStackOp::new(self.focus_stack_paths.clone())))
         } else if self.perspective_preview_active {
             Some(Box::new(PerspectiveOp::new(self.perspective_corners)))
         } else {
@@ -541,6 +555,7 @@ impl ToolState {
         self.flip_preview_active = false;
         self.straighten_preview_active = false;
         self.panorama_preview_active = false;
+        self.focus_stack_preview_active = false;
         self.perspective_preview_active = false;
     }
 

@@ -746,6 +746,107 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── Focus Stack ───────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("focus_stack");
+    let resp = egui::CollapsingHeader::new("🎯  Focus Stack")
+        .id_salt("focus_stack")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("Fuse multiple frames at different focus distances")
+                    .small()
+                    .color(Color32::from_gray(140)),
+            );
+            ui.add_space(2.0);
+
+            if state.tools.focus_stack_paths.is_empty() {
+                ui.label(
+                    egui::RichText::new("No frames added yet.")
+                        .small()
+                        .italics(),
+                );
+            } else {
+                let mut remove_idx: Option<usize> = None;
+                egui::ScrollArea::vertical()
+                    .max_height(120.0)
+                    .id_salt("focus_stack_list")
+                    .show(ui, |ui| {
+                        for (i, path) in state.tools.focus_stack_paths.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let name = std::path::Path::new(path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone());
+                                ui.label(format!("{}. {}", i + 1, name));
+                                if ui.small_button("✕").clicked() {
+                                    remove_idx = Some(i);
+                                }
+                            });
+                        }
+                    });
+                if let Some(idx) = remove_idx {
+                    state.tools.focus_stack_paths.remove(idx);
+                    if state.tools.focus_stack_paths.len() < 2 {
+                        state.cancel_focus_stack_preview();
+                    }
+                }
+            }
+
+            ui.add_space(4.0);
+            if ui
+                .add_enabled(has_image, egui::Button::new("+ Add Frame…"))
+                .clicked()
+            {
+                // Seed the list with the current image's path if it's the first entry.
+                if state.tools.focus_stack_paths.is_empty()
+                    && let Some(p) = state.last_path.as_ref()
+                {
+                    state
+                        .tools
+                        .focus_stack_paths
+                        .push(p.to_string_lossy().into_owned());
+                }
+                state.tools.focus_stack_dialog_requested = true;
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let ready = state.tools.focus_stack_paths.len() >= 2;
+                if ui
+                    .add_enabled(has_image && ready, egui::Button::new("Stack"))
+                    .clicked()
+                {
+                    state.push_focus_stack();
+                }
+                if state.tools.focus_stack_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_focus_stack_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_focus_stack();
+                }
+            });
+
+            if state.tools.focus_stack_paths.len() == 1 {
+                ui.label(
+                    egui::RichText::new("Add at least one more frame to fuse.")
+                        .small()
+                        .color(egui::Color32::from_rgb(200, 150, 50)),
+                );
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("focus_stack".to_string(), !default_open);
+    }
+
+    ui.separator();
+
     // ── Grain ─────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("grain");
     let resp = egui::CollapsingHeader::new("⣿  Grain")

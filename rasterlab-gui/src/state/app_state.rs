@@ -8,10 +8,10 @@ use rasterlab_core::{
     formats::FormatRegistry,
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
-        ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, GrainOp, HealOp, HealSpot,
-        HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp, LutOp, MaskedOp,
-        NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, ResizeOp, RotateOp, SaturationOp,
-        SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, FocusStackOp, GrainOp,
+        HealOp, HealSpot, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp,
+        LutOp, MaskedOp, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, ResizeOp, RotateOp,
+        SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -1095,6 +1095,36 @@ impl AppState {
         self.tools.panorama_paths.clear();
         self.tools.panorama_feather_px = 80;
         self.cancel_panorama_preview();
+    }
+
+    pub fn focus_stack_add_image(&mut self, path: std::path::PathBuf) {
+        self.tools
+            .focus_stack_paths
+            .push(path.to_string_lossy().into_owned());
+        if self.tools.focus_stack_paths.len() >= 2 {
+            self.tools.focus_stack_preview_active = true;
+            self.request_render();
+        }
+    }
+
+    pub fn cancel_focus_stack_preview(&mut self) {
+        if self.tools.focus_stack_preview_active {
+            self.tools.focus_stack_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_focus_stack(&mut self) {
+        self.tools.focus_stack_preview_active = false;
+        self.push_op(Box::new(FocusStackOp::new(
+            self.tools.focus_stack_paths.clone(),
+        )));
+        self.tools.focus_stack_paths.clear();
+    }
+
+    pub fn reset_focus_stack(&mut self) {
+        self.tools.focus_stack_paths.clear();
+        self.cancel_focus_stack_preview();
     }
 
     pub fn update_perspective_preview(&mut self) {

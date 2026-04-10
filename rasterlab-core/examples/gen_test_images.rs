@@ -530,7 +530,7 @@ fn crop_x(src: &RgbImage, x0: u32, w: u32) -> RgbImage {
 ///   overlap region — columns 1200 .. 2000  (800 px = 25 % of each tile)
 fn gen_panorama_2(scene: &RgbImage, dir: &Path) {
     let sw = scene.width(); // 3200
-    let tile_w = (sw * 5 / 8) as u32; // 2000
+    let tile_w = sw * 5 / 8; // 2000
     let overlap = sw / 4; // 800
 
     let left = crop_x(scene, 0, tile_w);
@@ -572,6 +572,240 @@ fn gen_panorama_3(scene: &RgbImage, dir: &Path) {
     );
 }
 
+// ─── focus stacking test images ─────────────────────────────────────────────
+
+/// Build a 1600×900 feature-rich scene used as the "in focus everywhere"
+/// reference.  Same non-periodic style as the panorama scene so Modified
+/// Laplacian has plenty of high-frequency content to pick up on.
+fn gen_focus_scene() -> RgbImage {
+    let w = 1600u32;
+    let h = 900u32;
+    let mut img = RgbImage::new(w, h);
+
+    // Two-tone diagonal gradient background.
+    for y in 0..h {
+        for x in 0..w {
+            let tx = x as f32 / w as f32;
+            let ty = y as f32 / h as f32;
+            let r = (50.0 + tx * 60.0 + ty * 20.0) as u8;
+            let g = (70.0 + tx * 40.0 + ty * 80.0) as u8;
+            let b = (100.0 + (1.0 - tx) * 70.0 + (1.0 - ty) * 40.0) as u8;
+            img.put_pixel(x, y, Rgb([r, g, b]));
+        }
+    }
+
+    let palette: [[u8; 3]; 20] = [
+        [230, 60, 60],
+        [60, 200, 60],
+        [60, 60, 220],
+        [220, 180, 40],
+        [220, 100, 40],
+        [140, 60, 200],
+        [40, 200, 200],
+        [220, 60, 160],
+        [100, 160, 60],
+        [60, 120, 200],
+        [200, 120, 80],
+        [80, 200, 140],
+        [180, 60, 100],
+        [100, 80, 160],
+        [200, 200, 80],
+        [255, 140, 0],
+        [0, 191, 255],
+        [154, 205, 50],
+        [218, 112, 214],
+        [47, 79, 79],
+    ];
+
+    // Dense scattering of small high-contrast shapes.  Each has a
+    // contrasting inner dot so the Modified Laplacian picks up strong
+    // double-edges.
+    let mut rng = 0x1234_5678_ABCD_EF00u64;
+    for _ in 0..900 {
+        rng = xs64(rng);
+        let cx = (rng as u32 % w) as i32;
+        rng = xs64(rng);
+        let cy = (rng as u32 % h) as i32;
+        rng = xs64(rng);
+        let r = 4 + (rng as i32 & 0xF);
+        rng = xs64(rng);
+        let ci = (rng as usize) % palette.len();
+        let color = palette[ci];
+        fill_circle(&mut img, cx, cy, r, color);
+        rng = xs64(rng);
+        let inner = palette[(rng as usize) % palette.len()];
+        fill_circle(&mut img, cx, cy, (r / 2).max(1), inner);
+    }
+
+    // Rectangles with sharp borders.
+    rng = 0xAAAA_BBBB_CCCC_DDDDu64;
+    for _ in 0..300 {
+        rng = xs64(rng);
+        let x0 = rng as u32 % (w - 40);
+        rng = xs64(rng);
+        let y0 = rng as u32 % (h - 40);
+        rng = xs64(rng);
+        let rw = 8 + (rng as u32 % 28);
+        rng = xs64(rng);
+        let rh = 8 + (rng as u32 % 28);
+        rng = xs64(rng);
+        let ci = (rng as usize) % palette.len();
+        let x1 = (x0 + rw).min(w - 1);
+        let y1 = (y0 + rh).min(h - 1);
+        fill_rect(&mut img, x0, y0, x1, y1, palette[ci]);
+        draw_border(&mut img, x0, y0, x1, y1, [15, 15, 15]);
+    }
+
+    img
+}
+
+/// Gaussian-blur a rectangular region of `src` in place (padded-reflect
+/// boundary handling).  Used to synthesise out-of-focus content.
+///
+/// `amount` is a unit-less blur strength: 0.0 → no blur, 1.0 → σ = 4 px.
+/// Non-affected pixels outside the bands stay at `src` exactly.
+fn gaussian_blur_bands(src: &RgbImage, bands: &[(u32, u32, f32)]) -> RgbImage {
+    // Each band: (y0, y1, blur_amount).  Pixels outside every band stay
+    // sharp.  Implementation: run a separable Gaussian on the full image
+    // per unique sigma, then composite the blurred rows back into src.
+    let w = src.width() as usize;
+    let h = src.height() as usize;
+
+    // Collect unique sigmas.
+    let mut sigmas: Vec<f32> = bands.iter().map(|&(_, _, a)| a * 4.0).collect();
+    sigmas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sigmas.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+
+    // Precompute a blurred buffer per unique sigma.
+    let blurred: Vec<(f32, Vec<[f32; 3]>)> = sigmas
+        .iter()
+        .map(|&sigma| {
+            // Source as f32 RGB.
+            let mut buf: Vec<[f32; 3]> = Vec::with_capacity(w * h);
+            for y in 0..h as u32 {
+                for x in 0..w as u32 {
+                    let p = src.get_pixel(x, y).0;
+                    buf.push([p[0] as f32, p[1] as f32, p[2] as f32]);
+                }
+            }
+            if sigma <= 0.01 {
+                return (sigma, buf);
+            }
+            let kernel = gaussian_kernel(sigma);
+            let half = kernel.len() / 2;
+
+            // Horizontal pass.
+            let mut tmp = buf.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let mut acc = [0.0f32; 3];
+                    for (k, &kv) in kernel.iter().enumerate() {
+                        let xi = (x as isize + k as isize - half as isize).clamp(0, w as isize - 1)
+                            as usize;
+                        let s = buf[y * w + xi];
+                        acc[0] += kv * s[0];
+                        acc[1] += kv * s[1];
+                        acc[2] += kv * s[2];
+                    }
+                    tmp[y * w + x] = acc;
+                }
+            }
+
+            // Vertical pass.
+            let mut out = tmp.clone();
+            for y in 0..h {
+                for x in 0..w {
+                    let mut acc = [0.0f32; 3];
+                    for (k, &kv) in kernel.iter().enumerate() {
+                        let yi = (y as isize + k as isize - half as isize).clamp(0, h as isize - 1)
+                            as usize;
+                        let s = tmp[yi * w + x];
+                        acc[0] += kv * s[0];
+                        acc[1] += kv * s[1];
+                        acc[2] += kv * s[2];
+                    }
+                    out[y * w + x] = acc;
+                }
+            }
+            (sigma, out)
+        })
+        .collect();
+
+    // Composite: start from the original, then for each band replace
+    // pixels with the matching blurred buffer.
+    let mut dst = src.clone();
+    for &(y0, y1, amount) in bands {
+        let sigma = amount * 4.0;
+        // Find the matching blurred buffer.
+        let buf = blurred
+            .iter()
+            .find(|(s, _)| (*s - sigma).abs() < 1e-3)
+            .map(|(_, b)| b)
+            .expect("sigma lookup");
+        let y0 = y0.min(src.height());
+        let y1 = y1.min(src.height());
+        for y in y0..y1 {
+            for x in 0..src.width() {
+                let p = buf[y as usize * w + x as usize];
+                dst.put_pixel(
+                    x,
+                    y,
+                    Rgb([
+                        p[0].clamp(0.0, 255.0) as u8,
+                        p[1].clamp(0.0, 255.0) as u8,
+                        p[2].clamp(0.0, 255.0) as u8,
+                    ]),
+                );
+            }
+        }
+    }
+    dst
+}
+
+/// Discrete 1-D Gaussian kernel for the given `sigma` (σ).  Kernel radius
+/// is `ceil(3 · σ)`, truncated at the tails.
+fn gaussian_kernel(sigma: f32) -> Vec<f32> {
+    let radius = (sigma * 3.0).ceil().max(1.0) as usize;
+    let mut k = vec![0.0f32; 2 * radius + 1];
+    let two_sigma_sq = 2.0 * sigma * sigma;
+    let mut sum = 0.0f32;
+    for (i, v) in k.iter_mut().enumerate() {
+        let x = i as f32 - radius as f32;
+        *v = (-(x * x) / two_sigma_sq).exp();
+        sum += *v;
+    }
+    for v in k.iter_mut() {
+        *v /= sum;
+    }
+    k
+}
+
+/// Build a three-frame focus stack from the reference scene:
+///   focus_top.png    — top band sharp,    mid + bottom blurred
+///   focus_mid.png    — middle band sharp, top + bottom blurred
+///   focus_bot.png    — bottom band sharp, top + middle blurred
+///
+/// When fused with a focus-stacking algorithm the output should match
+/// `focus_scene_full.png` pixel-for-pixel in the sharp regions and very
+/// closely everywhere else.
+fn gen_focus_stack_3(scene: &RgbImage, dir: &Path) {
+    let h = scene.height();
+    let t1 = h / 3;
+    let t2 = 2 * h / 3;
+
+    // Each frame blurs every band except its "sharp" band.  Use a heavy
+    // blur (σ = 4) so the Modified Laplacian signal-to-noise is huge.
+    let top = gaussian_blur_bands(scene, &[(t1, t2, 1.0), (t2, h, 1.0)]);
+    let mid = gaussian_blur_bands(scene, &[(0, t1, 1.0), (t2, h, 1.0)]);
+    let bot = gaussian_blur_bands(scene, &[(0, t1, 1.0), (t1, t2, 1.0)]);
+
+    save(top, dir, "focus_top.png");
+    save(mid, dir, "focus_mid.png");
+    save(bot, dir, "focus_bot.png");
+
+    println!("    band split: top=0..{t1}, mid={t1}..{t2}, bot={t2}..{h} (blur σ=4 elsewhere)");
+}
+
 // ─── main ───────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -609,6 +843,11 @@ fn main() {
     gen_panorama_2(&scene, out_dir);
     gen_panorama_3(&scene, out_dir);
 
+    println!("\n  [focus stacking test images]");
+    let focus_scene = gen_focus_scene();
+    save(focus_scene.clone(), out_dir, "focus_scene_full.png");
+    gen_focus_stack_3(&focus_scene, out_dir);
+
     println!("\nDone.");
     println!("\nColour filter workflow:");
     println!("  hald_clut_identity_L8.png → apply filter → output IS the 3-D LUT");
@@ -623,4 +862,8 @@ fn main() {
     println!("  pano_scene_full.png  — full 3200×800 reference scene");
     println!("  pano_left / pano_right — 2-tile test (open pano_left, stitch pano_right)");
     println!("  pano3_a / pano3_b / pano3_c — 3-tile test (open pano3_a, stitch b then c)");
+    println!("\nFocus stacking test workflow:");
+    println!("  focus_scene_full.png       — the all-in-focus reference");
+    println!("  focus_top / focus_mid / focus_bot — three frames, one sharp band each");
+    println!("  open focus_top, add focus_mid + focus_bot, stack → should match reference");
 }

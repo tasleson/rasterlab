@@ -32,6 +32,7 @@ pub enum DialogKind {
     ExportEditStack,
     LoadLut,
     PanoramaAddImage,
+    FocusStackAddImage,
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,7 @@ pub struct FileChooser {
     export_stack_dlg: FileDialog,
     lut_dlg: FileDialog,
     panorama_dlg: FileDialog,
+    focus_stack_dlg: FileDialog,
     /// Which kind is currently waiting for a result.
     pending: Option<DialogKind>,
 
@@ -101,6 +103,13 @@ impl FileChooser {
                 .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
                 .add_file_filter_extensions("PNG", vec!["png"])
                 .add_file_filter_extensions("NEF (Nikon RAW)", vec!["nef"]),
+            focus_stack_dlg: FileDialog::new()
+                .title("Add Frame to Focus Stack")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .add_file_filter_extensions("Images", vec!["jpg", "jpeg", "png", "nef"])
+                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
+                .add_file_filter_extensions("PNG", vec!["png"])
+                .add_file_filter_extensions("NEF (Nikon RAW)", vec!["nef"]),
             pending: None,
             rfd_rx: None,
         }
@@ -134,6 +143,10 @@ impl FileChooser {
 
     pub fn panorama_add_image(&mut self, ctx: &egui::Context) {
         self.open(ctx, DialogKind::PanoramaAddImage, false);
+    }
+
+    pub fn focus_stack_add_image(&mut self, ctx: &egui::Context) {
+        self.open(ctx, DialogKind::FocusStackAddImage, false);
     }
 
     // ── Per-frame polling ───────────────────────────────────────────────────
@@ -185,6 +198,7 @@ impl FileChooser {
             DialogKind::ExportEditStack => &mut self.export_stack_dlg,
             DialogKind::LoadLut => &mut self.lut_dlg,
             DialogKind::PanoramaAddImage => &mut self.panorama_dlg,
+            DialogKind::FocusStackAddImage => &mut self.focus_stack_dlg,
         }
     }
 
@@ -219,6 +233,12 @@ impl FileChooser {
                     .add_filter("CUBE LUT", &["cube"])
                     .pick_file(),
                 DialogKind::PanoramaAddImage => rfd::FileDialog::new()
+                    .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
+                    .add_filter("JPEG", &["jpg", "jpeg"])
+                    .add_filter("PNG", &["png"])
+                    .add_filter("NEF (Nikon RAW)", &["nef"])
+                    .pick_file(),
+                DialogKind::FocusStackAddImage => rfd::FileDialog::new()
                     .add_filter("Images", &["jpg", "jpeg", "png", "nef"])
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])

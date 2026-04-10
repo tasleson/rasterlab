@@ -44,6 +44,7 @@ See change log below for status.
 | Denoise | Bilateral filter noise reduction |
 | Faux HDR | Exposure fusion from ±1 stop virtual brackets |
 | Flip | Horizontal or vertical mirror |
+| Focus Stack | Fuse multiple frames at different focus distances into one all-in-focus image (Sum-Modified-Laplacian focus measure) |
 | Grain | Film grain with configurable strength and size |
 | Heal | Content-aware spot heal / clone stamp; auto-detects source patch |
 | Highlights / Shadows | Independent highlight and shadow recovery |
