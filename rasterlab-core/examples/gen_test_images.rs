@@ -20,6 +20,10 @@
 ///   skin_tone_ramp.png          Warm desaturated tones across luminance (skin/sky range)
 ///   grey_color_pairs.png        Pure grey next to same-luminance hue (detects channel mixing)
 ///
+///   — EXIF / metadata test —
+///   meta_test.jpg               640×480 gradient JPEG with embedded EXIF (Make, Model,
+///                               ISO, shutter, aperture, focal length, date, exposure bias)
+///
 /// Workflow:
 ///   1. Run this once to generate all images.
 ///   2. Apply the mystery filter to every image.
@@ -806,6 +810,140 @@ fn gen_focus_stack_3(scene: &RgbImage, dir: &Path) {
     println!("    band split: top=0..{t1}, mid={t1}..{t2}, bot={t2}..{h} (blur σ=4 elsewhere)");
 }
 
+// ─── EXIF / metadata test image ─────────────────────────────────────────────
+
+/// Write a 12-byte IFD entry whose value is a 4-byte offset (or a LONG inline).
+fn write_ifd_entry(buf: &mut Vec<u8>, tag: u16, typ: u16, count: u32, value: u32) {
+    buf.extend_from_slice(&tag.to_le_bytes());
+    buf.extend_from_slice(&typ.to_le_bytes());
+    buf.extend_from_slice(&count.to_le_bytes());
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+/// Write a 12-byte IFD entry whose value is a single SHORT stored inline.
+fn write_ifd_short(buf: &mut Vec<u8>, tag: u16, value: u16) {
+    buf.extend_from_slice(&tag.to_le_bytes());
+    buf.extend_from_slice(&3u16.to_le_bytes()); // type SHORT
+    buf.extend_from_slice(&1u32.to_le_bytes()); // count 1
+    buf.extend_from_slice(&value.to_le_bytes()); // value (2 bytes)
+    buf.extend_from_slice(&0u16.to_le_bytes()); // padding
+}
+
+/// Build a minimal TIFF IFD blob encoding test EXIF fields.
+///
+/// Returns raw TIFF bytes (no "Exif\0\0" prefix — img-parts adds that wrapper).
+///
+/// Layout:
+///   0..8    TIFF header  (II magic + offset-to-IFD0 = 8)
+///   8..50   IFD0         (count=3: Make, Model, ExifIFD ptr; next=0)
+///   50..60  Make string  "RasterLab\0"
+///   60..76  Model string "Test Camera RX1\0"
+///   76..166 ExifIFD      (count=7: ExposureTime, FNumber, ISO, DateTimeOriginal,
+///                                   ExposureBiasValue, FocalLength, FocalLength35mm; next=0)
+///   166..174 ExposureTime rational  (1/200)
+///   174..182 FNumber rational       (14/5 = f/2.8)
+///   182..202 DateTimeOriginal       "2024:06:15 10:30:00\0"
+///   202..210 ExposureBiasValue      srational (-1/3 EV)
+///   210..218 FocalLength rational   (50/1 mm)
+fn build_test_exif() -> Vec<u8> {
+    let make: &[u8] = b"RasterLab\0"; // 10 bytes
+    let model: &[u8] = b"Test Camera RX1\0"; // 16 bytes
+    let datetime: &[u8] = b"2024:06:15 10:30:00\0"; // 20 bytes
+
+    let make_offset: u32 = 50;
+    let model_offset: u32 = 60;
+    let exif_ifd_offset: u32 = 76;
+    let exposure_time_offset: u32 = 166;
+    let fnumber_offset: u32 = 174;
+    let datetime_offset: u32 = 182;
+    let ev_bias_offset: u32 = 202;
+    let focal_length_offset: u32 = 210;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(220);
+
+    // TIFF header (little-endian)
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    buf.extend_from_slice(&8u32.to_le_bytes()); // IFD0 at byte 8
+
+    // IFD0 — 3 entries, sorted by tag
+    buf.extend_from_slice(&3u16.to_le_bytes());
+    write_ifd_entry(&mut buf, 0x010F, 2, make.len() as u32, make_offset); // Make
+    write_ifd_entry(&mut buf, 0x0110, 2, model.len() as u32, model_offset); // Model
+    write_ifd_entry(&mut buf, 0x8769, 4, 1, exif_ifd_offset); // ExifIFD ptr
+    buf.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+
+    // IFD0 data
+    buf.extend_from_slice(make); // offset 50
+    buf.extend_from_slice(model); // offset 60
+
+    // ExifIFD — 7 entries, sorted by tag
+    buf.extend_from_slice(&7u16.to_le_bytes());
+    write_ifd_entry(&mut buf, 0x829A, 5, 1, exposure_time_offset); // ExposureTime RATIONAL
+    write_ifd_entry(&mut buf, 0x829D, 5, 1, fnumber_offset); // FNumber RATIONAL
+    write_ifd_short(&mut buf, 0x8827, 400); // ISO SHORT inline
+    write_ifd_entry(&mut buf, 0x9003, 2, datetime.len() as u32, datetime_offset); // DateTimeOriginal
+    write_ifd_entry(&mut buf, 0x9204, 10, 1, ev_bias_offset); // ExposureBiasValue SRATIONAL
+    write_ifd_entry(&mut buf, 0x920A, 5, 1, focal_length_offset); // FocalLength RATIONAL
+    write_ifd_short(&mut buf, 0xA405, 50); // FocalLengthIn35mmFilm SHORT inline
+    buf.extend_from_slice(&0u32.to_le_bytes()); // no next ExifIFD
+
+    // ExifIFD data
+    buf.extend_from_slice(&1u32.to_le_bytes()); // ExposureTime: 1 …
+    buf.extend_from_slice(&200u32.to_le_bytes()); //              … /200
+    buf.extend_from_slice(&14u32.to_le_bytes()); // FNumber: 14 …
+    buf.extend_from_slice(&5u32.to_le_bytes()); //           … /5 = f/2.8
+    buf.extend_from_slice(datetime); // DateTimeOriginal (20 bytes)
+    buf.extend_from_slice(&(-1i32).to_le_bytes()); // ExposureBiasValue: -1 …
+    buf.extend_from_slice(&3i32.to_le_bytes()); //                      … /3 EV
+    buf.extend_from_slice(&50u32.to_le_bytes()); // FocalLength: 50 …
+    buf.extend_from_slice(&1u32.to_le_bytes()); //              … /1 mm
+
+    buf
+}
+
+/// Generate a JPEG test image with embedded EXIF metadata.
+///
+/// The image is a 640×480 warm-to-cool colour gradient.  EXIF payload:
+///   Make="RasterLab", Model="Test Camera RX1", ISO=400,
+///   ExposureTime=1/200 s, FNumber=f/2.8, FocalLength=50 mm,
+///   FocalLengthIn35mmFilm=50, ExposureBiasValue=−0.33 EV,
+///   DateTimeOriginal=2024:06:15 10:30:00
+fn gen_meta_test_jpeg(dir: &Path) {
+    use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
+    use img_parts::{ImageEXIF, jpeg::Jpeg};
+
+    let w = 640u32;
+    let h = 480u32;
+
+    // Warm-to-cool left-to-right, dark-to-light top-to-bottom
+    let img: RgbImage = ImageBuffer::from_fn(w, h, |x, y| {
+        let tx = x as f32 / (w - 1) as f32;
+        let ty = y as f32 / (h - 1) as f32;
+        let r = (80.0 + tx * 160.0 + ty * 15.0).min(255.0) as u8;
+        let g = (60.0 + tx * 80.0 + ty * 120.0).min(255.0) as u8;
+        let b = (160.0 - tx * 80.0 + ty * 80.0).clamp(0.0, 255.0) as u8;
+        Rgb([r, g, b])
+    });
+
+    // Encode to JPEG
+    let rgb_flat: Vec<u8> = img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
+    let mut jpeg_bytes: Vec<u8> = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg_bytes, 90)
+        .encode(&rgb_flat, w, h, ExtendedColorType::Rgb8)
+        .expect("JPEG encode failed");
+
+    // Inject EXIF via img-parts
+    let exif_bytes = build_test_exif();
+    let mut jpeg = Jpeg::from_bytes(jpeg_bytes.into()).expect("parse JPEG for EXIF injection");
+    jpeg.set_exif(Some(exif_bytes.into()));
+    let out_bytes = jpeg.encoder().bytes().to_vec();
+
+    let out_path = dir.join("meta_test.jpg");
+    std::fs::write(&out_path, &out_bytes).expect("write meta_test.jpg failed");
+    println!("  wrote {}", out_path.display());
+}
+
 // ─── main ───────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -848,6 +986,9 @@ fn main() {
     save(focus_scene.clone(), out_dir, "focus_scene_full.png");
     gen_focus_stack_3(&focus_scene, out_dir);
 
+    println!("\n  [EXIF / metadata test image]");
+    gen_meta_test_jpeg(out_dir);
+
     println!("\nDone.");
     println!("\nColour filter workflow:");
     println!("  hald_clut_identity_L8.png → apply filter → output IS the 3-D LUT");
@@ -866,4 +1007,11 @@ fn main() {
     println!("  focus_scene_full.png       — the all-in-focus reference");
     println!("  focus_top / focus_mid / focus_bot — three frames, one sharp band each");
     println!("  open focus_top, add focus_mid + focus_bot, stack → should match reference");
+    println!("\nMetadata test workflow:");
+    println!("  meta_test.jpg → open in RasterLab → 🏷 Metadata panel should show:");
+    println!("    Make=RasterLab  Model=Test Camera RX1  ISO=400");
+    println!("    Shutter=1/200 s  Aperture=f/2.8  Focal=50 mm (50 mm eq)");
+    println!("    EV bias=−0.33  Date=2024:06:15 10:30:00");
+    println!("  Export with 'Preserve metadata' ON  → re-open → EXIF still present");
+    println!("  Export with 'Preserve metadata' OFF → re-open → EXIF absent");
 }

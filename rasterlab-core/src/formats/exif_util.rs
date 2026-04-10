@@ -18,9 +18,10 @@ pub fn read_exif_from_bytes(data: &[u8]) -> ImageMetadata {
     // ── Capture raw APP1 bytes for re-attachment on export ────────────────
     use img_parts::{ImageEXIF, jpeg::Jpeg};
     if let Ok(jpeg) = Jpeg::from_bytes(data.to_vec().into())
-        && let Some(exif_bytes) = jpeg.exif() {
-            meta.raw_exif = Some(exif_bytes.to_vec());
-        }
+        && let Some(exif_bytes) = jpeg.exif()
+    {
+        meta.raw_exif = Some(exif_bytes.to_vec());
+    }
 
     // ── Parse EXIF fields ─────────────────────────────────────────────────
     if let Ok(exif) = exif::Reader::new().read_from_container(&mut std::io::Cursor::new(data)) {
@@ -97,40 +98,46 @@ fn populate_metadata(meta: &mut ImageMetadata, exif: &exif::Exif) {
             }
             Tag::PhotographicSensitivity => {
                 if let Value::Short(v) = &field.value
-                    && let Some(&iso) = v.first() {
-                        meta.iso = Some(iso as u32);
-                    }
+                    && let Some(&iso) = v.first()
+                {
+                    meta.iso = Some(iso as u32);
+                }
             }
             Tag::ExposureTime => {
                 if let Value::Rational(v) = &field.value
-                    && let Some(r) = v.first() {
-                        meta.shutter_speed = Some(format_rational(r.num, r.denom));
-                    }
+                    && let Some(r) = v.first()
+                {
+                    meta.shutter_speed = Some(format_rational(r.num, r.denom));
+                }
             }
             Tag::FNumber => {
                 if let Value::Rational(v) = &field.value
-                    && let Some(r) = v.first() {
-                        meta.aperture = Some(r.num as f32 / r.denom.max(1) as f32);
-                    }
+                    && let Some(r) = v.first()
+                {
+                    meta.aperture = Some(r.num as f32 / r.denom.max(1) as f32);
+                }
             }
             Tag::FocalLength => {
                 if let Value::Rational(v) = &field.value
-                    && let Some(r) = v.first() {
-                        meta.focal_length = Some(r.num as f32 / r.denom.max(1) as f32);
-                    }
+                    && let Some(r) = v.first()
+                {
+                    meta.focal_length = Some(r.num as f32 / r.denom.max(1) as f32);
+                }
             }
             Tag::FocalLengthIn35mmFilm => {
                 if let Value::Short(v) = &field.value
-                    && let Some(&fl) = v.first() {
-                        meta.focal_length_35mm = Some(fl as u32);
-                    }
+                    && let Some(&fl) = v.first()
+                {
+                    meta.focal_length_35mm = Some(fl as u32);
+                }
             }
             Tag::ExposureBiasValue => {
                 if let Value::SRational(v) = &field.value
-                    && let Some(r) = v.first() {
-                        let denom = if r.denom == 0 { 1 } else { r.denom };
-                        meta.exposure_bias = Some(r.num as f32 / denom as f32);
-                    }
+                    && let Some(r) = v.first()
+                {
+                    let denom = if r.denom == 0 { 1 } else { r.denom };
+                    meta.exposure_bias = Some(r.num as f32 / denom as f32);
+                }
             }
             Tag::ExposureProgram => {
                 meta.exposure_program = Some(field.display_value().to_string());
@@ -150,22 +157,25 @@ fn populate_metadata(meta: &mut ImageMetadata, exif: &exif::Exif) {
             Tag::GPSLatitudeRef => {
                 if let Some(s) = ascii_string(&field.value)
                     && (s.starts_with('S') || s.starts_with('s'))
-                        && let Some(lat) = meta.gps_lat {
-                            meta.gps_lat = Some(-lat.abs());
-                        }
+                    && let Some(lat) = meta.gps_lat
+                {
+                    meta.gps_lat = Some(-lat.abs());
+                }
             }
             Tag::GPSLongitudeRef => {
                 if let Some(s) = ascii_string(&field.value)
                     && (s.starts_with('W') || s.starts_with('w'))
-                        && let Some(lon) = meta.gps_lon {
-                            meta.gps_lon = Some(-lon.abs());
-                        }
+                    && let Some(lon) = meta.gps_lon
+                {
+                    meta.gps_lon = Some(-lon.abs());
+                }
             }
             Tag::GPSAltitude => {
                 if let Value::Rational(v) = &field.value
-                    && let Some(r) = v.first() {
-                        meta.gps_alt = Some(r.num as f32 / r.denom.max(1) as f32);
-                    }
+                    && let Some(r) = v.first()
+                {
+                    meta.gps_alt = Some(r.num as f32 / r.denom.max(1) as f32);
+                }
             }
             _ => {}
         }
@@ -220,11 +230,12 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
 /// Convert GPS DMS rational triplet to decimal degrees.
 fn gps_dms_to_decimal(val: &exif::Value) -> Option<f64> {
     if let exif::Value::Rational(v) = val
-        && v.len() >= 3 {
-            let deg = v[0].num as f64 / v[0].denom.max(1) as f64;
-            let min = v[1].num as f64 / v[1].denom.max(1) as f64;
-            let sec = v[2].num as f64 / v[2].denom.max(1) as f64;
-            return Some(deg + min / 60.0 + sec / 3600.0);
-        }
+        && v.len() >= 3
+    {
+        let deg = v[0].num as f64 / v[0].denom.max(1) as f64;
+        let min = v[1].num as f64 / v[1].denom.max(1) as f64;
+        let sec = v[2].num as f64 / v[2].denom.max(1) as f64;
+        return Some(deg + min / 60.0 + sec / 3600.0);
+    }
     None
 }

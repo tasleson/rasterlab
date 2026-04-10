@@ -2986,9 +2986,10 @@ fn metadata_ui(ui: &mut egui::Ui, meta: &rasterlab_core::image::ImageMetadata) {
                     row(ui, "Focal length", &s);
                 }
                 if let Some(ev) = meta.exposure_bias
-                    && ev.abs() > 0.01 {
-                        row(ui, "Exp. bias", &format!("{:+.2} EV", ev));
-                    }
+                    && ev.abs() > 0.01
+                {
+                    row(ui, "Exp. bias", &format!("{:+.2} EV", ev));
+                }
                 if let Some(ref prog) = meta.exposure_program {
                     row(ui, "Program", prog);
                 }

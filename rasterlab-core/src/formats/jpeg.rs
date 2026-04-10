@@ -45,9 +45,10 @@ impl FormatHandler for JpegHandler {
 
         // Re-attach original EXIF if requested and available.
         if options.preserve_metadata
-            && let Some(ref exif_bytes) = image.metadata.raw_exif {
-                buf = exif_util::attach_exif_to_jpeg(buf, exif_bytes);
-            }
+            && let Some(ref exif_bytes) = image.metadata.raw_exif
+        {
+            buf = exif_util::attach_exif_to_jpeg(buf, exif_bytes);
+        }
 
         Ok(buf)
     }
