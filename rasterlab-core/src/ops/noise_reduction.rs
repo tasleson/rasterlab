@@ -698,6 +698,142 @@ mod tests {
             .for_each(|p| assert_eq!(p[3], 77, "alpha must be preserved"));
     }
 
+    // ---- Reconstruction tests ---------------------------------------------
+    // These answer the real question: does NR bring a noisy image *closer to
+    // the clean original*?  Variance-reduction tests can be satisfied by any
+    // smoothing (even a constant output); MSE-vs-clean cannot.
+
+    /// Deterministic xorshift32 — seeded, reproducible across platforms.
+    fn xorshift(state: &mut u32) -> u32 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        *state = x;
+        x
+    }
+
+    /// Approximate N(0, 1) via sum of 12 uniforms − 6.
+    fn gauss(state: &mut u32) -> f32 {
+        let mut s = 0.0f32;
+        for _ in 0..12 {
+            s += (xorshift(state) as f32) / (u32::MAX as f32);
+        }
+        s - 6.0
+    }
+
+    /// Structured clean image: smooth gradient with a few hard edges and
+    /// blocks of flat color.  Gives NR real signal to preserve.
+    fn make_clean(w: u32, h: u32) -> Image {
+        let mut img = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize * 4;
+                // Diagonal gradient
+                let g = ((x + y) * 255 / (w + h).max(1)) as u8;
+                // A couple of hard-edged blocks
+                let (r, gg, b) = if x < w / 4 && y < h / 4 {
+                    (220, 40, 40)
+                } else if x >= 3 * w / 4 && y >= 3 * h / 4 {
+                    (40, 60, 200)
+                } else {
+                    (g, g, g)
+                };
+                img.data[i] = r;
+                img.data[i + 1] = gg;
+                img.data[i + 2] = b;
+                img.data[i + 3] = 255;
+            }
+        }
+        img
+    }
+
+    fn add_gaussian_noise(img: &Image, sigma: f32, seed: u32) -> Image {
+        let mut out = img.deep_clone();
+        let mut state = seed;
+        for px in out.data.chunks_mut(4) {
+            for ch in px.iter_mut().take(3) {
+                let n = gauss(&mut state) * sigma;
+                *ch = (*ch as f32 + n).clamp(0.0, 255.0) as u8;
+            }
+        }
+        out
+    }
+
+    fn mse(a: &[u8], b: &[u8]) -> f64 {
+        let mut sum = 0.0f64;
+        let mut n = 0usize;
+        for (pa, pb) in a.chunks(4).zip(b.chunks(4)) {
+            for c in 0..3 {
+                let d = pa[c] as f64 - pb[c] as f64;
+                sum += d * d;
+                n += 1;
+            }
+        }
+        sum / n.max(1) as f64
+    }
+
+    #[test]
+    fn wavelet_recovers_toward_clean() {
+        let clean = make_clean(64, 64);
+        let noisy = add_gaussian_noise(&clean, 15.0, 0xC0FFEE);
+        let mse_noisy = mse(&clean.data, &noisy.data);
+
+        let op = NoiseReductionOp {
+            method: NrMethod::Wavelet,
+            luma_strength: 0.5,
+            color_strength: 0.5,
+            detail_preservation: 0.3,
+        };
+        let denoised = op.apply(noisy).unwrap();
+        let mse_denoised = mse(&clean.data, &denoised.data);
+
+        assert!(
+            mse_denoised < mse_noisy * 0.70,
+            "wavelet NR should cut MSE-vs-clean by ≥30%: noisy={mse_noisy:.1} denoised={mse_denoised:.1}"
+        );
+    }
+
+    #[test]
+    fn nlm_recovers_toward_clean() {
+        let clean = make_clean(32, 32);
+        let noisy = add_gaussian_noise(&clean, 15.0, 0xBADC0DE);
+        let mse_noisy = mse(&clean.data, &noisy.data);
+
+        let op = NoiseReductionOp {
+            method: NrMethod::NonLocalMeans,
+            luma_strength: 0.5,
+            color_strength: 0.5,
+            detail_preservation: 0.3,
+        };
+        let denoised = op.apply(noisy).unwrap();
+        let mse_denoised = mse(&clean.data, &denoised.data);
+
+        assert!(
+            mse_denoised < mse_noisy * 0.70,
+            "NLM NR should cut MSE-vs-clean by ≥30%: noisy={mse_noisy:.1} denoised={mse_denoised:.1}"
+        );
+    }
+
+    #[test]
+    fn edges_are_preserved() {
+        // On a clean image (no noise), NR with detail_preservation should not
+        // obliterate hard edges.  MSE vs. clean should stay small.
+        let clean = make_clean(64, 64);
+        let op = NoiseReductionOp {
+            method: NrMethod::Wavelet,
+            luma_strength: 0.5,
+            color_strength: 0.5,
+            detail_preservation: 0.7,
+        };
+        let out = op.apply(clean.deep_clone()).unwrap();
+        let err = mse(&clean.data, &out.data);
+        assert!(
+            err < 50.0,
+            "NR on clean input should not badly distort edges, MSE={err:.1}"
+        );
+    }
+
     #[test]
     fn zero_strength_is_identity() {
         let src = make_noisy(16, 16);
