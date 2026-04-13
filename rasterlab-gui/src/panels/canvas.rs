@@ -1,11 +1,12 @@
 //! Central image viewer with zoom/pan and crop-selection overlay.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Ui, Vec2};
 use rasterlab_core::Image;
 
-use crate::state::AppState;
+use crate::state::{AppState, SplitMode};
 
 /// Persistent state for the canvas panel.
 pub struct CanvasState {
@@ -30,6 +31,10 @@ pub struct CanvasState {
     before_hash: u64,
     /// Logical pixel dimensions of the before image (may differ from source after rotate/crop).
     before_logical_size: (u32, u32),
+    /// "After" texture for vs-previous-step split mode (pipeline through op N).
+    after_step_texture: Option<TextureHandle>,
+    after_step_hash: u64,
+    after_step_logical_size: (u32, u32),
     /// Position of the split divider as a fraction of canvas width (0.0–1.0).
     split_ratio: f32,
     /// True while the user is dragging the split divider.
@@ -66,6 +71,9 @@ impl Default for CanvasState {
             before_texture: None,
             before_hash: 0,
             before_logical_size: (0, 0),
+            after_step_texture: None,
+            after_step_hash: 0,
+            after_step_logical_size: (0, 0),
             split_ratio: 0.5,
             split_dragging: false,
             mask_overlay_texture: None,
@@ -80,6 +88,21 @@ impl Default for CanvasState {
 
 impl CanvasState {
     pub fn ui(&mut self, ui: &mut Ui, state: &mut AppState) {
+        // Precompute pipeline data up-front so the toolbar closure doesn't need
+        // to reborrow `state` while `image` is still held below.
+        let op_count = state.pipeline().map(|p| p.ops().len()).unwrap_or(0);
+        let op_names: Vec<String> = state
+            .pipeline()
+            .map(|p| {
+                p.ops()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| format!("{}. {}", i + 1, e.operation.name()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let is_editing = state.editing.is_some();
+
         let Some(image) = state.rendered.as_ref() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
@@ -103,6 +126,49 @@ impl CanvasState {
                 state.split_view = !state.split_view;
                 if !state.split_view {
                     self.split_dragging = false;
+                }
+            }
+            if state.split_view {
+                egui::ComboBox::from_id_salt("split_mode")
+                    .selected_text(match state.split_mode {
+                        SplitMode::VsOriginal => "vs. Original",
+                        SplitMode::VsPreviousStep => "vs. Previous step",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut state.split_mode,
+                            SplitMode::VsOriginal,
+                            "vs. Original",
+                        );
+                        ui.add_enabled_ui(op_count > 0, |ui| {
+                            ui.selectable_value(
+                                &mut state.split_mode,
+                                SplitMode::VsPreviousStep,
+                                "vs. Previous step",
+                            )
+                            .on_disabled_hover_text(
+                                "Add at least one operation to compare a step.",
+                            );
+                        });
+                    });
+                // Op picker — only visible when vs-previous-step mode is active
+                // and the user is NOT currently editing an op (in that case the
+                // focus is pinned to the op under edit).
+                if state.split_mode == SplitMode::VsPreviousStep && !is_editing && op_count > 0 {
+                    let default_idx = op_count - 1;
+                    let mut selected = state.split_focus.unwrap_or(default_idx).min(default_idx);
+                    let current_label = op_names
+                        .get(selected)
+                        .cloned()
+                        .unwrap_or_else(|| "(none)".into());
+                    egui::ComboBox::from_id_salt("split_focus_op")
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            for (i, name) in op_names.iter().enumerate() {
+                                ui.selectable_value(&mut selected, i, name);
+                            }
+                        });
+                    state.split_focus = Some(selected);
                 }
             }
         });
@@ -129,25 +195,101 @@ impl CanvasState {
             self.last_hash = new_hash;
         }
 
-        // ── Upload "before" texture when split view is active ─────────────────
-        // "Before" is the source image with only geometric ops applied (rotate,
-        // flip, crop) so both sides of the split share the same orientation.
+        // ── Upload split-view textures ────────────────────────────────────────
+        // "Before" content depends on split_mode:
+        //   VsOriginal:     source + geometric ops only (full pipeline is "after")
+        //   VsPreviousStep: pipeline through op N-1; also need a custom "after"
+        //                   texture = pipeline through op N, where N is the op
+        //                   currently being edited.  Falls back to VsOriginal
+        //                   when no op is under edit.
+        // Anchor op index for VsPreviousStep mode.  Editing op takes precedence
+        // over the user's picker; falls back to the last op in the stack.
+        let anchor_idx: Option<usize> = if state.split_view {
+            let op_count = state.pipeline().map(|p| p.ops().len()).unwrap_or(0);
+            if op_count == 0 {
+                None
+            } else {
+                let last = op_count - 1;
+                Some(
+                    state
+                        .editing
+                        .map(|s| s.op_index)
+                        .or(state.split_focus)
+                        .unwrap_or(last)
+                        .min(last),
+                )
+            }
+        } else {
+            None
+        };
+        let effective_mode = if state.split_view {
+            match state.split_mode {
+                SplitMode::VsPreviousStep if anchor_idx.is_some() => SplitMode::VsPreviousStep,
+                _ => SplitMode::VsOriginal,
+            }
+        } else {
+            SplitMode::VsOriginal
+        };
         if state.split_view {
             if let Some(pipeline) = state.pipeline() {
+                let step_gen = pipeline.step_cache_gen();
                 let geo_gen = pipeline.geometric_gen();
-                if self.before_texture.is_none() || geo_gen != self.before_hash {
-                    match pipeline.render_geometric_only() {
-                        Ok(geo_img) => {
-                            self.before_logical_size = (geo_img.width, geo_img.height);
-                            self.before_texture = Some(ui.ctx().load_texture(
-                                "canvas_before",
-                                image_to_egui(&geo_img),
-                                TextureOptions::LINEAR,
-                            ));
-                            self.before_hash = geo_gen;
+                match effective_mode {
+                    SplitMode::VsOriginal => {
+                        // Invalidate after_step texture — it's unused in this mode.
+                        self.after_step_texture = None;
+                        self.after_step_hash = 0;
+                        self.after_step_logical_size = (0, 0);
+                        // Key distinguishes the two modes so switching modes
+                        // forces a refresh even if geo_gen happens to match.
+                        let hashed = hash_key(&(0u64, geo_gen));
+                        if self.before_texture.is_none() || hashed != self.before_hash {
+                            match pipeline.render_geometric_only() {
+                                Ok(img) => {
+                                    self.before_logical_size = (img.width, img.height);
+                                    self.before_texture = Some(ui.ctx().load_texture(
+                                        "canvas_before",
+                                        image_to_egui(&img),
+                                        TextureOptions::LINEAR,
+                                    ));
+                                    self.before_hash = hashed;
+                                }
+                                Err(e) => eprintln!("render_geometric_only failed: {e}"),
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("render_geometric_only failed: {e}");
+                    }
+                    SplitMode::VsPreviousStep => {
+                        let n = anchor_idx.unwrap_or(0);
+                        let before_hashed = hash_key(&(1u64, step_gen, n as u64, 0u64));
+                        let after_hashed = hash_key(&(1u64, step_gen, n as u64, 1u64));
+                        if self.before_texture.is_none() || before_hashed != self.before_hash {
+                            match pipeline.render_prefix(n) {
+                                Ok(img) => {
+                                    self.before_logical_size = (img.width, img.height);
+                                    self.before_texture = Some(ui.ctx().load_texture(
+                                        "canvas_before",
+                                        image_to_egui(&img),
+                                        TextureOptions::LINEAR,
+                                    ));
+                                    self.before_hash = before_hashed;
+                                }
+                                Err(e) => eprintln!("render_prefix({n}) failed: {e}"),
+                            }
+                        }
+                        if self.after_step_texture.is_none() || after_hashed != self.after_step_hash
+                        {
+                            match pipeline.render_prefix(n + 1) {
+                                Ok(img) => {
+                                    self.after_step_logical_size = (img.width, img.height);
+                                    self.after_step_texture = Some(ui.ctx().load_texture(
+                                        "canvas_after_step",
+                                        image_to_egui(&img),
+                                        TextureOptions::LINEAR,
+                                    ));
+                                    self.after_step_hash = after_hashed;
+                                }
+                                Err(e) => eprintln!("render_prefix({}) failed: {e}", n + 1),
+                            }
                         }
                     }
                 }
@@ -177,6 +319,9 @@ impl CanvasState {
                 self.before_texture = None;
                 self.before_hash = 0;
                 self.before_logical_size = (0, 0);
+                self.after_step_texture = None;
+                self.after_step_hash = 0;
+                self.after_step_logical_size = (0, 0);
             }
             self.last_generation = img_gen;
             self.last_img_dims = (img_w, img_h);
@@ -247,6 +392,20 @@ impl CanvasState {
         });
 
         if state.split_view {
+            // In vs-previous-step mode the "after" side shows the image through
+            // the editing op, not the final pipeline output.
+            let after_tex_id = match effective_mode {
+                SplitMode::VsPreviousStep => self
+                    .after_step_texture
+                    .as_ref()
+                    .map(|t| t.id())
+                    .unwrap_or(tex_id),
+                SplitMode::VsOriginal => tex_id,
+            };
+            let after_logical_size = match effective_mode {
+                SplitMode::VsPreviousStep => self.after_step_logical_size,
+                SplitMode::VsOriginal => (0, 0),
+            };
             self.draw_split_view(
                 ui,
                 &resp,
@@ -255,7 +414,8 @@ impl CanvasState {
                 canvas_rect,
                 image_tl,
                 display_size,
-                tex_id,
+                after_tex_id,
+                after_logical_size,
                 middle_down,
                 ctrl_held,
                 over_canvas,
@@ -351,6 +511,7 @@ impl CanvasState {
         image_tl: Pos2,
         display_size: Vec2,
         after_tex_id: egui::TextureId,
+        after_logical_size: (u32, u32),
         middle_down: bool,
         ctrl_held: bool,
         over_canvas: bool,
@@ -381,9 +542,15 @@ impl CanvasState {
         }
 
         // ── Draw after (rendered image, right half) ──────────────────────────
+        let (aw, ah) = after_logical_size;
+        let after_size = if aw > 0 && ah > 0 {
+            Vec2::new(aw as f32 * self.zoom, ah as f32 * self.zoom)
+        } else {
+            display_size
+        };
         painter.with_clip_rect(right_clip).image(
             after_tex_id,
-            Rect::from_min_size(image_tl, display_size),
+            Rect::from_min_size(image_tl, after_size),
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
@@ -1287,10 +1454,14 @@ fn fit_zoom(img_w: u32, img_h: u32, available: Vec2) -> f32 {
         .max(0.05)
 }
 
+fn hash_key<T: Hash>(t: &T) -> u64 {
+    let mut h = DefaultHasher::new();
+    t.hash(&mut h);
+    h.finish()
+}
+
 fn compute_hash(image: &Image) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    // Sample every 128th byte — fast, but catches any pixel change.
+    let mut h = DefaultHasher::new();
     image.data.len().hash(&mut h);
     for byte in image.data.iter().step_by(128) {
         byte.hash(&mut h);

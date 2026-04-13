@@ -471,6 +471,34 @@ impl EditPipeline {
         Ok(current)
     }
 
+    /// Render the source image through the first `len` ops (enabled ops in
+    /// `0..len`).  `len = 0` returns the source unchanged.  Clamped to
+    /// `self.cursor`.
+    ///
+    /// Used by the split view to show the state of the image before and after
+    /// a single op under edit.
+    pub fn render_prefix(&self, len: usize) -> RasterResult<Arc<Image>> {
+        let end = len.min(self.cursor);
+        let mut current: Arc<Image> = Arc::clone(&self.source);
+        for entry in &self.ops[..end] {
+            if entry.enabled {
+                let img = match Arc::try_unwrap(current) {
+                    Ok(img) => img,
+                    Err(arc) => arc.as_ref().deep_clone(),
+                };
+                let result = entry.operation.apply(img).map_err(|e| {
+                    RasterError::Pipeline(format!(
+                        "Operation '{}' failed: {}",
+                        entry.operation.name(),
+                        e
+                    ))
+                })?;
+                current = Arc::new(result);
+            }
+        }
+        Ok(current)
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------

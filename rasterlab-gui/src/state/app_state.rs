@@ -63,6 +63,17 @@ enum BgMessage {
     Cancelled,
 }
 
+/// What the split "before/after" view compares against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitMode {
+    /// Left = source with geometric ops only; right = full pipeline output.
+    VsOriginal,
+    /// Left = pipeline through op N-1; right = pipeline through op N, where
+    /// N is the index of the op currently being edited.  Falls back to
+    /// `VsOriginal` when no op is under edit.
+    VsPreviousStep,
+}
+
 // ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
@@ -111,6 +122,11 @@ pub struct AppState {
     pub image_generation: u64,
     /// When true the canvas renders a split before/after view.
     pub split_view: bool,
+    /// What the split view compares against.
+    pub split_mode: SplitMode,
+    /// Op index anchoring vs-previous-step mode when no op is under edit.
+    /// `None` means "last op in the pipeline".
+    pub split_focus: Option<usize>,
 
     // Background thread channel
     bg_tx: mpsc::Sender<BgMessage>,
@@ -177,6 +193,8 @@ impl AppState {
             project_created_at: None,
             image_generation: 0,
             split_view: false,
+            split_mode: SplitMode::VsOriginal,
+            split_focus: None,
             bg_tx,
             bg_rx,
             ctx,
