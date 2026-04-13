@@ -118,7 +118,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 ui.add_enabled_ui(row_enabled, |ui| {
                     // ── Delete ───────────────────────────────────────────
                     if ui
-                        .button(RichText::new("✕").color(Color32::from_rgb(220, 80, 80)))
+                        .button(RichText::new("🗙").color(Color32::from_rgb(220, 80, 80)))
                         .on_hover_text("Remove this operation")
                         .clicked()
                     {
@@ -126,12 +126,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     }
 
                     // ── Move up ──────────────────────────────────────────
-                    if i > 0 && ui.button("▲").on_hover_text("Move up").clicked() {
+                    if i > 0 && ui.button("⏶").on_hover_text("Move up").clicked() {
                         reorder = Some((i, i - 1));
                     }
 
                     // ── Move down ────────────────────────────────────────
-                    if i + 1 < ops.len() && ui.button("▼").on_hover_text("Move down").clicked() {
+                    if i + 1 < ops.len() && ui.button("⏷").on_hover_text("Move down").clicked() {
                         reorder = Some((i, i + 1));
                     }
                 });
@@ -157,7 +157,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 if ui
                     .add_enabled(
                         pencil_enabled,
-                        egui::Button::new(RichText::new("✎").color(pencil_color)),
+                        egui::Button::new(RichText::new("📝").color(pencil_color)),
                     )
                     .on_hover_text(hover)
                     .clicked()
