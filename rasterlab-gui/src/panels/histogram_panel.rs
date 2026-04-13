@@ -49,7 +49,10 @@ pub fn ui(ui: &mut Ui, hist: Option<&HistogramData>) {
 }
 
 fn draw_channel(ui: &mut Ui, data: &[u64; 256], color: Color32, width: f32, label: &str) {
-    let peak = data.iter().copied().max().unwrap_or(1).max(1) as f32;
+    // Scale to the tallest interior bucket, ignoring 0/255 which often hold
+    // large clipping spikes that would otherwise flatten the rest of the chart.
+    let interior_peak = data[1..255].iter().copied().max().unwrap_or(0);
+    let peak = interior_peak.max(1) as f32;
 
     ui.label(label);
     let (resp, painter) =
@@ -62,7 +65,7 @@ fn draw_channel(ui: &mut Ui, data: &[u64; 256], color: Color32, width: f32, labe
     painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_gray(20));
 
     for (i, &count) in data.iter().enumerate() {
-        let bar_height = (count as f32 / peak) * CHANNEL_HEIGHT;
+        let bar_height = ((count as f32 / peak) * CHANNEL_HEIGHT).min(CHANNEL_HEIGHT);
         let x = rect.left() + i as f32 * bar_w;
         let bar_rect = Rect::from_min_size(
             egui::pos2(x + BAR_GAP, rect.bottom() - bar_height),
