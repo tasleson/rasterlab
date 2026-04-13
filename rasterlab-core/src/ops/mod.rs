@@ -35,7 +35,7 @@ pub mod white_balance;
 
 pub use blur::BlurOp;
 pub use brightness_contrast::BrightnessContrastOp;
-pub use bw::BlackAndWhiteOp;
+pub use bw::{BlackAndWhiteOp, BwMode};
 pub use clarity_texture::ClarityTextureOp;
 pub use color_balance::ColorBalanceOp;
 pub use color_space::{ColorSpaceConversion, ColorSpaceOp};

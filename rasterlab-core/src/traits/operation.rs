@@ -78,4 +78,12 @@ pub trait Operation: Send + Sync {
     fn scaled_for_preview(&self, _scale: f32) -> Box<dyn Operation> {
         self.clone_box()
     }
+
+    /// Optional downcast hook used by the GUI's "edit existing op" feature.
+    /// Override to return `Some(self)` so the GUI can recover the concrete op
+    /// type and rehydrate its tool-panel sliders.  Default is `None`, meaning
+    /// the op is not editable from the stack.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }

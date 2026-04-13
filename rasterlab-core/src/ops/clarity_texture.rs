@@ -57,6 +57,10 @@ impl Operation for ClarityTextureOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         if self.clarity == 0.0 && self.texture == 0.0 {
             return Ok(image);

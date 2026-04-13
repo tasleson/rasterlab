@@ -11,15 +11,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.heading("Edit Stack");
     ui.separator();
 
+    let lock = state.editing.is_some();
+
     // ── Virtual copy tab bar ──────────────────────────────────────────────
-    virtual_copy_tabs(ui, state);
+    ui.add_enabled_ui(!lock, |ui| {
+        virtual_copy_tabs(ui, state);
+    });
 
     ui.separator();
 
     // ── Undo / Redo controls ──────────────────────────────────────────────
     ui.horizontal(|ui| {
-        let can_undo = state.can_undo();
-        let can_redo = state.can_redo();
+        let can_undo = state.can_undo() && !lock;
+        let can_redo = state.can_redo() && !lock;
         if ui
             .add_enabled(can_undo, egui::Button::new("⟵ Undo"))
             .clicked()
@@ -63,10 +67,15 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let mut remove_idx: Option<usize> = None;
     let mut reorder: Option<(usize, usize)> = None;
     let mut toggle_idx: Option<usize> = None;
+    let mut edit_idx: Option<usize> = None;
+
+    let editing = state.editing;
 
     for (i, entry) in ops.iter().enumerate() {
         let is_active = i < cursor;
         let desc = entry.operation.describe();
+        let is_editing_this = editing.is_some_and(|s| s.op_index == i);
+        let editable = entry.operation.as_any().is_some();
 
         // Dimmed rows are in the "redo" area (after the cursor)
         let row_color = if !is_active {
@@ -77,40 +86,83 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             ui.visuals().text_color().gamma_multiply(0.55) // disabled
         };
 
+        // While editing a different op, disable this row so the user can only
+        // interact with the op under edit (its own pencil still works, to exit).
+        let row_enabled = editing.is_none() || is_editing_this;
+
         ui.horizontal(|ui| {
             // ── Drag handle ──────────────────────────────────────────────
             ui.label(RichText::new("⣿").color(Color32::from_gray(80)));
 
-            // ── Enable / disable checkbox ─────────────────────────────
-            let mut enabled = entry.enabled;
-            if ui.checkbox(&mut enabled, "").changed() {
-                toggle_idx = Some(i);
-            }
+            ui.add_enabled_ui(row_enabled, |ui| {
+                // ── Enable / disable checkbox ─────────────────────────────
+                let mut enabled = entry.enabled;
+                if ui.checkbox(&mut enabled, "").changed() {
+                    toggle_idx = Some(i);
+                }
+            });
 
             // ── Operation name + description ──────────────────────────
-            let text = RichText::new(format!("{}.  {}", i + 1, desc))
-                .color(row_color)
+            let name_color = if is_editing_this {
+                Color32::from_rgb(90, 160, 255)
+            } else {
+                row_color
+            };
+            let prefix = if is_editing_this { "✎ " } else { "" };
+            let text = RichText::new(format!("{}{}.  {}", prefix, i + 1, desc))
+                .color(name_color)
                 .monospace();
             ui.label(text);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // ── Delete ───────────────────────────────────────────
+                ui.add_enabled_ui(row_enabled, |ui| {
+                    // ── Delete ───────────────────────────────────────────
+                    if ui
+                        .button(RichText::new("✕").color(Color32::from_rgb(220, 80, 80)))
+                        .on_hover_text("Remove this operation")
+                        .clicked()
+                    {
+                        remove_idx = Some(i);
+                    }
+
+                    // ── Move up ──────────────────────────────────────────
+                    if i > 0 && ui.button("▲").on_hover_text("Move up").clicked() {
+                        reorder = Some((i, i - 1));
+                    }
+
+                    // ── Move down ────────────────────────────────────────
+                    if i + 1 < ops.len() && ui.button("▼").on_hover_text("Move down").clicked() {
+                        reorder = Some((i, i + 1));
+                    }
+                });
+
+                // ── Edit (pencil) ────────────────────────────────────
+                // Always enabled for the row under edit (so the user can
+                // exit the session); otherwise only when no other edit is
+                // active and the op type supports editing.
+                let pencil_enabled =
+                    is_editing_this || (editing.is_none() && editable && is_active);
+                let pencil_color = if is_editing_this {
+                    Color32::from_rgb(90, 160, 255)
+                } else {
+                    ui.visuals().text_color()
+                };
+                let hover = if is_editing_this {
+                    "Exit edit mode"
+                } else if !editable {
+                    "This op type cannot be edited"
+                } else {
+                    "Edit this operation"
+                };
                 if ui
-                    .button(RichText::new("✕").color(Color32::from_rgb(220, 80, 80)))
-                    .on_hover_text("Remove this operation")
+                    .add_enabled(
+                        pencil_enabled,
+                        egui::Button::new(RichText::new("✎").color(pencil_color)),
+                    )
+                    .on_hover_text(hover)
                     .clicked()
                 {
-                    remove_idx = Some(i);
-                }
-
-                // ── Move up ──────────────────────────────────────────
-                if i > 0 && ui.button("▲").on_hover_text("Move up").clicked() {
-                    reorder = Some((i, i - 1));
-                }
-
-                // ── Move down ────────────────────────────────────────
-                if i + 1 < ops.len() && ui.button("▼").on_hover_text("Move down").clicked() {
-                    reorder = Some((i, i + 1));
+                    edit_idx = Some(i);
                 }
             });
         });
@@ -119,7 +171,13 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     }
 
     // ── Apply deferred mutations ──────────────────────────────────────────
-    if let Some(idx) = remove_idx {
+    if let Some(idx) = edit_idx {
+        if state.editing.is_some_and(|s| s.op_index == idx) {
+            state.end_edit();
+        } else {
+            state.begin_edit(idx);
+        }
+    } else if let Some(idx) = remove_idx {
         state.remove_op(idx);
     } else if let Some((from, to)) = reorder {
         state.reorder_op(from, to);

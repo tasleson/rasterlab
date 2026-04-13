@@ -58,6 +58,10 @@ impl Operation for LevelsOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let lut = self.build_lut();
 

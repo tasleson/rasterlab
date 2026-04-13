@@ -46,6 +46,10 @@ impl Operation for HighlightsShadowsOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.highlights.abs() < 1e-5 && self.shadows.abs() < 1e-5 {
             return Ok(image);

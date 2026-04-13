@@ -57,6 +57,10 @@ impl Operation for FauxHdrOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.strength < 1e-5 {
             return Ok(image);

@@ -174,6 +174,46 @@ impl EditPipeline {
         true
     }
 
+    /// Set the `enabled` flag on the op at `index` without saving an undo
+    /// snapshot.  Used by the "edit existing op" flow, which needs to hide
+    /// the original op while the user adjusts its parameters but must not
+    /// pollute undo history with the toggle.
+    pub fn set_enabled_no_snapshot(&mut self, index: usize, enabled: bool) -> bool {
+        if index >= self.ops.len() {
+            return false;
+        }
+        let entry = &mut self.ops[index];
+        if entry.enabled == enabled {
+            return true;
+        }
+        if entry.operation.is_geometric() {
+            self.geo_gen += 1;
+        }
+        entry.enabled = enabled;
+        if index < self.cursor {
+            self.invalidate_steps_from(index);
+        }
+        true
+    }
+
+    /// Replace the operation at `index` with a new one, preserving enabled flag
+    /// and position. Used by the "edit existing op" flow. Returns `false` if
+    /// index is out of range.
+    pub fn replace_op(&mut self, index: usize, operation: Box<dyn Operation>) -> bool {
+        if index >= self.ops.len() {
+            return false;
+        }
+        self.save_snapshot();
+        let old_geo = self.ops[index].operation.is_geometric();
+        let new_geo = operation.is_geometric();
+        if old_geo || new_geo {
+            self.geo_gen += 1;
+        }
+        self.ops[index].operation = operation;
+        self.invalidate_steps_from(index);
+        true
+    }
+
     /// Toggle the `enabled` flag of the operation at `index`.
     pub fn toggle_op(&mut self, index: usize) -> bool {
         if index >= self.ops.len() {

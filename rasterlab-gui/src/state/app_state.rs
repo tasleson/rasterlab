@@ -18,7 +18,7 @@ use rasterlab_core::{
     traits::operation::Operation,
 };
 
-use super::ToolState;
+use super::{EditSession, EditingTool, ToolState, load_op_into_tools};
 
 // ---------------------------------------------------------------------------
 // Background-thread messaging
@@ -145,6 +145,12 @@ pub struct AppState {
     /// Session ID to reuse when performing an autosave restore, so that the
     /// original autosave file is correctly cleaned up on project save.
     autosave_restore_session_id: Option<u64>,
+
+    /// When `Some`, the user is editing an existing pipeline op rather than
+    /// creating a new one.  While active, most tool panel sections and edit
+    /// stack buttons are disabled; only the tool matching `editing.tool` is
+    /// interactive, and its Apply button replaces the op instead of pushing.
+    pub editing: Option<EditSession>,
 }
 
 impl AppState {
@@ -182,6 +188,7 @@ impl AppState {
             autosave_pending: false,
             autosave_restore: None,
             autosave_restore_session_id: None,
+            editing: None,
         }
     }
 
@@ -1548,7 +1555,106 @@ impl AppState {
         self.open_file(source_path);
     }
 
+    /// Start editing the pipeline op at `index`.  Copies its parameters into
+    /// the corresponding tool panel and activates that tool's live preview so
+    /// the user sees the current values while they adjust.  No-op when the op
+    /// is not one we support editing (returns without changing state).
+    pub fn begin_edit(&mut self, index: usize) {
+        // Already editing — first, cancel current session.
+        self.end_edit();
+        let (op_clone, op_name) = {
+            let Some(pipeline) = self.pipeline() else {
+                return;
+            };
+            let Some(entry) = pipeline.ops().get(index) else {
+                return;
+            };
+            (entry.operation.clone_box(), entry.operation.name())
+        };
+        let Some(tool) = load_op_into_tools(op_clone.as_ref(), &mut self.tools) else {
+            self.status = format!("This op type cannot be edited: {}", op_name);
+            return;
+        };
+        self.editing = Some(EditSession {
+            op_index: index,
+            tool,
+        });
+        // Temporarily disable the op under edit so previewed values are shown
+        // in situ rather than stacked on top of its committed output.
+        if let Some(p) = self.pipeline_mut() {
+            p.set_enabled_no_snapshot(index, false);
+        }
+        // Turn on this tool's live preview so the user immediately sees the
+        // loaded parameters without having to nudge a slider.
+        self.activate_preview_for(tool);
+        self.request_render();
+    }
+
+    /// End the current edit session, re-enabling the op if it was auto-disabled.
+    pub fn end_edit(&mut self) {
+        let Some(session) = self.editing.take() else {
+            return;
+        };
+        // Re-enable the op (it was toggled off when the session began).
+        if let Some(p) = self.pipeline_mut() {
+            p.set_enabled_no_snapshot(session.op_index, true);
+        }
+        self.tools.cancel_all_previews();
+        self.request_render();
+    }
+
+    /// Replace the op under edit with `new_op` and end the session.
+    pub fn commit_edit(&mut self, new_op: Box<dyn Operation>) {
+        let Some(session) = self.editing.take() else {
+            // Should not happen; fall back to push.
+            self.push_op(new_op);
+            return;
+        };
+        self.tools.cancel_all_previews();
+        if let Some(p) = self.pipeline_mut() {
+            p.set_enabled_no_snapshot(session.op_index, true);
+            p.replace_op(session.op_index, new_op);
+        }
+        self.mark_dirty();
+        self.request_render();
+    }
+
+    fn activate_preview_for(&mut self, tool: EditingTool) {
+        match tool {
+            EditingTool::Levels => self.tools.levels_preview_active = true,
+            EditingTool::BlackAndWhite => self.tools.bw_preview_active = true,
+            EditingTool::BrightnessContrast => self.tools.bc_preview_active = true,
+            EditingTool::Saturation => self.tools.sat_preview_active = true,
+            EditingTool::Sepia => self.tools.sepia_preview_active = true,
+            EditingTool::Sharpen => self.tools.sharpen_preview_active = true,
+            EditingTool::ClarityTexture => self.tools.clarity_preview_active = true,
+            EditingTool::SplitTone => self.tools.split_preview_active = true,
+            EditingTool::Curves => self.tools.curve_preview_active = true,
+            EditingTool::Vignette => self.tools.vignette_preview_active = true,
+            EditingTool::Vibrance => self.tools.vibrance_preview_active = true,
+            EditingTool::HueShift => self.tools.hue_preview_active = true,
+            EditingTool::HighlightsShadows => self.tools.hl_preview_active = true,
+            EditingTool::WhiteBalance => self.tools.wb_preview_active = true,
+            EditingTool::FauxHdr => self.tools.hdr_preview_active = true,
+            EditingTool::Grain => self.tools.grain_preview_active = true,
+            EditingTool::ColorBalance => self.tools.cb_preview_active = true,
+            EditingTool::HslPanel => self.tools.hsl_preview_active = true,
+            EditingTool::Blur => self.tools.blur_preview_active = true,
+            EditingTool::Denoise => self.tools.denoise_preview_active = true,
+            EditingTool::NoiseReduction => self.tools.nr_preview_active = true,
+        }
+    }
+
     fn push_op(&mut self, op: Box<dyn Operation>) {
+        // When an edit session is active, the tool's Apply button replaces the
+        // op under edit instead of pushing a new one.  The mask wrapper is
+        // skipped in this path — editing preserves the structure of the
+        // existing entry (including its own mask wrapper, if any, which we
+        // leave untouched by writing the new inner op type unwrapped).
+        if self.editing.is_some() {
+            self.commit_edit(op);
+            return;
+        }
         // Wrap in MaskedOp when masking is active.
         let op: Box<dyn Operation> = match self.tools.current_mask_shape() {
             Some(mask) => Box::new(MaskedOp { inner: op, mask }),

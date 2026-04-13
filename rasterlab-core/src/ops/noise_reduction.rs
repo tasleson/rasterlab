@@ -567,6 +567,10 @@ impl Operation for NoiseReductionOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         self.apply_inner(image)
     }

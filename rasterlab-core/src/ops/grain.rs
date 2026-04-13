@@ -64,6 +64,10 @@ impl Operation for GrainOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let w = image.width as usize;
         let seed = self.seed;

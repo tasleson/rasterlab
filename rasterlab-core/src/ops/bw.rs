@@ -81,6 +81,10 @@ impl Operation for BlackAndWhiteOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         image.data.par_chunks_mut(4).for_each(|pixel| {
             let gray = self

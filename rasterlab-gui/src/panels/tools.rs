@@ -47,6 +47,37 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.heading("Tools");
     ui.separator();
 
+    // Edit-session banner: prominent indicator that one existing op is under
+    // edit and every other tool is temporarily locked out.
+    if let Some(session) = state.editing {
+        let frame = egui::Frame::group(ui.style())
+            .stroke(Stroke::new(2.0, Color32::from_rgb(90, 160, 255)))
+            .fill(Color32::from_rgb(20, 35, 60));
+        frame.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("✎ Editing op #{}", session.op_index + 1))
+                        .color(Color32::from_rgb(140, 190, 255))
+                        .strong(),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Cancel Edit").clicked() {
+                        state.end_edit();
+                    }
+                });
+            });
+            ui.label(
+                egui::RichText::new(
+                    "Other tools are locked. Adjust this tool, then press its Apply button \
+                     to save changes, or Cancel Edit to discard.",
+                )
+                .color(Color32::from_gray(180))
+                .small(),
+            );
+        });
+        ui.separator();
+    }
+
     let has_image = state.pipeline().is_some();
 
     // ── Auto Enhance ──────────────────────────────────────────────────────
@@ -62,6 +93,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("looks")
         .default_open(false)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             let btn =
                 egui::Button::new("Classic B&W").min_size(Vec2::new(ui.available_width(), 0.0));
             if ui.add_enabled(has_image, btn).clicked() {
@@ -77,8 +111,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("bw");
     let resp = egui::CollapsingHeader::new("◑  Black & White")
         .id_salt("bw")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::BlackAndWhite),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::BlackAndWhite)
+            {
+                ui.disable();
+            }
             let old_idx = state.tools.bw_mode_idx;
             let combo_resp = ComboBox::from_label("Mode")
                 .selected_text(BW_MODES[state.tools.bw_mode_idx])
@@ -178,8 +223,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("blur");
     let resp = egui::CollapsingHeader::new("≋  Blur")
         .id_salt("blur")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Blur),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Blur)
+            {
+                ui.disable();
+            }
             let changed = ui
                 .horizontal(|ui| {
                     ui.label("Radius (σ):");
@@ -227,8 +283,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("brightness_contrast");
     let resp = egui::CollapsingHeader::new("☀  Brightness / Contrast")
         .id_salt("brightness_contrast")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::BrightnessContrast),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::BrightnessContrast)
+            {
+                ui.disable();
+            }
             let mut changed = false;
             egui::Grid::new("bc_grid")
                 .num_columns(2)
@@ -286,8 +353,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("clarity_texture");
     let resp = egui::CollapsingHeader::new("◈  Clarity / Texture")
         .id_salt("clarity_texture")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::ClarityTexture),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::ClarityTexture)
+            {
+                ui.disable();
+            }
             let c_changed = ui
                 .add(
                     egui::Slider::new(&mut state.tools.clarity, -1.0..=1.0)
@@ -337,8 +415,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("color_balance");
     let resp = egui::CollapsingHeader::new("⚖  Color Balance")
         .id_salt("color_balance")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::ColorBalance),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::ColorBalance)
+            {
+                ui.disable();
+            }
             let mut changed = false;
             let zone_labels = ["Shadows", "Midtones", "Highlights"];
             {
@@ -437,6 +526,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("color_space")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             use rasterlab_core::ops::ColorSpaceConversion;
             egui::ComboBox::from_id_salt("color_space_combo")
                 .selected_text(match state.tools.color_space_conversion {
@@ -477,6 +569,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("crop")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             egui::Grid::new("crop_grid")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
@@ -544,8 +639,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("curves");
     let resp = egui::CollapsingHeader::new("〜  Curves")
         .id_salt("curves")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Curves),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Curves)
+            {
+                ui.disable();
+            }
             curves_ui(ui, state);
         });
     if resp.header_response.clicked() {
@@ -561,8 +667,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("denoise");
     let resp = egui::CollapsingHeader::new("◌  Denoise")
         .id_salt("denoise")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Denoise),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Denoise)
+            {
+                ui.disable();
+            }
             let mut changed = false;
             egui::Grid::new("denoise_grid")
                 .num_columns(2)
@@ -625,6 +742,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("export_settings")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             egui::Grid::new("export_grid")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
@@ -706,8 +826,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("faux_hdr");
     let resp = egui::CollapsingHeader::new("◈  Faux HDR")
         .id_salt("faux_hdr")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::FauxHdr),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::FauxHdr)
+            {
+                ui.disable();
+            }
             ui.label(
                 egui::RichText::new("Exposure fusion from ±1 stop virtual brackets")
                     .small()
@@ -758,6 +889,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("focus_stack")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             ui.label(
                 egui::RichText::new("Fuse multiple frames at different focus distances")
                     .small()
@@ -857,8 +991,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("grain");
     let resp = egui::CollapsingHeader::new("⣿  Grain")
         .id_salt("grain")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Grain),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Grain)
+            {
+                ui.disable();
+            }
             grain_ui(ui, state);
         });
     if resp.header_response.clicked() {
@@ -890,6 +1035,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .id_salt("heal")
             .default_open(default_open)
             .show(ui, |ui| {
+                if state.editing.is_some() {
+                    ui.disable();
+                }
                 egui::Grid::new("heal_grid")
                     .num_columns(2)
                     .spacing([8.0, 4.0])
@@ -964,8 +1112,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("highlights_shadows");
     let resp = egui::CollapsingHeader::new("◑  Highlights / Shadows")
         .id_salt("highlights_shadows")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::HighlightsShadows),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::HighlightsShadows)
+            {
+                ui.disable();
+            }
             let mut changed = false;
             egui::Grid::new("hl_grid")
                 .num_columns(2)
@@ -1023,8 +1182,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("hsl_panel");
     let resp = egui::CollapsingHeader::new("🌈  HSL Panel")
         .id_salt("hsl_panel")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::HslPanel),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::HslPanel)
+            {
+                ui.disable();
+            }
             hsl_panel_ui(ui, state, has_image);
         });
     if resp.header_response.clicked() {
@@ -1040,8 +1210,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("hue_shift");
     let resp = egui::CollapsingHeader::new("🎡  Hue Shift")
         .id_salt("hue_shift")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::HueShift),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::HueShift)
+            {
+                ui.disable();
+            }
             let changed = ui
                 .add(
                     egui::Slider::new(&mut state.tools.hue_degrees, -180.0..=180.0)
@@ -1084,8 +1265,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("levels");
     let resp = egui::CollapsingHeader::new("▨  Levels")
         .id_salt("levels")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Levels),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Levels)
+            {
+                ui.disable();
+            }
             levels_ui(ui, state);
         });
     if resp.header_response.clicked() {
@@ -1112,6 +1304,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("masking")
         .default_open(mask_default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             egui::Grid::new("mask_type_grid")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
@@ -1229,6 +1424,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("lut")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             if ui.button("Load .cube LUT…").clicked() {
                 state.tools.lut_dialog_requested = true;
             }
@@ -1301,8 +1499,22 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("noise_reduction");
     let resp = egui::CollapsingHeader::new("◉  Noise Reduction")
         .id_salt("noise_reduction")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::NoiseReduction),
+        )
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::NoiseReduction)
+            {
+                ui.disable();
+            }
             let mut changed = false;
             let old_method = state.tools.nr_method.clone();
             egui::Grid::new("nr_grid")
@@ -1408,6 +1620,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("panorama")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             // Image list
             if state.tools.panorama_paths.is_empty() {
                 ui.label(
@@ -1521,6 +1736,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("perspective")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             let corner_labels = [
                 ("Top-left", 0usize),
                 ("Top-right", 1),
@@ -1592,6 +1810,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("resize")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             use rasterlab_core::ops::ResampleMode;
 
             let orig_w = state.tools.resize_w;
@@ -1751,6 +1972,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("rotate")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             ui.horizontal(|ui| {
                 for deg in [90.0_f32, 180.0, 270.0] {
                     if ui
@@ -1862,6 +2086,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         .id_salt("straighten")
         .default_open(default_open)
         .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
             let changed = ui
                 .add(
                     egui::Slider::new(&mut state.tools.straighten_angle, -45.0..=45.0)
@@ -1936,8 +2163,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("saturation");
     let resp = egui::CollapsingHeader::new("🎨  Saturation")
         .id_salt("saturation")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Saturation),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Saturation)
+            {
+                ui.disable();
+            }
             let changed = ui
                 .add(egui::Slider::new(&mut state.tools.saturation, 0.0..=4.0).step_by(0.01))
                 .changed();
@@ -1976,8 +2214,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("sepia");
     let resp = egui::CollapsingHeader::new("🟫  Sepia")
         .id_salt("sepia")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Sepia),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Sepia)
+            {
+                ui.disable();
+            }
             let changed = ui
                 .add(egui::Slider::new(&mut state.tools.sepia_strength, 0.0..=1.0).step_by(0.01))
                 .changed();
@@ -2016,8 +2265,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("sharpen");
     let resp = egui::CollapsingHeader::new("◈  Sharpen")
         .id_salt("sharpen")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Sharpen),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Sharpen)
+            {
+                ui.disable();
+            }
             let changed = ui
                 .add(
                     egui::Slider::new(&mut state.tools.sharpen_strength, 0.0..=10.0)
@@ -2060,8 +2320,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("split_tone");
     let resp = egui::CollapsingHeader::new("🎨  Split Tone")
         .id_salt("split_tone")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::SplitTone),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::SplitTone)
+            {
+                ui.disable();
+            }
             let mut changed = false;
 
             egui::Grid::new("split_tone_grid")
@@ -2154,8 +2425,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("vibrance");
     let resp = egui::CollapsingHeader::new("✦  Vibrance")
         .id_salt("vibrance")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Vibrance),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Vibrance)
+            {
+                ui.disable();
+            }
             let changed = ui
                 .add(egui::Slider::new(&mut state.tools.vibrance, -1.0..=1.0).step_by(0.01))
                 .changed();
@@ -2194,8 +2476,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("vignette");
     let resp = egui::CollapsingHeader::new("◎  Vignette")
         .id_salt("vignette")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::Vignette),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::Vignette)
+            {
+                ui.disable();
+            }
             let mut changed = false;
             egui::Grid::new("vignette_grid")
                 .num_columns(2)
@@ -2264,8 +2557,19 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let default_open = state.prefs.is_tool_open("white_balance");
     let resp = egui::CollapsingHeader::new("🌡  White Balance")
         .id_salt("white_balance")
-        .default_open(default_open)
+        .default_open(
+            default_open
+                || state
+                    .editing
+                    .is_some_and(|s| s.tool == crate::state::EditingTool::WhiteBalance),
+        )
         .show(ui, |ui| {
+            if state
+                .editing
+                .is_some_and(|s| s.tool != crate::state::EditingTool::WhiteBalance)
+            {
+                ui.disable();
+            }
             let mut changed = false;
             egui::Grid::new("wb_grid")
                 .num_columns(2)

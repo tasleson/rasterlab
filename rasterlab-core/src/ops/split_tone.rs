@@ -80,6 +80,10 @@ impl Operation for SplitToneOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.shadow_sat < 1e-4 && self.highlight_sat < 1e-4 {
             return Ok(image);

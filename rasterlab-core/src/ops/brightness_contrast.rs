@@ -52,6 +52,10 @@ impl Operation for BrightnessContrastOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let lut = build_lut(self.brightness, self.contrast);
 

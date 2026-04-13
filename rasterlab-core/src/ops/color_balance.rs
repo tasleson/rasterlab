@@ -72,6 +72,10 @@ impl Operation for ColorBalanceOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.is_identity() {
             return Ok(image);
