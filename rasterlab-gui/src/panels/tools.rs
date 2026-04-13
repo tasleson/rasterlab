@@ -43,8 +43,36 @@ const BW_PRESETS: &[(&str, f32, f32, f32)] = &[
     ("Infrared", 0.90, 0.10, -0.10),         // blown-out foliage simulation
 ];
 
+/// Wrap `CollapsingHeader::new` so every header in this panel honours the
+/// one-frame force-open flag that drives Expand-All / Collapse-All.
+fn header(force: Option<bool>, title: impl Into<egui::WidgetText>) -> egui::CollapsingHeader {
+    let h = egui::CollapsingHeader::new(title);
+    match force {
+        Some(open) => h.open(Some(open)),
+        None => h,
+    }
+}
+
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
-    ui.heading("Tools");
+    ui.horizontal(|ui| {
+        ui.heading("Tools");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("Collapse all")
+                .on_hover_text("Collapse every tool section")
+                .clicked()
+            {
+                state.tools_force_open = Some(false);
+            }
+            if ui
+                .small_button("Expand all")
+                .on_hover_text("Expand every tool section")
+                .clicked()
+            {
+                state.tools_force_open = Some(true);
+            }
+        });
+    });
     ui.separator();
 
     // Edit-session banner: prominent indicator that one existing op is under
@@ -89,7 +117,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.separator();
 
     // ── Looks ─────────────────────────────────────────────────────────────
-    egui::CollapsingHeader::new("🎞  Looks")
+    header(state.tools_force_open, "🎞  Looks")
         .id_salt("looks")
         .default_open(false)
         .show(ui, |ui| {
@@ -109,7 +137,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Black & White ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("bw");
-    let resp = egui::CollapsingHeader::new("◑  Black & White")
+    let resp = header(state.tools_force_open, "◑  Black & White")
         .id_salt("bw")
         .default_open(
             default_open
@@ -221,7 +249,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Blur ──────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("blur");
-    let resp = egui::CollapsingHeader::new("≋  Blur")
+    let resp = header(state.tools_force_open, "≋  Blur")
         .id_salt("blur")
         .default_open(
             default_open
@@ -281,7 +309,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Brightness / Contrast ─────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("brightness_contrast");
-    let resp = egui::CollapsingHeader::new("☀  Brightness / Contrast")
+    let resp = header(state.tools_force_open, "☀  Brightness / Contrast")
         .id_salt("brightness_contrast")
         .default_open(
             default_open
@@ -351,7 +379,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Clarity / Texture ─────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("clarity_texture");
-    let resp = egui::CollapsingHeader::new("◈  Clarity / Texture")
+    let resp = header(state.tools_force_open, "◈  Clarity / Texture")
         .id_salt("clarity_texture")
         .default_open(
             default_open
@@ -413,7 +441,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Color Balance ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("color_balance");
-    let resp = egui::CollapsingHeader::new("⚖  Color Balance")
+    let resp = header(state.tools_force_open, "⚖  Color Balance")
         .id_salt("color_balance")
         .default_open(
             default_open
@@ -522,7 +550,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Color Space Conversion ────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("color_space");
-    let resp = egui::CollapsingHeader::new("⬛  Color Space")
+    let resp = header(state.tools_force_open, "⬛  Color Space")
         .id_salt("color_space")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -565,7 +593,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Crop ─────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("crop");
-    let resp = egui::CollapsingHeader::new("✂  Crop")
+    let resp = header(state.tools_force_open, "✂  Crop")
         .id_salt("crop")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -637,7 +665,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Curves ────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("curves");
-    let resp = egui::CollapsingHeader::new("〜  Curves")
+    let resp = header(state.tools_force_open, "〜  Curves")
         .id_salt("curves")
         .default_open(
             default_open
@@ -665,7 +693,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Denoise ───────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("denoise");
-    let resp = egui::CollapsingHeader::new("◌  Denoise")
+    let resp = header(state.tools_force_open, "◌  Denoise")
         .id_salt("denoise")
         .default_open(
             default_open
@@ -738,7 +766,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Export settings ──────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("export_settings");
-    let resp = egui::CollapsingHeader::new("⚙  Export Settings")
+    let resp = header(state.tools_force_open, "⚙  Export Settings")
         .id_salt("export_settings")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -824,7 +852,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Faux HDR ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("faux_hdr");
-    let resp = egui::CollapsingHeader::new("◈  Faux HDR")
+    let resp = header(state.tools_force_open, "◈  Faux HDR")
         .id_salt("faux_hdr")
         .default_open(
             default_open
@@ -885,7 +913,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Focus Stack ───────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("focus_stack");
-    let resp = egui::CollapsingHeader::new("🎯  Focus Stack")
+    let resp = header(state.tools_force_open, "🎯  Focus Stack")
         .id_salt("focus_stack")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -989,7 +1017,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Grain ─────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("grain");
-    let resp = egui::CollapsingHeader::new("⣿  Grain")
+    let resp = header(state.tools_force_open, "⣿  Grain")
         .id_salt("grain")
         .default_open(
             default_open
@@ -1031,7 +1059,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         } else {
             "✦  Spot Heal".to_string()
         };
-        let resp = egui::CollapsingHeader::new(heal_label)
+        let resp = header(state.tools_force_open, heal_label)
             .id_salt("heal")
             .default_open(default_open)
             .show(ui, |ui| {
@@ -1110,7 +1138,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Highlights & Shadows ──────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("highlights_shadows");
-    let resp = egui::CollapsingHeader::new("◑  Highlights / Shadows")
+    let resp = header(state.tools_force_open, "◑  Highlights / Shadows")
         .id_salt("highlights_shadows")
         .default_open(
             default_open
@@ -1180,7 +1208,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── HSL Panel ─────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("hsl_panel");
-    let resp = egui::CollapsingHeader::new("🌈  HSL Panel")
+    let resp = header(state.tools_force_open, "🌈  HSL Panel")
         .id_salt("hsl_panel")
         .default_open(
             default_open
@@ -1208,7 +1236,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Hue Shift ─────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("hue_shift");
-    let resp = egui::CollapsingHeader::new("🎡  Hue Shift")
+    let resp = header(state.tools_force_open, "🎡  Hue Shift")
         .id_salt("hue_shift")
         .default_open(
             default_open
@@ -1263,7 +1291,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Levels ────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("levels");
-    let resp = egui::CollapsingHeader::new("▨  Levels")
+    let resp = header(state.tools_force_open, "▨  Levels")
         .id_salt("levels")
         .default_open(
             default_open
@@ -1300,7 +1328,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     } else {
         "◈  Masking".to_string()
     };
-    let mask_resp = egui::CollapsingHeader::new(mask_header)
+    let mask_resp = header(state.tools_force_open, mask_header)
         .id_salt("masking")
         .default_open(mask_default_open)
         .show(ui, |ui| {
@@ -1420,7 +1448,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── LUT (Color Grading) ───────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("lut");
-    let resp = egui::CollapsingHeader::new("🎞  LUT / Color Grading")
+    let resp = header(state.tools_force_open, "🎞  LUT / Color Grading")
         .id_salt("lut")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -1475,7 +1503,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Metadata viewer ───────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("metadata");
-    let resp = egui::CollapsingHeader::new("🏷  Metadata")
+    let resp = header(state.tools_force_open, "🏷  Metadata")
         .id_salt("metadata")
         .default_open(default_open)
         .show(ui, |ui| match state.image_metadata() {
@@ -1497,7 +1525,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Noise Reduction (Advanced) ───────────────────────────────────────
     let default_open = state.prefs.is_tool_open("noise_reduction");
-    let resp = egui::CollapsingHeader::new("◉  Noise Reduction")
+    let resp = header(state.tools_force_open, "◉  Noise Reduction")
         .id_salt("noise_reduction")
         .default_open(
             default_open
@@ -1616,7 +1644,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Panorama ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("panorama");
-    let resp = egui::CollapsingHeader::new("🌅  Panorama")
+    let resp = header(state.tools_force_open, "🌅  Panorama")
         .id_salt("panorama")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -1732,7 +1760,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Perspective ───────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("perspective");
-    let resp = egui::CollapsingHeader::new("⬡  Perspective")
+    let resp = header(state.tools_force_open, "⬡  Perspective")
         .id_salt("perspective")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -1806,7 +1834,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Resize ────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("resize");
-    let resp = egui::CollapsingHeader::new("⤢  Resize")
+    let resp = header(state.tools_force_open, "⤢  Resize")
         .id_salt("resize")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -1968,7 +1996,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Rotate ───────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("rotate");
-    let resp = egui::CollapsingHeader::new("↻  Rotate")
+    let resp = header(state.tools_force_open, "↻  Rotate")
         .id_salt("rotate")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -2082,7 +2110,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     } else {
         "⟳  Straighten".to_string()
     };
-    let resp = egui::CollapsingHeader::new(straight_label)
+    let resp = header(state.tools_force_open, straight_label)
         .id_salt("straighten")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -2161,7 +2189,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Saturation ────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("saturation");
-    let resp = egui::CollapsingHeader::new("🎨  Saturation")
+    let resp = header(state.tools_force_open, "🎨  Saturation")
         .id_salt("saturation")
         .default_open(
             default_open
@@ -2212,7 +2240,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Sepia ─────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("sepia");
-    let resp = egui::CollapsingHeader::new("🟫  Sepia")
+    let resp = header(state.tools_force_open, "🟫  Sepia")
         .id_salt("sepia")
         .default_open(
             default_open
@@ -2263,7 +2291,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Sharpen ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("sharpen");
-    let resp = egui::CollapsingHeader::new("◈  Sharpen")
+    let resp = header(state.tools_force_open, "◈  Sharpen")
         .id_salt("sharpen")
         .default_open(
             default_open
@@ -2318,7 +2346,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Split Tone ────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("split_tone");
-    let resp = egui::CollapsingHeader::new("🎨  Split Tone")
+    let resp = header(state.tools_force_open, "🎨  Split Tone")
         .id_salt("split_tone")
         .default_open(
             default_open
@@ -2423,7 +2451,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Vibrance ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("vibrance");
-    let resp = egui::CollapsingHeader::new("✦  Vibrance")
+    let resp = header(state.tools_force_open, "✦  Vibrance")
         .id_salt("vibrance")
         .default_open(
             default_open
@@ -2474,7 +2502,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Vignette ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("vignette");
-    let resp = egui::CollapsingHeader::new("◎  Vignette")
+    let resp = header(state.tools_force_open, "◎  Vignette")
         .id_salt("vignette")
         .default_open(
             default_open
@@ -2555,7 +2583,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── White Balance ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("white_balance");
-    let resp = egui::CollapsingHeader::new("🌡  White Balance")
+    let resp = header(state.tools_force_open, "🌡  White Balance")
         .id_salt("white_balance")
         .default_open(
             default_open
@@ -2617,6 +2645,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             .tools_open
             .insert("white_balance".to_string(), !default_open);
     }
+
+    // Clear one-frame force-open flag so the user can subsequently toggle
+    // individual headers without them being re-forced every frame.
+    state.tools_force_open = None;
 }
 
 // ---------------------------------------------------------------------------
@@ -2955,7 +2987,7 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
     let mut changed = false;
 
     let default_open = state.prefs.is_tool_open("hsl_hue");
-    let resp = egui::CollapsingHeader::new("Hue")
+    let resp = header(state.tools_force_open, "Hue")
         .id_salt("hsl_hue")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -2984,7 +3016,7 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
     }
 
     let default_open = state.prefs.is_tool_open("hsl_sat");
-    let resp = egui::CollapsingHeader::new("Saturation")
+    let resp = header(state.tools_force_open, "Saturation")
         .id_salt("hsl_sat")
         .default_open(default_open)
         .show(ui, |ui| {
@@ -3012,7 +3044,7 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
     }
 
     let default_open = state.prefs.is_tool_open("hsl_lum");
-    let resp = egui::CollapsingHeader::new("Luminance")
+    let resp = header(state.tools_force_open, "Luminance")
         .id_salt("hsl_lum")
         .default_open(default_open)
         .show(ui, |ui| {

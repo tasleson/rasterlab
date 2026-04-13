@@ -127,6 +127,9 @@ pub struct AppState {
     /// Op index anchoring vs-previous-step mode when no op is under edit.
     /// `None` means "last op in the pipeline".
     pub split_focus: Option<usize>,
+    /// When `Some`, forces every tool-panel CollapsingHeader open/closed for
+    /// one frame.  Cleared by the tools panel after use.
+    pub tools_force_open: Option<bool>,
 
     // Background thread channel
     bg_tx: mpsc::Sender<BgMessage>,
@@ -195,6 +198,7 @@ impl AppState {
             split_view: false,
             split_mode: SplitMode::VsOriginal,
             split_focus: None,
+            tools_force_open: None,
             bg_tx,
             bg_rx,
             ctx,
