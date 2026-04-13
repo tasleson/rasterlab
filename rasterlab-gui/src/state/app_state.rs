@@ -11,7 +11,8 @@ use rasterlab_core::{
         ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, FocusStackOp, GrainOp,
         HealOp, HealSpot, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp,
         LutOp, MaskedOp, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, ResizeOp, RotateOp,
-        SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
+        WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -1287,6 +1288,34 @@ impl AppState {
         self.cancel_hl_preview();
     }
 
+    pub fn update_shadow_exp_preview(&mut self) {
+        self.tools.shadow_exp_preview_active = true;
+        self.request_render();
+    }
+
+    pub fn cancel_shadow_exp_preview(&mut self) {
+        if self.tools.shadow_exp_preview_active {
+            self.tools.shadow_exp_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_shadow_exp(&mut self) {
+        self.tools.shadow_exp_preview_active = false;
+        self.push_op(Box::new(ShadowExposureOp::new(
+            self.tools.shadow_ev,
+            self.tools.shadow_falloff,
+        )));
+        self.tools.shadow_ev = 0.0;
+        self.tools.shadow_falloff = 2.0;
+    }
+
+    pub fn reset_shadow_exp(&mut self) {
+        self.tools.shadow_ev = 0.0;
+        self.tools.shadow_falloff = 2.0;
+        self.cancel_shadow_exp_preview();
+    }
+
     pub fn update_wb_preview(&mut self) {
         self.tools.wb_preview_active = true;
         self.request_render();
@@ -1656,6 +1685,7 @@ impl AppState {
             EditingTool::Vibrance => self.tools.vibrance_preview_active = true,
             EditingTool::HueShift => self.tools.hue_preview_active = true,
             EditingTool::HighlightsShadows => self.tools.hl_preview_active = true,
+            EditingTool::ShadowExposure => self.tools.shadow_exp_preview_active = true,
             EditingTool::WhiteBalance => self.tools.wb_preview_active = true,
             EditingTool::FauxHdr => self.tools.hdr_preview_active = true,
             EditingTool::Grain => self.tools.grain_preview_active = true,

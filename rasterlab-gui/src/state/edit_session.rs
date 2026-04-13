@@ -7,8 +7,8 @@
 use rasterlab_core::ops::{
     BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp, CurvesOp,
     DenoiseOp, FauxHdrOp, GrainOp, HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp,
-    NoiseReductionOp, SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
-    WhiteBalanceOp,
+    NoiseReductionOp, SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp,
+    VignetteOp, WhiteBalanceOp,
 };
 use rasterlab_core::traits::operation::Operation;
 
@@ -31,6 +31,7 @@ pub enum EditingTool {
     Vibrance,
     HueShift,
     HighlightsShadows,
+    ShadowExposure,
     WhiteBalance,
     FauxHdr,
     Grain,
@@ -127,6 +128,11 @@ pub fn load_op_into_tools(op: &dyn Operation, tools: &mut ToolState) -> Option<E
         tools.hl_highlights = o.highlights;
         tools.hl_shadows = o.shadows;
         return Some(EditingTool::HighlightsShadows);
+    }
+    if let Some(o) = any.downcast_ref::<ShadowExposureOp>() {
+        tools.shadow_ev = o.ev;
+        tools.shadow_falloff = o.falloff;
+        return Some(EditingTool::ShadowExposure);
     }
     if let Some(o) = any.downcast_ref::<WhiteBalanceOp>() {
         tools.wb_temperature = o.temperature;

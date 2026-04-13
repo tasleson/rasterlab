@@ -4,8 +4,8 @@ use rasterlab_core::{
         ColorSpaceConversion, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, FocusStackOp, GrainOp,
         HealSpot, HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp,
         MaskShape, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, RadialMask, ResampleMode,
-        RotateOp, SaturationOp, SepiaOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
-        WhiteBalanceOp,
+        RotateOp, SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp,
+        VignetteOp, WhiteBalanceOp,
     },
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
@@ -177,6 +177,11 @@ pub struct ToolState {
     pub hl_shadows: f32,
     pub hl_preview_active: bool,
 
+    // ── Shadow Exposure ───────────────────────────────────────────────────
+    pub shadow_ev: f32,
+    pub shadow_falloff: f32,
+    pub shadow_exp_preview_active: bool,
+
     // ── White Balance ─────────────────────────────────────────────────────
     pub wb_temperature: f32,
     pub wb_tint: f32,
@@ -321,6 +326,9 @@ impl ToolState {
             hl_highlights: 0.0,
             hl_shadows: 0.0,
             hl_preview_active: false,
+            shadow_ev: 0.0,
+            shadow_falloff: 2.0,
+            shadow_exp_preview_active: false,
             wb_temperature: 0.0,
             wb_tint: 0.0,
             wb_preview_active: false,
@@ -381,6 +389,7 @@ impl ToolState {
             || self.hdr_preview_active
             || self.wb_preview_active
             || self.hl_preview_active
+            || self.shadow_exp_preview_active
             || self.hue_preview_active
             || self.vibrance_preview_active
             || self.cb_preview_active
@@ -453,6 +462,11 @@ impl ToolState {
             Some(Box::new(HighlightsShadowsOp::new(
                 self.hl_highlights,
                 self.hl_shadows,
+            )))
+        } else if self.shadow_exp_preview_active {
+            Some(Box::new(ShadowExposureOp::new(
+                self.shadow_ev,
+                self.shadow_falloff,
             )))
         } else if self.wb_preview_active {
             Some(Box::new(WhiteBalanceOp::new(
@@ -541,6 +555,7 @@ impl ToolState {
         self.vibrance_preview_active = false;
         self.hue_preview_active = false;
         self.hl_preview_active = false;
+        self.shadow_exp_preview_active = false;
         self.wb_preview_active = false;
         self.hdr_preview_active = false;
         self.grain_preview_active = false;

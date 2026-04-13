@@ -60,6 +60,7 @@ See change log below for status.
 | Rotate / Straighten | 90°/180°/270° lossless; arbitrary angle with bilinear interp; horizon-line straighten with auto-crop |
 | Saturation | Global saturation multiplier |
 | Sepia | Sepia tone with adjustable strength |
+| Shadow Exposure | Lift or crush shadows with an EV-stops gain in linear light, highlights untouched |
 | Sharpen | Unsharp mask convolution |
 | Split Tone | Shadow / highlight tinting with independent hue, saturation, and balance |
 | Vibrance | Saturation boost that protects already-saturated colours |
