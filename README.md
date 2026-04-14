@@ -2,7 +2,7 @@
 
 # RasterLab
 
-> *How good of an image editor can you build with $20 worth of Claude Code?*
+> *How good of an image editor can you build with $20 worth of Claude Code Pro subscription?[2]*
 
 We're here to find out!  This is still a work in progress!
 
@@ -74,7 +74,7 @@ cargo build --release
 cargo run --release -p rasterlab-gui
 ```
 
-It's still not as fast as I would like.  ~~Claude thinks it's fast, but I disagree.~~ It's much faster, but would like it just a little bit more :-) 
+It's still not as fast as I would like.  ~~Claude thinks it's fast, but I disagree.~~ It's much faster, but would like it just a little bit more :-)
 
 ## Architecture
 
@@ -113,9 +113,39 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 # Changelog
 
+# Week 3
+
+## 2026-04-13 (Week 3 is a wrap, we used 72% of our total available usage[1])
+
+### Features
+
+- **UI scaling** — add UI Scale option to Preferences menu
+- **Mouse pan** — add right-mouse button as an alternative pan gesture
+- **Panorama Stitching** - load multiple images and stich them together as one
+- **Focus stacking** - load multiple images to improve focus
+- **More RAW** - allow the reading of all supported RAW file types by rawler crate
+- **EXIF** - display, preserve, and optionally strip on export
+- **Edit stack edits** - edit entries on the edit stack instead of deleting and creating a new edit
+- **Split view option** - before/after using the before as the original file or anywhere in between
+- **Shadow only exposure control** - Allows you to selectively control the exposure of shadows
+
+### Tools Panel
+- Added a expand all, collapse all ability
+
+### Bug fixes
+
+- Center the file dialog, instead of having it in the bottom left corner of screen
+- Allow undo to restore an edit from the edit stack that was deleted
+- Only send title viewport command when title changes (reduces idle CPU load)
+- Stop continuous render loop when straighten tool is idle
+- Make rotate work like other tools, apply/reset/cancel
+- Fix button glyphs
+- Make histograms more usable after editing
+
+
 # Week 2
 
-## 2026-04-04 (98% of our weekly usage)
+## 2026-04-04 (Week 2 is a wrap, we used 98% of our weekly usage)
 
 ### Features
 
@@ -186,7 +216,7 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 ### Usage
 - I didn't allocate enough dedicated time to leverage Claude effectively, so some resources went unused.
-  
+
 ### Perf focus
 
 - There's a performance-focused branch pending merge that needs cleanup. We've reduced latency from ~800ms to ~50ms for computing and displaying user-requested edits. Half the improvement came from hardware-specific optimizations; the rest from bug fixes, particularly in histogram generation. The goal is ≤42ms to achieve virtually real-time feel.
@@ -212,7 +242,7 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 ## 2026-03-26 (40% of our first week usage)
 
-### Native File Format (.rlab) 
+### Native File Format (.rlab)
   - **New .rlab binary format** — chunked layout with per-chunk and file-level Blake3 integrity hashes. Stores the
   original source image verbatim, the full edit stack, metadata (timestamps, source path, dimensions, app version), and
   an optional thumbnail.
@@ -263,6 +293,8 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 <img width="1405" height="933" alt="Screenshot 2026-03-26 at 12 19 59 AM" src="https://github.com/user-attachments/assets/1650d897-232c-44de-80c5-64ee0450a135" />
 
 
+***[1]** The way Anthropic does the blocks of usage for a day, and then week etc. is annoying.  I understand why they do it, but it benefits them, not the paying customer*
+***[2]** I wasn't diligent enough to get the full $20 worth, but that's Anthropic's loss as it diminishes what this could have been*
 ## License
 
 MIT OR Apache-2.0
