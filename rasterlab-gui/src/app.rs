@@ -160,6 +160,7 @@ impl RasterLabApp {
                 DialogKind::LoadLut => self.state.load_lut(path),
                 DialogKind::PanoramaAddImage => self.state.panorama_add_image(path),
                 DialogKind::FocusStackAddImage => self.state.focus_stack_add_image(path),
+                DialogKind::HdrMergeAddImage => self.state.hdr_merge_add_image(path),
             }
         }
     }
@@ -203,6 +204,10 @@ impl eframe::App for RasterLabApp {
         if self.state.tools.focus_stack_dialog_requested {
             self.state.tools.focus_stack_dialog_requested = false;
             self.chooser.focus_stack_add_image(&ctx);
+        }
+        if self.state.tools.hdr_merge_dialog_requested {
+            self.state.tools.hdr_merge_dialog_requested = false;
+            self.chooser.hdr_merge_add_image(&ctx);
         }
 
         self.handle_keyboard(&ctx);

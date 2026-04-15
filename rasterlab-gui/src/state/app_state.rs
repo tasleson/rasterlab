@@ -9,10 +9,10 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
         ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, FocusStackOp, GrainOp,
-        HealOp, HealSpot, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp, LevelsOp,
-        LutOp, MaskedOp, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, ResizeOp, RotateOp,
-        SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp,
-        WhiteBalanceOp,
+        HdrMergeOp, HealOp, HealSpot, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp,
+        LevelsOp, LutOp, MaskedOp, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, ResizeOp,
+        RotateOp, SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp,
+        VignetteOp, WhiteBalanceOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -1155,6 +1155,36 @@ impl AppState {
     pub fn reset_focus_stack(&mut self) {
         self.tools.focus_stack_paths.clear();
         self.cancel_focus_stack_preview();
+    }
+
+    pub fn hdr_merge_add_image(&mut self, path: std::path::PathBuf) {
+        self.tools
+            .hdr_merge_paths
+            .push(path.to_string_lossy().into_owned());
+        if self.tools.hdr_merge_paths.len() >= 2 {
+            self.tools.hdr_merge_preview_active = true;
+            self.request_render();
+        }
+    }
+
+    pub fn cancel_hdr_merge_preview(&mut self) {
+        if self.tools.hdr_merge_preview_active {
+            self.tools.hdr_merge_preview_active = false;
+            self.request_render();
+        }
+    }
+
+    pub fn push_hdr_merge(&mut self) {
+        self.tools.hdr_merge_preview_active = false;
+        self.push_op(Box::new(HdrMergeOp::new(
+            self.tools.hdr_merge_paths.clone(),
+        )));
+        self.tools.hdr_merge_paths.clear();
+    }
+
+    pub fn reset_hdr_merge(&mut self) {
+        self.tools.hdr_merge_paths.clear();
+        self.cancel_hdr_merge_preview();
     }
 
     pub fn update_perspective_preview(&mut self) {

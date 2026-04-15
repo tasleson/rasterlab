@@ -52,6 +52,7 @@ pub enum DialogKind {
     LoadLut,
     PanoramaAddImage,
     FocusStackAddImage,
+    HdrMergeAddImage,
 }
 
 // ---------------------------------------------------------------------------
@@ -72,6 +73,7 @@ pub struct FileChooser {
     lut_dlg: FileDialog,
     panorama_dlg: FileDialog,
     focus_stack_dlg: FileDialog,
+    hdr_merge_dlg: FileDialog,
     /// Which kind is currently waiting for a result.
     pending: Option<DialogKind>,
 
@@ -126,6 +128,13 @@ impl FileChooser {
                 .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
                 .add_file_filter_extensions("PNG", vec!["png"])
                 .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
+            hdr_merge_dlg: FileDialog::new()
+                .title("Add Bracketed Exposure")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .add_file_filter_extensions("Images", image_exts())
+                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
+                .add_file_filter_extensions("PNG", vec!["png"])
+                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
             pending: None,
             rfd_rx: None,
         }
@@ -163,6 +172,10 @@ impl FileChooser {
 
     pub fn focus_stack_add_image(&mut self, ctx: &egui::Context) {
         self.open(ctx, DialogKind::FocusStackAddImage, false);
+    }
+
+    pub fn hdr_merge_add_image(&mut self, ctx: &egui::Context) {
+        self.open(ctx, DialogKind::HdrMergeAddImage, false);
     }
 
     // ── Per-frame polling ───────────────────────────────────────────────────
@@ -215,6 +228,7 @@ impl FileChooser {
             DialogKind::LoadLut => &mut self.lut_dlg,
             DialogKind::PanoramaAddImage => &mut self.panorama_dlg,
             DialogKind::FocusStackAddImage => &mut self.focus_stack_dlg,
+            DialogKind::HdrMergeAddImage => &mut self.hdr_merge_dlg,
         }
     }
 
@@ -255,6 +269,12 @@ impl FileChooser {
                     .add_filter("Camera RAW", RAW_EXTENSIONS)
                     .pick_file(),
                 DialogKind::FocusStackAddImage => rfd::FileDialog::new()
+                    .add_filter("Images", &image_exts())
+                    .add_filter("JPEG", &["jpg", "jpeg"])
+                    .add_filter("PNG", &["png"])
+                    .add_filter("Camera RAW", RAW_EXTENSIONS)
+                    .pick_file(),
+                DialogKind::HdrMergeAddImage => rfd::FileDialog::new()
                     .add_filter("Images", &image_exts())
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])

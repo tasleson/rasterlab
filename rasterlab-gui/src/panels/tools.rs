@@ -1043,6 +1043,110 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     ui.separator();
 
+    // ── HDR Merge ─────────────────────────────────────────────────────────
+    let default_open = state.prefs.is_tool_open("hdr_merge");
+    let resp = header(state.tools_force_open, "✺  HDR Merge")
+        .id_salt("hdr_merge")
+        .default_open(default_open)
+        .show(ui, |ui| {
+            if state.editing.is_some() {
+                ui.disable();
+            }
+            ui.label(
+                egui::RichText::new("Fuse bracketed exposures into a single extended-range image")
+                    .small()
+                    .color(Color32::from_gray(140)),
+            );
+            ui.add_space(2.0);
+
+            if state.tools.hdr_merge_paths.is_empty() {
+                ui.label(
+                    egui::RichText::new("No exposures added yet.")
+                        .small()
+                        .italics(),
+                );
+            } else {
+                let mut remove_idx: Option<usize> = None;
+                egui::ScrollArea::vertical()
+                    .max_height(120.0)
+                    .id_salt("hdr_merge_list")
+                    .show(ui, |ui| {
+                        for (i, path) in state.tools.hdr_merge_paths.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let name = std::path::Path::new(path)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone());
+                                ui.label(format!("{}. {}", i + 1, name));
+                                if ui.small_button("✕").clicked() {
+                                    remove_idx = Some(i);
+                                }
+                            });
+                        }
+                    });
+                if let Some(idx) = remove_idx {
+                    state.tools.hdr_merge_paths.remove(idx);
+                    if state.tools.hdr_merge_paths.len() < 2 {
+                        state.cancel_hdr_merge_preview();
+                    }
+                }
+            }
+
+            ui.add_space(4.0);
+            if ui
+                .add_enabled(has_image, egui::Button::new("+ Add Exposure…"))
+                .clicked()
+            {
+                // Seed the list with the current image's path as the first entry.
+                if state.tools.hdr_merge_paths.is_empty()
+                    && let Some(p) = state.last_path.as_ref()
+                {
+                    state
+                        .tools
+                        .hdr_merge_paths
+                        .push(p.to_string_lossy().into_owned());
+                }
+                state.tools.hdr_merge_dialog_requested = true;
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let ready = state.tools.hdr_merge_paths.len() >= 2;
+                if ui
+                    .add_enabled(has_image && ready, egui::Button::new("Merge"))
+                    .clicked()
+                {
+                    state.push_hdr_merge();
+                }
+                if state.tools.hdr_merge_preview_active
+                    && ui
+                        .add_enabled(has_image, egui::Button::new("Cancel"))
+                        .clicked()
+                {
+                    state.cancel_hdr_merge_preview();
+                }
+                if ui.button("Reset").clicked() {
+                    state.reset_hdr_merge();
+                }
+            });
+
+            if state.tools.hdr_merge_paths.len() == 1 {
+                ui.label(
+                    egui::RichText::new("Add at least one more bracket to merge.")
+                        .small()
+                        .color(egui::Color32::from_rgb(200, 150, 50)),
+                );
+            }
+        });
+    if resp.header_response.clicked() {
+        state
+            .prefs
+            .tools_open
+            .insert("hdr_merge".to_string(), !default_open);
+    }
+
+    ui.separator();
+
     // ── Spot Heal ─────────────────────────────────────────────────────────
     {
         let default_open = state.prefs.is_tool_open("heal");

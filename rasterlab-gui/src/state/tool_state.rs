@@ -2,10 +2,10 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
         ColorSpaceConversion, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, FocusStackOp, GrainOp,
-        HealSpot, HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp, LinearMask, LutOp,
-        MaskShape, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, RadialMask, ResampleMode,
-        RotateOp, SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp,
-        VignetteOp, WhiteBalanceOp,
+        HdrMergeOp, HealSpot, HighlightsShadowsOp, HslPanelOp, HueShiftOp, LevelsOp, LinearMask,
+        LutOp, MaskShape, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, RadialMask,
+        ResampleMode, RotateOp, SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp,
+        VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
@@ -147,6 +147,13 @@ pub struct ToolState {
     pub focus_stack_preview_active: bool,
     /// Set to true by the tools panel to ask app.rs to open the image picker.
     pub focus_stack_dialog_requested: bool,
+
+    // ── HDR Merge ─────────────────────────────────────────────────────────
+    /// Absolute paths of the bracketed exposures to fuse.
+    pub hdr_merge_paths: Vec<String>,
+    pub hdr_merge_preview_active: bool,
+    /// Set to true by the tools panel to ask app.rs to open the image picker.
+    pub hdr_merge_dialog_requested: bool,
 
     // ── Perspective ───────────────────────────────────────────────────────
     /// Corner offsets `[[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]`
@@ -313,6 +320,9 @@ impl ToolState {
             focus_stack_paths: Vec::new(),
             focus_stack_preview_active: false,
             focus_stack_dialog_requested: false,
+            hdr_merge_paths: Vec::new(),
+            hdr_merge_preview_active: false,
+            hdr_merge_dialog_requested: false,
             perspective_corners: [[0.0; 2]; 4],
             perspective_preview_active: false,
             color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,
@@ -402,6 +412,7 @@ impl ToolState {
             || self.straighten_preview_active
             || self.panorama_preview_active
             || self.focus_stack_preview_active
+            || self.hdr_merge_preview_active
             || self.perspective_preview_active
     }
 
@@ -526,6 +537,8 @@ impl ToolState {
             )))
         } else if self.focus_stack_preview_active {
             Some(Box::new(FocusStackOp::new(self.focus_stack_paths.clone())))
+        } else if self.hdr_merge_preview_active {
+            Some(Box::new(HdrMergeOp::new(self.hdr_merge_paths.clone())))
         } else if self.perspective_preview_active {
             Some(Box::new(PerspectiveOp::new(self.perspective_corners)))
         } else {
@@ -571,6 +584,7 @@ impl ToolState {
         self.straighten_preview_active = false;
         self.panorama_preview_active = false;
         self.focus_stack_preview_active = false;
+        self.hdr_merge_preview_active = false;
         self.perspective_preview_active = false;
     }
 

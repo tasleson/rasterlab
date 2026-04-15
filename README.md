@@ -46,6 +46,7 @@ See change log below for status.
 | Flip | Horizontal or vertical mirror |
 | Focus Stack | Fuse multiple frames at different focus distances into one all-in-focus image (Sum-Modified-Laplacian focus measure) |
 | Grain | Film grain with configurable strength and size |
+| HDR Merge | Fuse 2+ bracketed exposures into a single image with extended dynamic range; auto exposure estimation, Debevec-style radiance merge, Reinhard tone map |
 | Heal | Content-aware spot heal / clone stamp; auto-detects source patch |
 | Highlights / Shadows | Independent highlight and shadow recovery |
 | HSL Panel | Per-hue-band hue, saturation, and luminance (8 bands: Reds … Magentas) |
