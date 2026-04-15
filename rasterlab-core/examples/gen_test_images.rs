@@ -20,6 +20,11 @@
 ///   skin_tone_ramp.png          Warm desaturated tones across luminance (skin/sky range)
 ///   grey_color_pairs.png        Pure grey next to same-luminance hue (detects channel mixing)
 ///
+///   — HDR merge test —
+///   hdr_bracket_under.png       1024×512 scene at −2 EV (preserves highlights)
+///   hdr_bracket_mid.png         same scene at  0 EV (clips both ends)
+///   hdr_bracket_over.png        same scene at +2 EV (preserves shadows)
+///
 ///   — EXIF / metadata test —
 ///   meta_test.jpg               640×480 gradient JPEG with embedded EXIF (Make, Model,
 ///                               ISO, shutter, aperture, focal length, date, exposure bias)
@@ -810,6 +815,75 @@ fn gen_focus_stack_3(scene: &RgbImage, dir: &Path) {
     println!("    band split: top=0..{t1}, mid={t1}..{t2}, bot={t2}..{h} (blur σ=4 elsewhere)");
 }
 
+// ─── HDR merge test images ──────────────────────────────────────────────────
+
+/// sRGB OETF applied to a linear-light value in [0, 1].
+fn linear_to_srgb8(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let s = if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round() as u8
+}
+
+/// Linear-radiance at (x, y) for the HDR bracket scene.
+///
+/// * Horizontal axis: 10-stop brightness ramp (2⁻⁵ … 2⁵), so no single
+///   exposure can capture it without clipping one end.
+/// * Vertical axis: red/blue chroma tilt, so the merge has real colour
+///   to preserve — pure greys would mask a lot of bugs.
+fn hdr_radiance_at(x: u32, y: u32, w: u32, h: u32) -> [f32; 3] {
+    const STOPS: f32 = 10.0;
+    let tx = x as f32 / (w - 1).max(1) as f32;
+    let ty = y as f32 / (h - 1).max(1) as f32;
+    let base = (-STOPS * 0.5 + STOPS * tx).exp2();
+    let r_tint = 0.7 + 0.6 * (1.0 - ty);
+    let b_tint = 0.7 + 0.6 * ty;
+    [base * r_tint, base, base * b_tint]
+}
+
+fn gen_hdr_exposure(w: u32, h: u32, exposure: f32) -> RgbImage {
+    let mut img: RgbImage = ImageBuffer::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let rad = hdr_radiance_at(x, y, w, h);
+            img.put_pixel(
+                x,
+                y,
+                Rgb([
+                    linear_to_srgb8(rad[0] * exposure),
+                    linear_to_srgb8(rad[1] * exposure),
+                    linear_to_srgb8(rad[2] * exposure),
+                ]),
+            );
+        }
+    }
+    img
+}
+
+/// Build three bracketed exposures (−2 EV / 0 EV / +2 EV) of a synthetic
+/// 10-stop scene. Any correct HDR merge must pull shadow detail from the
+/// over-exposed frame and highlight detail from the under-exposed frame.
+fn gen_hdr_brackets(dir: &Path) {
+    const W: u32 = 1024;
+    const H: u32 = 512;
+    let brackets = [
+        (
+            "hdr_bracket_under.png",
+            0.25,
+            "−2 EV  (preserves highlights)",
+        ),
+        ("hdr_bracket_mid.png", 1.0, " 0 EV  (clips both ends)"),
+        ("hdr_bracket_over.png", 4.0, "+2 EV  (preserves shadows)"),
+    ];
+    for (name, exp, label) in brackets {
+        save(gen_hdr_exposure(W, H, exp), dir, name);
+        println!("    {name}  {label}");
+    }
+}
+
 // ─── EXIF / metadata test image ─────────────────────────────────────────────
 
 /// Write a 12-byte IFD entry whose value is a 4-byte offset (or a LONG inline).
@@ -986,6 +1060,9 @@ fn main() {
     save(focus_scene.clone(), out_dir, "focus_scene_full.png");
     gen_focus_stack_3(&focus_scene, out_dir);
 
+    println!("\n  [HDR merge test images]");
+    gen_hdr_brackets(out_dir);
+
     println!("\n  [EXIF / metadata test image]");
     gen_meta_test_jpeg(out_dir);
 
@@ -1007,6 +1084,13 @@ fn main() {
     println!("  focus_scene_full.png       — the all-in-focus reference");
     println!("  focus_top / focus_mid / focus_bot — three frames, one sharp band each");
     println!("  open focus_top, add focus_mid + focus_bot, stack → should match reference");
+    println!("\nHDR merge test workflow:");
+    println!(
+        "  hdr_bracket_under / hdr_bracket_mid / hdr_bracket_over — 10-stop scene at −2/0/+2 EV"
+    );
+    println!("  open hdr_bracket_under, add the other two, HDR Merge → should preserve shadow");
+    println!("  detail (from _over) and highlight detail (from _under) with a smooth monotone");
+    println!("  horizontal gradient and a red-top / blue-bottom vertical tint");
     println!("\nMetadata test workflow:");
     println!("  meta_test.jpg → open in RasterLab → 🏷 Metadata panel should show:");
     println!("    Make=RasterLab  Model=Test Camera RX1  ISO=400");
