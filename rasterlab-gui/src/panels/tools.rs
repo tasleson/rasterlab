@@ -53,6 +53,29 @@ fn header(force: Option<bool>, title: impl Into<egui::WidgetText>) -> egui::Coll
     }
 }
 
+/// Like `header`, but when `editing` matches `this_tool` the title is rendered
+/// bold and the section is forced open so the user can immediately find the
+/// tool they just started editing from the Edit Stack.
+fn header_for_tool(
+    force: Option<bool>,
+    title: &str,
+    editing: Option<crate::state::EditSession>,
+    this_tool: crate::state::EditingTool,
+) -> egui::CollapsingHeader {
+    let is_active = editing.is_some_and(|s| s.tool == this_tool);
+    let widget_text: egui::WidgetText = if is_active {
+        egui::RichText::new(title).strong().into()
+    } else {
+        title.into()
+    };
+    let h = egui::CollapsingHeader::new(widget_text);
+    let effective_force = if is_active { Some(true) } else { force };
+    match effective_force {
+        Some(open) => h.open(Some(open)),
+        None => h,
+    }
+}
+
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         ui.heading("Tools");
@@ -137,107 +160,107 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Black & White ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("bw");
-    let resp = header(state.tools_force_open, "◑  Black & White")
-        .id_salt("bw")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::BlackAndWhite),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::BlackAndWhite)
-            {
-                ui.disable();
-            }
-            let old_idx = state.tools.bw_mode_idx;
-            let combo_resp = ComboBox::from_label("Mode")
-                .selected_text(BW_MODES[state.tools.bw_mode_idx])
-                .show_ui(ui, |ui| {
-                    for (i, &label) in BW_MODES.iter().enumerate() {
-                        ui.selectable_value(&mut state.tools.bw_mode_idx, i, label);
-                    }
-                });
-            if (combo_resp.response.changed() || state.tools.bw_mode_idx != old_idx) && has_image {
-                state.update_bw_preview();
-            }
-
-            // Channel mixer sliders — only shown when that mode is selected.
-            if state.tools.bw_mode_idx == 3 {
-                let mut changed = false;
-
-                // Preset buttons — clicking one loads the weights and previews.
-                ui.label("Presets:");
-                ui.horizontal_wrapped(|ui| {
-                    for &(label, r, g, b) in BW_PRESETS {
-                        if ui.small_button(label).clicked() && has_image {
-                            state.tools.bw_mixer_r = r;
-                            state.tools.bw_mixer_g = g;
-                            state.tools.bw_mixer_b = b;
-                            state.update_bw_preview();
-                        }
-                    }
-                });
-                ui.add_space(2.0);
-
-                egui::Grid::new("bw_mixer_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("R");
-                        changed |= ui
-                            .add(
-                                DragValue::new(&mut state.tools.bw_mixer_r)
-                                    .speed(0.01)
-                                    .range(-2.0..=2.0),
-                            )
-                            .changed();
-                        ui.end_row();
-                        ui.label("G");
-                        changed |= ui
-                            .add(
-                                DragValue::new(&mut state.tools.bw_mixer_g)
-                                    .speed(0.01)
-                                    .range(-2.0..=2.0),
-                            )
-                            .changed();
-                        ui.end_row();
-                        ui.label("B");
-                        changed |= ui
-                            .add(
-                                DragValue::new(&mut state.tools.bw_mixer_b)
-                                    .speed(0.01)
-                                    .range(-2.0..=2.0),
-                            )
-                            .changed();
-                        ui.end_row();
-                    });
-                if changed && has_image {
-                    state.update_bw_preview();
-                }
-            }
-
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply B&W"))
-                    .clicked()
-                {
-                    state.push_bw();
-                }
-                if state.tools.bw_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_bw_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_bw();
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "◑  Black & White",
+        state.editing,
+        crate::state::EditingTool::BlackAndWhite,
+    )
+    .id_salt("bw")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::BlackAndWhite)
+        {
+            ui.disable();
+        }
+        let old_idx = state.tools.bw_mode_idx;
+        let combo_resp = ComboBox::from_label("Mode")
+            .selected_text(BW_MODES[state.tools.bw_mode_idx])
+            .show_ui(ui, |ui| {
+                for (i, &label) in BW_MODES.iter().enumerate() {
+                    ui.selectable_value(&mut state.tools.bw_mode_idx, i, label);
                 }
             });
+        if (combo_resp.response.changed() || state.tools.bw_mode_idx != old_idx) && has_image {
+            state.update_bw_preview();
+        }
+
+        // Channel mixer sliders — only shown when that mode is selected.
+        if state.tools.bw_mode_idx == 3 {
+            let mut changed = false;
+
+            // Preset buttons — clicking one loads the weights and previews.
+            ui.label("Presets:");
+            ui.horizontal_wrapped(|ui| {
+                for &(label, r, g, b) in BW_PRESETS {
+                    if ui.small_button(label).clicked() && has_image {
+                        state.tools.bw_mixer_r = r;
+                        state.tools.bw_mixer_g = g;
+                        state.tools.bw_mixer_b = b;
+                        state.update_bw_preview();
+                    }
+                }
+            });
+            ui.add_space(2.0);
+
+            egui::Grid::new("bw_mixer_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("R");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.tools.bw_mixer_r)
+                                .speed(0.01)
+                                .range(-2.0..=2.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("G");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.tools.bw_mixer_g)
+                                .speed(0.01)
+                                .range(-2.0..=2.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("B");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut state.tools.bw_mixer_b)
+                                .speed(0.01)
+                                .range(-2.0..=2.0),
+                        )
+                        .changed();
+                    ui.end_row();
+                });
+            if changed && has_image {
+                state.update_bw_preview();
+            }
+        }
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply B&W"))
+                .clicked()
+            {
+                state.push_bw();
+            }
+            if state.tools.bw_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_bw_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_bw();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -249,55 +272,55 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Blur ──────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("blur");
-    let resp = header(state.tools_force_open, "≋  Blur")
-        .id_salt("blur")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Blur),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Blur)
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "≋  Blur",
+        state.editing,
+        crate::state::EditingTool::Blur,
+    )
+    .id_salt("blur")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Blur)
+        {
+            ui.disable();
+        }
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label("Radius (σ):");
+                ui.add(
+                    DragValue::new(&mut state.tools.blur_radius)
+                        .speed(0.1)
+                        .range(0.1..=100.0_f32)
+                        .suffix(" px"),
+                )
+                .changed()
+            })
+            .inner;
+        if changed && has_image {
+            state.update_blur_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Blur"))
+                .clicked()
             {
-                ui.disable();
+                state.push_blur();
             }
-            let changed = ui
-                .horizontal(|ui| {
-                    ui.label("Radius (σ):");
-                    ui.add(
-                        DragValue::new(&mut state.tools.blur_radius)
-                            .speed(0.1)
-                            .range(0.1..=100.0_f32)
-                            .suffix(" px"),
-                    )
-                    .changed()
-                })
-                .inner;
-            if changed && has_image {
-                state.update_blur_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Blur"))
+            if state.tools.blur_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_blur();
-                }
-                if state.tools.blur_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_blur_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_blur();
-                }
-            });
+            {
+                state.cancel_blur_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_blur();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -309,65 +332,61 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Brightness / Contrast ─────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("brightness_contrast");
-    let resp = header(state.tools_force_open, "☀  Brightness / Contrast")
-        .id_salt("brightness_contrast")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::BrightnessContrast),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::BrightnessContrast)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
-            egui::Grid::new("bc_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Brightness");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.bc_brightness, -1.0..=1.0)
-                                .step_by(0.01),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Contrast");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.bc_contrast, -1.0..=1.0)
-                                .step_by(0.01),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_bc_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_bc();
-                }
-                if state.tools.bc_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_bc_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_bc();
-                }
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "☀  Brightness / Contrast",
+        state.editing,
+        crate::state::EditingTool::BrightnessContrast,
+    )
+    .id_salt("brightness_contrast")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::BrightnessContrast)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
+        egui::Grid::new("bc_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Brightness");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.bc_brightness, -1.0..=1.0).step_by(0.01),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label("Contrast");
+                changed |= ui
+                    .add(egui::Slider::new(&mut state.tools.bc_contrast, -1.0..=1.0).step_by(0.01))
+                    .changed();
+                ui.end_row();
             });
+        if changed && has_image {
+            state.update_bc_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
+            {
+                state.push_bc();
+            }
+            if state.tools.bc_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_bc_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_bc();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -379,57 +398,57 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Clarity / Texture ─────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("clarity_texture");
-    let resp = header(state.tools_force_open, "◈  Clarity / Texture")
-        .id_salt("clarity_texture")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::ClarityTexture),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::ClarityTexture)
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "◈  Clarity / Texture",
+        state.editing,
+        crate::state::EditingTool::ClarityTexture,
+    )
+    .id_salt("clarity_texture")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::ClarityTexture)
+        {
+            ui.disable();
+        }
+        let c_changed = ui
+            .add(
+                egui::Slider::new(&mut state.tools.clarity, -1.0..=1.0)
+                    .step_by(0.01)
+                    .text("Clarity"),
+            )
+            .changed();
+        let t_changed = ui
+            .add(
+                egui::Slider::new(&mut state.tools.texture, -1.0..=1.0)
+                    .step_by(0.01)
+                    .text("Texture"),
+            )
+            .changed();
+        if (c_changed || t_changed) && has_image {
+            state.update_clarity_texture_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
             {
-                ui.disable();
+                state.push_clarity_texture();
             }
-            let c_changed = ui
-                .add(
-                    egui::Slider::new(&mut state.tools.clarity, -1.0..=1.0)
-                        .step_by(0.01)
-                        .text("Clarity"),
-                )
-                .changed();
-            let t_changed = ui
-                .add(
-                    egui::Slider::new(&mut state.tools.texture, -1.0..=1.0)
-                        .step_by(0.01)
-                        .text("Texture"),
-                )
-                .changed();
-            if (c_changed || t_changed) && has_image {
-                state.update_clarity_texture_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
+            if state.tools.clarity_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_clarity_texture();
-                }
-                if state.tools.clarity_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_clarity_texture_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_clarity_texture();
-                }
-            });
+            {
+                state.cancel_clarity_texture_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_clarity_texture();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -441,104 +460,98 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Color Balance ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("color_balance");
-    let resp = header(state.tools_force_open, "⚖  Color Balance")
-        .id_salt("color_balance")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::ColorBalance),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::ColorBalance)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
-            let zone_labels = ["Shadows", "Midtones", "Highlights"];
-            {
-                ui.label("Cyan ↔ Red");
-                egui::Grid::new("cb_cr_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 2.0])
-                    .show(ui, |ui| {
-                        for (i, zone) in zone_labels.iter().enumerate() {
-                            ui.label(*zone);
-                            changed |= ui
-                                .add(
-                                    egui::Slider::new(&mut state.tools.cb_cyan_red[i], -1.0..=1.0)
-                                        .step_by(0.01),
-                                )
-                                .changed();
-                            ui.end_row();
-                        }
-                    });
-                ui.add_space(4.0);
-                ui.label("Magenta ↔ Green");
-                egui::Grid::new("cb_mg_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 2.0])
-                    .show(ui, |ui| {
-                        for (i, zone) in zone_labels.iter().enumerate() {
-                            ui.label(*zone);
-                            changed |= ui
-                                .add(
-                                    egui::Slider::new(
-                                        &mut state.tools.cb_magenta_green[i],
-                                        -1.0..=1.0,
-                                    )
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "⚖  Color Balance",
+        state.editing,
+        crate::state::EditingTool::ColorBalance,
+    )
+    .id_salt("color_balance")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::ColorBalance)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
+        let zone_labels = ["Shadows", "Midtones", "Highlights"];
+        {
+            ui.label("Cyan ↔ Red");
+            egui::Grid::new("cb_cr_grid")
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    for (i, zone) in zone_labels.iter().enumerate() {
+                        ui.label(*zone);
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut state.tools.cb_cyan_red[i], -1.0..=1.0)
                                     .step_by(0.01),
-                                )
-                                .changed();
-                            ui.end_row();
-                        }
-                    });
-                ui.add_space(4.0);
-                ui.label("Yellow ↔ Blue");
-                egui::Grid::new("cb_yb_grid")
-                    .num_columns(2)
-                    .spacing([8.0, 2.0])
-                    .show(ui, |ui| {
-                        for (i, zone) in zone_labels.iter().enumerate() {
-                            ui.label(*zone);
-                            changed |= ui
-                                .add(
-                                    egui::Slider::new(
-                                        &mut state.tools.cb_yellow_blue[i],
-                                        -1.0..=1.0,
-                                    )
+                            )
+                            .changed();
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(4.0);
+            ui.label("Magenta ↔ Green");
+            egui::Grid::new("cb_mg_grid")
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    for (i, zone) in zone_labels.iter().enumerate() {
+                        ui.label(*zone);
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut state.tools.cb_magenta_green[i], -1.0..=1.0)
                                     .step_by(0.01),
-                                )
-                                .changed();
-                            ui.end_row();
-                        }
-                    });
-                ui.add_space(4.0);
+                            )
+                            .changed();
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(4.0);
+            ui.label("Yellow ↔ Blue");
+            egui::Grid::new("cb_yb_grid")
+                .num_columns(2)
+                .spacing([8.0, 2.0])
+                .show(ui, |ui| {
+                    for (i, zone) in zone_labels.iter().enumerate() {
+                        ui.label(*zone);
+                        changed |= ui
+                            .add(
+                                egui::Slider::new(&mut state.tools.cb_yellow_blue[i], -1.0..=1.0)
+                                    .step_by(0.01),
+                            )
+                            .changed();
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(4.0);
+        }
+        if changed && has_image {
+            state.update_cb_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
+            {
+                state.push_cb();
             }
-            if changed && has_image {
-                state.update_cb_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
+            if state.tools.cb_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_cb();
-                }
-                if state.tools.cb_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_cb_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_cb();
-                }
-            });
+            {
+                state.cancel_cb_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_cb();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -665,23 +678,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Curves ────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("curves");
-    let resp = header(state.tools_force_open, "〜  Curves")
-        .id_salt("curves")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Curves),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Curves)
-            {
-                ui.disable();
-            }
-            curves_ui(ui, state);
-        });
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "〜  Curves",
+        state.editing,
+        crate::state::EditingTool::Curves,
+    )
+    .id_salt("curves")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Curves)
+        {
+            ui.disable();
+        }
+        curves_ui(ui, state);
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -693,68 +706,68 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Denoise ───────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("denoise");
-    let resp = header(state.tools_force_open, "◌  Denoise")
-        .id_salt("denoise")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Denoise),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Denoise)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
-            egui::Grid::new("denoise_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Strength:");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.tools.denoise_strength)
-                                .speed(0.01)
-                                .range(0.01..=1.0_f32),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Radius:");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.tools.denoise_radius)
-                                .speed(1)
-                                .range(1..=10_u32)
-                                .suffix(" px"),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_denoise_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Denoise"))
-                    .clicked()
-                {
-                    state.push_denoise();
-                }
-                if state.tools.denoise_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_denoise_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_denoise();
-                }
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "◌  Denoise",
+        state.editing,
+        crate::state::EditingTool::Denoise,
+    )
+    .id_salt("denoise")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Denoise)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
+        egui::Grid::new("denoise_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Strength:");
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut state.tools.denoise_strength)
+                            .speed(0.01)
+                            .range(0.01..=1.0_f32),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label("Radius:");
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut state.tools.denoise_radius)
+                            .speed(1)
+                            .range(1..=10_u32)
+                            .suffix(" px"),
+                    )
+                    .changed();
+                ui.end_row();
             });
+        if changed && has_image {
+            state.update_denoise_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Denoise"))
+                .clicked()
+            {
+                state.push_denoise();
+            }
+            if state.tools.denoise_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_denoise_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_denoise();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -852,56 +865,56 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Faux HDR ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("faux_hdr");
-    let resp = header(state.tools_force_open, "◈  Faux HDR")
-        .id_salt("faux_hdr")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::FauxHdr),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::FauxHdr)
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "◈  Faux HDR",
+        state.editing,
+        crate::state::EditingTool::FauxHdr,
+    )
+    .id_salt("faux_hdr")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::FauxHdr)
+        {
+            ui.disable();
+        }
+        ui.label(
+            egui::RichText::new("Exposure fusion from ±1 stop virtual brackets")
+                .small()
+                .color(Color32::from_gray(140)),
+        );
+        ui.add_space(2.0);
+        let changed = ui
+            .add(
+                egui::Slider::new(&mut state.tools.hdr_strength, 0.0..=1.0)
+                    .text("Strength")
+                    .step_by(0.01),
+            )
+            .changed();
+        if changed && has_image {
+            state.update_hdr_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
             {
-                ui.disable();
+                state.push_hdr();
             }
-            ui.label(
-                egui::RichText::new("Exposure fusion from ±1 stop virtual brackets")
-                    .small()
-                    .color(Color32::from_gray(140)),
-            );
-            ui.add_space(2.0);
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut state.tools.hdr_strength, 0.0..=1.0)
-                        .text("Strength")
-                        .step_by(0.01),
-                )
-                .changed();
-            if changed && has_image {
-                state.update_hdr_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
+            if state.tools.hdr_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_hdr();
-                }
-                if state.tools.hdr_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_hdr_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_hdr();
-                }
-            });
+            {
+                state.cancel_hdr_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_hdr();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -1017,23 +1030,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Grain ─────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("grain");
-    let resp = header(state.tools_force_open, "⣿  Grain")
-        .id_salt("grain")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Grain),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Grain)
-            {
-                ui.disable();
-            }
-            grain_ui(ui, state);
-        });
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "⣿  Grain",
+        state.editing,
+        crate::state::EditingTool::Grain,
+    )
+    .id_salt("grain")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Grain)
+        {
+            ui.disable();
+        }
+        grain_ui(ui, state);
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -1242,65 +1255,61 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Highlights & Shadows ──────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("highlights_shadows");
-    let resp = header(state.tools_force_open, "◑  Highlights / Shadows")
-        .id_salt("highlights_shadows")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::HighlightsShadows),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::HighlightsShadows)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
-            egui::Grid::new("hl_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Highlights");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.hl_highlights, -1.0..=1.0)
-                                .step_by(0.01),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Shadows");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.hl_shadows, -1.0..=1.0)
-                                .step_by(0.01),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_hl_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_hl();
-                }
-                if state.tools.hl_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_hl_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_hl();
-                }
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "◑  Highlights / Shadows",
+        state.editing,
+        crate::state::EditingTool::HighlightsShadows,
+    )
+    .id_salt("highlights_shadows")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::HighlightsShadows)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
+        egui::Grid::new("hl_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Highlights");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.hl_highlights, -1.0..=1.0).step_by(0.01),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label("Shadows");
+                changed |= ui
+                    .add(egui::Slider::new(&mut state.tools.hl_shadows, -1.0..=1.0).step_by(0.01))
+                    .changed();
+                ui.end_row();
             });
+        if changed && has_image {
+            state.update_hl_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
+            {
+                state.push_hl();
+            }
+            if state.tools.hl_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_hl_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_hl();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -1312,23 +1321,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── HSL Panel ─────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("hsl_panel");
-    let resp = header(state.tools_force_open, "🌈  HSL Panel")
-        .id_salt("hsl_panel")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::HslPanel),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::HslPanel)
-            {
-                ui.disable();
-            }
-            hsl_panel_ui(ui, state, has_image);
-        });
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "🌈  HSL Panel",
+        state.editing,
+        crate::state::EditingTool::HslPanel,
+    )
+    .id_salt("hsl_panel")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::HslPanel)
+        {
+            ui.disable();
+        }
+        hsl_panel_ui(ui, state, has_image);
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -1340,50 +1349,50 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Hue Shift ─────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("hue_shift");
-    let resp = header(state.tools_force_open, "🎡  Hue Shift")
-        .id_salt("hue_shift")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::HueShift),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::HueShift)
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "🎡  Hue Shift",
+        state.editing,
+        crate::state::EditingTool::HueShift,
+    )
+    .id_salt("hue_shift")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::HueShift)
+        {
+            ui.disable();
+        }
+        let changed = ui
+            .add(
+                egui::Slider::new(&mut state.tools.hue_degrees, -180.0..=180.0)
+                    .text("Degrees")
+                    .step_by(1.0),
+            )
+            .changed();
+        if changed && has_image {
+            state.update_hue_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
             {
-                ui.disable();
+                state.push_hue();
             }
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut state.tools.hue_degrees, -180.0..=180.0)
-                        .text("Degrees")
-                        .step_by(1.0),
-                )
-                .changed();
-            if changed && has_image {
-                state.update_hue_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
+            if state.tools.hue_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_hue();
-                }
-                if state.tools.hue_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_hue_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_hue();
-                }
-            });
+            {
+                state.cancel_hue_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_hue();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -1395,23 +1404,23 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Levels ────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("levels");
-    let resp = header(state.tools_force_open, "▨  Levels")
-        .id_salt("levels")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Levels),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Levels)
-            {
-                ui.disable();
-            }
-            levels_ui(ui, state);
-        });
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "▨  Levels",
+        state.editing,
+        crate::state::EditingTool::Levels,
+    )
+    .id_salt("levels")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Levels)
+        {
+            ui.disable();
+        }
+        levels_ui(ui, state);
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -1629,114 +1638,113 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Noise Reduction (Advanced) ───────────────────────────────────────
     let default_open = state.prefs.is_tool_open("noise_reduction");
-    let resp = header(state.tools_force_open, "◉  Noise Reduction")
-        .id_salt("noise_reduction")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::NoiseReduction),
-        )
-        .show(ui, |ui| {
-            if state.editing.is_some() {
-                ui.disable();
-            }
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::NoiseReduction)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
-            let old_method = state.tools.nr_method.clone();
-            egui::Grid::new("nr_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Method:");
-                    egui::ComboBox::from_id_salt("nr_method")
-                        .selected_text(match state.tools.nr_method {
-                            NrMethod::Wavelet => "Wavelet (fast)",
-                            NrMethod::NonLocalMeans => "Non-Local Means",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut state.tools.nr_method,
-                                NrMethod::Wavelet,
-                                "Wavelet (fast)",
-                            );
-                            ui.selectable_value(
-                                &mut state.tools.nr_method,
-                                NrMethod::NonLocalMeans,
-                                "Non-Local Means",
-                            );
-                        });
-                    ui.end_row();
-                    if state.tools.nr_method != old_method {
-                        changed = true;
-                    }
-
-                    ui.label("Luminance:");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.nr_luma, 0.0..=1.0_f32)
-                                .show_value(true),
-                        )
-                        .changed();
-                    ui.end_row();
-
-                    ui.label("Color:");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.nr_color, 0.0..=1.0_f32)
-                                .show_value(true),
-                        )
-                        .changed();
-                    ui.end_row();
-
-                    ui.label("Detail:");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.nr_detail, 0.0..=1.0_f32)
-                                .show_value(true),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-
-            if state.tools.nr_method == NrMethod::NonLocalMeans {
-                ui.label(
-                    egui::RichText::new("⚠ NLM is slow on large images (30s+)")
-                        .small()
-                        .color(egui::Color32::from_rgb(200, 150, 50)),
-                );
-            }
-
-            if changed && has_image {
-                state.update_nr_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Noise Reduction"))
-                    .clicked()
-                {
-                    state.push_noise_reduction();
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "◉  Noise Reduction",
+        state.editing,
+        crate::state::EditingTool::NoiseReduction,
+    )
+    .id_salt("noise_reduction")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state.editing.is_some() {
+            ui.disable();
+        }
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::NoiseReduction)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
+        let old_method = state.tools.nr_method.clone();
+        egui::Grid::new("nr_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Method:");
+                egui::ComboBox::from_id_salt("nr_method")
+                    .selected_text(match state.tools.nr_method {
+                        NrMethod::Wavelet => "Wavelet (fast)",
+                        NrMethod::NonLocalMeans => "Non-Local Means",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut state.tools.nr_method,
+                            NrMethod::Wavelet,
+                            "Wavelet (fast)",
+                        );
+                        ui.selectable_value(
+                            &mut state.tools.nr_method,
+                            NrMethod::NonLocalMeans,
+                            "Non-Local Means",
+                        );
+                    });
+                ui.end_row();
+                if state.tools.nr_method != old_method {
+                    changed = true;
                 }
-                // Cancel is visible both while a preview is active and while
-                // a (potentially slow) noise-reduction render is in flight so
-                // the user can abort an NLM pass that has already started.
-                if (state.tools.nr_preview_active || state.nr_in_flight())
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_nr_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_noise_reduction();
-                }
+
+                ui.label("Luminance:");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.nr_luma, 0.0..=1.0_f32).show_value(true),
+                    )
+                    .changed();
+                ui.end_row();
+
+                ui.label("Color:");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.nr_color, 0.0..=1.0_f32)
+                            .show_value(true),
+                    )
+                    .changed();
+                ui.end_row();
+
+                ui.label("Detail:");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.nr_detail, 0.0..=1.0_f32)
+                            .show_value(true),
+                    )
+                    .changed();
+                ui.end_row();
             });
+
+        if state.tools.nr_method == NrMethod::NonLocalMeans {
+            ui.label(
+                egui::RichText::new("⚠ NLM is slow on large images (30s+)")
+                    .small()
+                    .color(egui::Color32::from_rgb(200, 150, 50)),
+            );
+        }
+
+        if changed && has_image {
+            state.update_nr_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Noise Reduction"))
+                .clicked()
+            {
+                state.push_noise_reduction();
+            }
+            // Cancel is visible both while a preview is active and while
+            // a (potentially slow) noise-reduction render is in flight so
+            // the user can abort an NLM pass that has already started.
+            if (state.tools.nr_preview_active || state.nr_in_flight())
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_nr_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_noise_reduction();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -2293,46 +2301,46 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Saturation ────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("saturation");
-    let resp = header(state.tools_force_open, "🎨  Saturation")
-        .id_salt("saturation")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Saturation),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Saturation)
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "🎨  Saturation",
+        state.editing,
+        crate::state::EditingTool::Saturation,
+    )
+    .id_salt("saturation")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Saturation)
+        {
+            ui.disable();
+        }
+        let changed = ui
+            .add(egui::Slider::new(&mut state.tools.saturation, 0.0..=4.0).step_by(0.01))
+            .changed();
+        if changed && has_image {
+            state.update_sat_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
             {
-                ui.disable();
+                state.push_saturation();
             }
-            let changed = ui
-                .add(egui::Slider::new(&mut state.tools.saturation, 0.0..=4.0).step_by(0.01))
-                .changed();
-            if changed && has_image {
-                state.update_sat_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
+            if state.tools.sat_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_saturation();
-                }
-                if state.tools.sat_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_sat_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_saturation();
-                }
-            });
+            {
+                state.cancel_sat_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_saturation();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -2344,46 +2352,46 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Sepia ─────────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("sepia");
-    let resp = header(state.tools_force_open, "🟫  Sepia")
-        .id_salt("sepia")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Sepia),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Sepia)
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "🟫  Sepia",
+        state.editing,
+        crate::state::EditingTool::Sepia,
+    )
+    .id_salt("sepia")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Sepia)
+        {
+            ui.disable();
+        }
+        let changed = ui
+            .add(egui::Slider::new(&mut state.tools.sepia_strength, 0.0..=1.0).step_by(0.01))
+            .changed();
+        if changed && has_image {
+            state.update_sepia_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Sepia"))
+                .clicked()
             {
-                ui.disable();
+                state.push_sepia();
             }
-            let changed = ui
-                .add(egui::Slider::new(&mut state.tools.sepia_strength, 0.0..=1.0).step_by(0.01))
-                .changed();
-            if changed && has_image {
-                state.update_sepia_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Sepia"))
+            if state.tools.sepia_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_sepia();
-                }
-                if state.tools.sepia_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_sepia_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_sepia();
-                }
-            });
+            {
+                state.cancel_sepia_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_sepia();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -2395,71 +2403,70 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Shadow Exposure ───────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("shadow_exposure");
-    let resp = header(state.tools_force_open, "🌑  Shadow Exposure")
-        .id_salt("shadow_exposure")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::ShadowExposure),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::ShadowExposure)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
-            egui::Grid::new("shadow_exp_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("EV");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.shadow_ev, -3.0..=3.0)
-                                .step_by(0.05)
-                                .suffix(" stops"),
-                        )
-                        .on_hover_text("Exposure adjustment applied only in the shadows")
-                        .changed();
-                    ui.end_row();
-                    ui.label("Falloff");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.shadow_falloff, 0.5..=4.0)
-                                .step_by(0.05),
-                        )
-                        .on_hover_text(
-                            "Higher values restrict the effect to deeper shadows;\n\
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "🌑  Shadow Exposure",
+        state.editing,
+        crate::state::EditingTool::ShadowExposure,
+    )
+    .id_salt("shadow_exposure")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::ShadowExposure)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
+        egui::Grid::new("shadow_exp_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("EV");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.shadow_ev, -3.0..=3.0)
+                            .step_by(0.05)
+                            .suffix(" stops"),
+                    )
+                    .on_hover_text("Exposure adjustment applied only in the shadows")
+                    .changed();
+                ui.end_row();
+                ui.label("Falloff");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.shadow_falloff, 0.5..=4.0).step_by(0.05),
+                    )
+                    .on_hover_text(
+                        "Higher values restrict the effect to deeper shadows;\n\
                              lower values reach further into the midtones",
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_shadow_exp_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_shadow_exp();
-                }
-                if state.tools.shadow_exp_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_shadow_exp_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_shadow_exp();
-                }
+                    )
+                    .changed();
+                ui.end_row();
             });
+        if changed && has_image {
+            state.update_shadow_exp_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
+            {
+                state.push_shadow_exp();
+            }
+            if state.tools.shadow_exp_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_shadow_exp_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_shadow_exp();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -2471,50 +2478,50 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Sharpen ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("sharpen");
-    let resp = header(state.tools_force_open, "◈  Sharpen")
-        .id_salt("sharpen")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Sharpen),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Sharpen)
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "◈  Sharpen",
+        state.editing,
+        crate::state::EditingTool::Sharpen,
+    )
+    .id_salt("sharpen")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Sharpen)
+        {
+            ui.disable();
+        }
+        let changed = ui
+            .add(
+                egui::Slider::new(&mut state.tools.sharpen_strength, 0.0..=10.0)
+                    .step_by(0.05)
+                    .text("Strength"),
+            )
+            .changed();
+        if changed && has_image {
+            state.update_sharpen_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Sharpen"))
+                .clicked()
             {
-                ui.disable();
+                state.push_sharpen();
             }
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut state.tools.sharpen_strength, 0.0..=10.0)
-                        .step_by(0.05)
-                        .text("Strength"),
-                )
-                .changed();
-            if changed && has_image {
-                state.update_sharpen_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Sharpen"))
+            if state.tools.sharpen_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_sharpen();
-                }
-                if state.tools.sharpen_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_sharpen_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_sharpen();
-                }
-            });
+            {
+                state.cancel_sharpen_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_sharpen();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -2526,100 +2533,99 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Split Tone ────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("split_tone");
-    let resp = header(state.tools_force_open, "🎨  Split Tone")
-        .id_salt("split_tone")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::SplitTone),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::SplitTone)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "🎨  Split Tone",
+        state.editing,
+        crate::state::EditingTool::SplitTone,
+    )
+    .id_salt("split_tone")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::SplitTone)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
 
-            egui::Grid::new("split_tone_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Shadow hue");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.tools.split_shadow_hue)
-                                .speed(1.0)
-                                .range(0.0..=359.9_f32)
-                                .suffix("°"),
-                        )
-                        .changed();
-                    ui.end_row();
+        egui::Grid::new("split_tone_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Shadow hue");
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut state.tools.split_shadow_hue)
+                            .speed(1.0)
+                            .range(0.0..=359.9_f32)
+                            .suffix("°"),
+                    )
+                    .changed();
+                ui.end_row();
 
-                    ui.label("Shadow sat");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.split_shadow_sat, 0.0..=1.0)
-                                .step_by(0.01),
-                        )
-                        .changed();
-                    ui.end_row();
+                ui.label("Shadow sat");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.split_shadow_sat, 0.0..=1.0)
+                            .step_by(0.01),
+                    )
+                    .changed();
+                ui.end_row();
 
-                    ui.label("Highlight hue");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.tools.split_highlight_hue)
-                                .speed(1.0)
-                                .range(0.0..=359.9_f32)
-                                .suffix("°"),
-                        )
-                        .changed();
-                    ui.end_row();
+                ui.label("Highlight hue");
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut state.tools.split_highlight_hue)
+                            .speed(1.0)
+                            .range(0.0..=359.9_f32)
+                            .suffix("°"),
+                    )
+                    .changed();
+                ui.end_row();
 
-                    ui.label("Highlight sat");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.split_highlight_sat, 0.0..=1.0)
-                                .step_by(0.01),
-                        )
-                        .changed();
-                    ui.end_row();
+                ui.label("Highlight sat");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.split_highlight_sat, 0.0..=1.0)
+                            .step_by(0.01),
+                    )
+                    .changed();
+                ui.end_row();
 
-                    ui.label("Balance");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.split_balance, -1.0..=1.0)
-                                .step_by(0.01),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-
-            if changed && has_image {
-                state.update_split_preview();
-            }
-
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_split_tone();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_split_tone();
-                }
-                if state.tools.split_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_split_preview();
-                }
+                ui.label("Balance");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.split_balance, -1.0..=1.0).step_by(0.01),
+                    )
+                    .changed();
+                ui.end_row();
             });
+
+        if changed && has_image {
+            state.update_split_preview();
+        }
+
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
+            {
+                state.push_split_tone();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_split_tone();
+            }
+            if state.tools.split_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_split_preview();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -2631,46 +2637,46 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Vibrance ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("vibrance");
-    let resp = header(state.tools_force_open, "✦  Vibrance")
-        .id_salt("vibrance")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Vibrance),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Vibrance)
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "✦  Vibrance",
+        state.editing,
+        crate::state::EditingTool::Vibrance,
+    )
+    .id_salt("vibrance")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Vibrance)
+        {
+            ui.disable();
+        }
+        let changed = ui
+            .add(egui::Slider::new(&mut state.tools.vibrance, -1.0..=1.0).step_by(0.01))
+            .changed();
+        if changed && has_image {
+            state.update_vibrance_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
             {
-                ui.disable();
+                state.push_vibrance();
             }
-            let changed = ui
-                .add(egui::Slider::new(&mut state.tools.vibrance, -1.0..=1.0).step_by(0.01))
-                .changed();
-            if changed && has_image {
-                state.update_vibrance_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
+            if state.tools.vibrance_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_vibrance();
-                }
-                if state.tools.vibrance_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_vibrance_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_vibrance();
-                }
-            });
+            {
+                state.cancel_vibrance_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_vibrance();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -2682,76 +2688,76 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Vignette ──────────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("vignette");
-    let resp = header(state.tools_force_open, "◎  Vignette")
-        .id_salt("vignette")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::Vignette),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::Vignette)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
-            egui::Grid::new("vignette_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Strength");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.tools.vignette_strength)
-                                .speed(0.01)
-                                .range(0.0..=1.0),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Radius");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.tools.vignette_radius)
-                                .speed(0.01)
-                                .range(0.0..=1.0),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Feather");
-                    changed |= ui
-                        .add(
-                            DragValue::new(&mut state.tools.vignette_feather)
-                                .speed(0.01)
-                                .range(0.0..=1.0),
-                        )
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_vignette_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Vignette"))
-                    .clicked()
-                {
-                    state.push_vignette();
-                }
-                if state.tools.vignette_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_vignette_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_vignette();
-                }
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "◎  Vignette",
+        state.editing,
+        crate::state::EditingTool::Vignette,
+    )
+    .id_salt("vignette")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::Vignette)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
+        egui::Grid::new("vignette_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Strength");
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut state.tools.vignette_strength)
+                            .speed(0.01)
+                            .range(0.0..=1.0),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label("Radius");
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut state.tools.vignette_radius)
+                            .speed(0.01)
+                            .range(0.0..=1.0),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label("Feather");
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut state.tools.vignette_feather)
+                            .speed(0.01)
+                            .range(0.0..=1.0),
+                    )
+                    .changed();
+                ui.end_row();
             });
+        if changed && has_image {
+            state.update_vignette_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply Vignette"))
+                .clicked()
+            {
+                state.push_vignette();
+            }
+            if state.tools.vignette_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_vignette_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_vignette();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
@@ -2763,62 +2769,62 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── White Balance ─────────────────────────────────────────────────────
     let default_open = state.prefs.is_tool_open("white_balance");
-    let resp = header(state.tools_force_open, "🌡  White Balance")
-        .id_salt("white_balance")
-        .default_open(
-            default_open
-                || state
-                    .editing
-                    .is_some_and(|s| s.tool == crate::state::EditingTool::WhiteBalance),
-        )
-        .show(ui, |ui| {
-            if state
-                .editing
-                .is_some_and(|s| s.tool != crate::state::EditingTool::WhiteBalance)
-            {
-                ui.disable();
-            }
-            let mut changed = false;
-            egui::Grid::new("wb_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Temperature");
-                    changed |= ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.wb_temperature, -1.0..=1.0)
-                                .step_by(0.01),
-                        )
-                        .changed();
-                    ui.end_row();
-                    ui.label("Tint");
-                    changed |= ui
-                        .add(egui::Slider::new(&mut state.tools.wb_tint, -1.0..=1.0).step_by(0.01))
-                        .changed();
-                    ui.end_row();
-                });
-            if changed && has_image {
-                state.update_wb_preview();
-            }
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    state.push_wb();
-                }
-                if state.tools.wb_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_wb_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_wb();
-                }
+    let resp = header_for_tool(
+        state.tools_force_open,
+        "🌡  White Balance",
+        state.editing,
+        crate::state::EditingTool::WhiteBalance,
+    )
+    .id_salt("white_balance")
+    .default_open(default_open)
+    .show(ui, |ui| {
+        if state
+            .editing
+            .is_some_and(|s| s.tool != crate::state::EditingTool::WhiteBalance)
+        {
+            ui.disable();
+        }
+        let mut changed = false;
+        egui::Grid::new("wb_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Temperature");
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut state.tools.wb_temperature, -1.0..=1.0)
+                            .step_by(0.01),
+                    )
+                    .changed();
+                ui.end_row();
+                ui.label("Tint");
+                changed |= ui
+                    .add(egui::Slider::new(&mut state.tools.wb_tint, -1.0..=1.0).step_by(0.01))
+                    .changed();
+                ui.end_row();
             });
+        if changed && has_image {
+            state.update_wb_preview();
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(has_image, egui::Button::new("Apply"))
+                .clicked()
+            {
+                state.push_wb();
+            }
+            if state.tools.wb_preview_active
+                && ui
+                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                state.cancel_wb_preview();
+            }
+            if ui.button("Reset").clicked() {
+                state.reset_wb();
+            }
         });
+    });
     if resp.header_response.clicked() {
         state
             .prefs
