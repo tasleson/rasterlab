@@ -74,6 +74,17 @@ pub struct Prefs {
     /// Whether to copy EXIF metadata into exported files.
     #[serde(default = "default_true")]
     pub preserve_metadata: bool,
+
+    // ── Library ──────────────────────────────────────────────────────────────
+    /// Most-recently-opened libraries, newest first.  Capped at [`MAX_RECENT`].
+    #[serde(default)]
+    pub recent_libraries: Vec<PathBuf>,
+    /// The library that was open when the app last exited.
+    #[serde(default)]
+    pub last_library: Option<PathBuf>,
+    /// Thumbnail display scale in the library grid (0.25–1.0; 1.0 = 512px).
+    #[serde(default = "default_thumb_scale")]
+    pub library_thumb_scale: f32,
 }
 
 fn default_true() -> bool {
@@ -90,6 +101,10 @@ fn default_jpeg_quality() -> u8 {
 
 fn default_png_compression() -> u8 {
     6
+}
+
+fn default_thumb_scale() -> f32 {
+    0.5
 }
 
 impl Prefs {
@@ -139,5 +154,13 @@ impl Prefs {
         self.recent_files.retain(|p| p != &path);
         self.recent_files.insert(0, path);
         self.recent_files.truncate(MAX_RECENT);
+    }
+
+    /// Prepend `path` to the recent-libraries list, deduplicating and capping
+    /// at [`MAX_RECENT`].
+    pub fn push_recent_library(&mut self, path: PathBuf) {
+        self.recent_libraries.retain(|p| p != &path);
+        self.recent_libraries.insert(0, path);
+        self.recent_libraries.truncate(MAX_RECENT);
     }
 }

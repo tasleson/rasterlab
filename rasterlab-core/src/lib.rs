@@ -35,6 +35,7 @@ pub mod cancel;
 pub mod error;
 pub mod formats;
 pub mod image;
+pub mod library_meta;
 pub mod ops;
 pub mod pipeline;
 pub mod plugin_loader;

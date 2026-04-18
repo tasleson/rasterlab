@@ -1,6 +1,11 @@
-use std::sync::{Arc, mpsc};
+use std::{path::PathBuf as StdPathBuf, sync::{Arc, mpsc}};
 
-use crate::{prefs::Prefs, state::VirtualCopyStore};
+use image as img_crate;
+
+use crate::{
+    prefs::Prefs,
+    state::{LibraryState, VirtualCopyStore},
+};
 
 use egui::Context;
 use rasterlab_core::{
@@ -20,6 +25,17 @@ use rasterlab_core::{
 };
 
 use super::{EditSession, EditingTool, ToolState, load_op_into_tools};
+
+// ---------------------------------------------------------------------------
+// App mode
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppMode {
+    #[default]
+    Editor,
+    Library,
+}
 
 // ---------------------------------------------------------------------------
 // Background-thread messaging
@@ -62,6 +78,18 @@ enum BgMessage {
     Error(String),
     /// The render thread aborted because [`core_cancel::request`] was called.
     Cancelled,
+    /// Progress update from a running import.
+    ImportProgress(rasterlab_library::ImportProgress),
+    /// Import finished; thumbnail cache should be invalidated.
+    ImportComplete {
+        session: rasterlab_library::ImportSession,
+        errors:  Vec<(StdPathBuf, String)>,
+    },
+    /// A thumbnail image was loaded from disk; ready to upload to egui.
+    ThumbLoaded {
+        hash:  String,
+        bytes: Vec<u8>,
+    },
 }
 
 /// What the split "before/after" view compares against.
@@ -171,6 +199,13 @@ pub struct AppState {
     /// stack buttons are disabled; only the tool matching `editing.tool` is
     /// interactive, and its Apply button replaces the op instead of pushing.
     pub editing: Option<EditSession>,
+
+    // ── App mode & library ────────────────────────────────────────────────────
+    pub mode:    AppMode,
+    pub library: LibraryState,
+    /// Set when the Editor opens a file that was imported into a library.
+    /// `(library_root, hash)` — on save triggers thumb regen + DB sync.
+    pub library_context: Option<(StdPathBuf, String)>,
 }
 
 impl AppState {
@@ -181,6 +216,7 @@ impl AppState {
         tools.encode_opts.jpeg_quality = prefs.jpeg_quality;
         tools.encode_opts.png_compression = prefs.png_compression;
         tools.encode_opts.preserve_metadata = prefs.preserve_metadata;
+        let initial_thumb_scale = prefs.library_thumb_scale;
         Self {
             prefs,
             registry: FormatRegistry::with_builtins(),
@@ -217,6 +253,13 @@ impl AppState {
             autosave_restore: None,
             autosave_restore_session_id: None,
             editing: None,
+            mode:    AppMode::Editor,
+            library: {
+                let mut ls = LibraryState::default();
+                ls.thumb_scale = initial_thumb_scale;
+                ls
+            },
+            library_context: None,
         }
     }
 
@@ -400,6 +443,45 @@ impl AppState {
                         self.needs_rerender = false;
                         self.request_render_inner(false);
                     }
+                }
+                BgMessage::ImportProgress(p) => {
+                    self.library.import_progress = Some(p);
+                }
+                BgMessage::ImportComplete { session, errors } => {
+                    self.library.import_progress = None;
+                    self.library.thumb_cache.clear();
+                    self.library.thumb_requested.clear();
+                    self.library.refresh();
+                    if errors.is_empty() {
+                        self.status = format!(
+                            "Import complete: {} photos in \"{}\"",
+                            session.photo_count, session.name
+                        );
+                    } else {
+                        self.status = format!(
+                            "Import: {} photos, {} error(s)",
+                            session.photo_count,
+                            errors.len()
+                        );
+                    }
+                }
+                BgMessage::ThumbLoaded { hash, bytes } => {
+                    // Upload JPEG bytes as a texture
+                    if let Ok(dyn_img) = img_crate::load_from_memory(&bytes) {
+                        let rgba = dyn_img.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                            size,
+                            rgba.as_raw(),
+                        );
+                        let handle = self.ctx.load_texture(
+                            &hash,
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.library.thumb_cache.insert(hash, handle);
+                    }
+                    self.ctx.request_repaint();
                 }
             }
         }
@@ -2035,6 +2117,67 @@ impl AppState {
             store.rename(index, name);
         }
         self.mark_dirty();
+    }
+
+    // ── Library ────────────────────────────────────────────────────────────
+
+    pub fn open_library(&mut self, path: std::path::PathBuf) {
+        let scale = self.prefs.library_thumb_scale;
+        self.library.open_library(path.clone(), scale);
+        self.prefs.push_recent_library(path.clone());
+        self.prefs.last_library = Some(path);
+        self.prefs.save();
+        self.mode = AppMode::Library;
+    }
+
+    pub fn import_into_library(&mut self, paths: Vec<std::path::PathBuf>) {
+        let Some(lib) = self.library.library.clone() else { return };
+        let tx  = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::Builder::new()
+            .name("rasterlab-import".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let progress_tx = tx.clone();
+                let result = lib.import_files(&paths, move |p| {
+                    let _ = progress_tx.send(BgMessage::ImportProgress(p));
+                    ctx.request_repaint();
+                });
+                match result {
+                    Ok(session) => {
+                        let _ = tx.send(BgMessage::ImportComplete {
+                            errors: Vec::new(),
+                            session,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BgMessage::Error(e.to_string()));
+                    }
+                }
+            })
+            .ok();
+    }
+
+    /// Request that the thumbnail for `hash` be loaded from disk in the background.
+    pub fn request_thumb_load(&mut self, hash: String) {
+        if self.library.thumb_requested.contains(&hash) {
+            return;
+        }
+        self.library.thumb_requested.insert(hash.clone());
+        let Some(lib) = &self.library.library else { return };
+        let thumb_path = lib.thumb_path(&hash);
+        let tx  = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::Builder::new()
+            .name("rasterlab-thumb".into())
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                if let Ok(bytes) = std::fs::read(&thumb_path) {
+                    let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
+                    ctx.request_repaint();
+                }
+            })
+            .ok();
     }
 }
 

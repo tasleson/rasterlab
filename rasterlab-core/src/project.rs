@@ -26,8 +26,12 @@
 //! | `EDIT` | 1   | yes      | JSON-encoded [`PipelineState`] (single copy)    |
 //! | `VCPS` | 2+  | yes      | JSON-encoded [`VcpsChunk`] (all virtual copies) |
 //! | `PREV` | 1+  | no       | JPEG thumbnail of the rendered result           |
+//! | `LMTA` | 3+  | no       | JSON-encoded [`LibraryMeta`] (library metadata) |
+//! | `RECC` | 4+  | no       | Reed-Solomon parity blocks (bitrot recovery)    |
 //!
 //! Version 1 files have an `EDIT` chunk; version 2+ files use `VCPS` instead.
+//! `LMTA` is written by the library importer and absent in editor-only files.
+//! `RECC` is reserved for a future v4 format; v3 readers skip it safely.
 //! Unknown chunks are skipped on read, enabling forward compatibility.
 
 use std::{
@@ -40,6 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{RasterError, RasterResult},
+    library_meta::LibraryMeta,
     pipeline::PipelineState,
 };
 
@@ -49,7 +54,7 @@ use crate::{
 const MAGIC: &[u8; 8] = b"RLAB\x00\x01\r\n";
 
 /// Current file format version.  Bump when the layout changes incompatibly.
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 
 const TAG_META: &[u8; 4] = b"META";
 const TAG_ORIG: &[u8; 4] = b"ORIG";
@@ -57,6 +62,8 @@ const TAG_ORIG: &[u8; 4] = b"ORIG";
 const TAG_EDIT: &[u8; 4] = b"EDIT";
 const TAG_VCPS: &[u8; 4] = b"VCPS"; // v2+ — replaces EDIT
 const TAG_PREV: &[u8; 4] = b"PREV";
+const TAG_LMTA: &[u8; 4] = b"LMTA"; // v3+ — library metadata (optional)
+                                     // TAG_RECC b"RECC" reserved for v4 Reed-Solomon ECC
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -136,6 +143,9 @@ pub struct RlabFile {
     pub active_copy_index: usize,
     /// Embedded JPEG thumbnail of the rendered result, if present.
     pub thumbnail: Option<Vec<u8>>,
+    /// Library metadata (keywords, rating, EXIF snapshot, etc.).
+    /// Present only in files that were imported through the library.
+    pub lmta: Option<LibraryMeta>,
 }
 
 impl RlabFile {
@@ -161,7 +171,13 @@ impl RlabFile {
             copies,
             active_copy_index,
             thumbnail,
+            lmta: None,
         }
+    }
+
+    /// Replace (or clear) the library metadata chunk.
+    pub fn set_lmta(&mut self, lmta: Option<LibraryMeta>) {
+        self.lmta = lmta;
     }
 
     // ── Write ────────────────────────────────────────────────────────────────
@@ -194,6 +210,13 @@ impl RlabFile {
         // PREV (optional)
         if let Some(thumb) = &self.thumbnail {
             write_chunk(&mut buf, TAG_PREV, thumb);
+        }
+
+        // LMTA (optional) — library metadata
+        if let Some(lmta) = &self.lmta {
+            let lmta_json = serde_json::to_vec(lmta)
+                .map_err(|e| RasterError::Serialization(e.to_string()))?;
+            write_chunk(&mut buf, TAG_LMTA, &lmta_json);
         }
 
         // File-level hash covers everything written so far
@@ -265,6 +288,8 @@ impl RlabFile {
         // v2+: all copies from the VCPS chunk
         let mut vcps: Option<VcpsChunk> = None;
         let mut thumbnail: Option<Vec<u8>> = None;
+        // v3+: library metadata
+        let mut lmta: Option<LibraryMeta> = None;
 
         loop {
             // Peek: stop when we've consumed all payload bytes
@@ -325,8 +350,13 @@ impl RlabFile {
                 b"PREV" => {
                     thumbnail = Some(chunk_data);
                 }
+                b"LMTA" => {
+                    let m: LibraryMeta = serde_json::from_slice(&chunk_data)
+                        .map_err(|e| RasterError::Serialization(e.to_string()))?;
+                    lmta = Some(m);
+                }
                 _ => {
-                    // Unknown chunk — skip for forward compatibility
+                    // Unknown chunk (including reserved RECC) — skip for forward compatibility
                 }
             }
         }
@@ -363,6 +393,7 @@ impl RlabFile {
             copies,
             active_copy_index,
             thumbnail,
+            lmta,
         })
     }
 }

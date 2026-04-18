@@ -24,6 +24,7 @@ resolver = "2"
 members = [
     "rasterlab-plugin-api",
     "rasterlab-core",
+    "rasterlab-library",
     "rasterlab-cli",
     "rasterlab-gui",
     "plugins/example-plugin",
@@ -76,3 +77,4 @@ blake3 = "1"
 # Internal crates
 rasterlab-plugin-api = { path = "rasterlab-plugin-api" }
 rasterlab-core       = { path = "rasterlab-core" }
+rasterlab-library    = { path = "rasterlab-library" }

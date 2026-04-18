@@ -1,0 +1,24 @@
+[package]
+name    = "rasterlab-library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rasterlab-core = { workspace = true }
+
+stoolap  = "0.4"
+uuid     = { version = "1", features = ["v4"] }
+walkdir  = "2"
+trash    = "5"
+
+serde      = { workspace = true }
+serde_json = { workspace = true }
+blake3     = { workspace = true }
+rayon      = { workspace = true }
+image      = { workspace = true }
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
