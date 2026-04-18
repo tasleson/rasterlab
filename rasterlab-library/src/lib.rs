@@ -12,3 +12,4 @@ pub use library::{ImportProgress, Library};
 pub use reconstruct::RebuildProgress;
 pub use search::SearchFilter;
 pub use stoolap_db::StoolapDb;
+pub use rasterlab_core::library_meta::{LibraryExif, LibraryMeta};

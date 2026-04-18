@@ -6,8 +6,8 @@ use egui::{Context, Key, Modifiers};
 
 use crate::{
     file_chooser::{DialogKind, FileChooser},
-    panels::{canvas::CanvasState, edit_stack, histogram_panel, tools},
-    state::AppState,
+    panels::{canvas::CanvasState, edit_stack, export_dialog, histogram_panel, library_detail, library_panel, tools},
+    state::{AppMode, AppState},
 };
 
 /// What to do once the user confirms discarding unsaved changes on open.
@@ -237,6 +237,11 @@ impl eframe::App for RasterLabApp {
         // ── Menu bar ─────────────────────────────────────────────────────
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
+                // ── Mode toggle ──────────────────────────────────────────────
+                ui.selectable_value(&mut self.state.mode, AppMode::Editor,  "Editor");
+                ui.selectable_value(&mut self.state.mode, AppMode::Library, "Library");
+                ui.separator();
+
                 ui.menu_button("File", |ui| {
                     #[cfg(not(target_arch = "wasm32"))]
                     if ui.button("Open…  (Ctrl+O)").clicked() {
@@ -306,6 +311,88 @@ impl eframe::App for RasterLabApp {
                             });
                         });
                     }
+                    // ── Library ──────────────────────────────────────────────
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.separator();
+                        if ui.button("New Library…").clicked() {
+                            ui.close_kind(egui::UiKind::Menu);
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                self.state.open_library(path);
+                            }
+                        }
+                        if ui.button("Open Library…").clicked() {
+                            ui.close_kind(egui::UiKind::Menu);
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                self.state.open_library(path);
+                            }
+                        }
+                        {
+                            let recent = self.state.prefs.recent_libraries.clone();
+                            ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                                ui.menu_button("Recent Libraries", |ui| {
+                                    for path in &recent {
+                                        let label = path.file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_else(|| path.display().to_string());
+                                        if ui.button(label)
+                                            .on_hover_text(path.display().to_string())
+                                            .clicked()
+                                        {
+                                            ui.close_kind(egui::UiKind::Menu);
+                                            self.state.open_library(path.clone());
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                        ui.add_enabled_ui(self.state.library.library.is_some(), |ui| {
+                            ui.menu_button("Import Photos", |ui| {
+                                if ui.button("Select Files…").clicked() {
+                                    ui.close_kind(egui::UiKind::Menu);
+                                    if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                                        self.state.import_into_library(paths);
+                                    }
+                                }
+                                if ui.button("Select Folder…").clicked() {
+                                    ui.close_kind(egui::UiKind::Menu);
+                                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                        // Collect all image paths then import
+                                        if let Some(lib) = &self.state.library.library {
+                                            let registry = rasterlab_core::formats::FormatRegistry::with_builtins();
+                                            let exts: std::collections::HashSet<String> = registry
+                                                .supported_extensions()
+                                                .into_iter()
+                                                .collect();
+                                            let paths: Vec<PathBuf> = walkdir::WalkDir::new(&folder)
+                                                .into_iter()
+                                                .filter_map(|e| e.ok())
+                                                .filter(|e| e.file_type().is_file())
+                                                .filter(|e| e.path().extension()
+                                                    .and_then(|x| x.to_str())
+                                                    .map(|x| exts.contains(&x.to_lowercase()))
+                                                    .unwrap_or(false))
+                                                .map(|e| e.into_path())
+                                                .collect();
+                                            drop(lib);
+                                            self.state.import_into_library(paths);
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                        ui.add_enabled_ui(
+                            self.state.library.library.is_some() && !self.state.library.selected.is_empty(),
+                            |ui| {
+                                if ui.button("Export Selection…").clicked() {
+                                    ui.close_kind(egui::UiKind::Menu);
+                                    self.state.tools.export_dialog.open = true;
+                                    self.state.mode = AppMode::Library;
+                                }
+                            },
+                        );
+                    }
+
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         ui.separator();
@@ -489,43 +576,55 @@ impl eframe::App for RasterLabApp {
             });
         });
 
-        // ── Left panel: Tools ─────────────────────────────────────────────
-        egui::Panel::left("tools_panel")
-            .resizable(true)
-            .default_size(220.0)
-            .min_size(180.0)
-            .show_inside(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    tools::ui(ui, &mut self.state);
-                });
-            });
-
-        // ── Right panel: Edit stack + Histogram ───────────────────────────
-        egui::Panel::right("right_panel")
-            .resizable(true)
-            .default_size(280.0)
-            .min_size(220.0)
-            .show_inside(ui, |ui| {
-                // Histogram pinned to the bottom; must be declared before the
-                // fill content so egui reserves the space correctly.
-                egui::Panel::bottom("histogram_panel")
+        match self.state.mode {
+            AppMode::Library => {
+                // ── Library mode ─────────────────────────────────────────
+                egui::Panel::right("lib_detail_panel")
                     .resizable(true)
-                    .default_size(200.0)
-                    .min_size(80.0)
+                    .default_size(260.0)
+                    .min_size(180.0)
                     .show_inside(ui, |ui| {
-                        histogram_panel::ui(ui, self.state.histogram.as_ref());
+                        library_detail::ui(ui, &mut self.state);
+                    });
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    library_panel::ui(ui, &mut self.state);
+                });
+                export_dialog::ui(&ctx, &mut self.state);
+            }
+            AppMode::Editor => {
+                // ── Editor mode (original layout) ────────────────────────
+                egui::Panel::left("tools_panel")
+                    .resizable(true)
+                    .default_size(220.0)
+                    .min_size(180.0)
+                    .show_inside(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            tools::ui(ui, &mut self.state);
+                        });
                     });
 
-                // Edit stack fills whatever space remains above the histogram.
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    edit_stack::ui(ui, &mut self.state);
-                });
-            });
+                egui::Panel::right("right_panel")
+                    .resizable(true)
+                    .default_size(280.0)
+                    .min_size(220.0)
+                    .show_inside(ui, |ui| {
+                        egui::Panel::bottom("histogram_panel")
+                            .resizable(true)
+                            .default_size(200.0)
+                            .min_size(80.0)
+                            .show_inside(ui, |ui| {
+                                histogram_panel::ui(ui, self.state.histogram.as_ref());
+                            });
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            edit_stack::ui(ui, &mut self.state);
+                        });
+                    });
 
-        // ── Central panel: Image canvas ───────────────────────────────────
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.canvas.ui(ui, &mut self.state);
-        });
+                egui::CentralPanel::default().show_inside(ui, |ui| {
+                    self.canvas.ui(ui, &mut self.state);
+                });
+            }
+        }
 
         // ── About dialog ─────────────────────────────────────────────────
         self.show_about_window(&ctx);

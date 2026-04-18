@@ -248,6 +248,9 @@ pub struct ToolState {
     pub export_resize_w: u32,
     pub export_resize_h: u32,
     pub export_resize_mode: ResampleMode,
+
+    // ── Library batch export dialog ───────────────────────────────────────
+    pub export_dialog: crate::panels::export_dialog::ExportDialogState,
 }
 
 impl ToolState {
@@ -380,6 +383,7 @@ impl ToolState {
             export_resize_w: 0,
             export_resize_h: 0,
             export_resize_mode: ResampleMode::Bicubic,
+            export_dialog: crate::panels::export_dialog::ExportDialogState::default(),
         }
     }
 

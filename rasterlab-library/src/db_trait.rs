@@ -43,7 +43,7 @@ pub struct CollectionRow {
 
 // ── Sort order ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SortOrder {
     #[default]
     CaptureDateDesc,
