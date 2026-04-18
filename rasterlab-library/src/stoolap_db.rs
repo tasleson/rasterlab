@@ -35,7 +35,7 @@ impl StoolapDb {
 
 const SCHEMA_STMTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS photos (
-        id                INTEGER PRIMARY KEY,
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
         hash              TEXT    NOT NULL UNIQUE,
         lib_path          TEXT    NOT NULL,
         width             INTEGER,
@@ -85,14 +85,15 @@ const SCHEMA_STMTS: &[&str] = &[
         location_country TEXT
     )",
     "CREATE TABLE IF NOT EXISTS import_sessions (
-        id          TEXT PRIMARY KEY,
+        rowid       INTEGER PRIMARY KEY AUTOINCREMENT,
+        id          TEXT NOT NULL UNIQUE,
         name        TEXT NOT NULL,
         started_at  INTEGER,
         source_dir  TEXT,
         photo_count INTEGER NOT NULL DEFAULT 0
     )",
     "CREATE TABLE IF NOT EXISTS collections (
-        id         INTEGER PRIMARY KEY,
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
         name       TEXT NOT NULL UNIQUE,
         created_at INTEGER
     )",
@@ -104,7 +105,7 @@ const SCHEMA_STMTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS exif_aperture  ON exif(aperture)",
     "CREATE INDEX IF NOT EXISTS exif_iso       ON exif(iso)",
     "CREATE INDEX IF NOT EXISTS exif_shutter   ON exif(shutter_sec)",
-    "CREATE INDEX IF NOT EXISTS exif_capture   ON exif(capture_date)",
+    "CREATE INDEX IF NOT EXISTS photos_capture ON photos(capture_date)",
     "CREATE INDEX IF NOT EXISTS photos_import  ON photos(import_date, import_session)",
     "CREATE INDEX IF NOT EXISTS photos_stack   ON photos(stack_id)",
     "CREATE INDEX IF NOT EXISTS keywords_kw    ON keywords(keyword)",
@@ -173,12 +174,14 @@ impl LibraryDb for StoolapDb {
     ) -> Result<PhotoId> {
         let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
 
-        self.db
-            .execute(
+        let photo_id: i64 = self
+            .db
+            .query_one(
                 "INSERT INTO photos
              (hash, lib_path, width, height, import_date, import_session,
               capture_date, original_filename, stack_id, stack_is_primary)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             RETURNING id",
                 (
                     hash,
                     lib_path,
@@ -193,11 +196,6 @@ impl LibraryDb for StoolapDb {
                 ),
             )
             .context("insert photo")?;
-
-        let photo_id: i64 = self
-            .db
-            .query_one("SELECT last_insert_rowid()", ())
-            .context("last_insert_rowid")?;
 
         // EXIF — 17 params exceeds tuple impl limit; use Vec<Value>
         if let Some(exif) = &lmta.exif {
@@ -284,7 +282,7 @@ impl LibraryDb for StoolapDb {
         for coll_name in &lmta.collections {
             self.db
                 .execute(
-                    "INSERT OR IGNORE INTO collections (name, created_at) VALUES ($1, $2)",
+                    "INSERT INTO collections (name, created_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                     (coll_name.as_str(), unix_now() as i64),
                 )
                 .ok();
@@ -294,8 +292,8 @@ impl LibraryDb for StoolapDb {
             ) {
                 self.db
                     .execute(
-                        "INSERT OR IGNORE INTO collection_photos
-                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3)",
+                        "INSERT INTO collection_photos
+                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
                         (coll_id, photo_id, unix_now() as i64),
                     )
                     .ok();
@@ -563,8 +561,8 @@ impl LibraryDb for StoolapDb {
     ) -> Result<()> {
         self.db
             .execute(
-                "INSERT OR IGNORE INTO import_sessions
-             (id, name, started_at, source_dir, photo_count) VALUES ($1,$2,$3,$4,0)",
+                "INSERT INTO import_sessions
+             (id, name, started_at, source_dir, photo_count) VALUES ($1,$2,$3,$4,0) ON CONFLICT DO NOTHING",
                 (id, name, started_at as i64, source_dir),
             )
             .context("insert_session")?;
@@ -626,11 +624,10 @@ impl LibraryDb for StoolapDb {
     // ── Collections ───────────────────────────────────────────────────────
 
     fn create_collection(&self, name: &str, created_at: u64) -> Result<CollectionId> {
-        self.db.execute(
-            "INSERT INTO collections (name, created_at) VALUES ($1,$2)",
+        let id: i64 = self.db.query_one(
+            "INSERT INTO collections (name, created_at) VALUES ($1,$2) RETURNING id",
             (name, created_at as i64),
         )?;
-        let id: i64 = self.db.query_one("SELECT last_insert_rowid()", ())?;
         Ok(id)
     }
 
@@ -671,8 +668,8 @@ impl LibraryDb for StoolapDb {
         let now = unix_now() as i64;
         for &pid in photo_ids {
             self.db.execute(
-                "INSERT OR IGNORE INTO collection_photos
-                 (collection_id, photo_id, added_at) VALUES ($1,$2,$3)",
+                "INSERT INTO collection_photos
+                 (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
                 (collection_id, pid, now),
             )?;
         }

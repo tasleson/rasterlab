@@ -25,6 +25,7 @@ pub struct ImportSession {
     pub name: String,
     pub started_at: u64,
     pub photo_count: usize,
+    pub errors: Vec<(std::path::PathBuf, String)>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -80,7 +81,7 @@ pub fn import_files(
                 done += 1;
             }
             Err(e) => {
-                errors.push((path.clone(), e.to_string()));
+                errors.push((path.clone(), format!("{:#}", e)));
             }
         }
     }
@@ -103,6 +104,7 @@ pub fn import_files(
         name: session_name,
         started_at,
         photo_count: done,
+        errors,
     })
 }
 

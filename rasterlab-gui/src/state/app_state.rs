@@ -2201,6 +2201,7 @@ impl AppState {
                                 name: "Index rebuild".into(),
                                 started_at: 0,
                                 photo_count: 0,
+                                errors: Vec::new(),
                             },
                             errors: Vec::new(),
                         });
