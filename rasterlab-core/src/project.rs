@@ -63,7 +63,7 @@ const TAG_EDIT: &[u8; 4] = b"EDIT";
 const TAG_VCPS: &[u8; 4] = b"VCPS"; // v2+ — replaces EDIT
 const TAG_PREV: &[u8; 4] = b"PREV";
 const TAG_LMTA: &[u8; 4] = b"LMTA"; // v3+ — library metadata (optional)
-                                     // TAG_RECC b"RECC" reserved for v4 Reed-Solomon ECC
+// TAG_RECC b"RECC" reserved for v4 Reed-Solomon ECC
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -214,8 +214,8 @@ impl RlabFile {
 
         // LMTA (optional) — library metadata
         if let Some(lmta) = &self.lmta {
-            let lmta_json = serde_json::to_vec(lmta)
-                .map_err(|e| RasterError::Serialization(e.to_string()))?;
+            let lmta_json =
+                serde_json::to_vec(lmta).map_err(|e| RasterError::Serialization(e.to_string()))?;
             write_chunk(&mut buf, TAG_LMTA, &lmta_json);
         }
 

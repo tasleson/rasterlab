@@ -1,8 +1,8 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -14,20 +14,16 @@ use rasterlab_core::{
 };
 use uuid::Uuid;
 
-use crate::{
-    db_trait::LibraryDb,
-    library::ImportProgress,
-    thumbnail::generate_thumbnail,
-};
+use crate::{db_trait::LibraryDb, library::ImportProgress, thumbnail::generate_thumbnail};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// One completed import session returned from [`import_files`].
 #[derive(Debug, Clone)]
 pub struct ImportSession {
-    pub id:          String,
-    pub name:        String,
-    pub started_at:  u64,
+    pub id: String,
+    pub name: String,
+    pub started_at: u64,
     pub photo_count: usize,
 }
 
@@ -43,21 +39,21 @@ pub fn import_files(
     cancelled: Arc<AtomicBool>,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Result<ImportSession> {
-    let session_id   = Uuid::new_v4().to_string();
-    let started_at   = unix_now();
+    let session_id = Uuid::new_v4().to_string();
+    let started_at = unix_now();
 
     progress_cb(ImportProgress {
-        total:              paths.len(),
-        done:               0,
-        current_file:       PathBuf::new(),
+        total: paths.len(),
+        done: 0,
+        current_file: PathBuf::new(),
         skipped_duplicates: 0,
-        errors:             Vec::new(),
+        errors: Vec::new(),
     });
 
     // Detect RAW+JPEG stacks within this batch before importing.
     let stack_map = detect_stacks(paths);
 
-    let mut done               = 0usize;
+    let mut done = 0usize;
     let mut skipped_duplicates = 0usize;
     let mut errors: Vec<(PathBuf, String)> = Vec::new();
     let mut imported_hashes: Vec<(PathBuf, String)> = Vec::new();
@@ -68,11 +64,11 @@ pub fn import_files(
         }
 
         progress_cb(ImportProgress {
-            total:              paths.len(),
+            total: paths.len(),
             done,
-            current_file:       path.clone(),
+            current_file: path.clone(),
             skipped_duplicates,
-            errors:             errors.clone(),
+            errors: errors.clone(),
         });
 
         match import_one(library_root, db, registry, path, &session_id, &stack_map) {
@@ -95,16 +91,16 @@ pub fn import_files(
     db.update_session_count(&session_id, done as i64)?;
 
     progress_cb(ImportProgress {
-        total:              paths.len(),
+        total: paths.len(),
         done,
-        current_file:       PathBuf::new(),
+        current_file: PathBuf::new(),
         skipped_duplicates,
-        errors:             errors.clone(),
+        errors: errors.clone(),
     });
 
     Ok(ImportSession {
-        id:          session_id,
-        name:        session_name,
+        id: session_id,
+        name: session_name,
         started_at,
         photo_count: done,
     })
@@ -115,15 +111,14 @@ pub fn import_files(
 /// Returns `Ok(Some(hash))` on success, `Ok(None)` if duplicate, `Err` on failure.
 fn import_one(
     library_root: &Path,
-    db:           &dyn LibraryDb,
-    registry:     &FormatRegistry,
-    path:         &Path,
-    session_id:   &str,
-    stack_map:    &[(usize, usize)],   // (primary_idx, secondary_idx) pairs by path index
+    db: &dyn LibraryDb,
+    registry: &FormatRegistry,
+    path: &Path,
+    session_id: &str,
+    stack_map: &[(usize, usize)], // (primary_idx, secondary_idx) pairs by path index
 ) -> Result<Option<String>> {
     // 1. Read source bytes
-    let original_bytes = std::fs::read(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let original_bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
 
     // 2. Compute hash
     let hash = blake3::hash(&original_bytes).to_hex().to_string();
@@ -179,7 +174,14 @@ fn import_one(
     if let Some(parent) = rlab_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    write_rlab(&rlab_path, &original_bytes, &lmta, &thumb_bytes, width, height)?;
+    write_rlab(
+        &rlab_path,
+        &original_bytes,
+        &lmta,
+        &thumb_bytes,
+        width,
+        height,
+    )?;
 
     // 11. Insert into DB
     db.insert_photo(
@@ -197,15 +199,15 @@ fn import_one(
 // ── Write .rlab ───────────────────────────────────────────────────────────────
 
 fn write_rlab(
-    path:           &Path,
+    path: &Path,
     original_bytes: &[u8],
-    lmta:           &LibraryMeta,
-    thumb_bytes:    &[u8],
-    width:          u32,
-    height:         u32,
+    lmta: &LibraryMeta,
+    thumb_bytes: &[u8],
+    width: u32,
+    height: u32,
 ) -> Result<()> {
-    use rasterlab_core::project::{RlabFile, RlabMeta, SavedCopy};
     use rasterlab_core::pipeline::PipelineState;
+    use rasterlab_core::project::{RlabFile, RlabMeta, SavedCopy};
 
     let meta = RlabMeta::new(
         env!("CARGO_PKG_VERSION"),
@@ -213,12 +215,21 @@ fn write_rlab(
         width,
         height,
     );
-    let empty_pipeline = PipelineState { entries: Vec::new(), cursor: 0 };
+    let empty_pipeline = PipelineState {
+        entries: Vec::new(),
+        cursor: 0,
+    };
     let copies = vec![SavedCopy {
-        name:           "Copy 1".into(),
+        name: "Copy 1".into(),
         pipeline_state: empty_pipeline,
     }];
-    let mut rlab = RlabFile::new(meta, original_bytes.to_vec(), copies, 0, Some(thumb_bytes.to_vec()));
+    let mut rlab = RlabFile::new(
+        meta,
+        original_bytes.to_vec(),
+        copies,
+        0,
+        Some(thumb_bytes.to_vec()),
+    );
     rlab.set_lmta(Some(lmta.clone()));
     rlab.write(path).context("write .rlab")
 }
@@ -245,8 +256,16 @@ pub fn thumb_path(library_root: &Path, hash: &str) -> PathBuf {
 fn detect_stacks(paths: &[PathBuf]) -> Vec<(usize, usize)> {
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (i, p) in paths.iter().enumerate() {
-        let stem = p.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
-        let ext  = p.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+        let stem = p
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        let ext = p
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
         if !is_raw_ext(&ext) {
             continue;
         }
@@ -255,8 +274,16 @@ fn detect_stacks(paths: &[PathBuf]) -> Vec<(usize, usize)> {
             if i == j {
                 continue;
             }
-            let qstem = q.file_stem().unwrap_or_default().to_string_lossy().to_lowercase();
-            let qext  = q.extension().unwrap_or_default().to_string_lossy().to_lowercase();
+            let qstem = q
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
+            let qext = q
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
             if qstem == stem && is_jpeg_ext(&qext) {
                 pairs.push((i, j));
                 break;
@@ -269,8 +296,19 @@ fn detect_stacks(paths: &[PathBuf]) -> Vec<(usize, usize)> {
 fn is_raw_ext(ext: &str) -> bool {
     matches!(
         ext,
-        "nef" | "cr2" | "cr3" | "arw" | "orf" | "rw2" | "pef"
-            | "dng" | "srw" | "3fr" | "iiq" | "erf" | "raf"
+        "nef"
+            | "cr2"
+            | "cr3"
+            | "arw"
+            | "orf"
+            | "rw2"
+            | "pef"
+            | "dng"
+            | "srw"
+            | "3fr"
+            | "iiq"
+            | "erf"
+            | "raf"
     )
 }
 
@@ -287,11 +325,7 @@ fn is_primary_in_pair(path: &Path) -> bool {
     is_raw_ext(&ext)
 }
 
-fn stack_peer_for(
-    _path:      &Path,
-    _stack_map: &[(usize, usize)],
-    _len:       usize,
-) -> Option<String> {
+fn stack_peer_for(_path: &Path, _stack_map: &[(usize, usize)], _len: usize) -> Option<String> {
     // Peer hash is set after the peer is imported.
     // The library.rs import loop handles back-linking after both files are done.
     None
@@ -333,12 +367,11 @@ fn format_exif_date(d: &str) -> String {
         return d.to_owned();
     }
     let month_names = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let month: usize = parts[1].parse().unwrap_or(0);
-    let day: u32     = parts[2].parse().unwrap_or(0);
-    let year         = parts[0];
+    let day: u32 = parts[2].parse().unwrap_or(0);
+    let year = parts[0];
     if month >= 1 && month <= 12 {
         format!("{} {} {}", month_names[month - 1], day, year)
     } else {
@@ -376,8 +409,7 @@ fn chrono_lite_date(ts: u64) -> String {
         [31i64, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
     let month_names = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let mut month = 0usize;
     while month < 12 && remaining >= months[month] {

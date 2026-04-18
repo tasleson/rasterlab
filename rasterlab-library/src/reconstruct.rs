@@ -4,27 +4,23 @@ use anyhow::Result;
 use rasterlab_core::{formats::FormatRegistry, project::RlabFile};
 use walkdir::WalkDir;
 
-use crate::{
-    db_trait::LibraryDb,
-    import::thumb_path,
-    thumbnail::generate_thumbnail,
-};
+use crate::{db_trait::LibraryDb, import::thumb_path, thumbnail::generate_thumbnail};
 
 #[derive(Debug, Clone)]
 pub struct RebuildProgress {
-    pub total:   usize,
-    pub done:    usize,
+    pub total: usize,
+    pub done: usize,
     pub current: std::path::PathBuf,
-    pub errors:  Vec<(std::path::PathBuf, String)>,
+    pub errors: Vec<(std::path::PathBuf, String)>,
 }
 
 /// Rebuild the database index by scanning all `.rlab` files in `library_root/files/`.
 /// On completion the DB reflects the current on-disk state.
 pub fn rebuild(
     library_root: &Path,
-    db:           &dyn LibraryDb,
-    registry:     &FormatRegistry,
-    progress_cb:  &dyn Fn(RebuildProgress),
+    db: &dyn LibraryDb,
+    registry: &FormatRegistry,
+    progress_cb: &dyn Fn(RebuildProgress),
 ) -> Result<()> {
     db.clear_all()?;
 
@@ -37,10 +33,7 @@ pub fn rebuild(
     let rlab_paths: Vec<_> = WalkDir::new(&files_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.path().extension().map_or(false, |x| x == "rlab")
-        })
+        .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "rlab"))
         .map(|e| e.into_path())
         .collect();
 
@@ -70,9 +63,9 @@ pub fn rebuild(
 }
 
 fn reindex_one(
-    library_root:   &Path,
-    db:             &dyn LibraryDb,
-    registry:       &FormatRegistry,
+    library_root: &Path,
+    db: &dyn LibraryDb,
+    registry: &FormatRegistry,
     rlab_file_path: &Path,
 ) -> Result<()> {
     let rlab = RlabFile::read(rlab_file_path)?;
@@ -114,17 +107,25 @@ fn reindex_one(
         &lmta,
         rlab.meta.width,
         rlab.meta.height,
-        lmta.stack_peer_hash.as_deref().map(|_| hash.as_str()).map(|_| {
-            // Generate a stable stack_id from the sorted pair of hashes
-            // (same logic used during import)
-            hash.as_str()
-        }),
+        lmta.stack_peer_hash
+            .as_deref()
+            .map(|_| hash.as_str())
+            .map(|_| {
+                // Generate a stable stack_id from the sorted pair of hashes
+                // (same logic used during import)
+                hash.as_str()
+            }),
     )?;
 
     // Rebuild import session row if needed
     if !lmta.import_session_id.is_empty() {
-        db.insert_session(&lmta.import_session_id, "Recovered session", lmta.import_date, None)
-            .ok();
+        db.insert_session(
+            &lmta.import_session_id,
+            "Recovered session",
+            lmta.import_date,
+            None,
+        )
+        .ok();
     }
 
     Ok(())

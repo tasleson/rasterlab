@@ -1,5 +1,5 @@
 use egui::ScrollArea;
-use rasterlab_library::{PhotoRow, PhotoId};
+use rasterlab_library::{PhotoId, PhotoRow};
 
 use crate::state::AppState;
 
@@ -74,7 +74,10 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
                         for star in 0u8..=5 {
                             let filled = star <= lmta.rating;
                             let label = if filled { "★" } else { "☆" };
-                            if ui.selectable_label(filled && star == lmta.rating, label).clicked() {
+                            if ui
+                                .selectable_label(filled && star == lmta.rating, label)
+                                .clicked()
+                            {
                                 lmta.rating = if lmta.rating == star { 0 } else { star };
                                 dirty = true;
                             }
@@ -86,7 +89,10 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
                         ui.label("Flag:");
                         for flag_opt in [None, Some("pick"), Some("reject")] {
                             let active = lmta.flag.as_deref() == flag_opt;
-                            if ui.selectable_label(active, flag_opt.unwrap_or("—")).clicked() {
+                            if ui
+                                .selectable_label(active, flag_opt.unwrap_or("—"))
+                                .clicked()
+                            {
                                 lmta.flag = flag_opt.map(|s| s.to_owned());
                                 dirty = true;
                             }
@@ -96,7 +102,14 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
                     // Color label
                     ui.horizontal(|ui| {
                         ui.label("Color:");
-                        for color in [None, Some("red"), Some("yellow"), Some("green"), Some("blue"), Some("purple")] {
+                        for color in [
+                            None,
+                            Some("red"),
+                            Some("yellow"),
+                            Some("green"),
+                            Some("blue"),
+                            Some("purple"),
+                        ] {
                             let active = lmta.color_label.as_deref() == color;
                             let display = color.unwrap_or("—");
                             if ui.selectable_label(active, display).clicked() {
@@ -110,7 +123,11 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
                     ui.label("Caption:");
                     let mut caption = lmta.caption.clone().unwrap_or_default();
                     if ui.text_edit_multiline(&mut caption).changed() {
-                        lmta.caption = if caption.is_empty() { None } else { Some(caption) };
+                        lmta.caption = if caption.is_empty() {
+                            None
+                        } else {
+                            Some(caption)
+                        };
                         dirty = true;
                     }
 
@@ -159,32 +176,50 @@ fn exif_table(ui: &mut egui::Ui, exif: &rasterlab_library::LibraryExif) {
         .spacing([8.0, 2.0])
         .show(ui, |ui| {
             if let Some(ref v) = exif.camera_make {
-                ui.label("Make:"); ui.label(v); ui.end_row();
+                ui.label("Make:");
+                ui.label(v);
+                ui.end_row();
             }
             if let Some(ref v) = exif.camera_model {
-                ui.label("Camera:"); ui.label(v); ui.end_row();
+                ui.label("Camera:");
+                ui.label(v);
+                ui.end_row();
             }
             if let Some(ref v) = exif.lens_model {
-                ui.label("Lens:"); ui.label(v); ui.end_row();
+                ui.label("Lens:");
+                ui.label(v);
+                ui.end_row();
             }
             if let Some(ref v) = exif.capture_date {
                 let end = v.len().min(19usize);
-                ui.label("Date:"); ui.label(&v[..end]); ui.end_row();
+                ui.label("Date:");
+                ui.label(&v[..end]);
+                ui.end_row();
             }
             if let Some(v) = exif.iso {
-                ui.label("ISO:"); ui.label(format!("{}", v)); ui.end_row();
+                ui.label("ISO:");
+                ui.label(format!("{}", v));
+                ui.end_row();
             }
             if let Some(ref v) = exif.shutter_display {
-                ui.label("Shutter:"); ui.label(format!("{} s", v)); ui.end_row();
+                ui.label("Shutter:");
+                ui.label(format!("{} s", v));
+                ui.end_row();
             }
             if let Some(v) = exif.aperture {
-                ui.label("Aperture:"); ui.label(format!("f/{:.1}", v)); ui.end_row();
+                ui.label("Aperture:");
+                ui.label(format!("f/{:.1}", v));
+                ui.end_row();
             }
             if let Some(v) = exif.focal_length {
-                ui.label("Focal length:"); ui.label(format!("{:.0} mm", v)); ui.end_row();
+                ui.label("Focal length:");
+                ui.label(format!("{:.0} mm", v));
+                ui.end_row();
             }
             if let Some(v) = exif.focal_length_35mm {
-                ui.label("35 mm equiv:"); ui.label(format!("{:.0} mm", v)); ui.end_row();
+                ui.label("35 mm equiv:");
+                ui.label(format!("{:.0} mm", v));
+                ui.end_row();
             }
         });
 }
@@ -231,7 +266,8 @@ fn multi_photo_ui(ui: &mut egui::Ui, state: &mut AppState, ids: &[PhotoId], coun
     ui.horizontal(|ui| {
         ui.label("Add keyword:");
         let resp = ui.text_edit_singleline(&mut kw_text);
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !kw_text.is_empty() {
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !kw_text.is_empty()
+        {
             let kw = kw_text.clone();
             apply_batch_keyword(state, ids, &kw);
             kw_text.clear();
@@ -241,9 +277,13 @@ fn multi_photo_ui(ui: &mut egui::Ui, state: &mut AppState, ids: &[PhotoId], coun
 }
 
 fn apply_batch_rating(state: &mut AppState, ids: &[PhotoId], rating: u8) {
-    let Some(lib) = state.library.library.clone() else { return };
+    let Some(lib) = state.library.library.clone() else {
+        return;
+    };
     for &id in ids {
-        let rlab_path_opt = state.library.results
+        let rlab_path_opt = state
+            .library
+            .results
             .iter()
             .find(|p| p.id == id)
             .map(|p| lib.rlab_path(&p.hash));
@@ -260,9 +300,13 @@ fn apply_batch_rating(state: &mut AppState, ids: &[PhotoId], rating: u8) {
 }
 
 fn apply_batch_flag(state: &mut AppState, ids: &[PhotoId], flag: Option<&str>) {
-    let Some(lib) = state.library.library.clone() else { return };
+    let Some(lib) = state.library.library.clone() else {
+        return;
+    };
     for &id in ids {
-        let rlab_path_opt = state.library.results
+        let rlab_path_opt = state
+            .library
+            .results
             .iter()
             .find(|p| p.id == id)
             .map(|p| lib.rlab_path(&p.hash));
@@ -279,9 +323,13 @@ fn apply_batch_flag(state: &mut AppState, ids: &[PhotoId], flag: Option<&str>) {
 }
 
 fn apply_batch_keyword(state: &mut AppState, ids: &[PhotoId], kw: &str) {
-    let Some(lib) = state.library.library.clone() else { return };
+    let Some(lib) = state.library.library.clone() else {
+        return;
+    };
     for &id in ids {
-        let rlab_path_opt = state.library.results
+        let rlab_path_opt = state
+            .library
+            .results
             .iter()
             .find(|p| p.id == id)
             .map(|p| lib.rlab_path(&p.hash));

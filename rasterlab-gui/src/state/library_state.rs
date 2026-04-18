@@ -5,8 +5,8 @@ use std::{
 };
 
 use rasterlab_library::{
-    ImportProgress, Library, PhotoId, PhotoRow, SearchFilter, SortOrder,
-    CollectionId, CollectionRow, ImportSessionRow,
+    CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, PhotoId, PhotoRow,
+    SearchFilter, SortOrder,
 };
 
 // ── LibraryView ───────────────────────────────────────────────────────────────
@@ -27,48 +27,48 @@ impl Default for LibraryView {
 // ── LibraryState ──────────────────────────────────────────────────────────────
 
 pub struct LibraryState {
-    pub library:         Option<Arc<Library>>,
-    pub view:            LibraryView,
-    pub filter:          SearchFilter,
-    pub sort:            SortOrder,
-    pub results:         Vec<PhotoRow>,
-    pub selected:        Vec<PhotoId>,
-    pub thumb_scale:     f32,
+    pub library: Option<Arc<Library>>,
+    pub view: LibraryView,
+    pub filter: SearchFilter,
+    pub sort: SortOrder,
+    pub results: Vec<PhotoRow>,
+    pub selected: Vec<PhotoId>,
+    pub thumb_scale: f32,
     pub import_progress: Option<ImportProgress>,
-    pub scroll_offset:   f32,
+    pub scroll_offset: f32,
     pub expanded_stacks: HashSet<String>,
 
     // Thumbnail cache: hash → egui texture handle
-    pub thumb_cache:     HashMap<String, egui::TextureHandle>,
+    pub thumb_cache: HashMap<String, egui::TextureHandle>,
     /// Hashes for which a bg load has already been requested (to avoid dupes).
     pub thumb_requested: HashSet<String>,
 
     // Sidebar state
-    pub sessions:        Vec<ImportSessionRow>,
-    pub collections:     Vec<CollectionRow>,
+    pub sessions: Vec<ImportSessionRow>,
+    pub collections: Vec<CollectionRow>,
 
     /// Error message to show in a status bar or dialog.
-    pub last_error:      Option<String>,
+    pub last_error: Option<String>,
 }
 
 impl Default for LibraryState {
     fn default() -> Self {
         Self {
-            library:         None,
-            view:            LibraryView::default(),
-            filter:          SearchFilter::default(),
-            sort:            SortOrder::ImportDateDesc,
-            results:         Vec::new(),
-            selected:        Vec::new(),
-            thumb_scale:     0.5,
+            library: None,
+            view: LibraryView::default(),
+            filter: SearchFilter::default(),
+            sort: SortOrder::ImportDateDesc,
+            results: Vec::new(),
+            selected: Vec::new(),
+            thumb_scale: 0.5,
             import_progress: None,
-            scroll_offset:   0.0,
+            scroll_offset: 0.0,
             expanded_stacks: HashSet::new(),
-            thumb_cache:     HashMap::new(),
+            thumb_cache: HashMap::new(),
             thumb_requested: HashSet::new(),
-            sessions:        Vec::new(),
-            collections:     Vec::new(),
-            last_error:      None,
+            sessions: Vec::new(),
+            collections: Vec::new(),
+            last_error: None,
         }
     }
 }
@@ -95,21 +95,21 @@ impl LibraryState {
         }
 
         // Refresh sidebar lists
-        self.sessions    = lib.all_sessions().unwrap_or_default();
+        self.sessions = lib.all_sessions().unwrap_or_default();
         self.collections = lib.all_collections().unwrap_or_default();
     }
 
     pub fn open_library(&mut self, path: PathBuf, thumb_scale: f32) {
         match Library::open_or_create(&path) {
             Ok(lib) => {
-                self.library         = Some(Arc::new(lib));
-                self.thumb_scale     = thumb_scale;
-                self.view            = LibraryView::AllPhotos;
-                self.filter          = SearchFilter::default();
-                self.selected        .clear();
-                self.thumb_cache     .clear();
-                self.thumb_requested .clear();
-                self.last_error      = None;
+                self.library = Some(Arc::new(lib));
+                self.thumb_scale = thumb_scale;
+                self.view = LibraryView::AllPhotos;
+                self.filter = SearchFilter::default();
+                self.selected.clear();
+                self.thumb_cache.clear();
+                self.thumb_requested.clear();
+                self.last_error = None;
                 self.refresh();
             }
             Err(e) => {

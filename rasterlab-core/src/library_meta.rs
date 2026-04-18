@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryMeta {
     // ── Identity ──────────────────────────────────────────────────────────────
-
     /// Original filename before import (e.g. `"DSC_001.NEF"`).
     pub original_filename: Option<String>,
     /// UUID of the import session this file belongs to.
@@ -15,7 +14,6 @@ pub struct LibraryMeta {
     pub import_date: u64,
 
     // ── Stack (RAW+JPEG pairs) ─────────────────────────────────────────────
-
     /// Blake3 hex hash of the paired file in a RAW+JPEG stack, if any.
     pub stack_peer_hash: Option<String>,
     /// `true` if this is the primary file in a stack (RAW, or the only file).
@@ -23,7 +21,6 @@ pub struct LibraryMeta {
     pub stack_is_primary: bool,
 
     // ── User metadata ─────────────────────────────────────────────────────
-
     /// User-assigned keywords / tags.
     #[serde(default)]
     pub keywords: Vec<String>,
@@ -50,7 +47,6 @@ pub struct LibraryMeta {
     pub location_country: Option<String>,
 
     // ── EXIF snapshot ─────────────────────────────────────────────────────
-
     /// Cached EXIF values extracted at import time. Stored here so that
     /// reconstruction (`rebuild_index`) never requires a full image decode.
     pub exif: Option<LibraryExif>,
@@ -130,9 +126,10 @@ impl LibraryExif {
             exposure_program: m.exposure_program.clone(),
             metering_mode: m.metering_mode.clone(),
             // Normalise flash string to bool: present + not "No Flash" → true
-            flash: m.flash.as_deref().map(|s| {
-                !s.eq_ignore_ascii_case("no flash") && !s.eq_ignore_ascii_case("0")
-            }),
+            flash: m
+                .flash
+                .as_deref()
+                .map(|s| !s.eq_ignore_ascii_case("no flash") && !s.eq_ignore_ascii_case("0")),
             gps_lat: m.gps_lat,
             gps_lon: m.gps_lon,
             gps_alt: m.gps_alt,

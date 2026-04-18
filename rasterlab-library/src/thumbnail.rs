@@ -5,12 +5,8 @@ use rasterlab_core::image::Image;
 /// Encode `image` as a JPEG thumbnail at most `max_side` pixels wide.
 /// Returns JPEG bytes.
 pub fn generate_thumbnail(image: &Image, max_side: u32) -> Result<Vec<u8>> {
-    let src = img_crate::RgbaImage::from_raw(
-        image.width,
-        image.height,
-        image.data.clone(),
-    )
-    .ok_or_else(|| anyhow::anyhow!("image buffer size mismatch"))?;
+    let src = img_crate::RgbaImage::from_raw(image.width, image.height, image.data.clone())
+        .ok_or_else(|| anyhow::anyhow!("image buffer size mismatch"))?;
 
     // Compute scale so the longer side fits within max_side
     let scale = if image.width >= image.height {
@@ -20,15 +16,11 @@ pub fn generate_thumbnail(image: &Image, max_side: u32) -> Result<Vec<u8>> {
     }
     .min(1.0); // never upscale
 
-    let nw = ((image.width  as f32 * scale).round() as u32).max(1);
+    let nw = ((image.width as f32 * scale).round() as u32).max(1);
     let nh = ((image.height as f32 * scale).round() as u32).max(1);
 
-    let resized = img_crate::imageops::resize(
-        &src,
-        nw,
-        nh,
-        img_crate::imageops::FilterType::Triangle,
-    );
+    let resized =
+        img_crate::imageops::resize(&src, nw, nh, img_crate::imageops::FilterType::Triangle);
 
     let rgb: img_crate::RgbImage = img_crate::DynamicImage::ImageRgba8(resized).into_rgb8();
 

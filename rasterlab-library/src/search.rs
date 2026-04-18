@@ -36,7 +36,7 @@ pub struct SearchFilter {
     /// Capture date range (inclusive).  Compared against the `capture_date`
     /// column which stores the raw EXIF string `"YYYY:MM:DD HH:MM:SS"`.
     pub capture_date_from: Option<String>,
-    pub capture_date_to:   Option<String>,
+    pub capture_date_to: Option<String>,
 
     /// Filter to photos from a specific import session (UUID string).
     pub import_session: Option<String>,

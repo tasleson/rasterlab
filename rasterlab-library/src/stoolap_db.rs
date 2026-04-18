@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rasterlab_core::library_meta::LibraryMeta;
-use stoolap::api::Database;
 use stoolap::Value;
+use stoolap::api::Database;
 
 use crate::{
     db_trait::{
@@ -118,10 +118,10 @@ const SCHEMA_STMTS: &[&str] = &[
 fn sort_clause(sort: SortOrder) -> &'static str {
     match sort {
         SortOrder::CaptureDateDesc => "ORDER BY p.capture_date DESC, p.id DESC",
-        SortOrder::CaptureDateAsc  => "ORDER BY p.capture_date ASC, p.id ASC",
-        SortOrder::ImportDateDesc  => "ORDER BY p.import_date DESC, p.id DESC",
-        SortOrder::RatingDesc      => "ORDER BY COALESCE(r.rating, 0) DESC, p.id DESC",
-        SortOrder::FilenameAsc     => "ORDER BY p.original_filename ASC, p.id ASC",
+        SortOrder::CaptureDateAsc => "ORDER BY p.capture_date ASC, p.id ASC",
+        SortOrder::ImportDateDesc => "ORDER BY p.import_date DESC, p.id DESC",
+        SortOrder::RatingDesc => "ORDER BY COALESCE(r.rating, 0) DESC, p.id DESC",
+        SortOrder::FilenameAsc => "ORDER BY p.original_filename ASC, p.id ASC",
     }
 }
 
@@ -129,22 +129,21 @@ fn sort_clause(sort: SortOrder) -> &'static str {
 
 fn row_to_photo(row: &stoolap::api::rows::ResultRow) -> Result<PhotoRow> {
     Ok(PhotoRow {
-        id:                row.get::<i64>(0).context("id")?,
-        hash:              row.get::<String>(1).context("hash")?,
-        lib_path:          row.get::<String>(2).context("lib_path")?,
-        width:             row.get::<i64>(3).context("width")? as u32,
-        height:            row.get::<i64>(4).context("height")? as u32,
-        import_date:       row.get::<i64>(5).context("import_date")? as u64,
-        import_session:    row.get::<String>(6).context("import_session")?,
-        capture_date:      row.get::<Option<String>>(7).context("capture_date")?,
+        id: row.get::<i64>(0).context("id")?,
+        hash: row.get::<String>(1).context("hash")?,
+        lib_path: row.get::<String>(2).context("lib_path")?,
+        width: row.get::<i64>(3).context("width")? as u32,
+        height: row.get::<i64>(4).context("height")? as u32,
+        import_date: row.get::<i64>(5).context("import_date")? as u64,
+        import_session: row.get::<String>(6).context("import_session")?,
+        capture_date: row.get::<Option<String>>(7).context("capture_date")?,
         original_filename: row.get::<Option<String>>(8).context("original_filename")?,
-        stack_id:          row.get::<Option<String>>(9).context("stack_id")?,
-        stack_is_primary:  row.get::<i64>(10).context("stack_is_primary")? != 0,
+        stack_id: row.get::<Option<String>>(9).context("stack_id")?,
+        stack_is_primary: row.get::<i64>(10).context("stack_is_primary")? != 0,
     })
 }
 
-const PHOTO_SELECT: &str =
-    "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
+const PHOTO_SELECT: &str = "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
             p.import_date, p.import_session, p.capture_date,
             p.original_filename, p.stack_id, p.stack_is_primary
      FROM photos p";
@@ -154,7 +153,9 @@ const PHOTO_SELECT: &str =
 impl LibraryDb for StoolapDb {
     fn init(&self) -> Result<()> {
         for stmt in SCHEMA_STMTS {
-            self.db.execute(stmt, ()).with_context(|| format!("schema: {}", &stmt[..40]))?;
+            self.db
+                .execute(stmt, ())
+                .with_context(|| format!("schema: {}", &stmt[..40]))?;
         }
         Ok(())
     }
@@ -163,34 +164,35 @@ impl LibraryDb for StoolapDb {
 
     fn insert_photo(
         &self,
-        hash:     &str,
+        hash: &str,
         lib_path: &str,
-        lmta:     &LibraryMeta,
-        width:    u32,
-        height:   u32,
+        lmta: &LibraryMeta,
+        width: u32,
+        height: u32,
         stack_id: Option<&str>,
     ) -> Result<PhotoId> {
         let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
 
-        self.db.execute(
-            "INSERT INTO photos
+        self.db
+            .execute(
+                "INSERT INTO photos
              (hash, lib_path, width, height, import_date, import_session,
               capture_date, original_filename, stack_id, stack_is_primary)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-            (
-                hash,
-                lib_path,
-                width as i64,
-                height as i64,
-                lmta.import_date as i64,
-                lmta.import_session_id.as_str(),
-                capture_date,
-                lmta.original_filename.as_deref(),
-                stack_id,
-                if lmta.stack_is_primary { 1i64 } else { 0i64 },
-            ),
-        )
-        .context("insert photo")?;
+                (
+                    hash,
+                    lib_path,
+                    width as i64,
+                    height as i64,
+                    lmta.import_date as i64,
+                    lmta.import_session_id.as_str(),
+                    capture_date,
+                    lmta.original_filename.as_deref(),
+                    stack_id,
+                    if lmta.stack_is_primary { 1i64 } else { 0i64 },
+                ),
+            )
+            .context("insert photo")?;
 
         let photo_id: i64 = self
             .db
@@ -199,15 +201,12 @@ impl LibraryDb for StoolapDb {
 
         // EXIF — 17 params exceeds tuple impl limit; use Vec<Value>
         if let Some(exif) = &lmta.exif {
-            let opt_text = |s: Option<&str>| -> Value {
-                s.map_or_else(Value::null_unknown, Value::text)
-            };
-            let opt_int  = |v: Option<i64>| -> Value {
-                v.map_or_else(Value::null_unknown, Value::integer)
-            };
-            let opt_f64  = |v: Option<f64>| -> Value {
-                v.map_or_else(Value::null_unknown, Value::float)
-            };
+            let opt_text =
+                |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+            let opt_int =
+                |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
+            let opt_f64 =
+                |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
 
             let params: Vec<Value> = vec![
                 Value::integer(photo_id),
@@ -228,72 +227,78 @@ impl LibraryDb for StoolapDb {
                 opt_f64(exif.gps_lon),
                 opt_f64(exif.gps_alt.map(|v| v as f64)),
             ];
-            self.db.execute(
-                "INSERT INTO exif
+            self.db
+                .execute(
+                    "INSERT INTO exif
                  (photo_id, camera_make, camera_model, lens_model, iso,
                   shutter_sec, shutter_display, aperture, focal_length,
                   focal_length_35mm, exposure_bias, exposure_program,
                   metering_mode, flash, gps_lat, gps_lon, gps_alt)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
-                params,
-            )
-            .context("insert exif")?;
+                    params,
+                )
+                .context("insert exif")?;
         }
 
         // Ratings row
-        self.db.execute(
-            "INSERT INTO ratings (photo_id, rating, color_label, flag) VALUES ($1,$2,$3,$4)",
-            (
-                photo_id,
-                lmta.rating as i64,
-                lmta.color_label.as_deref(),
-                lmta.flag.as_deref(),
-            ),
-        )
-        .context("insert rating")?;
+        self.db
+            .execute(
+                "INSERT INTO ratings (photo_id, rating, color_label, flag) VALUES ($1,$2,$3,$4)",
+                (
+                    photo_id,
+                    lmta.rating as i64,
+                    lmta.color_label.as_deref(),
+                    lmta.flag.as_deref(),
+                ),
+            )
+            .context("insert rating")?;
 
         // Keywords
         for kw in &lmta.keywords {
-            self.db.execute(
-                "INSERT INTO keywords (photo_id, keyword) VALUES ($1, $2)",
-                (photo_id, kw.as_str()),
-            )
-            .context("insert keyword")?;
+            self.db
+                .execute(
+                    "INSERT INTO keywords (photo_id, keyword) VALUES ($1, $2)",
+                    (photo_id, kw.as_str()),
+                )
+                .context("insert keyword")?;
         }
 
         // user_meta
-        self.db.execute(
-            "INSERT INTO user_meta
+        self.db
+            .execute(
+                "INSERT INTO user_meta
              (photo_id, caption, copyright, creator, location_city, location_country)
              VALUES ($1,$2,$3,$4,$5,$6)",
-            (
-                photo_id,
-                lmta.caption.as_deref(),
-                lmta.copyright.as_deref(),
-                lmta.creator.as_deref(),
-                lmta.location_city.as_deref(),
-                lmta.location_country.as_deref(),
-            ),
-        )
-        .context("insert user_meta")?;
+                (
+                    photo_id,
+                    lmta.caption.as_deref(),
+                    lmta.copyright.as_deref(),
+                    lmta.creator.as_deref(),
+                    lmta.location_city.as_deref(),
+                    lmta.location_country.as_deref(),
+                ),
+            )
+            .context("insert user_meta")?;
 
         // Collections
         for coll_name in &lmta.collections {
-            self.db.execute(
-                "INSERT OR IGNORE INTO collections (name, created_at) VALUES ($1, $2)",
-                (coll_name.as_str(), unix_now() as i64),
-            )
-            .ok();
+            self.db
+                .execute(
+                    "INSERT OR IGNORE INTO collections (name, created_at) VALUES ($1, $2)",
+                    (coll_name.as_str(), unix_now() as i64),
+                )
+                .ok();
             if let Ok(coll_id) = self.db.query_one::<i64, _>(
                 "SELECT id FROM collections WHERE name = $1",
                 (coll_name.as_str(),),
             ) {
-                self.db.execute(
-                    "INSERT OR IGNORE INTO collection_photos
+                self.db
+                    .execute(
+                        "INSERT OR IGNORE INTO collection_photos
                      (collection_id, photo_id, added_at) VALUES ($1,$2,$3)",
-                    (coll_id, photo_id, unix_now() as i64),
-                )
-                .ok();
+                        (coll_id, photo_id, unix_now() as i64),
+                    )
+                    .ok();
             }
         }
 
@@ -301,11 +306,10 @@ impl LibraryDb for StoolapDb {
     }
 
     fn photo_by_hash(&self, hash: &str) -> Result<Option<PhotoRow>> {
-        let rows = self.db.query(
-            &format!("{} WHERE p.hash = $1", PHOTO_SELECT),
-            (hash,),
-        )?;
-        for row in rows {
+        let mut rows = self
+            .db
+            .query(&format!("{} WHERE p.hash = $1", PHOTO_SELECT), (hash,))?;
+        if let Some(row) = rows.next() {
             let row = row.context("photo_by_hash row")?;
             return Ok(Some(row_to_photo(&row)?));
         }
@@ -315,7 +319,12 @@ impl LibraryDb for StoolapDb {
     fn update_lmta(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> Result<()> {
         self.db.execute(
             "UPDATE ratings SET rating=$1, color_label=$2, flag=$3 WHERE photo_id=$4",
-            (lmta.rating as i64, lmta.color_label.as_deref(), lmta.flag.as_deref(), photo_id),
+            (
+                lmta.rating as i64,
+                lmta.color_label.as_deref(),
+                lmta.flag.as_deref(),
+                photo_id,
+            ),
         )?;
         self.db.execute(
             "UPDATE user_meta SET caption=$1, copyright=$2, creator=$3,
@@ -329,10 +338,8 @@ impl LibraryDb for StoolapDb {
                 photo_id,
             ),
         )?;
-        self.db.execute(
-            "DELETE FROM keywords WHERE photo_id = $1",
-            (photo_id,),
-        )?;
+        self.db
+            .execute("DELETE FROM keywords WHERE photo_id = $1", (photo_id,))?;
         for kw in &lmta.keywords {
             self.db.execute(
                 "INSERT INTO keywords (photo_id, keyword) VALUES ($1,$2)",
@@ -351,13 +358,20 @@ impl LibraryDb for StoolapDb {
 
     fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
         // Manual cascade since we dropped ON DELETE CASCADE
-        for tbl in &["keywords", "ratings", "exif", "user_meta", "collection_photos"] {
+        for tbl in &[
+            "keywords",
+            "ratings",
+            "exif",
+            "user_meta",
+            "collection_photos",
+        ] {
             self.db.execute(
                 &format!("DELETE FROM {} WHERE photo_id = $1", tbl),
                 (photo_id,),
             )?;
         }
-        self.db.execute("DELETE FROM photos WHERE id = $1", (photo_id,))?;
+        self.db
+            .execute("DELETE FROM photos WHERE id = $1", (photo_id,))?;
         Ok(())
     }
 
@@ -379,7 +393,7 @@ impl LibraryDb for StoolapDb {
 
     fn search(&self, filter: &SearchFilter, sort: SortOrder) -> Result<Vec<PhotoRow>> {
         let mut conditions: Vec<String> = Vec::new();
-        let mut params: Vec<Value>      = Vec::new();
+        let mut params: Vec<Value> = Vec::new();
 
         macro_rules! push {
             ($cond:expr, $val:expr) => {{
@@ -390,9 +404,11 @@ impl LibraryDb for StoolapDb {
             ($cond:expr, $v1:expr, $v2:expr) => {{
                 let n1 = params.len() + 1;
                 let n2 = n1 + 1;
-                let c  = $cond
-                    .replacen("{}", &format!("${}", n1), 1)
-                    .replacen("{}", &format!("${}", n2), 1);
+                let c = $cond.replacen("{}", &format!("${}", n1), 1).replacen(
+                    "{}",
+                    &format!("${}", n2),
+                    1,
+                );
                 conditions.push(c);
                 params.push($v1);
                 params.push($v2);
@@ -401,7 +417,7 @@ impl LibraryDb for StoolapDb {
                 let n1 = params.len() + 1;
                 let n2 = n1 + 1;
                 let n3 = n2 + 1;
-                let c  = $cond
+                let c = $cond
                     .replacen("{}", &format!("${}", n1), 1)
                     .replacen("{}", &format!("${}", n2), 1)
                     .replacen("{}", &format!("${}", n3), 1);
@@ -540,25 +556,24 @@ impl LibraryDb for StoolapDb {
 
     fn insert_session(
         &self,
-        id:         &str,
-        name:       &str,
+        id: &str,
+        name: &str,
         started_at: u64,
         source_dir: Option<&str>,
     ) -> Result<()> {
-        self.db.execute(
-            "INSERT OR IGNORE INTO import_sessions
+        self.db
+            .execute(
+                "INSERT OR IGNORE INTO import_sessions
              (id, name, started_at, source_dir, photo_count) VALUES ($1,$2,$3,$4,0)",
-            (id, name, started_at as i64, source_dir),
-        )
-        .context("insert_session")?;
+                (id, name, started_at as i64, source_dir),
+            )
+            .context("insert_session")?;
         Ok(())
     }
 
     fn rename_session(&self, id: &str, name: &str) -> Result<()> {
-        self.db.execute(
-            "UPDATE import_sessions SET name=$1 WHERE id=$2",
-            (name, id),
-        )?;
+        self.db
+            .execute("UPDATE import_sessions SET name=$1 WHERE id=$2", (name, id))?;
         Ok(())
     }
 
@@ -580,10 +595,10 @@ impl LibraryDb for StoolapDb {
         for row in rows {
             let row = row.context("all_sessions row")?;
             result.push(ImportSessionRow {
-                id:          row.get::<String>(0)?,
-                name:        row.get::<String>(1)?,
-                started_at:  row.get::<i64>(2)? as u64,
-                source_dir:  row.get::<Option<String>>(3)?,
+                id: row.get::<String>(0)?,
+                name: row.get::<String>(1)?,
+                started_at: row.get::<i64>(2)? as u64,
+                source_dir: row.get::<Option<String>>(3)?,
                 photo_count: row.get::<i64>(4)?,
             });
         }
@@ -620,10 +635,8 @@ impl LibraryDb for StoolapDb {
     }
 
     fn rename_collection(&self, id: CollectionId, name: &str) -> Result<()> {
-        self.db.execute(
-            "UPDATE collections SET name=$1 WHERE id=$2",
-            (name, id),
-        )?;
+        self.db
+            .execute("UPDATE collections SET name=$1 WHERE id=$2", (name, id))?;
         Ok(())
     }
 
@@ -632,7 +645,8 @@ impl LibraryDb for StoolapDb {
             "DELETE FROM collection_photos WHERE collection_id=$1",
             (id,),
         )?;
-        self.db.execute("DELETE FROM collections WHERE id=$1", (id,))?;
+        self.db
+            .execute("DELETE FROM collections WHERE id=$1", (id,))?;
         Ok(())
     }
 
@@ -645,19 +659,15 @@ impl LibraryDb for StoolapDb {
         for row in rows {
             let row = row.context("all_collections row")?;
             result.push(CollectionRow {
-                id:         row.get::<i64>(0)?,
-                name:       row.get::<String>(1)?,
+                id: row.get::<i64>(0)?,
+                name: row.get::<String>(1)?,
                 created_at: row.get::<i64>(2)? as u64,
             });
         }
         Ok(result)
     }
 
-    fn add_to_collection(
-        &self,
-        collection_id: CollectionId,
-        photo_ids:     &[PhotoId],
-    ) -> Result<()> {
+    fn add_to_collection(&self, collection_id: CollectionId, photo_ids: &[PhotoId]) -> Result<()> {
         let now = unix_now() as i64;
         for &pid in photo_ids {
             self.db.execute(
@@ -672,7 +682,7 @@ impl LibraryDb for StoolapDb {
     fn remove_from_collection(
         &self,
         collection_id: CollectionId,
-        photo_ids:     &[PhotoId],
+        photo_ids: &[PhotoId],
     ) -> Result<()> {
         for &pid in photo_ids {
             self.db.execute(

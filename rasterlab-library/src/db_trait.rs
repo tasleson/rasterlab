@@ -2,33 +2,33 @@ use rasterlab_core::library_meta::LibraryMeta;
 
 use crate::search::SearchFilter;
 
-pub type PhotoId      = i64;
+pub type PhotoId = i64;
 pub type CollectionId = i64;
 
 // ── Row types returned by the DB ──────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct PhotoRow {
-    pub id:                PhotoId,
+    pub id: PhotoId,
     /// Blake3 hex of the original file bytes.
-    pub hash:              String,
+    pub hash: String,
     /// Relative path inside `files/`: e.g. `"ab/cd/abc123….rlab"`.
-    pub lib_path:          String,
-    pub width:             u32,
-    pub height:            u32,
-    pub import_date:       u64,
-    pub import_session:    String,
-    pub capture_date:      Option<String>,
+    pub lib_path: String,
+    pub width: u32,
+    pub height: u32,
+    pub import_date: u64,
+    pub import_session: String,
+    pub capture_date: Option<String>,
     pub original_filename: Option<String>,
     /// UUID shared by all files in a RAW+JPEG stack.
-    pub stack_id:          Option<String>,
-    pub stack_is_primary:  bool,
+    pub stack_id: Option<String>,
+    pub stack_is_primary: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct ImportSessionRow {
-    pub id:         String,
-    pub name:       String,
+    pub id: String,
+    pub name: String,
     pub started_at: u64,
     pub source_dir: Option<String>,
     pub photo_count: i64,
@@ -36,8 +36,8 @@ pub struct ImportSessionRow {
 
 #[derive(Debug, Clone)]
 pub struct CollectionRow {
-    pub id:         CollectionId,
-    pub name:       String,
+    pub id: CollectionId,
+    pub name: String,
     pub created_at: u64,
 }
 
@@ -65,12 +65,12 @@ pub trait LibraryDb: Send + Sync {
 
     fn insert_photo(
         &self,
-        hash:      &str,
-        lib_path:  &str,
-        lmta:      &LibraryMeta,
-        width:     u32,
-        height:    u32,
-        stack_id:  Option<&str>,
+        hash: &str,
+        lib_path: &str,
+        lmta: &LibraryMeta,
+        width: u32,
+        height: u32,
+        stack_id: Option<&str>,
     ) -> anyhow::Result<PhotoId>;
 
     fn photo_by_hash(&self, hash: &str) -> anyhow::Result<Option<PhotoRow>>;
@@ -95,8 +95,8 @@ pub trait LibraryDb: Send + Sync {
 
     fn insert_session(
         &self,
-        id:         &str,
-        name:       &str,
+        id: &str,
+        name: &str,
         started_at: u64,
         source_dir: Option<&str>,
     ) -> anyhow::Result<()>;

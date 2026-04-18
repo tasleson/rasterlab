@@ -1,9 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        atomic::AtomicBool,
-        Arc,
-    },
+    sync::{Arc, atomic::AtomicBool},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,7 +8,9 @@ use anyhow::{Context, Result};
 use rasterlab_core::{formats::FormatRegistry, library_meta::LibraryMeta, project::RlabFile};
 
 use crate::{
-    db_trait::{CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow, SortOrder},
+    db_trait::{
+        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow, SortOrder,
+    },
     import::{self, ImportSession},
     reconstruct::{self, RebuildProgress},
     search::SearchFilter,
@@ -23,18 +22,18 @@ use crate::{
 
 #[derive(Debug, Clone, Default)]
 pub struct ImportProgress {
-    pub total:              usize,
-    pub done:               usize,
-    pub current_file:       PathBuf,
+    pub total: usize,
+    pub done: usize,
+    pub current_file: PathBuf,
     pub skipped_duplicates: usize,
-    pub errors:             Vec<(PathBuf, String)>,
+    pub errors: Vec<(PathBuf, String)>,
 }
 
 // ── Library ───────────────────────────────────────────────────────────────────
 
 pub struct Library {
-    root:     PathBuf,
-    db:       Box<dyn LibraryDb>,
+    root: PathBuf,
+    db: Box<dyn LibraryDb>,
     registry: FormatRegistry,
 }
 
@@ -52,7 +51,7 @@ impl Library {
         std::fs::create_dir_all(path.join("thumbs"))?;
         db.init()?;
         Ok(Self {
-            root:     path.to_path_buf(),
+            root: path.to_path_buf(),
             db,
             registry: FormatRegistry::with_builtins(),
         })
@@ -78,7 +77,7 @@ impl Library {
     /// file so the caller can update a progress bar.
     pub fn import_files(
         &self,
-        paths:       &[PathBuf],
+        paths: &[PathBuf],
         progress_cb: impl Fn(ImportProgress) + Send + 'static,
     ) -> Result<ImportSession> {
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -95,7 +94,7 @@ impl Library {
     /// Recursively import all supported images found under `folder`.
     pub fn import_folder(
         &self,
-        folder:      &Path,
+        folder: &Path,
         progress_cb: impl Fn(ImportProgress) + Send + 'static,
     ) -> Result<ImportSession> {
         let paths = collect_image_paths(folder, &self.registry);
@@ -163,7 +162,11 @@ impl Library {
     pub fn create_collection(&self, name: &str) -> Result<CollectionRow> {
         let now = unix_now();
         let id = self.db.create_collection(name, now)?;
-        Ok(CollectionRow { id, name: name.to_owned(), created_at: now })
+        Ok(CollectionRow {
+            id,
+            name: name.to_owned(),
+            created_at: now,
+        })
     }
 
     /// Rename a collection.  DB is updated immediately; all affected `.rlab`
@@ -200,7 +203,7 @@ impl Library {
     pub fn add_to_collection(
         &self,
         collection_id: CollectionId,
-        photo_ids:     &[PhotoId],
+        photo_ids: &[PhotoId],
     ) -> Result<()> {
         self.db.add_to_collection(collection_id, photo_ids)?;
         // Update collection names in .rlab LMTA
@@ -217,7 +220,7 @@ impl Library {
     pub fn remove_from_collection(
         &self,
         collection_id: CollectionId,
-        photo_ids:     &[PhotoId],
+        photo_ids: &[PhotoId],
     ) -> Result<()> {
         self.db.remove_from_collection(collection_id, photo_ids)?;
         if let Ok(coll) = self.db.all_collections() {
@@ -326,11 +329,7 @@ impl Library {
 
 // ── File-level helpers ────────────────────────────────────────────────────────
 
-fn rewrite_collection_name_in_file(
-    rlab_path: &Path,
-    old_name:  &str,
-    new_name:  &str,
-) -> Result<()> {
+fn rewrite_collection_name_in_file(rlab_path: &Path, old_name: &str, new_name: &str) -> Result<()> {
     let mut rlab = RlabFile::read(rlab_path)?;
     if let Some(ref mut lmta) = rlab.lmta {
         for name in &mut lmta.collections {
@@ -344,10 +343,8 @@ fn rewrite_collection_name_in_file(
 }
 
 fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf> {
-    let exts: std::collections::HashSet<String> = registry
-        .supported_extensions()
-        .into_iter()
-        .collect();
+    let exts: std::collections::HashSet<String> =
+        registry.supported_extensions().into_iter().collect();
 
     walkdir::WalkDir::new(folder)
         .into_iter()

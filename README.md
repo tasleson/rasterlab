@@ -89,6 +89,12 @@ plugins/              # Example plugin
 
 The GUI render path is fully async: mutations serialize op parameters to JSON, a background thread deserializes and applies them, results come back via mpsc. The main thread never blocks on pixel work.
 
+```
+rasterlab-library/    # Photo library (DAM): import, EXIF indexing, collections, search
+```
+
+The library stores every imported image as a `.rlab` v3 file in a hash-based balanced directory tree (`files/ab/cd/<blake3hash>.rlab`). A stoolap SQL database indexes EXIF metadata for fast search, but is entirely reconstructable from the on-disk `.rlab` files. All user metadata (ratings, keywords, collections, captions) is embedded in an LMTA chunk inside each `.rlab` so the library survives database loss.
+
 ## How the experiment is going
 
 **Things Claude got right immediately:**
@@ -113,6 +119,30 @@ Works. Suspiciously well for what we've done so far.  I'm interested in seeing w
 The plugin system exists and has an example. Nobody has written a plugin. The arbitrary rotation is slow on large images because bilinear interpolation has terrible cache locality and nobody has fixed it.
 
 # Changelog
+
+# Week 4
+
+## 2026-04-18
+
+### Features
+
+- **Photo Library (DAM)** — import photos into a managed library with EXIF indexing, ratings, keywords, collections, and search
+  - Files stored as `.rlab` v3 in a hash-based balanced directory tree (`files/ab/cd/<hash>.rlab`)
+  - Stoolap SQL database backend behind a `LibraryDb` trait (swappable for tests or future backends)
+  - Library is fully reconstructable from disk if the database is lost (`File > Rebuild Library Index`)
+  - All user metadata (ratings, keywords, collections, captions, flags) embedded in `.rlab` LMTA chunk
+  - RAW+JPEG pairs auto-detected at import time and linked by `stack_id` in the database
+  - Duplicate detection via BLAKE3 hash — silent skip with count in import summary
+  - 512px JPEG thumbnails generated on import; regenerated automatically when a photo is edited and saved
+- **Library UI** — `[Editor] [Library]` mode toggle in the menu bar
+  - Thumbnail grid with configurable scale slider (64–512px)
+  - Sidebar: All Photos / Import Sessions / Collections navigation
+  - Live filters: rating, flag, text search, camera model
+  - Detail panel: EXIF table, editable rating/flag/color label/caption/keywords
+  - Batch metadata edit when multiple photos selected
+  - Double-click a photo to open it in the Editor; saving propagates thumbnail back to the library
+  - `File > Import Photos` (select files or folder), `File > Export Selection…` (JPEG/PNG with optional resize)
+  - Last-used library auto-reopens on startup
 
 # Week 3
 

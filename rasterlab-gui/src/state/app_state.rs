@@ -1,4 +1,7 @@
-use std::{path::PathBuf as StdPathBuf, sync::{Arc, mpsc}};
+use std::{
+    path::PathBuf as StdPathBuf,
+    sync::{Arc, mpsc},
+};
 
 use image as img_crate;
 
@@ -83,11 +86,11 @@ enum BgMessage {
     /// Import finished; thumbnail cache should be invalidated.
     ImportComplete {
         session: rasterlab_library::ImportSession,
-        errors:  Vec<(StdPathBuf, String)>,
+        errors: Vec<(StdPathBuf, String)>,
     },
     /// A thumbnail image was loaded from disk; ready to upload to egui.
     ThumbLoaded {
-        hash:  String,
+        hash: String,
         bytes: Vec<u8>,
     },
 }
@@ -201,7 +204,7 @@ pub struct AppState {
     pub editing: Option<EditSession>,
 
     // ── App mode & library ────────────────────────────────────────────────────
-    pub mode:    AppMode,
+    pub mode: AppMode,
     pub library: LibraryState,
     /// Set when the Editor opens a file that was imported into a library.
     /// `(library_root, hash)` — on save triggers thumb regen + DB sync.
@@ -253,7 +256,7 @@ impl AppState {
             autosave_restore: None,
             autosave_restore_session_id: None,
             editing: None,
-            mode:    AppMode::Editor,
+            mode: AppMode::Editor,
             library: {
                 let mut ls = LibraryState::default();
                 ls.thumb_scale = initial_thumb_scale;
@@ -470,15 +473,11 @@ impl AppState {
                     if let Ok(dyn_img) = img_crate::load_from_memory(&bytes) {
                         let rgba = dyn_img.to_rgba8();
                         let size = [rgba.width() as usize, rgba.height() as usize];
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                            size,
-                            rgba.as_raw(),
-                        );
-                        let handle = self.ctx.load_texture(
-                            &hash,
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        );
+                        let color_image =
+                            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                        let handle =
+                            self.ctx
+                                .load_texture(&hash, color_image, egui::TextureOptions::LINEAR);
                         self.library.thumb_cache.insert(hash, handle);
                     }
                     self.ctx.request_repaint();
@@ -681,6 +680,28 @@ impl AppState {
                     crate::autosave::delete(session_id);
                 }
                 self.status = format!("Saved → {}", path.display());
+
+                // If this file was opened from the library, regenerate its thumbnail.
+                if let Some((_, hash)) = &self.library_context {
+                    let hash = hash.clone();
+                    if let Some(lib) = self.library.library.clone() {
+                        let tx = self.bg_tx.clone();
+                        let ctx = self.ctx.clone();
+                        std::thread::Builder::new()
+                            .name("rasterlab-thumb-regen".into())
+                            .stack_size(32 * 1024 * 1024)
+                            .spawn(move || {
+                                if lib.regenerate_thumbnail(&hash).is_ok() {
+                                    let thumb_path = lib.thumb_path(&hash);
+                                    if let Ok(bytes) = std::fs::read(&thumb_path) {
+                                        let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
+                                        ctx.request_repaint();
+                                    }
+                                }
+                            })
+                            .ok();
+                    }
+                }
             }
             Err(e) => {
                 self.status = format!("Save failed: {}", e);
@@ -2131,8 +2152,10 @@ impl AppState {
     }
 
     pub fn import_into_library(&mut self, paths: Vec<std::path::PathBuf>) {
-        let Some(lib) = self.library.library.clone() else { return };
-        let tx  = self.bg_tx.clone();
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
         std::thread::Builder::new()
             .name("rasterlab-import".into())
@@ -2158,15 +2181,50 @@ impl AppState {
             .ok();
     }
 
+    pub fn rebuild_library_index(&mut self) {
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        let tx = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
+        self.status = "Rebuilding library index…".into();
+        std::thread::Builder::new()
+            .name("rasterlab-rebuild".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let result = lib.rebuild_index(|_p| {});
+                match result {
+                    Ok(()) => {
+                        let _ = tx.send(BgMessage::ImportComplete {
+                            session: rasterlab_library::ImportSession {
+                                id: String::new(),
+                                name: "Index rebuild".into(),
+                                started_at: 0,
+                                photo_count: 0,
+                            },
+                            errors: Vec::new(),
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BgMessage::Error(format!("Rebuild failed: {e}")));
+                    }
+                }
+                ctx.request_repaint();
+            })
+            .ok();
+    }
+
     /// Request that the thumbnail for `hash` be loaded from disk in the background.
     pub fn request_thumb_load(&mut self, hash: String) {
         if self.library.thumb_requested.contains(&hash) {
             return;
         }
         self.library.thumb_requested.insert(hash.clone());
-        let Some(lib) = &self.library.library else { return };
+        let Some(lib) = &self.library.library else {
+            return;
+        };
         let thumb_path = lib.thumb_path(&hash);
-        let tx  = self.bg_tx.clone();
+        let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
         std::thread::Builder::new()
             .name("rasterlab-thumb".into())

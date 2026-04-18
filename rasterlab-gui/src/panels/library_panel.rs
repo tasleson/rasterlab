@@ -50,7 +50,10 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                     SortOrder::RatingDesc,
                     SortOrder::FilenameAsc,
                 ] {
-                    if ui.selectable_value(&mut state.library.sort, order, sort_label(order)).clicked() {
+                    if ui
+                        .selectable_value(&mut state.library.sort, order, sort_label(order))
+                        .clicked()
+                    {
                         state.library.refresh();
                     }
                 }
@@ -61,7 +64,10 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         // Thumbnail scale slider
         ui.label("Size:");
         let scale = &mut state.library.thumb_scale;
-        if ui.add(egui::Slider::new(scale, 0.25f32..=1.0).show_value(false)).changed() {
+        if ui
+            .add(egui::Slider::new(scale, 0.25f32..=1.0).show_value(false))
+            .changed()
+        {
             state.prefs.library_thumb_scale = *scale;
             state.prefs.save();
         }
@@ -87,11 +93,11 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
 fn sort_label(s: SortOrder) -> &'static str {
     match s {
-        SortOrder::ImportDateDesc  => "Import date (newest)",
+        SortOrder::ImportDateDesc => "Import date (newest)",
         SortOrder::CaptureDateDesc => "Capture date (newest)",
-        SortOrder::CaptureDateAsc  => "Capture date (oldest)",
-        SortOrder::RatingDesc      => "Rating (highest)",
-        SortOrder::FilenameAsc     => "Filename (A–Z)",
+        SortOrder::CaptureDateAsc => "Capture date (oldest)",
+        SortOrder::RatingDesc => "Rating (highest)",
+        SortOrder::FilenameAsc => "Filename (A–Z)",
     }
 }
 
@@ -107,7 +113,10 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             // Show total from sessions sum so we don't need a separate query
             state.library.results.len()
         };
-        if ui.selectable_label(all_selected, format!("All Photos ({})", total)).clicked() {
+        if ui
+            .selectable_label(all_selected, format!("All Photos ({})", total))
+            .clicked()
+        {
             state.library.view = LibraryView::AllPhotos;
             state.library.filter = SearchFilter::default();
             state.library.refresh();
@@ -189,7 +198,12 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         // Camera model
         ui.horizontal(|ui| {
             ui.label("Camera:");
-            let mut cam = state.library.filter.camera_model.clone().unwrap_or_default();
+            let mut cam = state
+                .library
+                .filter
+                .camera_model
+                .clone()
+                .unwrap_or_default();
             if ui.text_edit_singleline(&mut cam).changed() {
                 state.library.filter.camera_model = if cam.is_empty() { None } else { Some(cam) };
                 changed = true;
@@ -215,8 +229,8 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
 fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
     let thumb_px = (512.0 * state.library.thumb_scale).max(64.0);
-    let padding  = 6.0;
-    let cell_sz  = thumb_px + padding * 2.0;
+    let padding = 6.0;
+    let cell_sz = thumb_px + padding * 2.0;
 
     let avail_w = ui.available_width();
     let cols = ((avail_w / cell_sz) as usize).max(1);
@@ -244,22 +258,24 @@ fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn thumb_cell(
-    ui:      &mut egui::Ui,
-    state:   &mut AppState,
-    photo:   &PhotoRow,
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    photo: &PhotoRow,
     thumb_px: f32,
-    padding:  f32,
+    padding: f32,
 ) {
-    let selected  = state.library.is_selected(photo.id);
+    let selected = state.library.is_selected(photo.id);
     let cell_size = Vec2::splat(thumb_px + padding * 2.0);
 
     let (rect, resp) = ui.allocate_exact_size(cell_size, Sense::click());
 
     // Selection highlight
     if selected {
-        ui.painter().rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
+        ui.painter()
+            .rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);
     } else if resp.hovered() {
-        ui.painter().rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
+        ui.painter()
+            .rect_filled(rect, 4.0, ui.visuals().widgets.hovered.bg_fill);
     }
 
     let img_rect = rect.shrink(padding);
@@ -267,10 +283,12 @@ fn thumb_cell(
     // Draw thumbnail or placeholder
     if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        ui.painter().image(tex.id(), img_rect, uv, egui::Color32::WHITE);
+        ui.painter()
+            .image(tex.id(), img_rect, uv, egui::Color32::WHITE);
     } else {
         // Placeholder grey rect
-        ui.painter().rect_filled(img_rect, 2.0, egui::Color32::from_gray(60));
+        ui.painter()
+            .rect_filled(img_rect, 2.0, egui::Color32::from_gray(60));
         // Request background load
         state.request_thumb_load(photo.hash.clone());
     }

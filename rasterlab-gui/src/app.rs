@@ -6,7 +6,10 @@ use egui::{Context, Key, Modifiers};
 
 use crate::{
     file_chooser::{DialogKind, FileChooser},
-    panels::{canvas::CanvasState, edit_stack, export_dialog, histogram_panel, library_detail, library_panel, tools},
+    panels::{
+        canvas::CanvasState, edit_stack, export_dialog, histogram_panel, library_detail,
+        library_panel, tools,
+    },
     state::{AppMode, AppState},
 };
 
@@ -59,6 +62,12 @@ impl RasterLabApp {
         }
         if let Some(path) = initial_file {
             state.open_file(path);
+        }
+        // Auto-open the last library if one was open when the app last exited.
+        if let Some(lib_path) = state.prefs.last_library.clone() {
+            if lib_path.exists() {
+                state.open_library(lib_path);
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         let use_native = state.prefs.use_native_dialogs;
@@ -374,7 +383,7 @@ impl eframe::App for RasterLabApp {
                                                     .unwrap_or(false))
                                                 .map(|e| e.into_path())
                                                 .collect();
-                                            drop(lib);
+                                            let _ = lib;
                                             self.state.import_into_library(paths);
                                         }
                                     }
@@ -391,6 +400,12 @@ impl eframe::App for RasterLabApp {
                                 }
                             },
                         );
+                        ui.add_enabled_ui(self.state.library.library.is_some(), |ui| {
+                            if ui.button("Rebuild Library Index").clicked() {
+                                ui.close_kind(egui::UiKind::Menu);
+                                self.state.rebuild_library_index();
+                            }
+                        });
                     }
 
                     #[cfg(not(target_arch = "wasm32"))]
