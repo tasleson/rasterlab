@@ -59,10 +59,37 @@ pub struct Prefs {
     /// [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0].
     #[serde(default)]
     pub ui_scale: Option<f32>,
+
+    /// Default file-type filter for the Open dialog (e.g. `"All supported"`,
+    /// `"Images"`, `"Camera RAW"`).  `None` means the "All Files" catch-all.
+    #[serde(default = "default_open_file_filter")]
+    pub open_file_filter: Option<String>,
+
+    /// JPEG export quality (1–100).  Matches `EncodeOptions::jpeg_quality`.
+    #[serde(default = "default_jpeg_quality")]
+    pub jpeg_quality: u8,
+    /// PNG export compression level (0–9).  Matches `EncodeOptions::png_compression`.
+    #[serde(default = "default_png_compression")]
+    pub png_compression: u8,
+    /// Whether to copy EXIF metadata into exported files.
+    #[serde(default = "default_true")]
+    pub preserve_metadata: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_open_file_filter() -> Option<String> {
+    Some("All supported".to_string())
+}
+
+fn default_jpeg_quality() -> u8 {
+    90
+}
+
+fn default_png_compression() -> u8 {
+    6
 }
 
 impl Prefs {

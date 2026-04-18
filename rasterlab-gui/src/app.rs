@@ -62,11 +62,13 @@ impl RasterLabApp {
         }
         #[cfg(not(target_arch = "wasm32"))]
         let use_native = state.prefs.use_native_dialogs;
+        #[cfg(not(target_arch = "wasm32"))]
+        let open_file_filter = state.prefs.open_file_filter.clone();
         Self {
             state,
             canvas: CanvasState::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            chooser: FileChooser::new(use_native),
+            chooser: FileChooser::new(use_native, open_file_filter.as_deref()),
             about_open: false,
             exit_confirm_open: false,
             allow_close: false,
@@ -439,6 +441,28 @@ impl eframe::App for RasterLabApp {
                             self.state.prefs.save();
                             ui.close_kind(egui::UiKind::Menu);
                         }
+                        ui.separator();
+                        ui.menu_button("Default Open Filter", |ui| {
+                            let current = self.state.prefs.open_file_filter.clone();
+                            for (label, value) in [
+                                ("All Files", None),
+                                ("All Supported", Some("All supported")),
+                                ("Images", Some("Images")),
+                                ("JPEG", Some("JPEG")),
+                                ("PNG", Some("PNG")),
+                                ("Camera RAW", Some("Camera RAW")),
+                                ("RasterLab Project", Some("RasterLab Project")),
+                            ] {
+                                let selected = current.as_deref() == value;
+                                if ui.selectable_label(selected, label).clicked() {
+                                    self.state.prefs.open_file_filter =
+                                        value.map(|s| s.to_string());
+                                    self.chooser.set_open_file_filter(value);
+                                    self.state.prefs.save();
+                                    ui.close_kind(egui::UiKind::Menu);
+                                }
+                            }
+                        });
                     });
                 });
                 ui.menu_button("Help", |ui| {

@@ -786,27 +786,51 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             if state.editing.is_some() {
                 ui.disable();
             }
+            let mut export_changed = false;
             egui::Grid::new("export_grid")
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("JPEG quality:");
-                    ui.add(
-                        DragValue::new(&mut state.tools.encode_opts.jpeg_quality).range(1..=100u8),
-                    );
+                    if ui
+                        .add(
+                            DragValue::new(&mut state.tools.encode_opts.jpeg_quality)
+                                .range(1..=100u8),
+                        )
+                        .changed()
+                    {
+                        export_changed = true;
+                    }
                     ui.end_row();
                     ui.label("PNG compression:");
-                    ui.add(
-                        DragValue::new(&mut state.tools.encode_opts.png_compression).range(0..=9u8),
-                    );
+                    if ui
+                        .add(
+                            DragValue::new(&mut state.tools.encode_opts.png_compression)
+                                .range(0..=9u8),
+                        )
+                        .changed()
+                    {
+                        export_changed = true;
+                    }
                     ui.end_row();
                 });
 
             ui.separator();
-            ui.checkbox(
-                &mut state.tools.encode_opts.preserve_metadata,
-                "Preserve metadata on export",
-            );
+            if ui
+                .checkbox(
+                    &mut state.tools.encode_opts.preserve_metadata,
+                    "Preserve metadata on export",
+                )
+                .changed()
+            {
+                export_changed = true;
+            }
+            if export_changed {
+                state.prefs.jpeg_quality = state.tools.encode_opts.jpeg_quality;
+                state.prefs.png_compression = state.tools.encode_opts.png_compression;
+                state.prefs.preserve_metadata = state.tools.encode_opts.preserve_metadata;
+                state.prefs.save();
+            }
 
             ui.separator();
             ui.label("Resize on export:");

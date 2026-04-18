@@ -83,18 +83,24 @@ pub struct FileChooser {
 }
 
 impl FileChooser {
-    pub fn new(use_native: bool) -> Self {
+    /// `open_file_filter` – the filter name selected by default when the Open
+    /// dialog appears.  `None` means the library's "All Files" catch-all.
+    pub fn new(use_native: bool, open_file_filter: Option<&str>) -> Self {
+        let mut open_dlg = FileDialog::new()
+            .title("Open Image or Project")
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .add_file_filter_extensions("All supported", all_supported_exts())
+            .add_file_filter_extensions("RasterLab Project", vec!["rlab"])
+            .add_file_filter_extensions("Images", image_exts())
+            .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
+            .add_file_filter_extensions("PNG", vec!["png"])
+            .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec());
+        if let Some(name) = open_file_filter {
+            open_dlg = open_dlg.default_file_filter(name);
+        }
         Self {
             use_native,
-            open_dlg: FileDialog::new()
-                .title("Open Image or Project")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("All supported", all_supported_exts())
-                .add_file_filter_extensions("RasterLab Project", vec!["rlab"])
-                .add_file_filter_extensions("Images", image_exts())
-                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
-                .add_file_filter_extensions("PNG", vec!["png"])
-                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
+            open_dlg,
             export_dlg: FileDialog::new()
                 .title("Export Image")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -142,6 +148,13 @@ impl FileChooser {
 
     pub fn set_native(&mut self, native: bool) {
         self.use_native = native;
+    }
+
+    /// Update the default filter shown when the Open dialog next appears.
+    /// `None` restores the "All Files" catch-all.
+    #[allow(dead_code)]
+    pub fn set_open_file_filter(&mut self, filter: Option<&str>) {
+        self.open_dlg.config_mut().default_file_filter = filter.map(|s| s.to_string());
     }
 
     // ── Opening ─────────────────────────────────────────────────────────────

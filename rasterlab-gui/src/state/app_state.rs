@@ -176,8 +176,13 @@ pub struct AppState {
 impl AppState {
     pub fn new(ctx: Context) -> Self {
         let (bg_tx, bg_rx) = mpsc::channel();
+        let prefs = Prefs::load();
+        let mut tools = ToolState::new();
+        tools.encode_opts.jpeg_quality = prefs.jpeg_quality;
+        tools.encode_opts.png_compression = prefs.png_compression;
+        tools.encode_opts.preserve_metadata = prefs.preserve_metadata;
         Self {
-            prefs: Prefs::load(),
+            prefs,
             registry: FormatRegistry::with_builtins(),
             copies: None,
             rename_pending: None,
@@ -203,7 +208,7 @@ impl AppState {
             bg_tx,
             bg_rx,
             ctx,
-            tools: ToolState::new(),
+            tools,
             needs_rerender: false,
             render_start: None,
             nr_in_flight: false,
