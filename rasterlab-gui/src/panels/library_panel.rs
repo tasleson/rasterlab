@@ -1,5 +1,5 @@
 use egui::{ScrollArea, Sense, Vec2};
-use rasterlab_library::{CollectionId, PhotoId, PhotoRow, SearchFilter, SortOrder};
+use rasterlab_library::{PhotoId, PhotoRow, SearchFilter, SortOrder};
 
 use crate::state::{AppState, LibraryView};
 

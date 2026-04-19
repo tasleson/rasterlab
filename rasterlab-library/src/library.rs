@@ -207,11 +207,11 @@ impl Library {
     ) -> Result<()> {
         self.db.add_to_collection(collection_id, photo_ids)?;
         // Update collection names in .rlab LMTA
-        if let Ok(coll) = self.db.all_collections() {
-            if let Some(c) = coll.iter().find(|c| c.id == collection_id) {
-                for pid in photo_ids {
-                    self.add_collection_to_file(*pid, &c.name).ok();
-                }
+        if let Ok(coll) = self.db.all_collections()
+            && let Some(c) = coll.iter().find(|c| c.id == collection_id)
+        {
+            for pid in photo_ids {
+                self.add_collection_to_file(*pid, &c.name).ok();
             }
         }
         Ok(())
@@ -223,11 +223,11 @@ impl Library {
         photo_ids: &[PhotoId],
     ) -> Result<()> {
         self.db.remove_from_collection(collection_id, photo_ids)?;
-        if let Ok(coll) = self.db.all_collections() {
-            if let Some(c) = coll.iter().find(|c| c.id == collection_id) {
-                for pid in photo_ids {
-                    self.remove_collection_from_file(*pid, &c.name).ok();
-                }
+        if let Ok(coll) = self.db.all_collections()
+            && let Some(c) = coll.iter().find(|c| c.id == collection_id)
+        {
+            for pid in photo_ids {
+                self.remove_collection_from_file(*pid, &c.name).ok();
             }
         }
         Ok(())
@@ -298,10 +298,10 @@ impl Library {
             return Ok(());
         }
         let mut rlab = RlabFile::read(&rlab_path)?;
-        if let Some(ref mut lmta) = rlab.lmta {
-            if !lmta.collections.contains(&collection_name.to_owned()) {
-                lmta.collections.push(collection_name.to_owned());
-            }
+        if let Some(ref mut lmta) = rlab.lmta
+            && !lmta.collections.contains(&collection_name.to_owned())
+        {
+            lmta.collections.push(collection_name.to_owned());
         }
         rlab.meta = rlab.meta.touch();
         rlab.write(&rlab_path)?;

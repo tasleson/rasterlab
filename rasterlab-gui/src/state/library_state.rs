@@ -11,17 +11,12 @@ use rasterlab_library::{
 
 // ── LibraryView ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum LibraryView {
+    #[default]
     AllPhotos,
     Session(String),
     Collection(CollectionId),
-}
-
-impl Default for LibraryView {
-    fn default() -> Self {
-        Self::AllPhotos
-    }
 }
 
 // ── LibraryState ──────────────────────────────────────────────────────────────
@@ -35,8 +30,6 @@ pub struct LibraryState {
     pub selected: Vec<PhotoId>,
     pub thumb_scale: f32,
     pub import_progress: Option<ImportProgress>,
-    pub scroll_offset: f32,
-    pub expanded_stacks: HashSet<String>,
 
     // Thumbnail cache: hash → egui texture handle
     pub thumb_cache: HashMap<String, egui::TextureHandle>,
@@ -62,8 +55,6 @@ impl Default for LibraryState {
             selected: Vec::new(),
             thumb_scale: 0.5,
             import_progress: None,
-            scroll_offset: 0.0,
-            expanded_stacks: HashSet::new(),
             thumb_cache: HashMap::new(),
             thumb_requested: HashSet::new(),
             sessions: Vec::new(),

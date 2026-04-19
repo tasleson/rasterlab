@@ -374,7 +374,7 @@ fn format_exif_date(d: &str) -> String {
     let month: usize = parts[1].parse().unwrap_or(0);
     let day: u32 = parts[2].parse().unwrap_or(0);
     let year = parts[0];
-    if month >= 1 && month <= 12 {
+    if (1..=12).contains(&month) {
         format!("{} {} {}", month_names[month - 1], day, year)
     } else {
         d.to_owned()
@@ -385,8 +385,8 @@ fn format_date_from_unix(ts: u64) -> String {
     // Simple: just return ISO date from unix seconds
     let days_since_epoch = ts / 86400;
     let _ = days_since_epoch; // avoid unused warning
-    let now = chrono_lite_date(ts);
-    now
+
+    chrono_lite_date(ts)
 }
 
 fn chrono_lite_date(ts: u64) -> String {

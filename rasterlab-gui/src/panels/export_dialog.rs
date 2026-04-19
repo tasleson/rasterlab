@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use egui::ScrollArea;
 use rasterlab_core::{formats::FormatRegistry, project::RlabFile};
-use rasterlab_library::Library;
 
 use crate::state::AppState;
 
@@ -27,12 +26,6 @@ pub enum ExportFormat {
 }
 
 impl ExportFormat {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Jpeg => "JPEG",
-            Self::Png => "PNG",
-        }
-    }
     fn ext(self) -> &'static str {
         match self {
             Self::Jpeg => "jpg",
@@ -116,10 +109,10 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                             egui::TextEdit::singleline(&mut dir_str.clone()).desired_width(200.0),
                         );
                         #[cfg(not(target_arch = "wasm32"))]
-                        if ui.button("Browse…").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                export.dest_dir = path;
-                            }
+                        if ui.button("Browse…").clicked()
+                            && let Some(path) = rfd::FileDialog::new().pick_folder()
+                        {
+                            export.dest_dir = path;
                         }
                     });
                     ui.end_row();
@@ -259,15 +252,14 @@ fn export_one(
     });
 
     // Resize if requested
-    if let Some(max) = max_side {
-        if image.width > max || image.height > max {
-            let scale = max as f32 / image.width.max(image.height) as f32;
-            let nw = ((image.width as f32 * scale).round() as u32).max(1);
-            let nh = ((image.height as f32 * scale).round() as u32).max(1);
-            use rasterlab_core::{ops::ResizeOp, traits::operation::Operation};
-            image =
-                ResizeOp::new(nw, nh, rasterlab_core::ops::ResampleMode::Bicubic).apply(image)?;
-        }
+    if let Some(max) = max_side
+        && (image.width > max || image.height > max)
+    {
+        let scale = max as f32 / image.width.max(image.height) as f32;
+        let nw = ((image.width as f32 * scale).round() as u32).max(1);
+        let nh = ((image.height as f32 * scale).round() as u32).max(1);
+        use rasterlab_core::{ops::ResizeOp, traits::operation::Operation};
+        image = ResizeOp::new(nw, nh, rasterlab_core::ops::ResampleMode::Bicubic).apply(image)?;
     }
 
     // Encode

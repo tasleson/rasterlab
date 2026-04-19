@@ -532,15 +532,13 @@ impl LibraryDb for StoolapDb {
 
     fn collection_photos(&self, collection_id: CollectionId) -> Result<Vec<PhotoRow>> {
         let rows = self.db.query(
-            &format!(
-                "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
+            "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
                         p.import_date, p.import_session, p.capture_date,
                         p.original_filename, p.stack_id, p.stack_is_primary
                  FROM photos p
                  JOIN collection_photos cp ON cp.photo_id = p.id
                  WHERE cp.collection_id = $1
-                 ORDER BY p.capture_date DESC, p.id DESC"
-            ),
+                 ORDER BY p.capture_date DESC, p.id DESC",
             (collection_id,),
         )?;
         let mut result = Vec::new();

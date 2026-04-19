@@ -33,7 +33,7 @@ pub fn rebuild(
     let rlab_paths: Vec<_> = WalkDir::new(&files_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "rlab"))
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rlab"))
         .map(|e| e.into_path())
         .collect();
 
@@ -85,15 +85,14 @@ fn reindex_one(
 
     // Re-generate thumbnail if missing
     let tpath = thumb_path(library_root, &hash);
-    if !tpath.exists() {
-        if let Ok(image) = registry.decode_bytes(&rlab.original_bytes, None) {
-            if let Ok(thumb) = generate_thumbnail(&image, 512) {
-                if let Some(parent) = tpath.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                std::fs::write(&tpath, thumb).ok();
-            }
+    if !tpath.exists()
+        && let Ok(image) = registry.decode_bytes(&rlab.original_bytes, None)
+        && let Ok(thumb) = generate_thumbnail(&image, 512)
+    {
+        if let Some(parent) = tpath.parent() {
+            std::fs::create_dir_all(parent).ok();
         }
+        std::fs::write(&tpath, thumb).ok();
     }
 
     let lib_path = rlab_file_path

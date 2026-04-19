@@ -64,10 +64,10 @@ impl RasterLabApp {
             state.open_file(path);
         }
         // Auto-open the last library if one was open when the app last exited.
-        if let Some(lib_path) = state.prefs.last_library.clone() {
-            if lib_path.exists() {
-                state.open_library(lib_path);
-            }
+        if let Some(lib_path) = state.prefs.last_library.clone()
+            && lib_path.exists()
+        {
+            state.open_library(lib_path);
         }
         #[cfg(not(target_arch = "wasm32"))]
         let use_native = state.prefs.use_native_dialogs;

@@ -257,10 +257,9 @@ impl AppState {
             autosave_restore_session_id: None,
             editing: None,
             mode: AppMode::Editor,
-            library: {
-                let mut ls = LibraryState::default();
-                ls.thumb_scale = initial_thumb_scale;
-                ls
+            library: LibraryState {
+                thumb_scale: initial_thumb_scale,
+                ..Default::default()
             },
             library_context: None,
         }

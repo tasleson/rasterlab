@@ -1,5 +1,5 @@
 use egui::ScrollArea;
-use rasterlab_library::{PhotoId, PhotoRow};
+use rasterlab_library::PhotoId;
 
 use crate::state::AppState;
 
@@ -49,12 +49,11 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         // Fetch EXIF from the .rlab file if library is open
         if let Some(lib) = state.library.library.clone() {
             let rlab_path = lib.rlab_path(&photo.hash);
-            if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path) {
-                if let Some(lmta) = &rlab.lmta {
-                    if let Some(exif) = &lmta.exif {
-                        exif_table(ui, exif);
-                    }
-                }
+            if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
+                && let Some(lmta) = &rlab.lmta
+                && let Some(exif) = &lmta.exif
+            {
+                exif_table(ui, exif);
             }
         }
 
@@ -64,92 +63,90 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         // Editable fields — read from .rlab lmta
         if let Some(lib) = state.library.library.clone() {
             let rlab_path = lib.rlab_path(&photo.hash);
-            if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path) {
-                if let Some(mut lmta) = rlab.lmta.clone() {
-                    let mut dirty = false;
+            if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
+                && let Some(mut lmta) = rlab.lmta.clone()
+            {
+                let mut dirty = false;
 
-                    // Rating
-                    ui.horizontal(|ui| {
-                        ui.label("Rating:");
-                        for star in 0u8..=5 {
-                            let filled = star <= lmta.rating;
-                            let label = if filled { "★" } else { "☆" };
-                            if ui
-                                .selectable_label(filled && star == lmta.rating, label)
-                                .clicked()
-                            {
-                                lmta.rating = if lmta.rating == star { 0 } else { star };
-                                dirty = true;
-                            }
-                        }
-                    });
-
-                    // Flag
-                    ui.horizontal(|ui| {
-                        ui.label("Flag:");
-                        for flag_opt in [None, Some("pick"), Some("reject")] {
-                            let active = lmta.flag.as_deref() == flag_opt;
-                            if ui
-                                .selectable_label(active, flag_opt.unwrap_or("—"))
-                                .clicked()
-                            {
-                                lmta.flag = flag_opt.map(|s| s.to_owned());
-                                dirty = true;
-                            }
-                        }
-                    });
-
-                    // Color label
-                    ui.horizontal(|ui| {
-                        ui.label("Color:");
-                        for color in [
-                            None,
-                            Some("red"),
-                            Some("yellow"),
-                            Some("green"),
-                            Some("blue"),
-                            Some("purple"),
-                        ] {
-                            let active = lmta.color_label.as_deref() == color;
-                            let display = color.unwrap_or("—");
-                            if ui.selectable_label(active, display).clicked() {
-                                lmta.color_label = color.map(|s| s.to_owned());
-                                dirty = true;
-                            }
-                        }
-                    });
-
-                    // Caption
-                    ui.label("Caption:");
-                    let mut caption = lmta.caption.clone().unwrap_or_default();
-                    if ui.text_edit_multiline(&mut caption).changed() {
-                        lmta.caption = if caption.is_empty() {
-                            None
-                        } else {
-                            Some(caption)
-                        };
-                        dirty = true;
-                    }
-
-                    // Keywords
-                    ui.label("Keywords:");
-                    let kw_str: String = lmta.keywords.join(", ");
-                    let mut kw_edit = kw_str.clone();
-                    if ui.text_edit_singleline(&mut kw_edit).changed() {
-                        lmta.keywords = kw_edit
-                            .split(',')
-                            .map(|s| s.trim().to_owned())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        dirty = true;
-                    }
-
-                    if dirty {
-                        if let Some(lib) = &state.library.library {
-                            lib.update_metadata(id, lmta).ok();
-                            state.library.refresh();
+                // Rating
+                ui.horizontal(|ui| {
+                    ui.label("Rating:");
+                    for star in 0u8..=5 {
+                        let filled = star <= lmta.rating;
+                        let label = if filled { "★" } else { "☆" };
+                        if ui
+                            .selectable_label(filled && star == lmta.rating, label)
+                            .clicked()
+                        {
+                            lmta.rating = if lmta.rating == star { 0 } else { star };
+                            dirty = true;
                         }
                     }
+                });
+
+                // Flag
+                ui.horizontal(|ui| {
+                    ui.label("Flag:");
+                    for flag_opt in [None, Some("pick"), Some("reject")] {
+                        let active = lmta.flag.as_deref() == flag_opt;
+                        if ui
+                            .selectable_label(active, flag_opt.unwrap_or("—"))
+                            .clicked()
+                        {
+                            lmta.flag = flag_opt.map(|s| s.to_owned());
+                            dirty = true;
+                        }
+                    }
+                });
+
+                // Color label
+                ui.horizontal(|ui| {
+                    ui.label("Color:");
+                    for color in [
+                        None,
+                        Some("red"),
+                        Some("yellow"),
+                        Some("green"),
+                        Some("blue"),
+                        Some("purple"),
+                    ] {
+                        let active = lmta.color_label.as_deref() == color;
+                        let display = color.unwrap_or("—");
+                        if ui.selectable_label(active, display).clicked() {
+                            lmta.color_label = color.map(|s| s.to_owned());
+                            dirty = true;
+                        }
+                    }
+                });
+
+                // Caption
+                ui.label("Caption:");
+                let mut caption = lmta.caption.clone().unwrap_or_default();
+                if ui.text_edit_multiline(&mut caption).changed() {
+                    lmta.caption = if caption.is_empty() {
+                        None
+                    } else {
+                        Some(caption)
+                    };
+                    dirty = true;
+                }
+
+                // Keywords
+                ui.label("Keywords:");
+                let kw_str: String = lmta.keywords.join(", ");
+                let mut kw_edit = kw_str.clone();
+                if ui.text_edit_singleline(&mut kw_edit).changed() {
+                    lmta.keywords = kw_edit
+                        .split(',')
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    dirty = true;
+                }
+
+                if dirty && let Some(lib) = &state.library.library {
+                    lib.update_metadata(id, lmta).ok();
+                    state.library.refresh();
                 }
             }
         }
@@ -157,13 +154,13 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         ui.separator();
 
         // Open in editor button
-        if ui.button("Open in Editor").clicked() {
-            if let Some(lib) = &state.library.library {
-                let rlab_path = lib.rlab_path(&photo.hash);
-                state.library_context = Some((lib.root().to_path_buf(), photo.hash.clone()));
-                state.open_file(rlab_path);
-                state.mode = crate::state::AppMode::Editor;
-            }
+        if ui.button("Open in Editor").clicked()
+            && let Some(lib) = &state.library.library
+        {
+            let rlab_path = lib.rlab_path(&photo.hash);
+            state.library_context = Some((lib.root().to_path_buf(), photo.hash.clone()));
+            state.open_file(rlab_path);
+            state.mode = crate::state::AppMode::Editor;
         }
     });
 }
@@ -287,13 +284,12 @@ fn apply_batch_rating(state: &mut AppState, ids: &[PhotoId], rating: u8) {
             .iter()
             .find(|p| p.id == id)
             .map(|p| lib.rlab_path(&p.hash));
-        if let Some(rlab_path) = rlab_path_opt {
-            if let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path) {
-                if let Some(ref mut lmta) = rlab.lmta {
-                    lmta.rating = rating;
-                    lib.update_metadata(id, lmta.clone()).ok();
-                }
-            }
+        if let Some(rlab_path) = rlab_path_opt
+            && let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
+            && let Some(ref mut lmta) = rlab.lmta
+        {
+            lmta.rating = rating;
+            lib.update_metadata(id, lmta.clone()).ok();
         }
     }
     state.library.refresh();
@@ -310,13 +306,12 @@ fn apply_batch_flag(state: &mut AppState, ids: &[PhotoId], flag: Option<&str>) {
             .iter()
             .find(|p| p.id == id)
             .map(|p| lib.rlab_path(&p.hash));
-        if let Some(rlab_path) = rlab_path_opt {
-            if let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path) {
-                if let Some(ref mut lmta) = rlab.lmta {
-                    lmta.flag = flag.map(|s| s.to_owned());
-                    lib.update_metadata(id, lmta.clone()).ok();
-                }
-            }
+        if let Some(rlab_path) = rlab_path_opt
+            && let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
+            && let Some(ref mut lmta) = rlab.lmta
+        {
+            lmta.flag = flag.map(|s| s.to_owned());
+            lib.update_metadata(id, lmta.clone()).ok();
         }
     }
     state.library.refresh();
@@ -333,15 +328,13 @@ fn apply_batch_keyword(state: &mut AppState, ids: &[PhotoId], kw: &str) {
             .iter()
             .find(|p| p.id == id)
             .map(|p| lib.rlab_path(&p.hash));
-        if let Some(rlab_path) = rlab_path_opt {
-            if let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path) {
-                if let Some(ref mut lmta) = rlab.lmta {
-                    if !lmta.keywords.contains(&kw.to_owned()) {
-                        lmta.keywords.push(kw.to_owned());
-                        lib.update_metadata(id, lmta.clone()).ok();
-                    }
-                }
-            }
+        if let Some(rlab_path) = rlab_path_opt
+            && let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
+            && let Some(ref mut lmta) = rlab.lmta
+            && !lmta.keywords.contains(&kw.to_owned())
+        {
+            lmta.keywords.push(kw.to_owned());
+            lib.update_metadata(id, lmta.clone()).ok();
         }
     }
     state.library.refresh();
