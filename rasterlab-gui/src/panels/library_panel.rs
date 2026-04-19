@@ -263,6 +263,135 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
 
+        // Shutter speed — "faster than" presets (shutter_max_sec)
+        ui.horizontal(|ui| {
+            ui.label("Shutter:");
+            const SHUTTER: &[(&str, Option<f64>)] = &[
+                ("Any", None),
+                ("≥ 1/30", Some(1.0 / 30.0)),
+                ("≥ 1/60", Some(1.0 / 60.0)),
+                ("≥ 1/125", Some(1.0 / 125.0)),
+                ("≥ 1/250", Some(1.0 / 250.0)),
+                ("≥ 1/500", Some(1.0 / 500.0)),
+                ("≥ 1/1000", Some(1.0 / 1000.0)),
+                ("≥ 1/2000", Some(1.0 / 2000.0)),
+            ];
+            let cur = state.library.filter.shutter_max_sec;
+            let sel_label = SHUTTER
+                .iter()
+                .find(|(_, v)| match (v, cur) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => (a - b).abs() < 1e-9,
+                    _ => false,
+                })
+                .map_or("Any", |(l, _)| l);
+            egui::ComboBox::from_id_salt("lib_shutter_filter")
+                .selected_text(sel_label)
+                .show_ui(ui, |ui| {
+                    for (lbl, val) in SHUTTER {
+                        let active = match (val, cur) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => (a - b).abs() < 1e-9,
+                            _ => false,
+                        };
+                        if ui.selectable_label(active, *lbl).clicked() {
+                            state.library.filter.shutter_max_sec = *val;
+                            changed = true;
+                        }
+                    }
+                });
+        });
+
+        // Aperture — "f/X or wider" presets (aperture range 0.5..=max_f)
+        ui.horizontal(|ui| {
+            ui.label("Aperture:");
+            const APERTURE: &[(&str, Option<f32>)] = &[
+                ("Any", None),
+                ("≤ f/1.4", Some(1.4)),
+                ("≤ f/2", Some(2.0)),
+                ("≤ f/2.8", Some(2.8)),
+                ("≤ f/4", Some(4.0)),
+                ("≤ f/5.6", Some(5.6)),
+            ];
+            let cur_end = state.library.filter.aperture.as_ref().map(|r| *r.end());
+            let sel_label = APERTURE
+                .iter()
+                .find(|(_, v)| match (v, cur_end) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => (a - b).abs() < 0.05,
+                    _ => false,
+                })
+                .map_or("Any", |(l, _)| l);
+            egui::ComboBox::from_id_salt("lib_aperture_filter")
+                .selected_text(sel_label)
+                .show_ui(ui, |ui| {
+                    for (lbl, val) in APERTURE {
+                        let active = match (val, cur_end) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => (a - b).abs() < 0.05,
+                            _ => false,
+                        };
+                        if ui.selectable_label(active, *lbl).clicked() {
+                            state.library.filter.aperture = val.map(|v| 0.5_f32..=v);
+                            changed = true;
+                        }
+                    }
+                });
+        });
+
+        // ISO — "up to X" presets (iso range 50..=max_iso)
+        ui.horizontal(|ui| {
+            ui.label("ISO:");
+            const ISO: &[(&str, Option<u32>)] = &[
+                ("Any", None),
+                ("≤ 100", Some(100)),
+                ("≤ 400", Some(400)),
+                ("≤ 800", Some(800)),
+                ("≤ 1600", Some(1600)),
+                ("≤ 3200", Some(3200)),
+                ("≥ 3200", Some(u32::MAX)),
+            ];
+            let cur = state.library.filter.iso.clone();
+            let sel_label = ISO
+                .iter()
+                .find(|(_, v)| match (v, &cur) {
+                    (None, None) => true,
+                    (Some(a), Some(r)) => *a == *r.end(),
+                    _ => false,
+                })
+                .map_or("Any", |(l, _)| l);
+            egui::ComboBox::from_id_salt("lib_iso_filter")
+                .selected_text(sel_label)
+                .show_ui(ui, |ui| {
+                    for (lbl, val) in ISO {
+                        let active = match (val, &cur) {
+                            (None, None) => true,
+                            (Some(a), Some(r)) => *a == *r.end(),
+                            _ => false,
+                        };
+                        if ui.selectable_label(active, *lbl).clicked() {
+                            state.library.filter.iso = val.map(|v| {
+                                if v == u32::MAX {
+                                    3200..=u32::MAX
+                                } else {
+                                    50..=v
+                                }
+                            });
+                            changed = true;
+                        }
+                    }
+                });
+        });
+
+        // Edited only
+        ui.horizontal(|ui| {
+            let mut v = state.library.filter.has_edits_only;
+            if ui.checkbox(&mut v, "Edited only").changed() {
+                state.library.filter.has_edits_only = v;
+                changed = true;
+            }
+        });
+
         if changed {
             state.library.refresh();
         }

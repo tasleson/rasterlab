@@ -23,6 +23,8 @@ pub struct PhotoRow {
     /// UUID shared by all files in a RAW+JPEG stack.
     pub stack_id: Option<String>,
     pub stack_is_primary: bool,
+    /// True if the photo has at least one committed edit (non-empty op stack).
+    pub has_edits: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +78,8 @@ pub trait LibraryDb: Send + Sync {
     fn photo_by_hash(&self, hash: &str) -> anyhow::Result<Option<PhotoRow>>;
 
     fn update_lmta(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> anyhow::Result<()>;
+
+    fn set_has_edits(&self, photo_id: PhotoId, has_edits: bool) -> anyhow::Result<()>;
 
     fn update_lmta_batch(&self, updates: &[(PhotoId, LibraryMeta)]) -> anyhow::Result<()>;
 

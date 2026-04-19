@@ -268,6 +268,11 @@ impl Library {
         let mut updated = rlab;
         updated.thumbnail = Some(thumb);
         updated.write(&rlab_path)?;
+
+        // Mark the photo as edited in the DB.
+        if let Ok(Some(row)) = self.db.photo_by_hash(hash) {
+            let _ = self.db.set_has_edits(row.id, true);
+        }
         Ok(())
     }
 

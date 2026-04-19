@@ -45,7 +45,8 @@ const SCHEMA_STMTS: &[&str] = &[
         capture_date      TEXT,
         original_filename TEXT,
         stack_id          TEXT,
-        stack_is_primary  INTEGER NOT NULL DEFAULT 1
+        stack_is_primary  INTEGER NOT NULL DEFAULT 1,
+        has_edits         INTEGER NOT NULL DEFAULT 0
     )",
     "CREATE TABLE IF NOT EXISTS exif (
         photo_id          INTEGER PRIMARY KEY,
@@ -141,12 +142,13 @@ fn row_to_photo(row: &stoolap::api::rows::ResultRow) -> Result<PhotoRow> {
         original_filename: row.get::<Option<String>>(8).context("original_filename")?,
         stack_id: row.get::<Option<String>>(9).context("stack_id")?,
         stack_is_primary: row.get::<i64>(10).context("stack_is_primary")? != 0,
+        has_edits: row.get::<i64>(11).unwrap_or(0) != 0,
     })
 }
 
 const PHOTO_SELECT: &str = "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
             p.import_date, p.import_session, p.capture_date,
-            p.original_filename, p.stack_id, p.stack_is_primary
+            p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits
      FROM photos p";
 
 // ── LibraryDb impl ────────────────────────────────────────────────────────────
@@ -158,6 +160,11 @@ impl LibraryDb for StoolapDb {
                 .execute(stmt, ())
                 .with_context(|| format!("schema: {}", &stmt[..40]))?;
         }
+        // Migration: add has_edits to existing databases (ignore error if already present).
+        let _ = self.db.execute(
+            "ALTER TABLE photos ADD COLUMN has_edits INTEGER NOT NULL DEFAULT 0",
+            (),
+        );
         Ok(())
     }
 
@@ -347,6 +354,14 @@ impl LibraryDb for StoolapDb {
         Ok(())
     }
 
+    fn set_has_edits(&self, photo_id: PhotoId, has_edits: bool) -> Result<()> {
+        self.db.execute(
+            "UPDATE photos SET has_edits=$1 WHERE id=$2",
+            (has_edits as i64, photo_id),
+        )?;
+        Ok(())
+    }
+
     fn update_lmta_batch(&self, updates: &[(PhotoId, LibraryMeta)]) -> Result<()> {
         for (id, lmta) in updates {
             self.update_lmta(*id, lmta)?;
@@ -485,6 +500,9 @@ impl LibraryDb for StoolapDb {
         if let Some(ref label) = filter.color_label {
             push!("r.color_label = {}", Value::text(label.clone()));
         }
+        if filter.has_edits_only {
+            conditions.push("p.has_edits = 1".to_string());
+        }
 
         let where_clause = if conditions.is_empty() {
             String::new()
@@ -495,7 +513,7 @@ impl LibraryDb for StoolapDb {
         let sql = format!(
             "SELECT DISTINCT p.id, p.hash, p.lib_path, p.width, p.height,
                     p.import_date, p.import_session, p.capture_date,
-                    p.original_filename, p.stack_id, p.stack_is_primary
+                    p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits
              FROM photos p
              LEFT JOIN exif       e  ON e.photo_id  = p.id
              LEFT JOIN ratings    r  ON r.photo_id  = p.id

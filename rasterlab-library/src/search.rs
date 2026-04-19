@@ -46,6 +46,9 @@ pub struct SearchFilter {
 
     /// Color label: `"red"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`.
     pub color_label: Option<String>,
+
+    /// When `true`, only return photos with at least one committed edit.
+    pub has_edits_only: bool,
 }
 
 impl SearchFilter {
@@ -64,5 +67,6 @@ impl SearchFilter {
             && self.import_session.is_none()
             && self.collection_id.is_none()
             && self.color_label.is_none()
+            && !self.has_edits_only
     }
 }
