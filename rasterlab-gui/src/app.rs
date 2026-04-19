@@ -162,16 +162,62 @@ impl RasterLabApp {
     /// Poll the active file chooser and dispatch any completed result.
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_dialogs(&mut self, ctx: &Context) {
-        if let Some((kind, path)) = self.chooser.update(ctx) {
-            match kind {
-                DialogKind::OpenFile => self.state.open_file(path),
-                DialogKind::ExportImage => self.state.save_file(path),
-                DialogKind::SaveProject => self.state.save_project(path),
-                DialogKind::ExportEditStack => self.state.export_edit_stack_json(path),
-                DialogKind::LoadLut => self.state.load_lut(path),
-                DialogKind::PanoramaAddImage => self.state.panorama_add_image(path),
-                DialogKind::FocusStackAddImage => self.state.focus_stack_add_image(path),
-                DialogKind::HdrMergeAddImage => self.state.hdr_merge_add_image(path),
+        let Some((kind, paths)) = self.chooser.update(ctx) else {
+            return;
+        };
+        // Helper: consume the vec and take the first path (single-file/folder kinds).
+        let first = || paths.clone().into_iter().next();
+        match kind {
+            DialogKind::OpenFile => {
+                if let Some(p) = first() {
+                    self.state.open_file(p)
+                }
+            }
+            DialogKind::ExportImage => {
+                if let Some(p) = first() {
+                    self.state.save_file(p)
+                }
+            }
+            DialogKind::SaveProject => {
+                if let Some(p) = first() {
+                    self.state.save_project(p)
+                }
+            }
+            DialogKind::ExportEditStack => {
+                if let Some(p) = first() {
+                    self.state.export_edit_stack_json(p)
+                }
+            }
+            DialogKind::LoadLut => {
+                if let Some(p) = first() {
+                    self.state.load_lut(p)
+                }
+            }
+            DialogKind::PanoramaAddImage => {
+                if let Some(p) = first() {
+                    self.state.panorama_add_image(p)
+                }
+            }
+            DialogKind::FocusStackAddImage => {
+                if let Some(p) = first() {
+                    self.state.focus_stack_add_image(p)
+                }
+            }
+            DialogKind::HdrMergeAddImage => {
+                if let Some(p) = first() {
+                    self.state.hdr_merge_add_image(p)
+                }
+            }
+            DialogKind::OpenLibrary => {
+                if let Some(p) = first() {
+                    self.state.open_library(p)
+                }
+            }
+            DialogKind::ImportFiles => self.state.import_into_library(paths),
+            DialogKind::ImportFolder => {
+                if let Some(p) = first() {
+                    self.state.import_folder_into_library(p)
+                }
             }
         }
     }
@@ -220,6 +266,18 @@ impl eframe::App for RasterLabApp {
             self.state.tools.hdr_merge_dialog_requested = false;
             self.chooser.hdr_merge_add_image(&ctx);
         }
+        if self.state.tools.library_open_dialog_requested {
+            self.state.tools.library_open_dialog_requested = false;
+            self.chooser.open_library(&ctx);
+        }
+        if self.state.tools.library_import_files_dialog_requested {
+            self.state.tools.library_import_files_dialog_requested = false;
+            self.chooser.import_files(&ctx);
+        }
+        if self.state.tools.library_import_folder_dialog_requested {
+            self.state.tools.library_import_folder_dialog_requested = false;
+            self.chooser.import_folder(&ctx);
+        }
 
         self.handle_keyboard(&ctx);
 
@@ -247,7 +305,7 @@ impl eframe::App for RasterLabApp {
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 // ── Mode toggle ──────────────────────────────────────────────
-                ui.selectable_value(&mut self.state.mode, AppMode::Editor,  "Editor");
+                ui.selectable_value(&mut self.state.mode, AppMode::Editor, "Editor");
                 ui.selectable_value(&mut self.state.mode, AppMode::Library, "Library");
                 ui.separator();
 
@@ -326,25 +384,23 @@ impl eframe::App for RasterLabApp {
                         ui.separator();
                         if ui.button("New Library…").clicked() {
                             ui.close_kind(egui::UiKind::Menu);
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                self.state.open_library(path);
-                            }
+                            self.state.tools.library_open_dialog_requested = true;
                         }
                         if ui.button("Open Library…").clicked() {
                             ui.close_kind(egui::UiKind::Menu);
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                self.state.open_library(path);
-                            }
+                            self.state.tools.library_open_dialog_requested = true;
                         }
                         {
                             let recent = self.state.prefs.recent_libraries.clone();
                             ui.add_enabled_ui(!recent.is_empty(), |ui| {
                                 ui.menu_button("Recent Libraries", |ui| {
                                     for path in &recent {
-                                        let label = path.file_name()
+                                        let label = path
+                                            .file_name()
                                             .map(|n| n.to_string_lossy().into_owned())
                                             .unwrap_or_else(|| path.display().to_string());
-                                        if ui.button(label)
+                                        if ui
+                                            .button(label)
                                             .on_hover_text(path.display().to_string())
                                             .clicked()
                                         {
@@ -359,39 +415,17 @@ impl eframe::App for RasterLabApp {
                             ui.menu_button("Import Photos", |ui| {
                                 if ui.button("Select Files…").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);
-                                    if let Some(paths) = rfd::FileDialog::new().pick_files() {
-                                        self.state.import_into_library(paths);
-                                    }
+                                    self.state.tools.library_import_files_dialog_requested = true;
                                 }
                                 if ui.button("Select Folder…").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);
-                                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                        // Collect all image paths then import
-                                        if let Some(lib) = &self.state.library.library {
-                                            let registry = rasterlab_core::formats::FormatRegistry::with_builtins();
-                                            let exts: std::collections::HashSet<String> = registry
-                                                .supported_extensions()
-                                                .into_iter()
-                                                .collect();
-                                            let paths: Vec<PathBuf> = walkdir::WalkDir::new(&folder)
-                                                .into_iter()
-                                                .filter_map(|e| e.ok())
-                                                .filter(|e| e.file_type().is_file())
-                                                .filter(|e| e.path().extension()
-                                                    .and_then(|x| x.to_str())
-                                                    .map(|x| exts.contains(&x.to_lowercase()))
-                                                    .unwrap_or(false))
-                                                .map(|e| e.into_path())
-                                                .collect();
-                                            let _ = lib;
-                                            self.state.import_into_library(paths);
-                                        }
-                                    }
+                                    self.state.tools.library_import_folder_dialog_requested = true;
                                 }
                             });
                         });
                         ui.add_enabled_ui(
-                            self.state.library.library.is_some() && !self.state.library.selected.is_empty(),
+                            self.state.library.library.is_some()
+                                && !self.state.library.selected.is_empty(),
                             |ui| {
                                 if ui.button("Export Selection…").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);

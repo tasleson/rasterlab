@@ -42,6 +42,9 @@ pub struct LibraryState {
 
     /// Error message to show in a status bar or dialog.
     pub last_error: Option<String>,
+
+    /// When true, show the "Move to Trash?" confirmation dialog.
+    pub confirm_delete: bool,
 }
 
 impl Default for LibraryState {
@@ -60,6 +63,7 @@ impl Default for LibraryState {
             sessions: Vec::new(),
             collections: Vec::new(),
             last_error: None,
+            confirm_delete: false,
         }
     }
 }
@@ -128,5 +132,31 @@ impl LibraryState {
 
     pub fn select_none(&mut self) {
         self.selected.clear();
+    }
+
+    /// Move all selected photos to the OS trash and remove them from the library.
+    pub fn delete_selected(&mut self) {
+        let Some(lib) = &self.library else { return };
+        // Collect hashes of selected photos so we can evict them from the cache.
+        let hashes: Vec<String> = self
+            .results
+            .iter()
+            .filter(|r| self.selected.contains(&r.id))
+            .map(|r| r.hash.clone())
+            .collect();
+
+        for id in self.selected.clone() {
+            if let Err(e) = lib.delete_photo(id) {
+                self.last_error = Some(format!("Delete failed: {e}"));
+                return;
+            }
+        }
+
+        for hash in &hashes {
+            self.thumb_cache.remove(hash);
+            self.thumb_requested.remove(hash);
+        }
+        self.selected.clear();
+        self.refresh();
     }
 }

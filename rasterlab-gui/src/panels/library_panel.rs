@@ -11,6 +11,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
+    // Confirmation dialog (modal window)
+    confirm_delete_dialog(ui.ctx(), state);
+
     // Toolbar (import button, sort, scale slider)
     toolbar_ui(ui, state);
     ui.separator();
@@ -78,6 +81,10 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         let selected = state.library.selected.len();
         if selected > 0 {
             ui.label(format!("{} selected / {} photos", selected, count));
+            ui.separator();
+            if ui.button("Move to Trash").clicked() {
+                state.library.confirm_delete = true;
+            }
         } else {
             ui.label(format!("{} photos", count));
         }
@@ -88,7 +95,53 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             ui.spinner();
             ui.label(format!("Importing… {}/{}", p.done, p.total));
         }
+
+        // Thumbnail load diagnostics — remove once thumbnails confirmed working
+        {
+            let cached = state.library.thumb_cache.len();
+            let pending = state.library.thumb_requested.len();
+            if pending > cached {
+                ui.separator();
+                ui.label(format!("Loading thumbs… {}/{}", cached, pending));
+            }
+        }
     });
+}
+
+// ── Confirmation dialog ───────────────────────────────────────────────────────
+
+fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.library.confirm_delete {
+        return;
+    }
+    let n = state.library.selected.len();
+    let title = if n == 1 {
+        "Move to Trash?".to_owned()
+    } else {
+        format!("Move {} photos to Trash?", n)
+    };
+    let mut open = true;
+    egui::Window::new(&title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label("The selected photo(s) will be moved to your system trash.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Move to Trash").clicked() {
+                    state.library.confirm_delete = false;
+                    state.library.delete_selected();
+                }
+                if ui.button("Cancel").clicked() {
+                    state.library.confirm_delete = false;
+                }
+            });
+        });
+    if !open {
+        state.library.confirm_delete = false;
+    }
 }
 
 fn sort_label(s: SortOrder) -> &'static str {
@@ -235,8 +288,13 @@ fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
     let avail_w = ui.available_width();
     let cols = ((avail_w / cell_sz) as usize).max(1);
 
-    // Deselect on background click (detected before scroll area consumes input)
-    let bg_resp = ui.allocate_rect(ui.available_rect_before_wrap(), Sense::click());
+    // Deselect when clicking on the grid background (between cells).
+    // Use interact() rather than allocate_rect() so the layout cursor is not
+    // advanced — allocate_rect() would consume the entire available area and
+    // leave the ScrollArea with zero height.
+    let bg_id = ui.id().with("lib_grid_bg");
+    let bg_rect = ui.available_rect_before_wrap();
+    let bg_resp = ui.interact(bg_rect, bg_id, Sense::click());
     if bg_resp.clicked() {
         state.library.select_none();
     }
@@ -345,4 +403,22 @@ fn thumb_cell(
             state.mode = crate::state::AppMode::Editor;
         }
     }
+
+    resp.context_menu(|ui| {
+        // Ensure the right-clicked photo is selected
+        let id: PhotoId = photo.id;
+        if !state.library.is_selected(id) {
+            state.library.select_only(id);
+        }
+        let n = state.library.selected.len();
+        let label = if n == 1 {
+            "Move to Trash".to_owned()
+        } else {
+            format!("Move {} to Trash", n)
+        };
+        if ui.button(label).clicked() {
+            state.library.confirm_delete = true;
+            ui.close();
+        }
+    });
 }

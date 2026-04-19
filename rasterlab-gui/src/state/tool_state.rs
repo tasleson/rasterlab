@@ -251,6 +251,14 @@ pub struct ToolState {
 
     // ── Library batch export dialog ───────────────────────────────────────
     pub export_dialog: crate::panels::export_dialog::ExportDialogState,
+
+    // ── Library file-chooser triggers ─────────────────────────────────────
+    /// Set to true by the File menu to open the library folder picker.
+    pub library_open_dialog_requested: bool,
+    /// Set to true by the File menu to open the import-files picker.
+    pub library_import_files_dialog_requested: bool,
+    /// Set to true by the File menu to open the import-folder picker.
+    pub library_import_folder_dialog_requested: bool,
 }
 
 impl ToolState {
@@ -384,6 +392,9 @@ impl ToolState {
             export_resize_h: 0,
             export_resize_mode: ResampleMode::Bicubic,
             export_dialog: crate::panels::export_dialog::ExportDialogState::default(),
+            library_open_dialog_requested: false,
+            library_import_files_dialog_requested: false,
+            library_import_folder_dialog_requested: false,
         }
     }
 

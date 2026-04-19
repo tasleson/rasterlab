@@ -2180,6 +2180,29 @@ impl AppState {
             .ok();
     }
 
+    pub fn import_folder_into_library(&mut self, folder: std::path::PathBuf) {
+        if self.library.library.is_none() {
+            return;
+        }
+        let registry = rasterlab_core::formats::FormatRegistry::with_builtins();
+        let exts: std::collections::HashSet<String> =
+            registry.supported_extensions().into_iter().collect();
+        let paths: Vec<std::path::PathBuf> = walkdir::WalkDir::new(&folder)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| exts.contains(&x.to_lowercase()))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.into_path())
+            .collect();
+        self.import_into_library(paths);
+    }
+
     pub fn rebuild_library_index(&mut self) {
         let Some(lib) = self.library.library.clone() else {
             return;
@@ -2224,13 +2247,21 @@ impl AppState {
             return;
         };
         let thumb_path = lib.thumb_path(&hash);
+        let rlab_path = lib.rlab_path(&hash);
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
         std::thread::Builder::new()
             .name("rasterlab-thumb".into())
             .stack_size(1024 * 1024)
             .spawn(move || {
-                if let Ok(bytes) = std::fs::read(&thumb_path) {
+                // Primary source: separate JPEG in thumbs/.
+                // Fallback: thumbnail embedded in the PREV chunk of the .rlab file.
+                let bytes = std::fs::read(&thumb_path).ok().or_else(|| {
+                    rasterlab_core::project::RlabFile::read(&rlab_path)
+                        .ok()
+                        .and_then(|r| r.thumbnail)
+                });
+                if let Some(bytes) = bytes {
                     let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
                     ctx.request_repaint();
                 }

@@ -16,7 +16,8 @@ rayon        = { workspace = true }
 typetag      = { workspace = true }
 image        = { workspace = true }
 libloading   = { workspace = true }
-tempfile     = "3"
+tempfile                = "3"
+reed-solomon-erasure    = "6"
 
 # Camera RAW decoding (Nikon, Canon, Sony, Fujifilm, etc.)
 # Feature-gated so the crate compiles without rawler if unavailable.
@@ -38,3 +39,6 @@ criterion    = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name    = "operations"
 harness = false
+
+[[example]]
+name = "rlab_verify"

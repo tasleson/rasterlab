@@ -53,6 +53,12 @@ pub enum DialogKind {
     PanoramaAddImage,
     FocusStackAddImage,
     HdrMergeAddImage,
+    /// Folder picker for New Library / Open Library.
+    OpenLibrary,
+    /// Multi-file picker for Import Photos > Select Files.
+    ImportFiles,
+    /// Folder picker for Import Photos > Select Folder.
+    ImportFolder,
 }
 
 // ---------------------------------------------------------------------------
@@ -74,12 +80,15 @@ pub struct FileChooser {
     panorama_dlg: FileDialog,
     focus_stack_dlg: FileDialog,
     hdr_merge_dlg: FileDialog,
+    lib_folder_dlg: FileDialog,
+    import_files_dlg: FileDialog,
+    import_folder_dlg: FileDialog,
     /// Which kind is currently waiting for a result.
     pending: Option<DialogKind>,
 
     // ── Native (rfd) backend ───────────────────────────────────────────────
-    /// At most one rfd dialog is open at a time.
-    rfd_rx: Option<(DialogKind, mpsc::Receiver<Option<PathBuf>>)>,
+    /// At most one rfd dialog is open at a time.  Vec is empty on cancel.
+    rfd_rx: Option<(DialogKind, mpsc::Receiver<Vec<PathBuf>>)>,
 }
 
 impl FileChooser {
@@ -141,6 +150,20 @@ impl FileChooser {
                 .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
                 .add_file_filter_extensions("PNG", vec!["png"])
                 .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
+            lib_folder_dlg: FileDialog::new()
+                .title("Select Library Folder")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
+            import_files_dlg: FileDialog::new()
+                .title("Select Photos to Import")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .add_file_filter_extensions("All supported", all_supported_exts())
+                .add_file_filter_extensions("Images", image_exts())
+                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
+                .add_file_filter_extensions("PNG", vec!["png"])
+                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
+            import_folder_dlg: FileDialog::new()
+                .title("Select Folder to Import")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
             pending: None,
             rfd_rx: None,
         }
@@ -191,11 +214,24 @@ impl FileChooser {
         self.open(ctx, DialogKind::HdrMergeAddImage, false);
     }
 
+    pub fn open_library(&mut self, ctx: &egui::Context) {
+        self.open(ctx, DialogKind::OpenLibrary, false);
+    }
+
+    pub fn import_files(&mut self, ctx: &egui::Context) {
+        self.open(ctx, DialogKind::ImportFiles, false);
+    }
+
+    pub fn import_folder(&mut self, ctx: &egui::Context) {
+        self.open(ctx, DialogKind::ImportFolder, false);
+    }
+
     // ── Per-frame polling ───────────────────────────────────────────────────
 
-    /// Must be called once per frame.  Returns `Some((kind, path))` when the
-    /// user has confirmed a selection, `None` otherwise.
-    pub fn update(&mut self, ctx: &egui::Context) -> Option<(DialogKind, PathBuf)> {
+    /// Must be called once per frame.  Returns `Some((kind, paths))` when the
+    /// user has confirmed a selection, `None` otherwise.  Single-file and
+    /// folder kinds return a one-element vec; `ImportFiles` may return many.
+    pub fn update(&mut self, ctx: &egui::Context) -> Option<(DialogKind, Vec<PathBuf>)> {
         if self.use_native {
             self.poll_rfd()
         } else {
@@ -216,10 +252,11 @@ impl FileChooser {
         } else {
             self.pending = Some(kind);
             let dlg = self.dialog_mut(kind);
-            if is_save {
-                dlg.save_file();
-            } else {
-                dlg.pick_file();
+            match kind {
+                DialogKind::OpenLibrary | DialogKind::ImportFolder => dlg.pick_directory(),
+                DialogKind::ImportFiles => dlg.pick_multiple(),
+                _ if is_save => dlg.save_file(),
+                _ => dlg.pick_file(),
             }
         }
     }
@@ -242,18 +279,21 @@ impl FileChooser {
             DialogKind::PanoramaAddImage => &mut self.panorama_dlg,
             DialogKind::FocusStackAddImage => &mut self.focus_stack_dlg,
             DialogKind::HdrMergeAddImage => &mut self.hdr_merge_dlg,
+            DialogKind::OpenLibrary => &mut self.lib_folder_dlg,
+            DialogKind::ImportFiles => &mut self.import_files_dlg,
+            DialogKind::ImportFolder => &mut self.import_folder_dlg,
         }
     }
 
     // ── rfd (native) backend ────────────────────────────────────────────────
 
     fn spawn_rfd(&mut self, ctx: &egui::Context, kind: DialogKind, is_save: bool) {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
         self.rfd_rx = Some((kind, rx));
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let path = match kind {
+            let paths: Vec<PathBuf> = match kind {
                 DialogKind::OpenFile => rfd::FileDialog::new()
                     .add_filter("All supported", &all_supported_exts())
                     .add_filter("RasterLab Project", &["rlab"])
@@ -261,52 +301,80 @@ impl FileChooser {
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])
                     .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_file(),
+                    .pick_file()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
                 DialogKind::ExportImage => rfd::FileDialog::new()
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])
-                    .save_file(),
+                    .save_file()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
                 DialogKind::SaveProject => rfd::FileDialog::new()
                     .add_filter("RasterLab Project", &["rlab"])
-                    .save_file(),
+                    .save_file()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
                 DialogKind::ExportEditStack => rfd::FileDialog::new()
                     .add_filter("JSON", &["json"])
-                    .save_file(),
+                    .save_file()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
                 DialogKind::LoadLut => rfd::FileDialog::new()
                     .add_filter("CUBE LUT", &["cube"])
-                    .pick_file(),
+                    .pick_file()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
                 DialogKind::PanoramaAddImage => rfd::FileDialog::new()
                     .add_filter("Images", &image_exts())
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])
                     .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_file(),
+                    .pick_file()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
                 DialogKind::FocusStackAddImage => rfd::FileDialog::new()
                     .add_filter("Images", &image_exts())
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])
                     .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_file(),
+                    .pick_file()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
                 DialogKind::HdrMergeAddImage => rfd::FileDialog::new()
                     .add_filter("Images", &image_exts())
                     .add_filter("JPEG", &["jpg", "jpeg"])
                     .add_filter("PNG", &["png"])
                     .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_file(),
+                    .pick_file()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
+                DialogKind::OpenLibrary | DialogKind::ImportFolder => rfd::FileDialog::new()
+                    .pick_folder()
+                    .map(|p| vec![p])
+                    .unwrap_or_default(),
+                DialogKind::ImportFiles => rfd::FileDialog::new()
+                    .add_filter("All supported", &all_supported_exts())
+                    .add_filter("Images", &image_exts())
+                    .add_filter("JPEG", &["jpg", "jpeg"])
+                    .add_filter("PNG", &["png"])
+                    .add_filter("Camera RAW", RAW_EXTENSIONS)
+                    .pick_files()
+                    .unwrap_or_default(),
             };
-            let _ = tx.send(path);
+            let _ = tx.send(paths);
             ctx.request_repaint();
         });
 
-        // suppress unused warning for is_save — rfd picks open/save per kind above
+        // rfd picks open/save per kind above; is_save not needed here
         let _ = is_save;
     }
 
-    fn poll_rfd(&mut self) -> Option<(DialogKind, PathBuf)> {
+    fn poll_rfd(&mut self) -> Option<(DialogKind, Vec<PathBuf>)> {
         let (kind, rx) = self.rfd_rx.take()?;
         match rx.try_recv() {
-            Ok(Some(path)) => Some((kind, path)),
-            Ok(None) => None, // cancelled
+            Ok(paths) if !paths.is_empty() => Some((kind, paths)),
+            Ok(_) => None, // cancelled (empty vec)
             Err(mpsc::TryRecvError::Empty) => {
                 // Still waiting — put it back.
                 self.rfd_rx = Some((kind, rx));
@@ -318,14 +386,20 @@ impl FileChooser {
 
     // ── egui-file-dialog (inline) backend ───────────────────────────────────
 
-    fn poll_egui(&mut self, ctx: &egui::Context) -> Option<(DialogKind, PathBuf)> {
+    fn poll_egui(&mut self, ctx: &egui::Context) -> Option<(DialogKind, Vec<PathBuf>)> {
         let kind = self.pending?;
         let dlg = self.dialog_mut(kind);
         dlg.update(ctx);
 
-        if let Some(path) = dlg.take_picked() {
+        let result = if kind == DialogKind::ImportFiles {
+            dlg.take_picked_multiple().map(|paths| (kind, paths))
+        } else {
+            dlg.take_picked().map(|path| (kind, vec![path]))
+        };
+
+        if result.is_some() {
             self.pending = None;
-            return Some((kind, path));
+            return result;
         }
 
         // If the dialog was cancelled or closed without a pick, clear pending

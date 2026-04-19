@@ -122,10 +122,23 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 # Week 4
 
+## 2026-04-17
+
+### Features
+
+- **Active tool highlight** — the currently-open tool in the edit stack is expanded and its header rendered in bold so the active edit is always visually obvious
+
+## 2026-04-15
+
+### Features
+
+- **HDR Merge** — fuse 2+ bracketed exposures into a single image with extended dynamic range; auto exposure estimation, Debevec-style radiance merge, Reinhard tone map
+
 ## 2026-04-18
 
 ### Features
 
+- **Persist export settings** — last-used JPEG/PNG format, quality, and resize options are saved to prefs and restored on next launch; open-file dialog also remembers the last filter selection
 - **Photo Library (DAM)** — import photos into a managed library with EXIF indexing, ratings, keywords, collections, and search
   - Files stored as `.rlab` v3 in a hash-based balanced directory tree (`files/ab/cd/<hash>.rlab`)
   - Stoolap SQL database backend behind a `LibraryDb` trait (swappable for tests or future backends)
