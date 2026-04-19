@@ -151,6 +151,19 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
             }
         }
 
+        // Library path
+        let h = &photo.hash;
+        let rel_path = format!("files/{}/{}/{}.rlab", &h[0..2], &h[2..4], h);
+        ui.add_space(6.0);
+        egui::Grid::new("meta_path_grid")
+            .num_columns(2)
+            .spacing([8.0, 2.0])
+            .show(ui, |ui| {
+                ui.label("Library path:");
+                ui.add(egui::Label::new(egui::RichText::new(&rel_path).monospace()).truncate());
+                ui.end_row();
+            });
+
         ui.separator();
 
         // Open in editor button
