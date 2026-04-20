@@ -241,6 +241,26 @@ impl CanvasState {
             SplitMode::VsOriginal
         };
         if state.split_view {
+            // Compute the live-edit preview op BEFORE borrowing the pipeline:
+            // while an edit session is active, the op at `anchor_idx` is
+            // disabled in the pipeline, so `render_prefix(n+1)` would skip it
+            // and produce the same pixels as `render_prefix(n)`.  We need to
+            // apply the tool's live preview op to synthesise the "after" side.
+            let edit_preview_op: Option<Box<dyn rasterlab_core::traits::operation::Operation>> =
+                if state.editing.is_some() && effective_mode == SplitMode::VsPreviousStep {
+                    state.tools.preview_op()
+                } else {
+                    None
+                };
+            let preview_hash = edit_preview_op
+                .as_deref()
+                .and_then(|op| serde_json::to_string(op).ok())
+                .map(|s| {
+                    let mut h = DefaultHasher::new();
+                    s.hash(&mut h);
+                    h.finish()
+                })
+                .unwrap_or(0);
             if let Some(pipeline) = state.pipeline() {
                 let step_gen = pipeline.step_cache_gen();
                 let geo_gen = pipeline.geometric_gen();
@@ -271,7 +291,8 @@ impl CanvasState {
                     SplitMode::VsPreviousStep => {
                         let n = anchor_idx.unwrap_or(0);
                         let before_hashed = hash_key(&(1u64, step_gen, n as u64, 0u64));
-                        let after_hashed = hash_key(&(1u64, step_gen, n as u64, 1u64));
+                        let after_hashed =
+                            hash_key(&(1u64, step_gen, n as u64, 1u64, preview_hash));
                         if self.before_texture.is_none() || before_hashed != self.before_hash {
                             match pipeline.render_prefix(n) {
                                 Ok(img) => {
@@ -288,7 +309,23 @@ impl CanvasState {
                         }
                         if self.after_step_texture.is_none() || after_hashed != self.after_step_hash
                         {
-                            match pipeline.render_prefix(n + 1) {
+                            let after_result = match &edit_preview_op {
+                                Some(op) => pipeline.render_prefix(n).and_then(|img| {
+                                    let owned = match std::sync::Arc::try_unwrap(img) {
+                                        Ok(img) => img,
+                                        Err(arc) => arc.as_ref().deep_clone(),
+                                    };
+                                    op.apply(owned).map(std::sync::Arc::new).map_err(|e| {
+                                        rasterlab_core::error::RasterError::Pipeline(format!(
+                                            "Preview op '{}' failed: {}",
+                                            op.name(),
+                                            e
+                                        ))
+                                    })
+                                }),
+                                None => pipeline.render_prefix(n + 1),
+                            };
+                            match after_result {
                                 Ok(img) => {
                                     self.after_step_logical_size = (img.width, img.height);
                                     self.after_step_texture = Some(ui.ctx().load_texture(
@@ -298,7 +335,7 @@ impl CanvasState {
                                     ));
                                     self.after_step_hash = after_hashed;
                                 }
-                                Err(e) => eprintln!("render_prefix({}) failed: {e}", n + 1),
+                                Err(e) => eprintln!("split-view after render failed: {e}"),
                             }
                         }
                     }
