@@ -23,6 +23,13 @@ pub struct CanvasState {
     last_canvas_size: Vec2,
     crop_start: Option<Pos2>,
     crop_end: Option<Pos2>,
+    /// Active drag mode for the crop selection (create, move, or resize a handle).
+    crop_drag: Option<CropDragMode>,
+    /// Image-space pointer position captured when `crop_drag` started — used to
+    /// translate the rect during Moving without accumulating drift.
+    crop_drag_start_ptr: Pos2,
+    /// Rect at the moment `crop_drag` started (image-space corners).
+    crop_drag_start_rect: Rect,
     /// Overlay texture for full-resolution viewport previews.
     overlay_texture: Option<TextureHandle>,
     overlay_last_hash: u64,
@@ -66,6 +73,9 @@ impl Default for CanvasState {
             last_canvas_size: Vec2::ZERO,
             crop_start: None,
             crop_end: None,
+            crop_drag: None,
+            crop_drag_start_ptr: Pos2::ZERO,
+            crop_drag_start_rect: Rect::ZERO,
             overlay_texture: None,
             overlay_last_hash: 0,
             before_texture: None,
@@ -1027,45 +1037,128 @@ impl CanvasState {
             }
         } else {
             // ── Crop selection (primary drag only) ───────────────────────────
-            if resp.drag_started_by(egui::PointerButton::Primary) {
-                self.crop_start = resp
-                    .interact_pointer_pos()
-                    .map(|p| screen_to_image(p, image_tl, self.zoom));
-                self.crop_end = self.crop_start;
-            }
-            if resp.dragged_by(egui::PointerButton::Primary)
-                && let Some(raw_end) = resp
-                    .interact_pointer_pos()
-                    .map(|p| screen_to_image(p, image_tl, self.zoom))
+            // Screen-space rect of the current selection, if it's large enough
+            // to show handles on.  Used for both hit-testing and drawing.
+            let current_rect_screen = self.crop_start.zip(self.crop_end).and_then(|(a, b)| {
+                let r = Rect::from_two_pos(
+                    image_to_screen(a, image_tl, self.zoom),
+                    image_to_screen(b, image_tl, self.zoom),
+                );
+                (r.width() > 2.0 && r.height() > 2.0).then_some(r)
+            });
+
+            // Hover cursor hint when not actively dragging.
+            if self.crop_drag.is_none()
+                && resp.hovered()
+                && let Some(rs) = current_rect_screen
+                && let Some(ptr) = resp.hover_pos()
+                && let Some(mode) = hit_test_handle(rs, ptr)
             {
-                // Constrain the drag-end for aspect-ratio-locked crops
-                self.crop_end = Some(constrain_drag_end(
-                    self.crop_start.unwrap_or(raw_end),
-                    raw_end,
-                    state.tools.crop_aspect_ratio(),
-                ));
+                ui.ctx().set_cursor_icon(cursor_for_mode(mode));
             }
+
+            if resp.drag_started_by(egui::PointerButton::Primary)
+                && let Some(p_screen) = resp.interact_pointer_pos()
+            {
+                let ptr_img = screen_to_image(p_screen, image_tl, self.zoom);
+                let mode = current_rect_screen
+                    .and_then(|rs| hit_test_handle(rs, p_screen))
+                    .filter(|_| self.crop_start.is_some() && self.crop_end.is_some());
+                match mode {
+                    Some(m) => {
+                        self.crop_drag = Some(m);
+                        self.crop_drag_start_ptr = ptr_img;
+                        // crop_start/crop_end are guaranteed Some by the filter above.
+                        let (a, b) = (self.crop_start.unwrap(), self.crop_end.unwrap());
+                        self.crop_drag_start_rect = Rect::from_two_pos(a, b);
+                    }
+                    None => {
+                        // Empty area → start a fresh selection.
+                        self.crop_drag = Some(CropDragMode::Creating);
+                        self.crop_start = Some(ptr_img);
+                        self.crop_end = Some(ptr_img);
+                    }
+                }
+            }
+
+            if resp.dragged_by(egui::PointerButton::Primary)
+                && let Some(p_screen) = resp.interact_pointer_pos()
+                && let Some(mode) = self.crop_drag
+            {
+                let ptr_img = screen_to_image(p_screen, image_tl, self.zoom);
+                match mode {
+                    CropDragMode::Creating => {
+                        let constrained = constrain_drag_end(
+                            self.crop_start.unwrap_or(ptr_img),
+                            ptr_img,
+                            state.tools.crop_aspect_ratio(),
+                        );
+                        self.crop_end = Some(constrained);
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                    }
+                    CropDragMode::Moving => {
+                        let delta = ptr_img - self.crop_drag_start_ptr;
+                        let start_rect = self.crop_drag_start_rect;
+                        let w = start_rect.width();
+                        let h = start_rect.height();
+                        let max_x = (img_w as f32 - w).max(0.0);
+                        let max_y = (img_h as f32 - h).max(0.0);
+                        let nx = (start_rect.min.x + delta.x).clamp(0.0, max_x);
+                        let ny = (start_rect.min.y + delta.y).clamp(0.0, max_y);
+                        self.crop_start = Some(Pos2::new(nx, ny));
+                        self.crop_end = Some(Pos2::new(nx + w, ny + h));
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+                    }
+                    _ => {
+                        let start_rect = self.crop_drag_start_rect;
+                        let ratio = state.tools.crop_aspect_ratio();
+                        let ptr_c = Pos2::new(
+                            ptr_img.x.clamp(0.0, img_w as f32),
+                            ptr_img.y.clamp(0.0, img_h as f32),
+                        );
+                        let (min, max) = resize_rect(mode, start_rect, ptr_c, ratio, img_w, img_h);
+                        self.crop_start = Some(min);
+                        self.crop_end = Some(max);
+                        ui.ctx().set_cursor_icon(cursor_for_mode(mode));
+                    }
+                }
+            }
+
             if resp.drag_stopped_by(egui::PointerButton::Primary)
                 && let (Some(start), Some(end)) = (self.crop_start, self.crop_end)
             {
                 let (x, y, w, h) = image_to_crop(start, end, img_w, img_h);
-                let (cx, cy, cw, ch) =
-                    constrain_aspect(x, y, w, h, img_w, img_h, state.tools.crop_aspect_ratio());
+                // Aspect constraint only applies to newly drawn selections.
+                // Editing an existing rect (move/resize) should respect the
+                // user's explicit handle placement.
+                let (cx, cy, cw, ch) = match self.crop_drag {
+                    Some(CropDragMode::Creating) => {
+                        constrain_aspect(x, y, w, h, img_w, img_h, state.tools.crop_aspect_ratio())
+                    }
+                    _ => (x, y, w, h),
+                };
                 state.tools.crop_x = cx;
                 state.tools.crop_y = cy;
                 state.tools.crop_w = cw;
                 state.tools.crop_h = ch;
+                // Snap the on-canvas rect to the clamped integer coords so a
+                // subsequent drag starts from the committed rectangle.
+                self.crop_start = Some(Pos2::new(cx as f32, cy as f32));
+                self.crop_end = Some(Pos2::new((cx + cw) as f32, (cy + ch) as f32));
+                self.crop_drag = None;
             }
 
             // ── Clear selection: right-click or Escape ───────────────────────
             if resp.secondary_clicked() {
                 self.crop_start = None;
                 self.crop_end = None;
+                self.crop_drag = None;
             }
             ui.input(|i| {
                 if i.key_pressed(egui::Key::Escape) {
                     self.crop_start = None;
                     self.crop_end = None;
+                    self.crop_drag = None;
                 }
             });
 
@@ -1078,10 +1171,219 @@ impl CanvasState {
                 if sel.width() > 2.0 && sel.height() > 2.0 {
                     let time = ui.input(|i| i.time) as f32;
                     draw_marching_ants(painter, sel, time);
+                    draw_crop_handles(painter, sel);
                     ui.ctx().request_repaint_after(Duration::from_millis(16));
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Crop handle interaction
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CropDragMode {
+    Creating,
+    Moving,
+    ResizeN,
+    ResizeS,
+    ResizeE,
+    ResizeW,
+    ResizeNW,
+    ResizeNE,
+    ResizeSW,
+    ResizeSE,
+}
+
+/// Radius (in screen pixels) used both to draw a handle and to hit-test it.
+const HANDLE_R: f32 = 6.0;
+
+/// Hit-test a pointer against the crop rect handles. Corners take priority over
+/// edges, edges over the interior, so users can reliably grab a corner even
+/// when it's flush against the rect body.
+fn hit_test_handle(rect: Rect, ptr: Pos2) -> Option<CropDragMode> {
+    let r = HANDLE_R + 2.0;
+    let near = |p: Pos2| (p - ptr).length() <= r;
+    if near(rect.left_top()) {
+        return Some(CropDragMode::ResizeNW);
+    }
+    if near(rect.right_top()) {
+        return Some(CropDragMode::ResizeNE);
+    }
+    if near(rect.left_bottom()) {
+        return Some(CropDragMode::ResizeSW);
+    }
+    if near(rect.right_bottom()) {
+        return Some(CropDragMode::ResizeSE);
+    }
+    if near(Pos2::new(rect.center().x, rect.top())) {
+        return Some(CropDragMode::ResizeN);
+    }
+    if near(Pos2::new(rect.center().x, rect.bottom())) {
+        return Some(CropDragMode::ResizeS);
+    }
+    if near(Pos2::new(rect.left(), rect.center().y)) {
+        return Some(CropDragMode::ResizeW);
+    }
+    if near(Pos2::new(rect.right(), rect.center().y)) {
+        return Some(CropDragMode::ResizeE);
+    }
+    if rect.contains(ptr) {
+        return Some(CropDragMode::Moving);
+    }
+    None
+}
+
+fn cursor_for_mode(mode: CropDragMode) -> egui::CursorIcon {
+    match mode {
+        CropDragMode::Creating => egui::CursorIcon::Crosshair,
+        CropDragMode::Moving => egui::CursorIcon::Move,
+        CropDragMode::ResizeN | CropDragMode::ResizeS => egui::CursorIcon::ResizeVertical,
+        CropDragMode::ResizeE | CropDragMode::ResizeW => egui::CursorIcon::ResizeHorizontal,
+        CropDragMode::ResizeNW | CropDragMode::ResizeSE => egui::CursorIcon::ResizeNwSe,
+        CropDragMode::ResizeNE | CropDragMode::ResizeSW => egui::CursorIcon::ResizeNeSw,
+    }
+}
+
+/// Compute the new crop rect for a resize drag.
+///
+/// For corner handles the opposite corner is the anchor.  For edge handles the
+/// opposite edge is the anchor and the perpendicular dimension grows/shrinks
+/// symmetrically around the start rect's centre on that axis.
+///
+/// When a ratio is locked, the rect is shrunk uniformly if aspect-preserving
+/// growth would exceed the image bounds — so the aspect is honoured even at
+/// the edges.
+fn resize_rect(
+    mode: CropDragMode,
+    start_rect: Rect,
+    ptr: Pos2,
+    ratio: Option<(f32, f32)>,
+    img_w: u32,
+    img_h: u32,
+) -> (Pos2, Pos2) {
+    let iw = img_w as f32;
+    let ih = img_h as f32;
+
+    // Helper for corner drags: anchor stays fixed, opposite corner follows the
+    // pointer.  Width leads (matching the Creating behaviour) and height is
+    // derived from the aspect ratio, then both are clamped to image bounds —
+    // height may force width to shrink if it's the binding constraint.
+    let corner = |anchor: Pos2| -> (Pos2, Pos2) {
+        let sign_x = if ptr.x >= anchor.x { 1.0 } else { -1.0 };
+        let sign_y = if ptr.y >= anchor.y { 1.0 } else { -1.0 };
+        let max_w = if sign_x > 0.0 {
+            iw - anchor.x
+        } else {
+            anchor.x
+        };
+        let max_h = if sign_y > 0.0 {
+            ih - anchor.y
+        } else {
+            anchor.y
+        };
+        let (w, h) = match ratio {
+            Some((rw, rh)) => {
+                let want_w = (ptr.x - anchor.x).abs().min(max_w);
+                let h_from_w = want_w * rh / rw;
+                if h_from_w <= max_h {
+                    (want_w, h_from_w)
+                } else {
+                    (max_h * rw / rh, max_h)
+                }
+            }
+            None => (
+                (ptr.x - anchor.x).abs().min(max_w),
+                (ptr.y - anchor.y).abs().min(max_h),
+            ),
+        };
+        let other = Pos2::new(anchor.x + sign_x * w, anchor.y + sign_y * h);
+        let min = Pos2::new(anchor.x.min(other.x), anchor.y.min(other.y));
+        let max = Pos2::new(anchor.x.max(other.x), anchor.y.max(other.y));
+        (min, max)
+    };
+
+    // Helper for edge drags on a horizontal edge (N or S): the opposite edge
+    // is the anchor (y_anchor), width grows/shrinks around the start rect's
+    // horizontal centre.
+    let horiz_edge = |y_anchor: f32, cx: f32| -> (Pos2, Pos2) {
+        let sign = if ptr.y >= y_anchor { 1.0 } else { -1.0 };
+        let max_h = if sign > 0.0 { ih - y_anchor } else { y_anchor };
+        let want_h = (ptr.y - y_anchor).abs().min(max_h);
+        let (w, h) = match ratio {
+            Some((rw, rh)) => {
+                let max_w = 2.0 * cx.min(iw - cx);
+                let want_w = (want_h * rw / rh).min(max_w);
+                let final_h = want_w * rh / rw;
+                (want_w, final_h)
+            }
+            None => (start_rect.width(), want_h),
+        };
+        let y_other = y_anchor + sign * h;
+        let min_y = y_anchor.min(y_other);
+        let max_y = y_anchor.max(y_other);
+        let min_x = (cx - w / 2.0).max(0.0);
+        let max_x = (cx + w / 2.0).min(iw);
+        (Pos2::new(min_x, min_y), Pos2::new(max_x, max_y))
+    };
+
+    // Helper for edge drags on a vertical edge (E or W).
+    let vert_edge = |x_anchor: f32, cy: f32| -> (Pos2, Pos2) {
+        let sign = if ptr.x >= x_anchor { 1.0 } else { -1.0 };
+        let max_w = if sign > 0.0 { iw - x_anchor } else { x_anchor };
+        let want_w = (ptr.x - x_anchor).abs().min(max_w);
+        let (w, h) = match ratio {
+            Some((rw, rh)) => {
+                let max_h = 2.0 * cy.min(ih - cy);
+                let want_h = (want_w * rh / rw).min(max_h);
+                let final_w = want_h * rw / rh;
+                (final_w, want_h)
+            }
+            None => (want_w, start_rect.height()),
+        };
+        let x_other = x_anchor + sign * w;
+        let min_x = x_anchor.min(x_other);
+        let max_x = x_anchor.max(x_other);
+        let min_y = (cy - h / 2.0).max(0.0);
+        let max_y = (cy + h / 2.0).min(ih);
+        (Pos2::new(min_x, min_y), Pos2::new(max_x, max_y))
+    };
+
+    match mode {
+        CropDragMode::ResizeNW => corner(start_rect.max),
+        CropDragMode::ResizeNE => corner(Pos2::new(start_rect.min.x, start_rect.max.y)),
+        CropDragMode::ResizeSW => corner(Pos2::new(start_rect.max.x, start_rect.min.y)),
+        CropDragMode::ResizeSE => corner(start_rect.min),
+        CropDragMode::ResizeN => horiz_edge(start_rect.max.y, start_rect.center().x),
+        CropDragMode::ResizeS => horiz_edge(start_rect.min.y, start_rect.center().x),
+        CropDragMode::ResizeE => vert_edge(start_rect.min.x, start_rect.center().y),
+        CropDragMode::ResizeW => vert_edge(start_rect.max.x, start_rect.center().y),
+        _ => (start_rect.min, start_rect.max),
+    }
+}
+
+fn draw_crop_handles(painter: &egui::Painter, rect: Rect) {
+    let points = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.left_bottom(),
+        rect.right_bottom(),
+        Pos2::new(rect.center().x, rect.top()),
+        Pos2::new(rect.center().x, rect.bottom()),
+        Pos2::new(rect.left(), rect.center().y),
+        Pos2::new(rect.right(), rect.center().y),
+    ];
+    for p in points {
+        let handle = Rect::from_center_size(p, Vec2::splat(HANDLE_R * 2.0));
+        painter.rect_filled(handle, 1.0, Color32::WHITE);
+        painter.rect_stroke(
+            handle,
+            1.0,
+            Stroke::new(1.0, Color32::from_black_alpha(200)),
+            egui::StrokeKind::Middle,
+        );
     }
 }
 
