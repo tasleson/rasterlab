@@ -45,6 +45,17 @@ pub struct LibraryState {
 
     /// When true, show the "Move to Trash?" confirmation dialog.
     pub confirm_delete: bool,
+
+    // Raw text for exact-value filter inputs (persists across frames)
+    pub iso_exact_text: String,
+    pub aperture_exact_text: String,
+    pub shutter_exact_text: String,
+
+    // Per-field validation errors; `Some` means the input is out of the
+    // reasonable domain and the filter for that field is not applied.
+    pub iso_error: Option<String>,
+    pub aperture_error: Option<String>,
+    pub shutter_error: Option<String>,
 }
 
 impl Default for LibraryState {
@@ -64,6 +75,12 @@ impl Default for LibraryState {
             collections: Vec::new(),
             last_error: None,
             confirm_delete: false,
+            iso_exact_text: String::new(),
+            aperture_exact_text: String::new(),
+            shutter_exact_text: String::new(),
+            iso_error: None,
+            aperture_error: None,
+            shutter_error: None,
         }
     }
 }
@@ -73,16 +90,19 @@ impl LibraryState {
     pub fn refresh(&mut self) {
         let Some(lib) = &self.library else { return };
 
-        let photos = match &self.view {
-            LibraryView::AllPhotos => {
-                if self.filter.is_empty() {
-                    lib.all_photos(self.sort).ok()
-                } else {
-                    lib.search(&self.filter, self.sort).ok()
-                }
-            }
-            LibraryView::Session(id) => lib.photos_in_session(id).ok(),
-            LibraryView::Collection(id) => lib.collection_photos(*id).ok(),
+        // Compose the view scope into a copy of the filter so that
+        // session/collection views also honor shutter/ISO/aperture/etc.
+        let mut filter = self.filter.clone();
+        match &self.view {
+            LibraryView::AllPhotos => {}
+            LibraryView::Session(id) => filter.import_session = Some(id.clone()),
+            LibraryView::Collection(id) => filter.collection_id = Some(*id),
+        }
+
+        let photos = if filter.is_empty() {
+            lib.all_photos(self.sort).ok()
+        } else {
+            lib.search(&filter, self.sort).ok()
         };
 
         if let Some(photos) = photos {
@@ -101,6 +121,12 @@ impl LibraryState {
                 self.thumb_scale = thumb_scale;
                 self.view = LibraryView::AllPhotos;
                 self.filter = SearchFilter::default();
+                self.iso_exact_text.clear();
+                self.aperture_exact_text.clear();
+                self.shutter_exact_text.clear();
+                self.iso_error = None;
+                self.aperture_error = None;
+                self.shutter_error = None;
                 self.selected.clear();
                 self.thumb_cache.clear();
                 self.thumb_requested.clear();

@@ -167,6 +167,55 @@ fn rebuild_index_restores_rows_after_db_delete() {
     assert_eq!(photos.len(), 2, "should have 2 photos after rebuild");
 }
 
+// ── Search (EXIF-based) ───────────────────────────────────────────────────────
+
+#[test]
+fn search_by_iso_excludes_no_exif_photos() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    // jpeg has ISO 400; png has no EXIF
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+
+    let filter = SearchFilter {
+        iso: Some(400..=400),
+        ..Default::default()
+    };
+    let results = lib.search(&filter, SortOrder::default()).unwrap();
+    assert_eq!(results.len(), 1, "only the JPEG with ISO 400 should match");
+    assert_eq!(
+        results[0].original_filename.as_deref(),
+        Some("meta_test.jpg")
+    );
+}
+
+#[test]
+fn search_by_shutter_finds_matching_photo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    // jpeg has shutter 1/200 s (shutter_sec ≈ 0.005)
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+
+    // 1/200 = 0.005; use ±0.5% tolerance
+    let eps = 0.005 * 0.005_f64;
+    let filter = SearchFilter {
+        shutter_min_sec: Some(0.005 - eps),
+        shutter_max_sec: Some(0.005 + eps),
+        ..Default::default()
+    };
+    let results = lib.search(&filter, SortOrder::default()).unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "only the JPEG with 1/200 shutter should match"
+    );
+    assert_eq!(
+        results[0].original_filename.as_deref(),
+        Some("meta_test.jpg")
+    );
+}
+
 // ── Search ────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -184,8 +233,10 @@ fn search_by_text_returns_matching_subset() {
         .find(|r| r.original_filename.as_deref() == Some("meta_test.jpg"))
         .expect("jpeg photo");
 
-    let mut lmta = rasterlab_library::LibraryMeta::default();
-    lmta.keywords = vec!["searchable_kw".to_owned()];
+    let lmta = rasterlab_library::LibraryMeta {
+        keywords: vec!["searchable_kw".to_owned()],
+        ..Default::default()
+    };
     lib.update_metadata(jpeg_row.id, lmta).unwrap();
 
     let filter = SearchFilter {
@@ -214,8 +265,10 @@ fn search_by_rating_min_filters_correctly() {
         .iter()
         .find(|r| r.original_filename.as_deref() == Some("meta_test.jpg"))
         .unwrap();
-    let mut lmta = rasterlab_library::LibraryMeta::default();
-    lmta.rating = 4;
+    let lmta = rasterlab_library::LibraryMeta {
+        rating: 4,
+        ..Default::default()
+    };
     lib.update_metadata(jpeg_row.id, lmta).unwrap();
 
     let filter = SearchFilter {
@@ -303,9 +356,11 @@ fn batch_metadata_update_applies_to_all() {
     let updates: Vec<(PhotoId, rasterlab_library::LibraryMeta)> = photos
         .iter()
         .map(|r| {
-            let mut lmta = rasterlab_library::LibraryMeta::default();
-            lmta.rating = 5;
-            lmta.caption = Some("batch caption".to_owned());
+            let lmta = rasterlab_library::LibraryMeta {
+                rating: 5,
+                caption: Some("batch caption".to_owned()),
+                ..Default::default()
+            };
             (r.id, lmta)
         })
         .collect();

@@ -172,6 +172,12 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         {
             state.library.view = LibraryView::AllPhotos;
             state.library.filter = SearchFilter::default();
+            state.library.iso_exact_text.clear();
+            state.library.aperture_exact_text.clear();
+            state.library.shutter_exact_text.clear();
+            state.library.iso_error = None;
+            state.library.aperture_error = None;
+            state.library.shutter_error = None;
             state.library.refresh();
         }
 
@@ -185,6 +191,12 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             if ui.selectable_label(selected, label).clicked() {
                 state.library.view = LibraryView::Session(sess.id.clone());
                 state.library.filter = SearchFilter::default();
+                state.library.iso_exact_text.clear();
+                state.library.aperture_exact_text.clear();
+                state.library.shutter_exact_text.clear();
+                state.library.iso_error = None;
+                state.library.aperture_error = None;
+                state.library.shutter_error = None;
                 state.library.refresh();
             }
         }
@@ -198,6 +210,12 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             if ui.selectable_label(selected, &coll.name).clicked() {
                 state.library.view = LibraryView::Collection(coll.id);
                 state.library.filter = SearchFilter::default();
+                state.library.iso_exact_text.clear();
+                state.library.aperture_exact_text.clear();
+                state.library.shutter_exact_text.clear();
+                state.library.iso_error = None;
+                state.library.aperture_error = None;
+                state.library.shutter_error = None;
                 state.library.refresh();
             }
         }
@@ -263,124 +281,90 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
 
-        // Shutter speed — "faster than" presets (shutter_max_sec)
+        // Shutter speed — exact value, e.g. "1/500" or "0.5"
         ui.horizontal(|ui| {
             ui.label("Shutter:");
-            const SHUTTER: &[(&str, Option<f64>)] = &[
-                ("Any", None),
-                ("≥ 1/30", Some(1.0 / 30.0)),
-                ("≥ 1/60", Some(1.0 / 60.0)),
-                ("≥ 1/125", Some(1.0 / 125.0)),
-                ("≥ 1/250", Some(1.0 / 250.0)),
-                ("≥ 1/500", Some(1.0 / 500.0)),
-                ("≥ 1/1000", Some(1.0 / 1000.0)),
-                ("≥ 1/2000", Some(1.0 / 2000.0)),
-            ];
-            let cur = state.library.filter.shutter_max_sec;
-            let sel_label = SHUTTER
-                .iter()
-                .find(|(_, v)| match (v, cur) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => (a - b).abs() < 1e-9,
-                    _ => false,
-                })
-                .map_or("Any", |(l, _)| l);
-            egui::ComboBox::from_id_salt("lib_shutter_filter")
-                .selected_text(sel_label)
-                .show_ui(ui, |ui| {
-                    for (lbl, val) in SHUTTER {
-                        let active = match (val, cur) {
-                            (None, None) => true,
-                            (Some(a), Some(b)) => (a - b).abs() < 1e-9,
-                            _ => false,
-                        };
-                        if ui.selectable_label(active, *lbl).clicked() {
-                            state.library.filter.shutter_max_sec = *val;
-                            changed = true;
-                        }
+            let resp = ui.text_edit_singleline(&mut state.library.shutter_exact_text);
+            if resp.changed() {
+                match validate_shutter(&state.library.shutter_exact_text) {
+                    Ok(Some(s)) => {
+                        let eps = (s * 0.005).max(1e-9);
+                        state.library.filter.shutter_min_sec = Some((s - eps).max(0.0));
+                        state.library.filter.shutter_max_sec = Some(s + eps);
+                        state.library.shutter_error = None;
                     }
-                });
+                    Ok(None) => {
+                        state.library.filter.shutter_min_sec = None;
+                        state.library.filter.shutter_max_sec = None;
+                        state.library.shutter_error = None;
+                    }
+                    Err(msg) => {
+                        state.library.filter.shutter_min_sec = None;
+                        state.library.filter.shutter_max_sec = None;
+                        state.library.shutter_error = Some(msg);
+                    }
+                }
+                changed = true;
+            }
+            validation_popup(
+                ui.ctx(),
+                &resp,
+                "shutter",
+                state.library.shutter_error.as_deref(),
+            );
         });
 
-        // Aperture — "f/X or wider" presets (aperture range 0.5..=max_f)
+        // Aperture — exact f-number, e.g. "2.8" or "f/2.8"
         ui.horizontal(|ui| {
             ui.label("Aperture:");
-            const APERTURE: &[(&str, Option<f32>)] = &[
-                ("Any", None),
-                ("≤ f/1.4", Some(1.4)),
-                ("≤ f/2", Some(2.0)),
-                ("≤ f/2.8", Some(2.8)),
-                ("≤ f/4", Some(4.0)),
-                ("≤ f/5.6", Some(5.6)),
-            ];
-            let cur_end = state.library.filter.aperture.as_ref().map(|r| *r.end());
-            let sel_label = APERTURE
-                .iter()
-                .find(|(_, v)| match (v, cur_end) {
-                    (None, None) => true,
-                    (Some(a), Some(b)) => (a - b).abs() < 0.05,
-                    _ => false,
-                })
-                .map_or("Any", |(l, _)| l);
-            egui::ComboBox::from_id_salt("lib_aperture_filter")
-                .selected_text(sel_label)
-                .show_ui(ui, |ui| {
-                    for (lbl, val) in APERTURE {
-                        let active = match (val, cur_end) {
-                            (None, None) => true,
-                            (Some(a), Some(b)) => (a - b).abs() < 0.05,
-                            _ => false,
-                        };
-                        if ui.selectable_label(active, *lbl).clicked() {
-                            state.library.filter.aperture = val.map(|v| 0.5_f32..=v);
-                            changed = true;
-                        }
+            let resp = ui.text_edit_singleline(&mut state.library.aperture_exact_text);
+            if resp.changed() {
+                match validate_aperture(&state.library.aperture_exact_text) {
+                    Ok(Some(f)) => {
+                        state.library.filter.aperture = Some((f - 0.05)..=(f + 0.05));
+                        state.library.aperture_error = None;
                     }
-                });
+                    Ok(None) => {
+                        state.library.filter.aperture = None;
+                        state.library.aperture_error = None;
+                    }
+                    Err(msg) => {
+                        state.library.filter.aperture = None;
+                        state.library.aperture_error = Some(msg);
+                    }
+                }
+                changed = true;
+            }
+            validation_popup(
+                ui.ctx(),
+                &resp,
+                "aperture",
+                state.library.aperture_error.as_deref(),
+            );
         });
 
-        // ISO — "up to X" presets (iso range 50..=max_iso)
+        // ISO — exact value, e.g. "800"
         ui.horizontal(|ui| {
             ui.label("ISO:");
-            const ISO: &[(&str, Option<u32>)] = &[
-                ("Any", None),
-                ("≤ 100", Some(100)),
-                ("≤ 400", Some(400)),
-                ("≤ 800", Some(800)),
-                ("≤ 1600", Some(1600)),
-                ("≤ 3200", Some(3200)),
-                ("≥ 3200", Some(u32::MAX)),
-            ];
-            let cur = state.library.filter.iso.clone();
-            let sel_label = ISO
-                .iter()
-                .find(|(_, v)| match (v, &cur) {
-                    (None, None) => true,
-                    (Some(a), Some(r)) => *a == *r.end(),
-                    _ => false,
-                })
-                .map_or("Any", |(l, _)| l);
-            egui::ComboBox::from_id_salt("lib_iso_filter")
-                .selected_text(sel_label)
-                .show_ui(ui, |ui| {
-                    for (lbl, val) in ISO {
-                        let active = match (val, &cur) {
-                            (None, None) => true,
-                            (Some(a), Some(r)) => *a == *r.end(),
-                            _ => false,
-                        };
-                        if ui.selectable_label(active, *lbl).clicked() {
-                            state.library.filter.iso = val.map(|v| {
-                                if v == u32::MAX {
-                                    3200..=u32::MAX
-                                } else {
-                                    50..=v
-                                }
-                            });
-                            changed = true;
-                        }
+            let resp = ui.text_edit_singleline(&mut state.library.iso_exact_text);
+            if resp.changed() {
+                match validate_iso(&state.library.iso_exact_text) {
+                    Ok(Some(v)) => {
+                        state.library.filter.iso = Some(v..=v);
+                        state.library.iso_error = None;
                     }
-                });
+                    Ok(None) => {
+                        state.library.filter.iso = None;
+                        state.library.iso_error = None;
+                    }
+                    Err(msg) => {
+                        state.library.filter.iso = None;
+                        state.library.iso_error = Some(msg);
+                    }
+                }
+                changed = true;
+            }
+            validation_popup(ui.ctx(), &resp, "iso", state.library.iso_error.as_deref());
         });
 
         // Edited only
@@ -396,15 +380,129 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             state.library.refresh();
         }
 
-        // Clear filters button
-        if !state.library.filter.is_empty() {
+        // Clear filters button — also visible when there's a validation error,
+        // so the user can recover without having to find the offending field.
+        let has_error = state.library.iso_error.is_some()
+            || state.library.aperture_error.is_some()
+            || state.library.shutter_error.is_some();
+        if !state.library.filter.is_empty() || has_error {
             ui.add_space(4.0);
             if ui.button("Clear Filters").clicked() {
                 state.library.filter = SearchFilter::default();
+                state.library.iso_exact_text.clear();
+                state.library.aperture_exact_text.clear();
+                state.library.shutter_exact_text.clear();
+                state.library.iso_error = None;
+                state.library.aperture_error = None;
+                state.library.shutter_error = None;
                 state.library.refresh();
             }
         }
     });
+}
+
+// ── Filter input validators ───────────────────────────────────────────────────
+//
+// Each returns:
+//   Ok(None)    — empty input (filter should be cleared, no error)
+//   Ok(Some(v)) — parsed successfully and within the reasonable domain
+//   Err(msg)    — unparseable or out of range; `msg` is shown in a popup
+
+// Reasonable physical bounds for each field.
+const SHUTTER_MIN_SEC: f64 = 1e-5; // 1/100000 s
+const SHUTTER_MAX_SEC: f64 = 3600.0; // 1 hour
+const APERTURE_MIN: f32 = 0.5;
+const APERTURE_MAX: f32 = 100.0;
+const ISO_MIN: u32 = 10;
+const ISO_MAX: u32 = 1_000_000;
+
+fn validate_shutter(s: &str) -> Result<Option<f64>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let value = if let Some((num, den)) = s.split_once('/') {
+        let n: f64 = num
+            .trim()
+            .parse()
+            .map_err(|_| "Use a value like 1/500 or 0.5".to_owned())?;
+        let d: f64 = den
+            .trim()
+            .parse()
+            .map_err(|_| "Use a value like 1/500 or 0.5".to_owned())?;
+        if d == 0.0 {
+            return Err("Denominator cannot be zero".to_owned());
+        }
+        n / d
+    } else {
+        s.parse::<f64>()
+            .map_err(|_| "Use a value like 1/500 or 0.5".to_owned())?
+    };
+    if !(SHUTTER_MIN_SEC..=SHUTTER_MAX_SEC).contains(&value) {
+        return Err(format!(
+            "Shutter must be between 1/100000 s and 1 h (got {value:.5} s)"
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn validate_aperture(s: &str) -> Result<Option<f32>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let stripped = s
+        .strip_prefix("f/")
+        .or_else(|| s.strip_prefix("F/"))
+        .unwrap_or(s);
+    let f: f32 = stripped
+        .parse()
+        .map_err(|_| "Use a value like 2.8 or f/2.8".to_owned())?;
+    if !(APERTURE_MIN..=APERTURE_MAX).contains(&f) {
+        return Err(format!(
+            "Aperture must be between f/{APERTURE_MIN} and f/{APERTURE_MAX} (got f/{f})"
+        ));
+    }
+    Ok(Some(f))
+}
+
+fn validate_iso(s: &str) -> Result<Option<u32>, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let v: u32 = s
+        .parse()
+        .map_err(|_| "ISO must be a positive whole number".to_owned())?;
+    if !(ISO_MIN..=ISO_MAX).contains(&v) {
+        return Err(format!(
+            "ISO must be between {ISO_MIN} and {ISO_MAX} (got {v})"
+        ));
+    }
+    Ok(Some(v))
+}
+
+/// Draw a small warning popup just below the given text-edit response.
+/// Shown only when `error` is `Some`; disappears automatically when cleared.
+fn validation_popup(
+    ctx: &egui::Context,
+    resp: &egui::Response,
+    id_salt: &str,
+    error: Option<&str>,
+) {
+    let Some(msg) = error else { return };
+    let anchor = resp.rect.left_bottom() + egui::vec2(0.0, 2.0);
+    egui::Area::new(egui::Id::new(format!("lib_validation_{id_salt}")))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(anchor)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(egui::Color32::from_rgb(48, 18, 18))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 80, 80)))
+                .show(ui, |ui| {
+                    ui.colored_label(egui::Color32::from_rgb(255, 170, 170), format!("⚠ {msg}"));
+                });
+        });
 }
 
 // ── Thumbnail grid ────────────────────────────────────────────────────────────
