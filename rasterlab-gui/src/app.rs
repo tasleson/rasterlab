@@ -285,11 +285,22 @@ impl eframe::App for RasterLabApp {
         {
             let dirty_marker = if self.state.is_dirty { " ●" } else { "" };
             let title = match &self.state.project_path {
-                Some(p) => format!(
-                    "RasterLab — {}{}",
-                    p.file_name().unwrap_or_default().to_string_lossy(),
-                    dirty_marker
-                ),
+                Some(_) => {
+                    let display = self
+                        .state
+                        .last_path
+                        .as_deref()
+                        .and_then(|p| p.file_name())
+                        .or_else(|| {
+                            self.state
+                                .project_path
+                                .as_deref()
+                                .and_then(|p| p.file_name())
+                        })
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    format!("RasterLab — {}{}", display, dirty_marker)
+                }
                 None if self.state.pipeline().is_some() => {
                     format!("RasterLab — Unsaved Project{}", dirty_marker)
                 }
