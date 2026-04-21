@@ -137,10 +137,13 @@ impl LibraryExif {
     }
 }
 
-/// Parse a shutter-speed string (e.g. `"1/2000"`, `"0.5"`, `"2"`) to decimal
-/// seconds. Returns `None` if the string cannot be interpreted.
+/// Parse a shutter-speed string to decimal seconds.
+///
+/// Accepts `"1/2000"`, `"1/500 s"`, `"0.5"`, `"0.5 s"`, `"2 s"`, etc.
+/// The trailing ` s` unit (produced by `format_rational`) is stripped before parsing.
 pub fn parse_shutter_sec(s: &str) -> Option<f64> {
     let s = s.trim();
+    let s = s.strip_suffix(" s").unwrap_or(s).trim_end();
     if let Some((num, den)) = s.split_once('/') {
         let n: f64 = num.trim().parse().ok()?;
         let d: f64 = den.trim().parse().ok()?;
@@ -172,6 +175,17 @@ mod tests {
     #[test]
     fn parse_shutter_whole() {
         let v = parse_shutter_sec("2").unwrap();
+        assert!((v - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn parse_shutter_with_unit_suffix() {
+        // format_rational appends " s" — parser must strip it
+        let v = parse_shutter_sec("1/200 s").unwrap();
+        assert!((v - 0.005).abs() < 1e-10);
+        let v = parse_shutter_sec("0.5 s").unwrap();
+        assert!((v - 0.5).abs() < 1e-10);
+        let v = parse_shutter_sec("2 s").unwrap();
         assert!((v - 2.0).abs() < 1e-10);
     }
 
