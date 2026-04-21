@@ -54,6 +54,12 @@ pub struct Prefs {
     /// Most-recently-opened files, newest first.  Capped at [`MAX_RECENT`].
     #[serde(default)]
     pub recent_files: Vec<PathBuf>,
+    /// Friendly display names for entries in [`recent_files`], keyed by the
+    /// path's string form. Populated when opening `.rlab` files that carry
+    /// library metadata so the Open Recent menu can show the original
+    /// filename instead of the blake3 hash.
+    #[serde(default)]
+    pub recent_display_names: HashMap<String, String>,
     /// UI scale override (pixels-per-point).  `None` means follow the OS/
     /// display DPI automatically.  Stored values are restricted to the set
     /// [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0].
@@ -149,11 +155,42 @@ impl Prefs {
     }
 
     /// Prepend `path` to the recent-files list, deduplicating and capping at
-    /// [`MAX_RECENT`].
-    pub fn push_recent(&mut self, path: PathBuf) {
+    /// [`MAX_RECENT`]. `display_name` is stored when `Some` (e.g. the original
+    /// filename for a library-imported `.rlab`) and cleared otherwise, so a
+    /// stale mapping from an earlier import is not shown for a re-opened file.
+    pub fn push_recent(&mut self, path: PathBuf, display_name: Option<String>) {
         self.recent_files.retain(|p| p != &path);
-        self.recent_files.insert(0, path);
+        self.recent_files.insert(0, path.clone());
         self.recent_files.truncate(MAX_RECENT);
+
+        let key = path.to_string_lossy().into_owned();
+        match display_name {
+            Some(name) => {
+                self.recent_display_names.insert(key, name);
+            }
+            None => {
+                self.recent_display_names.remove(&key);
+            }
+        }
+
+        let live: std::collections::HashSet<String> = self
+            .recent_files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        self.recent_display_names.retain(|k, _| live.contains(k));
+    }
+
+    /// Friendly display name for a recent-files entry, falling back to the
+    /// file's basename (then to the full path) when no override is stored.
+    pub fn recent_display_name(&self, path: &std::path::Path) -> String {
+        let key = path.to_string_lossy();
+        if let Some(name) = self.recent_display_names.get(key.as_ref()) {
+            return name.clone();
+        }
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
     }
 
     /// Prepend `path` to the recent-libraries list, deduplicating and capping

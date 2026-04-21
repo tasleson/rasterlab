@@ -332,10 +332,7 @@ impl eframe::App for RasterLabApp {
                         ui.add_enabled_ui(!recent.is_empty(), |ui| {
                             ui.menu_button("Open Recent", |ui| {
                                 for path in &recent {
-                                    let label = path
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| path.display().to_string());
+                                    let label = self.state.prefs.recent_display_name(path);
                                     if ui
                                         .button(label)
                                         .on_hover_text(path.display().to_string())
@@ -349,6 +346,7 @@ impl eframe::App for RasterLabApp {
                                 if ui.button("Clear Recent").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);
                                     self.state.prefs.recent_files.clear();
+                                    self.state.prefs.recent_display_names.clear();
                                     self.state.prefs.save();
                                 }
                             });

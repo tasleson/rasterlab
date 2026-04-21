@@ -329,7 +329,7 @@ impl AppState {
                         ));
                     }
 
-                    self.prefs.push_recent(path);
+                    self.prefs.push_recent(path, None);
                     self.prefs.save();
                     self.loading = false;
                     self.image_generation += 1;
@@ -371,7 +371,8 @@ impl AppState {
                             self.status = format!("Warning: could not restore edit stack: {}", e);
                         }
                     }
-                    self.prefs.push_recent(path);
+                    let display_name = rlab.lmta.as_ref().and_then(|l| l.original_filename.clone());
+                    self.prefs.push_recent(path, display_name);
                     self.prefs.save();
                     self.loading = false;
                     self.image_generation += 1;
@@ -501,6 +502,7 @@ impl AppState {
     pub fn open_file(&mut self, path: std::path::PathBuf) {
         self.loading = true;
         self.status = format!("Loading {}…", path.display());
+        self.mode = AppMode::Editor;
 
         // Clear the canvas so the previous image doesn't flash while the new
         // one is still decoding/rendering in the background.
