@@ -27,11 +27,13 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
 
     ScrollArea::vertical().show(ui, |ui| {
         // Thumbnail preview — scale to fit within a square bound while
-        // preserving the photo's aspect ratio so it isn't distorted.
+        // preserving the texture's own aspect (which reflects rotation/crop
+        // ops, whereas photo.width/height are the source dimensions).
         if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
             let bound = ui.available_width().min(200.0);
-            let size = if photo.width > 0 && photo.height > 0 {
-                let aspect = photo.width as f32 / photo.height as f32;
+            let tex_size = tex.size_vec2();
+            let size = if tex_size.x > 0.0 && tex_size.y > 0.0 {
+                let aspect = tex_size.x / tex_size.y;
                 if aspect >= 1.0 {
                     egui::vec2(bound, bound / aspect)
                 } else {

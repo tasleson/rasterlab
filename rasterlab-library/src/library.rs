@@ -5,7 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rasterlab_core::{formats::FormatRegistry, library_meta::LibraryMeta, project::RlabFile};
+use rasterlab_core::{
+    formats::FormatRegistry, library_meta::LibraryMeta, pipeline::EditPipeline, project::RlabFile,
+};
 
 use crate::{
     db_trait::{
@@ -253,11 +255,30 @@ impl Library {
     pub fn regenerate_thumbnail(&self, hash: &str) -> Result<()> {
         let rlab_path = self.rlab_path(hash);
         let rlab = RlabFile::read(&rlab_path)?;
-        let image = self
+        let source = self
             .registry
             .decode_bytes(&rlab.original_bytes, None)
             .context("decode original for thumbnail")?;
-        let thumb = generate_thumbnail(&image, 512)?;
+
+        // Apply the active virtual copy's edit stack so the thumbnail reflects
+        // saved edits.
+        let active = rlab
+            .active_copy_index
+            .min(rlab.copies.len().saturating_sub(1));
+        let pipeline_state = rlab
+            .copies
+            .get(active)
+            .map(|c| c.pipeline_state.clone())
+            .context("rlab has no virtual copies")?;
+        let source_arc = Arc::new(source);
+        let mut pipeline = EditPipeline::new_virtual_copy(Arc::clone(&source_arc));
+        pipeline
+            .load_state(pipeline_state)
+            .map_err(|e| anyhow::anyhow!("load pipeline state: {e}"))?;
+        let rendered = pipeline
+            .render()
+            .map_err(|e| anyhow::anyhow!("render pipeline: {e}"))?;
+        let thumb = generate_thumbnail(&rendered, 512)?;
         let tpath = self.thumb_path(hash);
         if let Some(parent) = tpath.parent() {
             std::fs::create_dir_all(parent)?;

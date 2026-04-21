@@ -565,19 +565,22 @@ fn thumb_cell(
 
     let img_rect = rect.shrink(padding);
 
-    // Draw thumbnail or placeholder, preserving the photo's aspect ratio
-    // inside the square cell so landscape/portrait images aren't distorted.
-    let fit_rect = fit_rect_preserve_aspect(img_rect, photo.width, photo.height);
+    // Draw thumbnail or placeholder. When the texture is available, fit to
+    // the texture's own aspect so that rotated/cropped results render
+    // correctly — the photo.width/height in the DB are the source image
+    // dimensions and don't reflect pipeline ops like rotation or crop.
     if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
+        let tex_size = tex.size_vec2();
+        let fit_rect = fit_rect_preserve_aspect(img_rect, tex_size.x as u32, tex_size.y as u32);
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         ui.painter()
             .image(tex.id(), fit_rect, uv, egui::Color32::WHITE);
     } else {
-        // Placeholder grey rect (same shape as the final thumbnail so layout
-        // doesn't shift when the texture loads in).
+        // Placeholder grey rect using the source aspect as a best guess
+        // until the real thumbnail loads in.
+        let fit_rect = fit_rect_preserve_aspect(img_rect, photo.width, photo.height);
         ui.painter()
             .rect_filled(fit_rect, 2.0, egui::Color32::from_gray(60));
-        // Request background load
         state.request_thumb_load(photo.hash.clone());
     }
 

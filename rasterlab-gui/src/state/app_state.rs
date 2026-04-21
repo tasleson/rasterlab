@@ -681,25 +681,27 @@ impl AppState {
                 self.status = format!("Saved → {}", path.display());
 
                 // If this file was opened from the library, regenerate its thumbnail.
-                if let Some((_, hash)) = &self.library_context {
+                if let Some((_, hash)) = &self.library_context
+                    && let Some(lib) = self.library.library.clone()
+                {
                     let hash = hash.clone();
-                    if let Some(lib) = self.library.library.clone() {
-                        let tx = self.bg_tx.clone();
-                        let ctx = self.ctx.clone();
-                        std::thread::Builder::new()
-                            .name("rasterlab-thumb-regen".into())
-                            .stack_size(32 * 1024 * 1024)
-                            .spawn(move || {
-                                if lib.regenerate_thumbnail(&hash).is_ok() {
-                                    let thumb_path = lib.thumb_path(&hash);
-                                    if let Ok(bytes) = std::fs::read(&thumb_path) {
-                                        let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
-                                        ctx.request_repaint();
-                                    }
-                                }
-                            })
-                            .ok();
-                    }
+                    let tx = self.bg_tx.clone();
+                    let ctx = self.ctx.clone();
+                    std::thread::Builder::new()
+                        .name("rasterlab-thumb-regen".into())
+                        .stack_size(32 * 1024 * 1024)
+                        .spawn(move || {
+                            if let Err(e) = lib.regenerate_thumbnail(&hash) {
+                                eprintln!("thumb-regen failed: {:#}", e);
+                                return;
+                            }
+                            let thumb_path = lib.thumb_path(&hash);
+                            if let Ok(bytes) = std::fs::read(&thumb_path) {
+                                let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
+                                ctx.request_repaint();
+                            }
+                        })
+                        .ok();
                 }
             }
             Err(e) => {
