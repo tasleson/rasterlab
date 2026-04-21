@@ -114,9 +114,14 @@ impl CanvasState {
         let is_editing = state.editing.is_some();
 
         let Some(image) = state.rendered.as_ref() else {
+            let placeholder = if state.loading {
+                "Loading…"
+            } else {
+                "Open an image to begin"
+            };
             ui.centered_and_justified(|ui| {
                 ui.label(
-                    egui::RichText::new("Open an image to begin")
+                    egui::RichText::new(placeholder)
                         .size(22.0)
                         .color(Color32::from_gray(120)),
                 );

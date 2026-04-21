@@ -498,6 +498,13 @@ impl AppState {
         self.loading = true;
         self.status = format!("Loading {}…", path.display());
 
+        // Clear the canvas so the previous image doesn't flash while the new
+        // one is still decoding/rendering in the background.
+        self.rendered = None;
+        self.preview_overlay = None;
+        self.preview_overlay_rect = None;
+        self.histogram = None;
+
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
 
