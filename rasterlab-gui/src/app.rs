@@ -22,6 +22,12 @@ enum PendingOpen {
     Path(PathBuf),
     /// Restore an autosave session.
     Autosave(crate::autosave::AutosaveEntry),
+    /// Open a photo from the library grid (also sets library context + mode).
+    LibraryPhoto {
+        rlab_path: PathBuf,
+        lib_root: PathBuf,
+        hash: String,
+    },
 }
 
 pub struct RasterLabApp {
@@ -147,6 +153,30 @@ impl RasterLabApp {
         } else {
             self.state.restore_autosave(entry);
         }
+    }
+
+    /// Open a photo from the library, prompting to discard unsaved changes first if needed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_open_library_photo(&mut self, rlab_path: PathBuf, lib_root: PathBuf, hash: String) {
+        if self.state.is_dirty {
+            self.pending_open = Some(PendingOpen::LibraryPhoto {
+                rlab_path,
+                lib_root,
+                hash,
+            });
+            self.open_confirm_open = true;
+        } else {
+            self.open_library_photo(rlab_path, lib_root, hash);
+        }
+    }
+
+    /// Actually switch the editor to a library photo. Assumes any unsaved-changes
+    /// prompt has already been handled.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_library_photo(&mut self, rlab_path: PathBuf, lib_root: PathBuf, hash: String) {
+        self.state.library_context = Some((lib_root, hash));
+        self.state.open_file(rlab_path);
+        self.state.mode = AppMode::Editor;
     }
 
     /// Save in-place if a project path is already known; otherwise open Save As.
@@ -277,6 +307,9 @@ impl eframe::App for RasterLabApp {
         if self.state.tools.library_import_folder_dialog_requested {
             self.state.tools.library_import_folder_dialog_requested = false;
             self.chooser.import_folder(&ctx);
+        }
+        if let Some((rlab_path, lib_root, hash)) = self.state.library.pending_open_photo.take() {
+            self.request_open_library_photo(rlab_path, lib_root, hash);
         }
 
         self.handle_keyboard(&ctx);
@@ -874,6 +907,11 @@ impl RasterLabApp {
                             Some(PendingOpen::Dialog) => self.chooser.open_image(ctx),
                             Some(PendingOpen::Path(p)) => self.state.open_file(p),
                             Some(PendingOpen::Autosave(e)) => self.state.restore_autosave(e),
+                            Some(PendingOpen::LibraryPhoto {
+                                rlab_path,
+                                lib_root,
+                                hash,
+                            }) => self.open_library_photo(rlab_path, lib_root, hash),
                             None => {}
                         }
                     }

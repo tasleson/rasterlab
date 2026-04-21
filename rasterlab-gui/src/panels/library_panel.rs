@@ -627,14 +627,14 @@ fn thumb_cell(
         }
     }
 
-    if resp.double_clicked() {
-        // Open in editor
-        if let Some(lib) = &state.library.library {
-            let rlab_path = lib.rlab_path(&photo.hash);
-            state.library_context = Some((lib.root().to_path_buf(), photo.hash.clone()));
-            state.open_file(rlab_path);
-            state.mode = crate::state::AppMode::Editor;
-        }
+    if resp.double_clicked()
+        && let Some(lib) = &state.library.library
+    {
+        // Defer the actual open to app.rs so the unsaved-changes dialog can
+        // intercept before the current edits get replaced.
+        let rlab_path = lib.rlab_path(&photo.hash);
+        state.library.pending_open_photo =
+            Some((rlab_path, lib.root().to_path_buf(), photo.hash.clone()));
     }
 
     resp.context_menu(|ui| {

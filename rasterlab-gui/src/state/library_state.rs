@@ -56,6 +56,11 @@ pub struct LibraryState {
     pub iso_error: Option<String>,
     pub aperture_error: Option<String>,
     pub shutter_error: Option<String>,
+
+    /// Set by the thumbnail grid when the user double-clicks a photo, so
+    /// `app.rs` can route the open through the unsaved-changes confirmation
+    /// dialog. Tuple is `(rlab_path, library_root, photo_hash)`.
+    pub pending_open_photo: Option<(PathBuf, PathBuf, String)>,
 }
 
 impl Default for LibraryState {
@@ -81,6 +86,7 @@ impl Default for LibraryState {
             iso_error: None,
             aperture_error: None,
             shutter_error: None,
+            pending_open_photo: None,
         }
     }
 }
