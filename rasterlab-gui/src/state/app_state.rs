@@ -283,6 +283,8 @@ impl AppState {
                     self.tools.crop_h = h;
                     self.tools.resize_w = w;
                     self.tools.resize_h = h;
+                    self.tools.rotate_deg = 0.0;
+                    self.tools.rotate_preview_active = false;
                     self.last_path = Some(path.clone());
                     self.original_bytes = Some(original_bytes);
                     self.project_path = None;
@@ -340,6 +342,8 @@ impl AppState {
                     self.tools.crop_h = h;
                     self.tools.resize_w = w;
                     self.tools.resize_h = h;
+                    self.tools.rotate_deg = 0.0;
+                    self.tools.rotate_preview_active = false;
                     self.last_path = rlab
                         .meta
                         .source_path
