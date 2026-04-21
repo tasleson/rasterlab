@@ -40,8 +40,24 @@ pub fn import_files(
     cancelled: Arc<AtomicBool>,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Result<ImportSession> {
-    let session_id = Uuid::new_v4().to_string();
-    let started_at = unix_now();
+    let now = unix_now();
+    // Session is named by the date the user imports, so imports on the
+    // same local day roll into the same session.
+    let session_name = format_date_from_unix(now);
+
+    let existing = db
+        .all_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|s| s.name == session_name);
+    let (session_id, existing_count, session_started_at) = match existing {
+        Some(s) => (s.id, s.photo_count, s.started_at),
+        None => {
+            let id = Uuid::new_v4().to_string();
+            db.insert_session(&id, &session_name, now, None)?;
+            (id, 0, now)
+        }
+    };
 
     progress_cb(ImportProgress {
         total: paths.len(),
@@ -86,10 +102,7 @@ pub fn import_files(
         }
     }
 
-    // Derive session name from the capture-date range of imported photos.
-    let session_name = derive_session_name(db, &session_id);
-    db.insert_session(&session_id, &session_name, started_at, None)?;
-    db.update_session_count(&session_id, done as i64)?;
+    db.update_session_count(&session_id, existing_count + done as i64)?;
 
     progress_cb(ImportProgress {
         total: paths.len(),
@@ -102,7 +115,7 @@ pub fn import_files(
     Ok(ImportSession {
         id: session_id,
         name: session_name,
-        started_at,
+        started_at: session_started_at,
         photo_count: done,
         errors,
     })
@@ -334,52 +347,6 @@ fn stack_peer_for(_path: &Path, _stack_map: &[(usize, usize)], _len: usize) -> O
 }
 
 // ── Session naming ────────────────────────────────────────────────────────────
-
-fn derive_session_name(db: &dyn LibraryDb, session_id: &str) -> String {
-    let photos = db.photos_by_session(session_id).unwrap_or_default();
-    let mut dates: Vec<&str> = photos
-        .iter()
-        .filter_map(|p| p.capture_date.as_deref())
-        .filter(|d| d.len() >= 10)
-        .map(|d| &d[..10]) // "YYYY:MM:DD"
-        .collect();
-    dates.sort_unstable();
-    dates.dedup();
-
-    match dates.as_slice() {
-        [] => {
-            // Fall back to today
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            format_date_from_unix(now)
-        }
-        [single] => format_exif_date(single),
-        [first, .., last] => {
-            format!("{}–{}", format_exif_date(first), format_exif_date(last))
-        }
-    }
-}
-
-/// Format `"YYYY:MM:DD"` → `"Jun 3 2025"`.
-fn format_exif_date(d: &str) -> String {
-    let parts: Vec<&str> = d.splitn(3, ':').collect();
-    if parts.len() < 3 {
-        return d.to_owned();
-    }
-    let month_names = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let month: usize = parts[1].parse().unwrap_or(0);
-    let day: u32 = parts[2].parse().unwrap_or(0);
-    let year = parts[0];
-    if (1..=12).contains(&month) {
-        format!("{} {} {}", month_names[month - 1], day, year)
-    } else {
-        d.to_owned()
-    }
-}
 
 fn format_date_from_unix(ts: u64) -> String {
     // Simple: just return ISO date from unix seconds

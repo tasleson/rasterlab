@@ -98,6 +98,26 @@ fn duplicate_import_is_skipped() {
 }
 
 #[test]
+fn imports_on_same_day_share_one_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    // Import the two files in separate batches on the same day.
+    let s1 = lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let s2 = lib.import_files(&[png_path()], |_| {}).unwrap();
+
+    assert_eq!(
+        s1.id, s2.id,
+        "both imports on the same day should reuse the session id"
+    );
+    assert_eq!(s1.name, s2.name, "session names should match");
+
+    let sessions = lib.all_sessions().unwrap();
+    assert_eq!(sessions.len(), 1, "only one session should exist");
+    assert_eq!(sessions[0].photo_count, 2, "count should aggregate");
+}
+
+#[test]
 fn folder_import_finds_all_supported_formats() {
     let tmp_src = tempfile::tempdir().unwrap();
     // Copy two images into a subdirectory
