@@ -26,10 +26,20 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
     };
 
     ScrollArea::vertical().show(ui, |ui| {
-        // Thumbnail preview
+        // Thumbnail preview — scale to fit within a square bound while
+        // preserving the photo's aspect ratio so it isn't distorted.
         if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
-            let avail = ui.available_width();
-            let size = egui::Vec2::splat(avail.min(200.0));
+            let bound = ui.available_width().min(200.0);
+            let size = if photo.width > 0 && photo.height > 0 {
+                let aspect = photo.width as f32 / photo.height as f32;
+                if aspect >= 1.0 {
+                    egui::vec2(bound, bound / aspect)
+                } else {
+                    egui::vec2(bound * aspect, bound)
+                }
+            } else {
+                egui::Vec2::splat(bound)
+            };
             ui.image(egui::load::SizedTexture::new(tex.id(), size));
             ui.add_space(4.0);
         }

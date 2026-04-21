@@ -565,15 +565,18 @@ fn thumb_cell(
 
     let img_rect = rect.shrink(padding);
 
-    // Draw thumbnail or placeholder
+    // Draw thumbnail or placeholder, preserving the photo's aspect ratio
+    // inside the square cell so landscape/portrait images aren't distorted.
+    let fit_rect = fit_rect_preserve_aspect(img_rect, photo.width, photo.height);
     if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         ui.painter()
-            .image(tex.id(), img_rect, uv, egui::Color32::WHITE);
+            .image(tex.id(), fit_rect, uv, egui::Color32::WHITE);
     } else {
-        // Placeholder grey rect
+        // Placeholder grey rect (same shape as the final thumbnail so layout
+        // doesn't shift when the texture loads in).
         ui.painter()
-            .rect_filled(img_rect, 2.0, egui::Color32::from_gray(60));
+            .rect_filled(fit_rect, 2.0, egui::Color32::from_gray(60));
         // Request background load
         state.request_thumb_load(photo.hash.clone());
     }
@@ -648,4 +651,22 @@ fn thumb_cell(
             ui.close();
         }
     });
+}
+
+/// Return the largest rect with the given `(w, h)` aspect ratio that fits
+/// centered inside `outer`. Falls back to `outer` when the aspect is unknown
+/// (zero dimension).
+fn fit_rect_preserve_aspect(outer: egui::Rect, w: u32, h: u32) -> egui::Rect {
+    if w == 0 || h == 0 {
+        return outer;
+    }
+    let aspect = w as f32 / h as f32;
+    let (ow, oh) = (outer.width(), outer.height());
+    let (fw, fh) = if ow / oh > aspect {
+        (oh * aspect, oh)
+    } else {
+        (ow, ow / aspect)
+    };
+    let size = egui::vec2(fw, fh);
+    egui::Rect::from_center_size(outer.center(), size)
 }
