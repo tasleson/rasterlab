@@ -255,9 +255,10 @@ impl Library {
     pub fn regenerate_thumbnail(&self, hash: &str) -> Result<()> {
         let rlab_path = self.rlab_path(hash);
         let rlab = RlabFile::read(&rlab_path)?;
+        let hint = rlab.meta.source_path.as_deref().map(Path::new);
         let source = self
             .registry
-            .decode_bytes(&rlab.original_bytes, None)
+            .decode_bytes(&rlab.original_bytes, hint)
             .context("decode original for thumbnail")?;
 
         // Apply the active virtual copy's edit stack so the thumbnail reflects
