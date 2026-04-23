@@ -4,7 +4,7 @@
 
 > *How good of an image editor can you build with $20 worth of Claude Code Pro subscription?[2]*
 
-We're here to find out!  This is still a work in progress!
+We're here to find out!  ~This is still a work in progress!~  **This is a wrap, 1 month & $20US**.
 
 ## What is this?
 
