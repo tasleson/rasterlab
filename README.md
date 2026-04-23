@@ -22,6 +22,8 @@ See change log below for status.
 - **Histogram** — per-channel R/G/B + luma, computed in the render thread
 - **Arbitrary rotation** — with bilinear interpolation, the slow one
 - **Plugin API** — because why not
+- **Tamper-evident `.rlab` project format** — chunked binary container that stores the original source bytes verbatim alongside every virtual copy's edit stack, pipeline state, metadata, and an optional thumbnail. Every chunk carries a Blake3 hash and the whole file is sealed with a trailing Blake3 hash, so any mutation is detected on open.
+- **Bitrot recovery on `.rlab`** — a Reed–Solomon parity chunk (`RECC`) protects all preceding bytes at ~10% overhead; parity is written twice (adaptive ratio, with duplicate parity for small files) so corruption inside the parity region is itself survivable. `verify_and_repair` reconstructs damaged chunks in place as long as the total damage stays under the parity budget (`cargo run --example rlab_verify`).
 
 ## Supported operations
 
