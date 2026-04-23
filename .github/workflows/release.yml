@@ -58,7 +58,7 @@ jobs:
           STAGING="rasterlab-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir -p "dist/$STAGING"
           cp "target/${{ matrix.target }}/release/rasterlab-gui" "dist/$STAGING/"
-          cp "target/${{ matrix.target }}/release/rasterlab-cli" "dist/$STAGING/"
+          cp "target/${{ matrix.target }}/release/rasterlab" "dist/$STAGING/"
           cp README.md "dist/$STAGING/"
           tar -czf "dist/${STAGING}.tar.gz" -C dist "$STAGING"
           rm -rf "dist/$STAGING"
