@@ -33,6 +33,9 @@
 //! `LMTA` is written by the library importer and absent in editor-only files.
 //! `RECC` (v4) holds RS parity over all preceding bytes; ~10% overhead; up to 5%
 //! corruption in any position can be recovered via [`verify_and_repair`].
+//! Two identical `RECC` chunks are written back-to-back so the parity itself is
+//! redundant — bitrot landing inside the parity region is survivable as long as
+//! one copy remains intact. Readers use the first copy whose Blake3 validates.
 //! Unknown chunks are skipped on read, enabling forward compatibility.
 
 use std::{
@@ -73,6 +76,15 @@ const TAG_RECC: &[u8; 4] = b"RECC"; // v4+ — Reed-Solomon ECC parity (optional
 // GF(2^8) max total shards = 256; reserve 26 for parity → 230 data shards max.
 const RECC_MAX_DATA_SHARDS: usize = 230;
 const RECC_MIN_SHARD_SIZE: usize = 4096;
+
+/// Data-shard cap used for files large enough to need shards bigger than
+/// [`RECC_MIN_SHARD_SIZE`]. Leaves room for ~20 % parity (212 + 42 = 254 ≤ 255).
+const RECC_LARGE_MAX_DATA_SHARDS: usize = 212;
+
+/// Number of identical `RECC` chunks written by [`RlabFile::write_v4`].
+/// Redundancy guards against bitrot inside the parity region itself: losing any
+/// one copy still leaves a valid parity set for reconstruction.
+const RECC_COPIES: usize = 2;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -220,8 +232,12 @@ impl RlabFile {
         Ok(())
     }
 
-    /// Serialise and write the project to `path` as format v4 with a `RECC`
-    /// Reed-Solomon parity chunk (~10% size overhead).
+    /// Serialise and write the project to `path` as format v4 with `RECC`
+    /// Reed-Solomon parity chunks (~10% parity × [`RECC_COPIES`] ≈ 20% overhead).
+    ///
+    /// The parity chunk is written [`RECC_COPIES`] times so that bitrot landing
+    /// inside the parity region itself is survivable — losing any one copy
+    /// still leaves a valid parity set.
     ///
     /// The resulting file can be verified and repaired with [`verify_and_repair`].
     pub fn write_v4(&self, path: &Path) -> RasterResult<()> {
@@ -231,10 +247,12 @@ impl RlabFile {
         protected.extend_from_slice(&FORMAT_VERSION_V4.to_le_bytes());
         self.write_content_chunks(&mut protected)?;
 
-        // Compute and append the RECC chunk.
+        // Compute RECC parity once, append it RECC_COPIES times.
         let recc_payload = build_recc_payload(&protected)?;
         let mut buf = protected;
-        write_chunk(&mut buf, TAG_RECC, &recc_payload);
+        for _ in 0..RECC_COPIES {
+            write_chunk(&mut buf, TAG_RECC, &recc_payload);
+        }
 
         let file_hash = blake3::hash(&buf);
         buf.extend_from_slice(file_hash.as_bytes());
@@ -458,12 +476,19 @@ pub fn verify_and_repair(path: &Path, repair_to: Option<&Path>) -> RasterResult<
 
     let scan = scan_chunks(payload)?;
 
-    let damaged_chunks: Vec<String> = scan
+    let mut damaged_chunks: Vec<String> = scan
         .chunks
         .iter()
         .filter(|c| !c.hash_ok)
         .map(|c| String::from_utf8_lossy(&c.tag).into_owned())
         .collect();
+    if scan.any_recc_damaged {
+        // Surfaces "bad chunks: RECC" in the verify report when a parity copy
+        // rotted. Harmless alongside the other triggers: any_recc_damaged
+        // implies !file_hash_ok too, so repair would fire anyway — this just
+        // makes the cause visible in the report.
+        damaged_chunks.push("RECC".into());
+    }
 
     if file_hash_ok && damaged_chunks.is_empty() {
         return Ok(VerifyReport {
@@ -503,11 +528,18 @@ struct ChunkInfo {
 
 struct ScanResult {
     chunks: Vec<ChunkInfo>,
+    /// True if at least one `RECC` tag was found (regardless of hash validity).
     recc_present: bool,
-    /// RECC payload bytes, only populated when the RECC chunk hash is valid.
+    /// First `RECC` copy whose chunk Blake3 validated, or `None` if every
+    /// copy's hash failed (or no `RECC` chunks exist).
     recc_data: Option<Vec<u8>>,
-    /// Byte offset of the RECC chunk tag within `payload`, or `payload.len()` if absent.
+    /// Byte offset of the *first* `RECC` tag within `payload`. Bounds the
+    /// protected region (everything before this offset is covered by RS
+    /// parity). Equals `payload.len()` when no `RECC` chunk is present.
     recc_start: usize,
+    /// True if any `RECC` copy failed its per-chunk hash — triggers a
+    /// heal-on-repair even when the protected region is otherwise intact.
+    any_recc_damaged: bool,
 }
 
 fn scan_chunks(payload: &[u8]) -> RasterResult<ScanResult> {
@@ -517,6 +549,7 @@ fn scan_chunks(payload: &[u8]) -> RasterResult<ScanResult> {
     let mut recc_present = false;
     let mut recc_data = None;
     let mut recc_start = payload.len();
+    let mut any_recc_damaged = false;
 
     while pos + 4 + 8 <= payload.len() {
         let tag: [u8; 4] = payload[pos..pos + 4].try_into().unwrap();
@@ -534,10 +567,18 @@ fn scan_chunks(payload: &[u8]) -> RasterResult<ScanResult> {
         let hash_ok = blake3::hash(chunk_data).as_bytes() == stored_hash;
 
         if &tag == TAG_RECC {
+            // Keep the *first* RECC offset (bounds the protected region) and
+            // the *first* valid payload (all copies are identical by design).
+            if !recc_present {
+                recc_start = pos;
+            }
             recc_present = true;
-            recc_start = pos;
             if hash_ok {
-                recc_data = Some(chunk_data.to_vec());
+                if recc_data.is_none() {
+                    recc_data = Some(chunk_data.to_vec());
+                }
+            } else {
+                any_recc_damaged = true;
             }
         } else {
             chunks.push(ChunkInfo { tag, hash_ok });
@@ -551,6 +592,7 @@ fn scan_chunks(payload: &[u8]) -> RasterResult<ScanResult> {
         recc_present,
         recc_data,
         recc_start,
+        any_recc_damaged,
     })
 }
 
@@ -641,14 +683,12 @@ fn attempt_repair(
     }
     reconstructed.truncate(protected_len);
 
-    // Append the original RECC chunk (it had a valid hash; reuse it).
-    let recc_data_len =
-        u64::from_le_bytes(payload[recc_start + 4..recc_start + 12].try_into().unwrap()) as usize;
-    let recc_chunk_end = recc_start + 4 + 8 + recc_data_len + 32;
-    if recc_chunk_end > payload.len() {
-        return Ok(false);
+    // Re-emit RECC_COPIES fresh chunks from the known-good parity payload.
+    // This also heals any damaged copy without needing to know which one was
+    // bad, and auto-upgrades older single-copy v4 files to the redundant form.
+    for _ in 0..RECC_COPIES {
+        write_chunk(&mut reconstructed, TAG_RECC, recc_payload);
     }
-    reconstructed.extend_from_slice(&payload[recc_start..recc_chunk_end]);
 
     // New file-level hash over the repaired content.
     let new_hash = blake3::hash(&reconstructed);
@@ -669,10 +709,7 @@ fn attempt_repair(
 /// [parity_shards × shard_size bytes]  — RS parity shards
 /// ```
 fn build_recc_payload(protected: &[u8]) -> RasterResult<Vec<u8>> {
-    let shard_size = compute_shard_size(protected.len());
-    let padded_len = round_up(protected.len(), shard_size);
-    let data_shards = padded_len / shard_size;
-    let parity_shards = (data_shards / 10).max(1);
+    let (shard_size, data_shards, parity_shards) = compute_shard_plan(protected.len());
 
     let rs = ReedSolomon::new(data_shards, parity_shards)
         .map_err(|e| RasterError::decode("recc", e.to_string()))?;
@@ -711,11 +748,31 @@ fn build_recc_payload(protected: &[u8]) -> RasterResult<Vec<u8>> {
     Ok(payload)
 }
 
-/// Choose a shard size that keeps `data_shards` within [`RECC_MAX_DATA_SHARDS`].
-fn compute_shard_size(data_len: usize) -> usize {
-    let min_size = data_len.div_ceil(RECC_MAX_DATA_SHARDS);
-    let size = min_size.max(RECC_MIN_SHARD_SIZE);
-    round_up(size, RECC_MIN_SHARD_SIZE)
+/// Choose a shard layout for a protected region of `data_len` bytes.
+///
+/// Returns `(shard_size, data_shards, parity_shards)`.
+///
+/// Two regimes:
+/// - **Small files** — fit within [`RECC_MAX_DATA_SHARDS`] shards of
+///   [`RECC_MIN_SHARD_SIZE`]: use 4 KiB shards with ~10 % parity.
+/// - **Large files** — need shards bigger than [`RECC_MIN_SHARD_SIZE`]: size
+///   shards against [`RECC_LARGE_MAX_DATA_SHARDS`] and raise the target to
+///   ~20 % parity, trading a little data capacity for correction capacity.
+///   Guaranteed to stay under the 255-shard GF(2^8) limit.
+fn compute_shard_plan(data_len: usize) -> (usize, usize, usize) {
+    let small_shards = data_len.div_ceil(RECC_MIN_SHARD_SIZE).max(1);
+    if small_shards <= RECC_MAX_DATA_SHARDS {
+        let parity = (small_shards / 10).max(1);
+        return (RECC_MIN_SHARD_SIZE, small_shards, parity);
+    }
+
+    let shard_size = round_up(
+        data_len.div_ceil(RECC_LARGE_MAX_DATA_SHARDS),
+        RECC_MIN_SHARD_SIZE,
+    );
+    let data_shards = data_len.div_ceil(shard_size);
+    let parity_shards = (data_shards / 5).max(1).min(255 - data_shards);
+    (shard_size, data_shards, parity_shards)
 }
 
 fn round_up(n: usize, align: usize) -> usize {
