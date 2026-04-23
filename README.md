@@ -122,17 +122,46 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 # Week 4
 
-## 2026-04-17
+## 2026-04-23 (Week 4 is a wrap, ~80% weekly usage)
 
 ### Features
 
-- **Active tool highlight** — the currently-open tool in the edit stack is expanded and its header rendered in bold so the active edit is always visually obvious
+- **Export Original library bytes** — `File > Export Selection…` can now export the untouched original bytes of a library photo (RAW/JPEG/PNG as imported) with the source-file mtime preserved on disk, alongside the existing rendered JPEG/PNG export modes.
+- **Adaptive RECC parity in `.rlab`** — the Reed–Solomon error-correcting chunk now adapts its parity ratio to file size and writes duplicate parity for small files so an entire corrupted stripe can still be recovered; verified by round-trip integration tests.
 
-## 2026-04-15
+## 2026-04-21
 
 ### Features
 
-- **HDR Merge** — fuse 2+ bracketed exposures into a single image with extended dynamic range; auto exposure estimation, Debevec-style radiance merge, Reinhard tone map
+- **Same-day import sessions** — photos imported on the same calendar day now roll into a single Import Session row instead of creating a new session per import batch.
+- **Original filename in Open Recent** — File → Open Recent shows the source filename for `.rlab` library files, not the opaque hash path.
+- **Unsaved-edit guard when opening from Library** — double-clicking a library photo now prompts to discard pending edits before loading, matching the guard used by `File > Open`.
+
+### Bug fixes
+
+- Window title now shows the last-saved filename after Save As.
+- Parse shutter-speed strings with a trailing ` s` unit (rawler/exif variant).
+- Preserve aspect ratio when rendering library thumbnails and the detail-panel preview.
+- Regenerating a library thumbnail now re-applies the saved edit pipeline and uses the original source-path hint so RAW thumbnails match the edited output.
+- Reset the rotation tool when loading a new image so stale angle state doesn't carry over.
+- Clear the canvas on file open so the previous image no longer flashes while the new one decodes.
+
+## 2026-04-20
+
+### Features
+
+- **Editable crop selection** — the crop rectangle now has drag handles on each edge and corner, and the interior can be grabbed to move the whole selection; no more re-drawing from scratch to nudge a crop.
+
+### Bug fixes
+
+- Split before/after view now applies the live preview op to the "after" side while editing, so the divider reflects the in-progress adjustment instead of the last committed state.
+
+## 2026-04-19
+
+### Features
+
+- **Extended library sidebar filters** — added shutter speed, aperture, ISO, and an "edited only" toggle to the live filter set; filters are validated and applied consistently across All Photos, Import Sessions, and Collections views.
+- **Truncated library path in detail panel** — the metadata panel shows a shortened, readable path for library files instead of the full hashed on-disk location.
 
 ## 2026-04-18
 
@@ -156,6 +185,18 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
   - Double-click a photo to open it in the Editor; saving propagates thumbnail back to the library
   - `File > Import Photos` (select files or folder), `File > Export Selection…` (JPEG/PNG with optional resize)
   - Last-used library auto-reopens on startup
+
+## 2026-04-17
+
+### Features
+
+- **Active tool highlight** — the currently-open tool in the edit stack is expanded and its header rendered in bold so the active edit is always visually obvious
+
+## 2026-04-15
+
+### Features
+
+- **HDR Merge** — fuse 2+ bracketed exposures into a single image with extended dynamic range; auto exposure estimation, Debevec-style radiance merge, Reinhard tone map
 
 # Week 3
 
