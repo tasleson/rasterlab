@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result};
 use rasterlab_core::{
     formats::FormatRegistry,
-    library_meta::{LibraryExif, LibraryMeta},
+    library_meta::{FileTimeStamp, LibraryExif, LibraryMeta},
 };
 use uuid::Uuid;
 
@@ -132,7 +132,13 @@ fn import_one(
     session_id: &str,
     stack_map: &[(usize, usize)], // (primary_idx, secondary_idx) pairs by path index
 ) -> Result<Option<String>> {
-    // 1. Read source bytes
+    // 1. Read source bytes + capture source-file timestamps.
+    //    Stat first so we read the times the file had before we opened it.
+    let fs_meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let source_mtime = fs_meta.modified().ok().map(FileTimeStamp::from_system_time);
+    let source_atime = fs_meta.accessed().ok().map(FileTimeStamp::from_system_time);
+    let source_ctime = fs_meta.created().ok().map(FileTimeStamp::from_system_time);
+
     let original_bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
 
     // 2. Compute hash
@@ -173,6 +179,9 @@ fn import_one(
         import_date: unix_now(),
         stack_peer_hash,
         stack_is_primary,
+        source_mtime,
+        source_atime,
+        source_ctime,
         exif: Some(exif),
         ..Default::default()
     };

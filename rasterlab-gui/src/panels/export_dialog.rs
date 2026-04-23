@@ -1,7 +1,12 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use egui::ScrollArea;
-use rasterlab_core::{formats::FormatRegistry, project::RlabFile};
+use rasterlab_core::{
+    formats::FormatRegistry,
+    library_meta::{FileTimeStamp, LibraryMeta},
+    project::RlabFile,
+};
 
 use crate::state::AppState;
 
@@ -14,15 +19,46 @@ pub struct ExportDialogState {
     pub jpeg_quality: u8,
     pub max_side: Option<u32>,
     pub dest_dir: PathBuf,
+    /// `Some((done, total))` while an export is running, `None` when idle.
     pub progress: Option<(usize, usize)>,
+    /// True when the last export finished (success or with errors).
     pub done: bool,
     pub errors: Vec<String>,
+    /// Shared handle that the background worker updates as it progresses.
+    /// Drained into `progress` / `done` / `errors` at the top of each
+    /// dialog frame so the UI can react without spinning its own channel.
+    pub shared: Arc<Mutex<ExportShared>>,
+}
+
+#[derive(Debug, Default)]
+pub struct ExportShared {
+    pub done: usize,
+    pub total: usize,
+    pub finished: bool,
+    pub errors: Vec<String>,
+}
+
+impl ExportDialogState {
+    /// Clear any stale progress/result state — called when the user re-opens
+    /// the dialog so a completed prior export doesn't leave the Export button
+    /// greyed out as "busy".
+    pub fn reset_run_state(&mut self) {
+        self.progress = None;
+        self.done = false;
+        self.errors.clear();
+        if let Ok(mut s) = self.shared.lock() {
+            *s = ExportShared::default();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Jpeg,
     Png,
+    /// Verbatim copy of the original imported bytes, with filesystem
+    /// timestamps restored to their values at import time.
+    Original,
 }
 
 impl ExportFormat {
@@ -30,6 +66,8 @@ impl ExportFormat {
         match self {
             Self::Jpeg => "jpg",
             Self::Png => "png",
+            // Unused for Original — the original filename is preserved instead.
+            Self::Original => "",
         }
     }
 }
@@ -45,6 +83,7 @@ impl Default for ExportDialogState {
             progress: None,
             done: false,
             errors: Vec::new(),
+            shared: Arc::new(Mutex::new(ExportShared::default())),
         }
     }
 }
@@ -56,10 +95,37 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
 
+    // Pull the latest values from the worker into the dialog's view-state so
+    // the progress bar, completion label, and Export-button enable flag all
+    // reflect the current run.
+    {
+        let export = &mut state.tools.export_dialog;
+        let snapshot = export
+            .shared
+            .lock()
+            .map(|s| (s.done, s.total, s.finished, s.errors.clone()))
+            .ok();
+        if let Some((done, total, finished, errors)) = snapshot {
+            if finished {
+                export.progress = None;
+                export.done = true;
+                export.errors = errors;
+            } else if total > 0 {
+                export.progress = Some((done, total));
+                export.done = false;
+            }
+        }
+        // Also repaint while a run is in flight so progress ticks visibly.
+        if export.progress.is_some() {
+            ctx.request_repaint();
+        }
+    }
+
     let selected_count = state.library.selected.len();
     let mut open = state.tools.export_dialog.open;
     let mut do_export = false;
     let mut do_close = false;
+    let mut browse_requested = false;
 
     egui::Window::new(format!("Export {} Photos", selected_count))
         .collapsible(false)
@@ -77,8 +143,18 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut export.format, ExportFormat::Jpeg, "JPEG");
                         ui.selectable_value(&mut export.format, ExportFormat::Png, "PNG");
+                        ui.selectable_value(&mut export.format, ExportFormat::Original, "Original");
                     });
                     ui.end_row();
+
+                    if export.format == ExportFormat::Original {
+                        ui.label("");
+                        ui.label(
+                            "Writes the unmodified imported bytes with the \
+                             original filename and timestamps.",
+                        );
+                        ui.end_row();
+                    }
 
                     if export.format == ExportFormat::Jpeg {
                         ui.label("Quality:");
@@ -86,36 +162,45 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                         ui.end_row();
                     }
 
-                    ui.label("Long side:");
-                    ui.horizontal(|ui| {
-                        let mut resize = export.max_side.is_some();
-                        if ui.checkbox(&mut resize, "").changed() {
-                            export.max_side = if resize { Some(2048) } else { None };
-                        }
-                        if let Some(ref mut side) = export.max_side {
-                            ui.add(
-                                egui::DragValue::new(side)
-                                    .range(64u32..=65536)
-                                    .suffix(" px"),
-                            );
-                        }
-                    });
-                    ui.end_row();
+                    if export.format != ExportFormat::Original {
+                        ui.label("Long side:");
+                        ui.horizontal(|ui| {
+                            let mut resize = export.max_side.is_some();
+                            if ui.checkbox(&mut resize, "").changed() {
+                                export.max_side = if resize { Some(2048) } else { None };
+                            }
+                            if let Some(ref mut side) = export.max_side {
+                                ui.add(
+                                    egui::DragValue::new(side)
+                                        .range(64u32..=65536)
+                                        .suffix(" px"),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    }
 
                     ui.label("Destination:");
+                    let mut browse_clicked = false;
                     ui.horizontal(|ui| {
-                        let dir_str = export.dest_dir.display().to_string();
-                        ui.add(
-                            egui::TextEdit::singleline(&mut dir_str.clone()).desired_width(200.0),
-                        );
+                        let mut dir_str = export.dest_dir.display().to_string();
+                        let resp =
+                            ui.add(egui::TextEdit::singleline(&mut dir_str).desired_width(200.0));
+                        if resp.changed() {
+                            export.dest_dir = PathBuf::from(&dir_str);
+                        }
                         #[cfg(not(target_arch = "wasm32"))]
-                        if ui.button("Browse…").clicked()
-                            && let Some(path) = rfd::FileDialog::new().pick_folder()
-                        {
-                            export.dest_dir = path;
+                        if ui.button("Browse…").clicked() {
+                            browse_clicked = true;
                         }
                     });
                     ui.end_row();
+                    // Defer the actual folder pick to the outer app, which owns
+                    // the unified FileChooser — this works across Wayland/
+                    // waypipe where a raw rfd call from the UI thread does not.
+                    if browse_clicked {
+                        browse_requested = true;
+                    }
                 });
 
             ui.add_space(8.0);
@@ -161,6 +246,9 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
     if do_export {
         start_export(state);
     }
+    if browse_requested {
+        state.tools.export_dest_dialog_requested = true;
+    }
     if do_close || !open {
         state.tools.export_dialog.open = false;
     }
@@ -186,10 +274,20 @@ fn start_export(state: &mut AppState) {
     let quality = export.jpeg_quality;
     let max_side = export.max_side;
     let dest_dir = export.dest_dir.clone();
+    let shared = Arc::clone(&export.shared);
 
-    state.tools.export_dialog.progress = Some((0, photos.len()));
+    let total = photos.len();
+    state.tools.export_dialog.progress = Some((0, total));
     state.tools.export_dialog.done = false;
     state.tools.export_dialog.errors.clear();
+    if let Ok(mut s) = shared.lock() {
+        *s = ExportShared {
+            done: 0,
+            total,
+            finished: false,
+            errors: Vec::new(),
+        };
+    }
 
     std::thread::Builder::new()
         .name("rasterlab-export".into())
@@ -208,7 +306,16 @@ fn start_export(state: &mut AppState) {
                     &photo.hash,
                 ) {
                     eprintln!("export error {}: {e}", photo.hash);
+                    if let Ok(mut s) = shared.lock() {
+                        s.errors.push(format!("{}: {e}", photo.hash));
+                    }
                 }
+                if let Ok(mut s) = shared.lock() {
+                    s.done += 1;
+                }
+            }
+            if let Ok(mut s) = shared.lock() {
+                s.finished = true;
             }
         })
         .ok();
@@ -224,6 +331,12 @@ fn export_one(
     hash: &str,
 ) -> anyhow::Result<()> {
     let rlab = RlabFile::read(rlab_path)?;
+
+    // ── Original export: write the verbatim ORIG bytes and restore mtime/atime. ──
+    if format == ExportFormat::Original {
+        return export_original(rlab_path, dest_dir, &rlab, hash);
+    }
+
     let hint = rlab.meta.source_path.as_deref().map(std::path::Path::new);
     let source = registry.decode_bytes(&rlab.original_bytes, hint)?;
 
@@ -277,4 +390,99 @@ fn export_one(
     let bytes = registry.encode_file(&image, &dest, &opts)?;
     std::fs::write(&dest, &bytes)?;
     Ok(())
+}
+
+// ── Original-bytes export ────────────────────────────────────────────────────
+
+fn export_original(
+    rlab_path: &Path,
+    dest_dir: &Path,
+    rlab: &RlabFile,
+    hash: &str,
+) -> anyhow::Result<()> {
+    let filename = original_filename_for(rlab, rlab_path, hash);
+    let dest = unique_dest_path(dest_dir, &filename);
+    std::fs::write(&dest, &rlab.original_bytes)?;
+    apply_source_timestamps(&dest, rlab.lmta.as_ref());
+    Ok(())
+}
+
+/// Pick the best filename to use for the original-bytes export.
+///
+/// Priority:
+/// 1. `LibraryMeta::original_filename` (recorded at import).
+/// 2. `RlabMeta::source_path` basename (older imports / non-library files).
+/// 3. `{rlab-stem}` or `{hash}` as a last-ditch fallback.
+fn original_filename_for(rlab: &RlabFile, rlab_path: &Path, hash: &str) -> String {
+    if let Some(lmta) = &rlab.lmta
+        && let Some(name) = &lmta.original_filename
+        && !name.is_empty()
+    {
+        return name.clone();
+    }
+    if let Some(src) = rlab.meta.source_path.as_deref()
+        && let Some(name) = Path::new(src).file_name().and_then(|n| n.to_str())
+        && !name.is_empty()
+    {
+        return name.to_owned();
+    }
+    rlab_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| hash.to_owned())
+}
+
+/// Avoid clobbering an existing file in the destination directory by appending
+/// ` (2)`, ` (3)`, … before the extension.
+fn unique_dest_path(dest_dir: &Path, filename: &str) -> PathBuf {
+    let initial = dest_dir.join(filename);
+    if !initial.exists() {
+        return initial;
+    }
+    let path = Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    for n in 2u32..10_000 {
+        let candidate = if ext.is_empty() {
+            format!("{stem} ({n})")
+        } else {
+            format!("{stem} ({n}).{ext}")
+        };
+        let p = dest_dir.join(candidate);
+        if !p.exists() {
+            return p;
+        }
+    }
+    initial
+}
+
+/// Best-effort restore of the source file's mtime / atime. Failures are logged
+/// but not propagated — the bytes were written successfully, and on some
+/// filesystems (e.g. FAT, read-only mounts) timestamp updates may be denied.
+fn apply_source_timestamps(dest: &Path, lmta: Option<&LibraryMeta>) {
+    let Some(lmta) = lmta else {
+        return;
+    };
+    // Fall back to atime=mtime when the stored atime is missing so the file
+    // does not get "touched" to "now" by the write itself.
+    let mtime = lmta.source_mtime;
+    let atime = lmta.source_atime.or(mtime);
+    if let (Some(m), Some(a)) = (mtime, atime) {
+        let mft = filetime_from_stamp(m);
+        let aft = filetime_from_stamp(a);
+        if let Err(e) = filetime::set_file_times(dest, aft, mft) {
+            eprintln!(
+                "export: could not restore timestamps on {}: {e}",
+                dest.display()
+            );
+        }
+    }
+}
+
+fn filetime_from_stamp(ts: FileTimeStamp) -> filetime::FileTime {
+    filetime::FileTime::from_system_time(ts.to_system_time())
 }

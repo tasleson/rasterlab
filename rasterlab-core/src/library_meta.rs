@@ -1,3 +1,5 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 
 /// User-defined and EXIF metadata embedded in the `LMTA` chunk of a `.rlab`
@@ -46,10 +48,47 @@ pub struct LibraryMeta {
     /// Country where the photo was taken.
     pub location_country: Option<String>,
 
+    // ── Source file timestamps ────────────────────────────────────────────
+    /// Modification time of the original source file at import time.
+    /// Preserved so that the original bytes can be exported with matching mtime.
+    #[serde(default)]
+    pub source_mtime: Option<FileTimeStamp>,
+    /// Access time of the original source file at import time.
+    #[serde(default)]
+    pub source_atime: Option<FileTimeStamp>,
+    /// Creation/birth time of the original source file at import time (where
+    /// the OS reports one). On Linux this is usually unavailable.
+    #[serde(default)]
+    pub source_ctime: Option<FileTimeStamp>,
+
     // ── EXIF snapshot ─────────────────────────────────────────────────────
     /// Cached EXIF values extracted at import time. Stored here so that
     /// reconstruction (`rebuild_index`) never requires a full image decode.
     pub exif: Option<LibraryExif>,
+}
+
+/// Wall-clock timestamp stored as seconds + nanoseconds past the Unix epoch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileTimeStamp {
+    pub secs: i64,
+    pub nanos: u32,
+}
+
+impl FileTimeStamp {
+    /// Convert from a [`SystemTime`] (clamped to non-negative seconds from epoch).
+    pub fn from_system_time(t: SystemTime) -> Self {
+        let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+        Self {
+            secs: d.as_secs() as i64,
+            nanos: d.subsec_nanos(),
+        }
+    }
+
+    /// Convert to a [`SystemTime`]. Negative seconds are clamped to the epoch.
+    pub fn to_system_time(self) -> SystemTime {
+        let secs = self.secs.max(0) as u64;
+        UNIX_EPOCH + Duration::new(secs, self.nanos)
+    }
 }
 
 fn default_true() -> bool {
@@ -74,6 +113,9 @@ impl Default for LibraryMeta {
             creator: None,
             location_city: None,
             location_country: None,
+            source_mtime: None,
+            source_atime: None,
+            source_ctime: None,
             exif: None,
         }
     }

@@ -680,7 +680,18 @@ impl AppState {
         meta = meta.touch();
 
         let created_at = meta.created_at;
-        let rlab = RlabFile::new(meta, original_bytes, copies_saved, active_idx, None);
+        // If we're overwriting an existing library `.rlab`, read its current
+        // LMTA chunk so we can carry it forward. Otherwise the save drops the
+        // library metadata (keywords, rating, source-file timestamps, …) and
+        // features that depend on it — like "Export Selection → Original" —
+        // lose ground truth.
+        let existing_lmta = if path.exists() {
+            RlabFile::read(&path).ok().and_then(|r| r.lmta)
+        } else {
+            None
+        };
+        let mut rlab = RlabFile::new(meta, original_bytes, copies_saved, active_idx, None);
+        rlab.set_lmta(existing_lmta);
         match rlab.write(&path) {
             Ok(()) => {
                 self.project_created_at = Some(created_at);

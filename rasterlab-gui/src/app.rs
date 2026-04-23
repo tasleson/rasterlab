@@ -249,6 +249,11 @@ impl RasterLabApp {
                     self.state.import_folder_into_library(p)
                 }
             }
+            DialogKind::ExportDestination => {
+                if let Some(p) = first() {
+                    self.state.tools.export_dialog.dest_dir = p;
+                }
+            }
         }
     }
 }
@@ -307,6 +312,13 @@ impl eframe::App for RasterLabApp {
         if self.state.tools.library_import_folder_dialog_requested {
             self.state.tools.library_import_folder_dialog_requested = false;
             self.chooser.import_folder(&ctx);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.state.tools.export_dest_dialog_requested {
+            self.state.tools.export_dest_dialog_requested = false;
+            let start = self.state.tools.export_dialog.dest_dir.clone();
+            self.chooser
+                .choose_export_destination(&ctx, Some(start.as_path()));
         }
         if let Some((rlab_path, lib_root, hash)) = self.state.library.pending_open_photo.take() {
             self.request_open_library_photo(rlab_path, lib_root, hash);
@@ -471,6 +483,7 @@ impl eframe::App for RasterLabApp {
                             |ui| {
                                 if ui.button("Export Selection…").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);
+                                    self.state.tools.export_dialog.reset_run_state();
                                     self.state.tools.export_dialog.open = true;
                                     self.state.mode = AppMode::Library;
                                 }

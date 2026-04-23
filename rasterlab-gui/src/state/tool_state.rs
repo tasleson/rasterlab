@@ -259,6 +259,9 @@ pub struct ToolState {
     pub library_import_files_dialog_requested: bool,
     /// Set to true by the File menu to open the import-folder picker.
     pub library_import_folder_dialog_requested: bool,
+    /// Set to true by the Export Selection dialog's "Browse…" button so the
+    /// outer app can invoke the Wayland-safe file chooser on its behalf.
+    pub export_dest_dialog_requested: bool,
 }
 
 impl ToolState {
@@ -395,6 +398,7 @@ impl ToolState {
             library_open_dialog_requested: false,
             library_import_files_dialog_requested: false,
             library_import_folder_dialog_requested: false,
+            export_dest_dialog_requested: false,
         }
     }
 

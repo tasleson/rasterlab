@@ -59,6 +59,8 @@ pub enum DialogKind {
     ImportFiles,
     /// Folder picker for Import Photos > Select Folder.
     ImportFolder,
+    /// Folder picker for the Export Selection destination directory.
+    ExportDestination,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,12 +85,16 @@ pub struct FileChooser {
     lib_folder_dlg: FileDialog,
     import_files_dlg: FileDialog,
     import_folder_dlg: FileDialog,
+    export_dest_dlg: FileDialog,
     /// Which kind is currently waiting for a result.
     pending: Option<DialogKind>,
 
     // ── Native (rfd) backend ───────────────────────────────────────────────
     /// At most one rfd dialog is open at a time.  Vec is empty on cancel.
     rfd_rx: Option<(DialogKind, mpsc::Receiver<Vec<PathBuf>>)>,
+    /// Seeded by [`choose_export_destination`] so the native (rfd) dialog opens
+    /// at the right starting directory.  Consumed inside [`spawn_rfd`].
+    pending_start_dir: Option<PathBuf>,
 }
 
 impl FileChooser {
@@ -164,8 +170,12 @@ impl FileChooser {
             import_folder_dlg: FileDialog::new()
                 .title("Select Folder to Import")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
+            export_dest_dlg: FileDialog::new()
+                .title("Select Export Destination")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
             pending: None,
             rfd_rx: None,
+            pending_start_dir: None,
         }
     }
 
@@ -226,6 +236,18 @@ impl FileChooser {
         self.open(ctx, DialogKind::ImportFolder, false);
     }
 
+    pub fn choose_export_destination(
+        &mut self,
+        ctx: &egui::Context,
+        start_dir: Option<&std::path::Path>,
+    ) {
+        if let Some(dir) = start_dir {
+            self.export_dest_dlg.config_mut().initial_directory = dir.to_path_buf();
+            self.pending_start_dir = Some(dir.to_path_buf());
+        }
+        self.open(ctx, DialogKind::ExportDestination, false);
+    }
+
     // ── Per-frame polling ───────────────────────────────────────────────────
 
     /// Must be called once per frame.  Returns `Some((kind, paths))` when the
@@ -253,7 +275,9 @@ impl FileChooser {
             self.pending = Some(kind);
             let dlg = self.dialog_mut(kind);
             match kind {
-                DialogKind::OpenLibrary | DialogKind::ImportFolder => dlg.pick_directory(),
+                DialogKind::OpenLibrary
+                | DialogKind::ImportFolder
+                | DialogKind::ExportDestination => dlg.pick_directory(),
                 DialogKind::ImportFiles => dlg.pick_multiple(),
                 _ if is_save => dlg.save_file(),
                 _ => dlg.pick_file(),
@@ -282,6 +306,7 @@ impl FileChooser {
             DialogKind::OpenLibrary => &mut self.lib_folder_dlg,
             DialogKind::ImportFiles => &mut self.import_files_dlg,
             DialogKind::ImportFolder => &mut self.import_folder_dlg,
+            DialogKind::ExportDestination => &mut self.export_dest_dlg,
         }
     }
 
@@ -291,6 +316,7 @@ impl FileChooser {
         let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
         self.rfd_rx = Some((kind, rx));
         let ctx = ctx.clone();
+        let start_dir = self.pending_start_dir.take();
 
         std::thread::spawn(move || {
             let paths: Vec<PathBuf> = match kind {
@@ -349,10 +375,15 @@ impl FileChooser {
                     .pick_file()
                     .map(|p| vec![p])
                     .unwrap_or_default(),
-                DialogKind::OpenLibrary | DialogKind::ImportFolder => rfd::FileDialog::new()
-                    .pick_folder()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
+                DialogKind::OpenLibrary
+                | DialogKind::ImportFolder
+                | DialogKind::ExportDestination => {
+                    let mut d = rfd::FileDialog::new();
+                    if let Some(start) = &start_dir {
+                        d = d.set_directory(start);
+                    }
+                    d.pick_folder().map(|p| vec![p]).unwrap_or_default()
+                }
                 DialogKind::ImportFiles => rfd::FileDialog::new()
                     .add_filter("All supported", &all_supported_exts())
                     .add_filter("Images", &image_exts())
