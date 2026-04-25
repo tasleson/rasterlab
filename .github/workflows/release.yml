@@ -21,6 +21,9 @@ jobs:
           - name: macos-aarch64
             os: macos-latest
             target: aarch64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +56,8 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p rasterlab-gui -p rasterlab-cli
 
-      - name: Package tarball
+      - name: Package tarball (Unix)
+        if: matrix.os != 'windows-latest'
         run: |
           STAGING="rasterlab-${GITHUB_REF_NAME}-${{ matrix.name }}"
           mkdir -p "dist/$STAGING"
@@ -63,6 +67,20 @@ jobs:
           tar -czf "dist/${STAGING}.tar.gz" -C dist "$STAGING"
           rm -rf "dist/$STAGING"
           shasum -a 256 "dist/${STAGING}.tar.gz" > "dist/${STAGING}.tar.gz.sha256"
+
+      - name: Package zip (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $staging = "rasterlab-$env:GITHUB_REF_NAME-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path "dist/$staging" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/rasterlab-gui.exe" "dist/$staging/"
+          Copy-Item "target/${{ matrix.target }}/release/rasterlab.exe" "dist/$staging/"
+          Copy-Item "README.md" "dist/$staging/"
+          Compress-Archive -Path "dist/$staging" -DestinationPath "dist/$staging.zip"
+          Remove-Item -Recurse -Force "dist/$staging"
+          $hash = (Get-FileHash "dist/$staging.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $staging.zip" | Out-File -FilePath "dist/$staging.zip.sha256" -Encoding ascii
 
       - uses: actions/upload-artifact@v4
         with:
