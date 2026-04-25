@@ -287,7 +287,7 @@ fn stitch(op: &PanoramaOp) -> RasterResult<Image> {
                 if w <= 0.0 {
                     continue;
                 }
-                let px = bilinear_sample(img, sx, sy);
+                let px = super::bilinear_sample(img, sx, sy);
                 r_acc += w * px[0] as f32;
                 g_acc += w * px[1] as f32;
                 b_acc += w * px[2] as f32;
@@ -770,33 +770,6 @@ fn invert_h(m: &[f32; 9]) -> Option<[f32; 9]> {
         (m[1] * m[6] - m[0] * m[7]) * d,
         (m[0] * m[4] - m[1] * m[3]) * d,
     ])
-}
-
-// ── Bilinear sampling ─────────────────────────────────────────────────────────
-
-#[inline]
-fn bilinear_sample(image: &Image, sx: f32, sy: f32) -> [u8; 4] {
-    let w = image.width as usize;
-    let h = image.height as usize;
-    let x0 = (sx.floor() as isize).clamp(0, w as isize - 1) as usize;
-    let y0 = (sy.floor() as isize).clamp(0, h as isize - 1) as usize;
-    let x1 = (x0 + 1).min(w - 1);
-    let y1 = (y0 + 1).min(h - 1);
-    let tx = (sx - sx.floor()).clamp(0.0, 1.0);
-    let ty = (sy - sy.floor()).clamp(0.0, 1.0);
-
-    let p00 = &image.data[(y0 * w + x0) * 4..][..4];
-    let p10 = &image.data[(y0 * w + x1) * 4..][..4];
-    let p01 = &image.data[(y1 * w + x0) * 4..][..4];
-    let p11 = &image.data[(y1 * w + x1) * 4..][..4];
-
-    let mut out = [0u8; 4];
-    for i in 0..4 {
-        let top = p00[i] as f32 + (p10[i] as f32 - p00[i] as f32) * tx;
-        let bot = p01[i] as f32 + (p11[i] as f32 - p01[i] as f32) * tx;
-        out[i] = (top + (bot - top) * ty).clamp(0.0, 255.0) as u8;
-    }
-    out
 }
 
 // ── Separable [1,2,1]/4 smoothing ────────────────────────────────────────────

@@ -114,26 +114,6 @@ impl Operation for HdrMergeOp {
     }
 }
 
-// ── sRGB EOTF ────────────────────────────────────────────────────────────────
-
-#[inline]
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-#[inline]
-fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        12.92 * c
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 // ── Per-frame decoded data ───────────────────────────────────────────────────
 
 struct FrameData {
@@ -176,9 +156,9 @@ pub fn merge_images(images: &[&Image]) -> RasterResult<Image> {
         .par_chunks_mut(4)
         .zip(tone_mapped.par_chunks_exact(3))
         .for_each(|(px, rad)| {
-            px[0] = (linear_to_srgb(rad[0].clamp(0.0, 1.0)) * 255.0).round() as u8;
-            px[1] = (linear_to_srgb(rad[1].clamp(0.0, 1.0)) * 255.0).round() as u8;
-            px[2] = (linear_to_srgb(rad[2].clamp(0.0, 1.0)) * 255.0).round() as u8;
+            px[0] = (super::linear_to_srgb(rad[0].clamp(0.0, 1.0)) * 255.0).round() as u8;
+            px[1] = (super::linear_to_srgb(rad[1].clamp(0.0, 1.0)) * 255.0).round() as u8;
+            px[2] = (super::linear_to_srgb(rad[2].clamp(0.0, 1.0)) * 255.0).round() as u8;
             px[3] = 255;
         });
 
@@ -206,9 +186,9 @@ pub fn merge_linear(images: &[&Image]) -> RasterResult<Vec<f32>> {
                 let g = px[1] as f32 / 255.0;
                 let b = px[2] as f32 / 255.0;
                 luma_srgb.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
-                let rl = srgb_to_linear(r);
-                let gl = srgb_to_linear(g);
-                let bl = srgb_to_linear(b);
+                let rl = super::srgb_to_linear(r);
+                let gl = super::srgb_to_linear(g);
+                let bl = super::srgb_to_linear(b);
                 luma_lin.push(0.2126 * rl + 0.7152 * gl + 0.0722 * bl);
                 lin.push(rl);
                 lin.push(gl);
@@ -393,6 +373,7 @@ fn reinhard_auto_key(radiance: &[f32]) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{linear_to_srgb, srgb_to_linear};
     use super::*;
 
     /// Encode a linear-light RGB value as an 8-bit sRGB pixel, clipping

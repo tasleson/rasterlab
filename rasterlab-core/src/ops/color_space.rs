@@ -40,30 +40,6 @@ impl ColorSpaceOp {
 }
 
 // ---------------------------------------------------------------------------
-// Transfer functions
-// ---------------------------------------------------------------------------
-
-/// sRGB gamma → linear (exact piecewise formula).
-#[inline]
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// Linear → sRGB gamma.
-#[inline]
-fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        c * 12.92
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-// ---------------------------------------------------------------------------
 // 3×3 matrix × [r, g, b] in linear light
 // ---------------------------------------------------------------------------
 
@@ -116,17 +92,17 @@ impl Operation for ColorSpaceOp {
 
         image.data.par_chunks_mut(4).for_each(|p| {
             // Decode gamma.
-            let r = srgb_to_linear(p[0] as f32 / 255.0);
-            let g = srgb_to_linear(p[1] as f32 / 255.0);
-            let b = srgb_to_linear(p[2] as f32 / 255.0);
+            let r = super::srgb_to_linear(p[0] as f32 / 255.0);
+            let g = super::srgb_to_linear(p[1] as f32 / 255.0);
+            let b = super::srgb_to_linear(p[2] as f32 / 255.0);
 
             // Apply primaries conversion in linear light.
             let (ro, go, bo) = mat3_mul(mat, r, g, b);
 
             // Re-encode with destination transfer function (sRGB-style).
-            p[0] = (linear_to_srgb(ro.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
-            p[1] = (linear_to_srgb(go.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
-            p[2] = (linear_to_srgb(bo.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+            p[0] = (super::linear_to_srgb(ro.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+            p[1] = (super::linear_to_srgb(go.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+            p[2] = (super::linear_to_srgb(bo.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
             // alpha unchanged
         });
 

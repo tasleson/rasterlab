@@ -76,6 +76,28 @@ fn header_for_tool(
     }
 }
 
+fn path_list_ui(ui: &mut Ui, paths: &[String], id_salt: &str) -> Option<usize> {
+    let mut remove_idx: Option<usize> = None;
+    egui::ScrollArea::vertical()
+        .max_height(120.0)
+        .id_salt(id_salt)
+        .show(ui, |ui| {
+            for (i, path) in paths.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let name = std::path::Path::new(path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.clone());
+                    ui.label(format!("{}. {}", i + 1, name));
+                    if ui.small_button("✕").clicked() {
+                        remove_idx = Some(i);
+                    }
+                });
+            }
+        });
+    remove_idx
+}
+
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         ui.heading("Tools");
@@ -971,25 +993,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .italics(),
                 );
             } else {
-                let mut remove_idx: Option<usize> = None;
-                egui::ScrollArea::vertical()
-                    .max_height(120.0)
-                    .id_salt("focus_stack_list")
-                    .show(ui, |ui| {
-                        for (i, path) in state.tools.focus_stack_paths.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                let name = std::path::Path::new(path)
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| path.clone());
-                                ui.label(format!("{}. {}", i + 1, name));
-                                if ui.small_button("✕").clicked() {
-                                    remove_idx = Some(i);
-                                }
-                            });
-                        }
-                    });
-                if let Some(idx) = remove_idx {
+                if let Some(idx) =
+                    path_list_ui(ui, &state.tools.focus_stack_paths, "focus_stack_list")
+                {
                     state.tools.focus_stack_paths.remove(idx);
                     if state.tools.focus_stack_paths.len() < 2 {
                         state.cancel_focus_stack_preview();
@@ -1103,25 +1109,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .italics(),
                 );
             } else {
-                let mut remove_idx: Option<usize> = None;
-                egui::ScrollArea::vertical()
-                    .max_height(120.0)
-                    .id_salt("hdr_merge_list")
-                    .show(ui, |ui| {
-                        for (i, path) in state.tools.hdr_merge_paths.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                let name = std::path::Path::new(path)
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| path.clone());
-                                ui.label(format!("{}. {}", i + 1, name));
-                                if ui.small_button("✕").clicked() {
-                                    remove_idx = Some(i);
-                                }
-                            });
-                        }
-                    });
-                if let Some(idx) = remove_idx {
+                if let Some(idx) = path_list_ui(ui, &state.tools.hdr_merge_paths, "hdr_merge_list")
+                {
                     state.tools.hdr_merge_paths.remove(idx);
                     if state.tools.hdr_merge_paths.len() < 2 {
                         state.cancel_hdr_merge_preview();
@@ -1795,25 +1784,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                         .italics(),
                 );
             } else {
-                let mut remove_idx: Option<usize> = None;
-                egui::ScrollArea::vertical()
-                    .max_height(120.0)
-                    .id_salt("panorama_list")
-                    .show(ui, |ui| {
-                        for (i, path) in state.tools.panorama_paths.iter().enumerate() {
-                            ui.horizontal(|ui| {
-                                let name = std::path::Path::new(path)
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| path.clone());
-                                ui.label(format!("{}. {}", i + 1, name));
-                                if ui.small_button("✕").clicked() {
-                                    remove_idx = Some(i);
-                                }
-                            });
-                        }
-                    });
-                if let Some(idx) = remove_idx {
+                if let Some(idx) = path_list_ui(ui, &state.tools.panorama_paths, "panorama_list") {
                     state.tools.panorama_paths.remove(idx);
                     if state.tools.panorama_paths.len() < 2 {
                         state.cancel_panorama_preview();

@@ -42,24 +42,6 @@ impl ShadowExposureOp {
     }
 }
 
-#[inline]
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-#[inline]
-fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        12.92 * c
-    } else {
-        1.055 * c.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 #[typetag::serde]
 impl Operation for ShadowExposureOp {
     fn name(&self) -> &'static str {
@@ -94,13 +76,13 @@ impl Operation for ShadowExposureOp {
             let gain = (ev * weight).exp2();
 
             // Apply the gain in linear light so it behaves like real exposure.
-            let rl = srgb_to_linear(r) * gain;
-            let gl = srgb_to_linear(g) * gain;
-            let bl = srgb_to_linear(b) * gain;
+            let rl = super::srgb_to_linear(r) * gain;
+            let gl = super::srgb_to_linear(g) * gain;
+            let bl = super::srgb_to_linear(b) * gain;
 
-            p[0] = (linear_to_srgb(rl.clamp(0.0, 1.0)) * 255.0).round() as u8;
-            p[1] = (linear_to_srgb(gl.clamp(0.0, 1.0)) * 255.0).round() as u8;
-            p[2] = (linear_to_srgb(bl.clamp(0.0, 1.0)) * 255.0).round() as u8;
+            p[0] = (super::linear_to_srgb(rl.clamp(0.0, 1.0)) * 255.0).round() as u8;
+            p[1] = (super::linear_to_srgb(gl.clamp(0.0, 1.0)) * 255.0).round() as u8;
+            p[2] = (super::linear_to_srgb(bl.clamp(0.0, 1.0)) * 255.0).round() as u8;
             // alpha unchanged
         });
 

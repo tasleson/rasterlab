@@ -165,32 +165,6 @@ fn apply_h(h: &[f32; 9], x: f32, y: f32) -> (f32, f32) {
     )
 }
 
-/// Bilinear sample from `image` at float coordinates `(sx, sy)`, clamped to border.
-#[inline]
-fn bilinear_sample(image: &Image, sx: f32, sy: f32) -> [u8; 4] {
-    let w = image.width as usize;
-    let h = image.height as usize;
-    let x0 = (sx.floor() as isize).clamp(0, w as isize - 1) as usize;
-    let y0 = (sy.floor() as isize).clamp(0, h as isize - 1) as usize;
-    let x1 = (x0 + 1).min(w - 1);
-    let y1 = (y0 + 1).min(h - 1);
-    let tx = (sx - sx.floor()).clamp(0.0, 1.0);
-    let ty = (sy - sy.floor()).clamp(0.0, 1.0);
-
-    let p00 = &image.data[(y0 * w + x0) * 4..][..4];
-    let p10 = &image.data[(y0 * w + x1) * 4..][..4];
-    let p01 = &image.data[(y1 * w + x0) * 4..][..4];
-    let p11 = &image.data[(y1 * w + x1) * 4..][..4];
-
-    let mut out = [0u8; 4];
-    for i in 0..4 {
-        let top = p00[i] as f32 + (p10[i] as f32 - p00[i] as f32) * tx;
-        let bot = p01[i] as f32 + (p11[i] as f32 - p01[i] as f32) * tx;
-        out[i] = (top + (bot - top) * ty).clamp(0.0, 255.0) as u8;
-    }
-    out
-}
-
 #[typetag::serde]
 impl Operation for PerspectiveOp {
     fn name(&self) -> &'static str {
@@ -236,7 +210,7 @@ impl Operation for PerspectiveOp {
                 let dx = idx % out_w;
                 let dy = idx / out_w;
                 let (sx, sy) = apply_h(&h_mat, dx as f32 + 0.5, dy as f32 + 0.5);
-                let px = bilinear_sample(&image, sx - 0.5, sy - 0.5);
+                let px = super::bilinear_sample(&image, sx - 0.5, sy - 0.5);
                 dst.copy_from_slice(&px);
             });
 

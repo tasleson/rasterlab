@@ -454,18 +454,7 @@ impl EditPipeline {
         let mut current: Arc<Image> = Arc::clone(&self.source);
         for entry in &self.ops[..self.cursor] {
             if entry.enabled && entry.operation.is_geometric() {
-                let img = match Arc::try_unwrap(current) {
-                    Ok(img) => img,
-                    Err(arc) => arc.as_ref().deep_clone(),
-                };
-                let result = entry.operation.apply(img).map_err(|e| {
-                    RasterError::Pipeline(format!(
-                        "Operation '{}' failed: {}",
-                        entry.operation.name(),
-                        e
-                    ))
-                })?;
-                current = Arc::new(result);
+                current = apply_op(current, entry)?;
             }
         }
         Ok(current)
@@ -482,18 +471,7 @@ impl EditPipeline {
         let mut current: Arc<Image> = Arc::clone(&self.source);
         for entry in &self.ops[..end] {
             if entry.enabled {
-                let img = match Arc::try_unwrap(current) {
-                    Ok(img) => img,
-                    Err(arc) => arc.as_ref().deep_clone(),
-                };
-                let result = entry.operation.apply(img).map_err(|e| {
-                    RasterError::Pipeline(format!(
-                        "Operation '{}' failed: {}",
-                        entry.operation.name(),
-                        e
-                    ))
-                })?;
-                current = Arc::new(result);
+                current = apply_op(current, entry)?;
             }
         }
         Ok(current)
@@ -542,4 +520,19 @@ impl EditPipeline {
         self.cursor = new_cursor.min(self.ops.len());
         self.cache.clear();
     }
+}
+
+fn apply_op(current: Arc<Image>, entry: &EditEntry) -> RasterResult<Arc<Image>> {
+    let img = match Arc::try_unwrap(current) {
+        Ok(img) => img,
+        Err(arc) => arc.as_ref().deep_clone(),
+    };
+    let result = entry.operation.apply(img).map_err(|e| {
+        RasterError::Pipeline(format!(
+            "Operation '{}' failed: {}",
+            entry.operation.name(),
+            e
+        ))
+    })?;
+    Ok(Arc::new(result))
 }

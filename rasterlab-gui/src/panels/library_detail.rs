@@ -298,7 +298,11 @@ fn multi_photo_ui(ui: &mut egui::Ui, state: &mut AppState, ids: &[PhotoId], coun
     ui.data_mut(|d| d.insert_temp(kw_id, kw_text));
 }
 
-fn apply_batch_rating(state: &mut AppState, ids: &[PhotoId], rating: u8) {
+fn for_each_lmta(
+    state: &mut AppState,
+    ids: &[PhotoId],
+    mut f: impl FnMut(&mut rasterlab_core::library_meta::LibraryMeta) -> bool,
+) {
     let Some(lib) = state.library.library.clone() else {
         return;
     };
@@ -312,55 +316,34 @@ fn apply_batch_rating(state: &mut AppState, ids: &[PhotoId], rating: u8) {
         if let Some(rlab_path) = rlab_path_opt
             && let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
             && let Some(ref mut lmta) = rlab.lmta
+            && f(lmta)
         {
-            lmta.rating = rating;
             lib.update_metadata(id, lmta.clone()).ok();
         }
     }
     state.library.refresh();
+}
+
+fn apply_batch_rating(state: &mut AppState, ids: &[PhotoId], rating: u8) {
+    for_each_lmta(state, ids, |lmta| {
+        lmta.rating = rating;
+        true
+    });
 }
 
 fn apply_batch_flag(state: &mut AppState, ids: &[PhotoId], flag: Option<&str>) {
-    let Some(lib) = state.library.library.clone() else {
-        return;
-    };
-    for &id in ids {
-        let rlab_path_opt = state
-            .library
-            .results
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| lib.rlab_path(&p.hash));
-        if let Some(rlab_path) = rlab_path_opt
-            && let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
-            && let Some(ref mut lmta) = rlab.lmta
-        {
-            lmta.flag = flag.map(|s| s.to_owned());
-            lib.update_metadata(id, lmta.clone()).ok();
-        }
-    }
-    state.library.refresh();
+    for_each_lmta(state, ids, |lmta| {
+        lmta.flag = flag.map(|s| s.to_owned());
+        true
+    });
 }
 
 fn apply_batch_keyword(state: &mut AppState, ids: &[PhotoId], kw: &str) {
-    let Some(lib) = state.library.library.clone() else {
-        return;
-    };
-    for &id in ids {
-        let rlab_path_opt = state
-            .library
-            .results
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| lib.rlab_path(&p.hash));
-        if let Some(rlab_path) = rlab_path_opt
-            && let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
-            && let Some(ref mut lmta) = rlab.lmta
-            && !lmta.keywords.contains(&kw.to_owned())
-        {
-            lmta.keywords.push(kw.to_owned());
-            lib.update_metadata(id, lmta.clone()).ok();
+    for_each_lmta(state, ids, |lmta| {
+        if lmta.keywords.contains(&kw.to_owned()) {
+            return false;
         }
-    }
-    state.library.refresh();
+        lmta.keywords.push(kw.to_owned());
+        true
+    });
 }
