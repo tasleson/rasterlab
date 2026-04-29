@@ -26,6 +26,8 @@ pub struct ToolState {
     pub crop_aspect_idx: usize,
     /// Custom ratio (width / height), only used when crop_aspect_idx == 6.
     pub crop_custom_ratio: f32,
+    /// When true, flips landscape presets (3:2 → 2:3, 4:3 → 3:4, 16:9 → 9:16).
+    pub crop_portrait: bool,
 
     // ── Rotate / Flip ─────────────────────────────────────────────────────
     pub rotate_deg: f32,
@@ -273,6 +275,7 @@ impl ToolState {
             crop_h: 0,
             crop_aspect_idx: 0,
             crop_custom_ratio: 1.5,
+            crop_portrait: false,
             rotate_deg: 0.0,
             rotate_preview_active: false,
             flip_h_pending: false,
@@ -630,11 +633,21 @@ impl ToolState {
     }
 
     pub fn crop_aspect_ratio(&self) -> Option<(f32, f32)> {
+        let flip = self.crop_portrait;
         match self.crop_aspect_idx {
-            1 => Some((3.0, 2.0)),
-            2 => Some((4.0, 3.0)),
+            1 => {
+                let (w, h) = (3.0, 2.0);
+                Some(if flip { (h, w) } else { (w, h) })
+            }
+            2 => {
+                let (w, h) = (4.0, 3.0);
+                Some(if flip { (h, w) } else { (w, h) })
+            }
             3 => Some((1.0, 1.0)),
-            4 => Some((16.0, 9.0)),
+            4 => {
+                let (w, h) = (16.0, 9.0);
+                Some(if flip { (h, w) } else { (w, h) })
+            }
             5 => Some((9.0, 16.0)),
             6 => Some((self.crop_custom_ratio, 1.0)),
             _ => None,
