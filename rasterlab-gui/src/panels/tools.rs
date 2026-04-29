@@ -653,8 +653,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
                     // Portrait / landscape toggle — only meaningful for landscape presets.
                     ui.label("Orientation:");
-                    let orientation_matters =
-                        matches!(state.tools.crop_aspect_idx, 1 | 2 | 4);
+                    let orientation_matters = matches!(state.tools.crop_aspect_idx, 1 | 2 | 4);
                     let btn = egui::Button::new(if state.tools.crop_portrait {
                         "◫ Portrait"
                     } else {
