@@ -158,10 +158,20 @@ pub struct ToolState {
     pub hdr_merge_dialog_requested: bool,
 
     // ── Perspective ───────────────────────────────────────────────────────
-    /// Corner offsets `[[tl_x, tl_y], [tr_x, tr_y], [br_x, br_y], [bl_x, bl_y]]`
-    /// as fractions of image width/height in `[-1, 1]`.
-    pub perspective_corners: [[f32; 2]; 4],
+    /// Keystone correction for vertical lines (converging verticals).
+    /// Range: -100..100. Positive = fix building-shot-from-below convergence.
+    pub perspective_vertical: f32,
+    /// Keystone correction for horizontal lines (converging horizontals).
+    /// Range: -100..100. Positive = fix rightward convergence.
+    pub perspective_horizontal: f32,
+    /// Zoom applied after perspective correction to fill the frame.
+    /// Range: 50..150 (%). 100 = no zoom; increase to hide empty edge areas.
+    pub perspective_scale: f32,
     pub perspective_preview_active: bool,
+    /// Number of vertical grid cells shown in the perspective overlay.
+    pub perspective_grid_cols: u32,
+    /// Number of horizontal grid cells shown in the perspective overlay.
+    pub perspective_grid_rows: u32,
 
     // ── Color Space Conversion ────────────────────────────────────────────
     pub color_space_conversion: ColorSpaceConversion,
@@ -342,8 +352,12 @@ impl ToolState {
             hdr_merge_paths: Vec::new(),
             hdr_merge_preview_active: false,
             hdr_merge_dialog_requested: false,
-            perspective_corners: [[0.0; 2]; 4],
+            perspective_vertical: 0.0,
+            perspective_horizontal: 0.0,
+            perspective_scale: 100.0,
             perspective_preview_active: false,
+            perspective_grid_cols: 3,
+            perspective_grid_rows: 3,
             color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,
             lut_op: None,
             lut_strength: 1.0,
@@ -565,7 +579,9 @@ impl ToolState {
         } else if self.hdr_merge_preview_active {
             Some(Box::new(HdrMergeOp::new(self.hdr_merge_paths.clone())))
         } else if self.perspective_preview_active {
-            Some(Box::new(PerspectiveOp::new(self.perspective_corners)))
+            Some(Box::new(PerspectiveOp::new(
+                self.perspective_computed_corners(),
+            )))
         } else {
             None
         }
@@ -611,6 +627,26 @@ impl ToolState {
         self.focus_stack_preview_active = false;
         self.hdr_merge_preview_active = false;
         self.perspective_preview_active = false;
+    }
+
+    /// Compute the four corner offsets for `PerspectiveOp` from the current
+    /// Vertical / Horizontal / Scale parameters.
+    ///
+    /// The mapping mirrors Lightroom's Transform panel convention:
+    /// - `perspective_vertical > 0` → fix upward-converging verticals (buildings)
+    /// - `perspective_horizontal > 0` → fix rightward-converging horizontals
+    /// - `perspective_scale > 100` → zoom in to hide empty border areas
+    pub fn perspective_computed_corners(&self) -> [[f32; 2]; 4] {
+        let v = self.perspective_vertical / 100.0 * 0.4;
+        let h = self.perspective_horizontal / 100.0 * 0.4;
+        let s = (self.perspective_scale / 100.0).max(0.01);
+        let k = (1.0 - 1.0 / s) / 2.0;
+        [
+            [v + k, k],      // TL: vertical narrows top; scale shifts inward
+            [-v - k, h + k], // TR
+            [-k, -h - k],    // BR
+            [k, -k],         // BL
+        ]
     }
 
     /// Build a `MaskShape` from the current mask UI state, or `None` if masking

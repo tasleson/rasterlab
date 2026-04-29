@@ -1888,43 +1888,58 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             if state.editing.is_some() {
                 ui.disable();
             }
-            let corner_labels = [
-                ("Top-left", 0usize),
-                ("Top-right", 1),
-                ("Bottom-right", 2),
-                ("Bottom-left", 3),
-            ];
+
             let mut changed = false;
-            egui::Grid::new("perspective_grid")
-                .num_columns(3)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("");
-                    ui.label("X");
-                    ui.label("Y");
-                    ui.end_row();
-                    for (label, i) in corner_labels {
-                        ui.label(label);
-                        changed |= ui
-                            .add(
-                                DragValue::new(&mut state.tools.perspective_corners[i][0])
-                                    .speed(0.005)
-                                    .range(-1.0..=1.0_f32),
-                            )
-                            .changed();
-                        changed |= ui
-                            .add(
-                                DragValue::new(&mut state.tools.perspective_corners[i][1])
-                                    .speed(0.005)
-                                    .range(-1.0..=1.0_f32),
-                            )
-                            .changed();
-                        ui.end_row();
-                    }
-                });
+
+            // Vertical keystone slider.
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut state.tools.perspective_vertical, -100.0..=100.0)
+                        .text("Vertical")
+                        .step_by(0.5),
+                )
+                .changed();
+
+            // Horizontal keystone slider.
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut state.tools.perspective_horizontal, -100.0..=100.0)
+                        .text("Horizontal")
+                        .step_by(0.5),
+                )
+                .changed();
+
+            // Scale slider — zoom in to hide empty border areas.
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut state.tools.perspective_scale, 100.0..=150.0)
+                        .text("Scale")
+                        .step_by(0.1)
+                        .suffix("%"),
+                )
+                .changed();
+
             if changed && has_image {
                 state.update_perspective_preview();
             }
+
+            // Grid spacing controls.
+            ui.horizontal(|ui| {
+                ui.label("Grid");
+                ui.add(
+                    DragValue::new(&mut state.tools.perspective_grid_cols)
+                        .speed(0.1)
+                        .range(1..=24_u32)
+                        .prefix("cols: "),
+                );
+                ui.add(
+                    DragValue::new(&mut state.tools.perspective_grid_rows)
+                        .speed(0.1)
+                        .range(1..=24_u32)
+                        .prefix("rows: "),
+                );
+            });
+
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(has_image, egui::Button::new("Apply"))
@@ -1943,6 +1958,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     state.reset_perspective();
                 }
             });
+
+            ui.label(
+                egui::RichText::new("Use the grid to align straight lines in the image.")
+                    .small()
+                    .color(egui::Color32::from_gray(140)),
+            );
         });
     if resp.header_response.clicked() {
         state

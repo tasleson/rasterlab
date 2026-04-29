@@ -1334,12 +1334,17 @@ impl AppState {
 
     pub fn push_perspective(&mut self) {
         self.tools.perspective_preview_active = false;
-        self.push_op(Box::new(PerspectiveOp::new(self.tools.perspective_corners)));
-        self.tools.perspective_corners = [[0.0; 2]; 4];
+        let corners = self.tools.perspective_computed_corners();
+        self.push_op(Box::new(PerspectiveOp::new(corners)));
+        self.tools.perspective_vertical = 0.0;
+        self.tools.perspective_horizontal = 0.0;
+        self.tools.perspective_scale = 100.0;
     }
 
     pub fn reset_perspective(&mut self) {
-        self.tools.perspective_corners = [[0.0; 2]; 4];
+        self.tools.perspective_vertical = 0.0;
+        self.tools.perspective_horizontal = 0.0;
+        self.tools.perspective_scale = 100.0;
         self.cancel_perspective_preview();
     }
 

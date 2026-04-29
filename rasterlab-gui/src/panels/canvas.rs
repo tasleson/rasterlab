@@ -1218,6 +1218,32 @@ impl CanvasState {
                 }
             }
         }
+
+        // ── Perspective grid overlay ──────────────────────────────────────────
+        // Shown whenever the Perspective section is open, as an alignment aid.
+        if state.prefs.is_tool_open("perspective") {
+            let img_rect = Rect::from_min_size(image_tl, display_size);
+            let clipped = painter.with_clip_rect(img_rect);
+            let grid_stroke = Stroke::new(0.5, Color32::from_white_alpha(70));
+            let cols = state.tools.perspective_grid_cols.max(1) as f32;
+            let rows = state.tools.perspective_grid_rows.max(1) as f32;
+            for c in 1..state.tools.perspective_grid_cols {
+                let t = c as f32 / cols;
+                let x = img_rect.min.x + img_rect.width() * t;
+                clipped.line_segment(
+                    [Pos2::new(x, img_rect.min.y), Pos2::new(x, img_rect.max.y)],
+                    grid_stroke,
+                );
+            }
+            for r in 1..state.tools.perspective_grid_rows {
+                let t = r as f32 / rows;
+                let y = img_rect.min.y + img_rect.height() * t;
+                clipped.line_segment(
+                    [Pos2::new(img_rect.min.x, y), Pos2::new(img_rect.max.x, y)],
+                    grid_stroke,
+                );
+            }
+        }
     }
 }
 
