@@ -2167,6 +2167,14 @@ impl AppState {
 
     // ── Library ────────────────────────────────────────────────────────────
 
+    pub fn new_library(&mut self, path: std::path::PathBuf) {
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            self.library.last_error = Some(format!("Failed to create directory: {e}"));
+            return;
+        }
+        self.open_library(path);
+    }
+
     pub fn open_library(&mut self, path: std::path::PathBuf) {
         let scale = self.prefs.library_thumb_scale;
         self.library.open_library(path.clone(), scale);

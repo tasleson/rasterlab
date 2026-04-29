@@ -238,6 +238,11 @@ impl RasterLabApp {
                     self.state.hdr_merge_add_image(p)
                 }
             }
+            DialogKind::NewLibrary => {
+                if let Some(p) = first() {
+                    self.state.new_library(p)
+                }
+            }
             DialogKind::OpenLibrary => {
                 if let Some(p) = first() {
                     self.state.open_library(p)
@@ -300,6 +305,10 @@ impl eframe::App for RasterLabApp {
         if self.state.tools.hdr_merge_dialog_requested {
             self.state.tools.hdr_merge_dialog_requested = false;
             self.chooser.hdr_merge_add_image(&ctx);
+        }
+        if self.state.tools.library_new_dialog_requested {
+            self.state.tools.library_new_dialog_requested = false;
+            self.chooser.new_library(&ctx);
         }
         if self.state.tools.library_open_dialog_requested {
             self.state.tools.library_open_dialog_requested = false;
@@ -438,7 +447,7 @@ impl eframe::App for RasterLabApp {
                         ui.separator();
                         if ui.button("New Library…").clicked() {
                             ui.close_kind(egui::UiKind::Menu);
-                            self.state.tools.library_open_dialog_requested = true;
+                            self.state.tools.library_new_dialog_requested = true;
                         }
                         if ui.button("Open Library…").clicked() {
                             ui.close_kind(egui::UiKind::Menu);

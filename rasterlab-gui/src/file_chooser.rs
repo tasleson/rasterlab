@@ -53,7 +53,9 @@ pub enum DialogKind {
     PanoramaAddImage,
     FocusStackAddImage,
     HdrMergeAddImage,
-    /// Folder picker for New Library / Open Library.
+    /// Folder picker / creator for New Library.
+    NewLibrary,
+    /// Folder picker for Open Library.
     OpenLibrary,
     /// Multi-file picker for Import Photos > Select Files.
     ImportFiles,
@@ -82,6 +84,7 @@ pub struct FileChooser {
     panorama_dlg: FileDialog,
     focus_stack_dlg: FileDialog,
     hdr_merge_dlg: FileDialog,
+    lib_new_dlg: FileDialog,
     lib_folder_dlg: FileDialog,
     import_files_dlg: FileDialog,
     import_folder_dlg: FileDialog,
@@ -156,6 +159,9 @@ impl FileChooser {
                 .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
                 .add_file_filter_extensions("PNG", vec!["png"])
                 .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
+            lib_new_dlg: FileDialog::new()
+                .title("Create New Library")
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
             lib_folder_dlg: FileDialog::new()
                 .title("Select Library Folder")
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
@@ -224,6 +230,10 @@ impl FileChooser {
         self.open(ctx, DialogKind::HdrMergeAddImage, false);
     }
 
+    pub fn new_library(&mut self, ctx: &egui::Context) {
+        self.open(ctx, DialogKind::NewLibrary, false);
+    }
+
     pub fn open_library(&mut self, ctx: &egui::Context) {
         self.open(ctx, DialogKind::OpenLibrary, false);
     }
@@ -275,7 +285,8 @@ impl FileChooser {
             self.pending = Some(kind);
             let dlg = self.dialog_mut(kind);
             match kind {
-                DialogKind::OpenLibrary
+                DialogKind::NewLibrary
+                | DialogKind::OpenLibrary
                 | DialogKind::ImportFolder
                 | DialogKind::ExportDestination => dlg.pick_directory(),
                 DialogKind::ImportFiles => dlg.pick_multiple(),
@@ -303,6 +314,7 @@ impl FileChooser {
             DialogKind::PanoramaAddImage => &mut self.panorama_dlg,
             DialogKind::FocusStackAddImage => &mut self.focus_stack_dlg,
             DialogKind::HdrMergeAddImage => &mut self.hdr_merge_dlg,
+            DialogKind::NewLibrary => &mut self.lib_new_dlg,
             DialogKind::OpenLibrary => &mut self.lib_folder_dlg,
             DialogKind::ImportFiles => &mut self.import_files_dlg,
             DialogKind::ImportFolder => &mut self.import_folder_dlg,
@@ -375,7 +387,8 @@ impl FileChooser {
                     .pick_file()
                     .map(|p| vec![p])
                     .unwrap_or_default(),
-                DialogKind::OpenLibrary
+                DialogKind::NewLibrary
+                | DialogKind::OpenLibrary
                 | DialogKind::ImportFolder
                 | DialogKind::ExportDestination => {
                     let mut d = rfd::FileDialog::new();
