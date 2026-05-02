@@ -32,6 +32,8 @@ pub struct ToolState {
     // ── Rotate / Flip ─────────────────────────────────────────────────────
     pub rotate_deg: f32,
     pub rotate_preview_active: bool,
+    /// When true, automatically crop after a non-right-angle rotation to remove exposed corners.
+    pub rotate_crop: bool,
     /// Pending horizontal flip waiting for Apply.
     pub flip_h_pending: bool,
     /// Pending vertical flip waiting for Apply.
@@ -168,6 +170,8 @@ pub struct ToolState {
     /// Range: 50..150 (%). 100 = no zoom; increase to hide empty edge areas.
     pub perspective_scale: f32,
     pub perspective_preview_active: bool,
+    /// When true, automatically crop after perspective correction to remove clamped-edge areas.
+    pub perspective_crop: bool,
     /// Number of vertical grid cells shown in the perspective overlay.
     pub perspective_grid_cols: u32,
     /// Number of horizontal grid cells shown in the perspective overlay.
@@ -290,6 +294,7 @@ impl ToolState {
             crop_portrait: false,
             rotate_deg: 0.0,
             rotate_preview_active: false,
+            rotate_crop: true,
             flip_h_pending: false,
             flip_v_pending: false,
             flip_preview_active: false,
@@ -356,6 +361,7 @@ impl ToolState {
             perspective_horizontal: 0.0,
             perspective_scale: 100.0,
             perspective_preview_active: false,
+            perspective_crop: true,
             perspective_grid_cols: 3,
             perspective_grid_rows: 3,
             color_space_conversion: ColorSpaceConversion::SrgbToDisplayP3,

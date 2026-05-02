@@ -20,7 +20,7 @@ use rasterlab_core::{
         HdrMergeOp, HealOp, HealSpot, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp,
         LevelsOp, LutOp, MaskedOp, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, ResizeOp,
         RotateOp, SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp,
-        VignetteOp, WhiteBalanceOp,
+        VignetteOp, WhiteBalanceOp, auto_crop_rect,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -826,15 +826,41 @@ impl AppState {
     }
     pub fn push_rotate_arbitrary(&mut self) {
         self.tools.rotate_preview_active = false;
+        let angle = self.tools.rotate_deg;
+
+        // Auto-crop is only meaningful for non-right-angle rotations.
+        let is_right_angle = (angle % 90.0).abs() < 0.001;
+        let crop_op = if self.tools.rotate_crop && !is_right_angle {
+            self.rendered.as_ref().map(|img| {
+                let w = (img.width as f32 / self.rendered_scale).round() as u32;
+                let h = (img.height as f32 / self.rendered_scale).round() as u32;
+                straighten_crop_op(w, h, angle)
+            })
+        } else {
+            None
+        };
+
         // Use lossless pixel-transposition fast paths for exact right-angle
         // rotations; fall back to bilinear for all other angles.
-        let op: Box<dyn Operation> = match self.tools.rotate_deg as i32 % 360 {
+        let rotate_op: Box<dyn Operation> = match angle as i32 % 360 {
             90 | -270 => Box::new(RotateOp::cw90()),
             180 | -180 => Box::new(RotateOp::cw180()),
             270 | -90 => Box::new(RotateOp::cw270()),
-            _ => Box::new(RotateOp::arbitrary(self.tools.rotate_deg)),
+            _ => Box::new(RotateOp::arbitrary(angle)),
         };
-        self.push_op(op);
+
+        self.cancel_all_previews();
+        if let Some(store) = &mut self.copies {
+            let p = store.active_pipeline_mut();
+            p.push_op(rotate_op);
+            if let Some(crop) = crop_op {
+                p.push_op(Box::new(crop));
+            }
+        }
+        if self.copies.is_some() {
+            self.mark_dirty();
+            self.request_render();
+        }
     }
 
     pub fn update_rotate_preview(&mut self) {
@@ -1335,7 +1361,29 @@ impl AppState {
     pub fn push_perspective(&mut self) {
         self.tools.perspective_preview_active = false;
         let corners = self.tools.perspective_computed_corners();
-        self.push_op(Box::new(PerspectiveOp::new(corners)));
+
+        let crop_op = if self.tools.perspective_crop {
+            self.rendered.as_ref().and_then(|img| {
+                let w = (img.width as f32 / self.rendered_scale).round() as u32;
+                let h = (img.height as f32 / self.rendered_scale).round() as u32;
+                auto_crop_rect(corners, w, h).map(|[cx, cy, cw, ch]| CropOp::new(cx, cy, cw, ch))
+            })
+        } else {
+            None
+        };
+
+        self.cancel_all_previews();
+        if let Some(store) = &mut self.copies {
+            let p = store.active_pipeline_mut();
+            p.push_op(Box::new(PerspectiveOp::new(corners)));
+            if let Some(crop) = crop_op {
+                p.push_op(Box::new(crop));
+            }
+        }
+        if self.copies.is_some() {
+            self.mark_dirty();
+            self.request_render();
+        }
         self.tools.perspective_vertical = 0.0;
         self.tools.perspective_horizontal = 0.0;
         self.tools.perspective_scale = 100.0;

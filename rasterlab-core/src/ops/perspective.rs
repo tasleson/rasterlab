@@ -134,7 +134,6 @@ fn homography(src: &[[f32; 2]; 4], dst: &[[f32; 2]; 4]) -> Option<[f32; 9]> {
 }
 
 /// Invert a 3×3 matrix.  Returns `None` if singular.
-#[cfg(test)]
 fn invert3x3(m: &[f32; 9]) -> Option<[f32; 9]> {
     let det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
         + m[2] * (m[3] * m[7] - m[4] * m[6]);
@@ -153,6 +152,67 @@ fn invert3x3(m: &[f32; 9]) -> Option<[f32; 9]> {
         (m[1] * m[6] - m[0] * m[7]) * inv_det,
         (m[0] * m[4] - m[1] * m[3]) * inv_det,
     ])
+}
+
+/// Compute the tightest axis-aligned crop rectangle that fits inside the
+/// valid (non-clamped) region after applying a [`PerspectiveOp`] with the
+/// given corners to a `img_w × img_h` image.
+///
+/// Returns `[x, y, w, h]` in pixels, or `None` when all source samples are
+/// already in-bounds (no crop needed) or the computation is degenerate.
+pub fn auto_crop_rect(corners: [[f32; 2]; 4], img_w: u32, img_h: u32) -> Option<[u32; 4]> {
+    let w = img_w as f32;
+    let h = img_h as f32;
+
+    let dst_pts: [[f32; 2]; 4] = [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
+    let src_pts: [[f32; 2]; 4] = [
+        [corners[0][0] * w, corners[0][1] * h],
+        [w + corners[1][0] * w, corners[1][1] * h],
+        [w + corners[2][0] * w, h + corners[2][1] * h],
+        [corners[3][0] * w, h + corners[3][1] * h],
+    ];
+
+    // When all source corners are within [0,W]×[0,H] the output is fully
+    // valid — no crop needed.
+    if src_pts
+        .iter()
+        .all(|[sx, sy]| *sx >= 0.0 && *sx <= w && *sy >= 0.0 && *sy <= h)
+    {
+        return None;
+    }
+
+    // H maps output → source (inverse warp).  H⁻¹ maps source → output.
+    let h_fwd = homography(&dst_pts, &src_pts)?;
+    let h_inv = invert3x3(&h_fwd)?;
+
+    // Map the four source-image corners through H⁻¹ to obtain the vertices of
+    // the valid output quadrilateral (the region whose source samples are all
+    // within [0,W]×[0,H]).
+    let q0 = apply_h(&h_inv, 0.0, 0.0); // source TL
+    let q1 = apply_h(&h_inv, w, 0.0); // source TR
+    let q2 = apply_h(&h_inv, w, h); // source BR
+    let q3 = apply_h(&h_inv, 0.0, h); // source BL
+
+    // Largest inscribed axis-aligned rectangle via the 4-corner intersection.
+    let x0 = q0.0.max(q3.0).max(0.0).min(w);
+    let x1 = q1.0.min(q2.0).max(0.0).min(w);
+    let y0 = q0.1.max(q1.1).max(0.0).min(h);
+    let y1 = q3.1.min(q2.1).max(0.0).min(h);
+
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    let cx = x0.ceil() as u32;
+    let cy = y0.ceil() as u32;
+    let rx = x1.floor() as u32;
+    let ry = y1.floor() as u32;
+
+    if rx <= cx || ry <= cy {
+        return None;
+    }
+
+    Some([cx, cy, rx - cx, ry - cy])
 }
 
 /// Apply homography `h` to point `(x, y)` → `(x', y')`.

@@ -59,7 +59,7 @@ pub use lut::LutOp;
 pub use mask::{LinearMask, MaskShape, MaskedOp, RadialMask};
 pub use noise_reduction::{NoiseReductionOp, NrMethod};
 pub use panorama::PanoramaOp;
-pub use perspective::PerspectiveOp;
+pub use perspective::{PerspectiveOp, auto_crop_rect};
 pub use resize::{ResampleMode, ResizeOp};
 pub use rotate::{RotateMode, RotateOp};
 pub use saturation::SaturationOp;

@@ -1958,6 +1958,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     state.reset_perspective();
                 }
             });
+            ui.checkbox(
+                &mut state.tools.perspective_crop,
+                "Crop to rectangle after apply",
+            );
 
             ui.label(
                 egui::RichText::new("Use the grid to align straight lines in the image.")
@@ -2193,6 +2197,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     state.reset_rotate();
                 }
             });
+            ui.checkbox(
+                &mut state.tools.rotate_crop,
+                "Crop to rectangle after apply",
+            );
             ui.horizontal(|ui| {
                 let h_label = if state.tools.flip_h_pending {
                     "Flip H ✓"
