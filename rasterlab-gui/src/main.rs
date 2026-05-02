@@ -11,12 +11,7 @@ fn main() -> eframe::Result<()> {
     let initial_file: Option<std::path::PathBuf> =
         std::env::args_os().nth(1).map(std::path::PathBuf::from);
 
-    // Rayon worker threads default to 8 MiB stack — not enough for the JPEG/PNG
-    // decode chains + image-processing kernels.  Configure before first use.
-    rayon::ThreadPoolBuilder::new()
-        .stack_size(32 * 1024 * 1024) // 32 MiB per worker
-        .build_global()
-        .expect("failed to build rayon thread pool");
+    rasterlab_render::init_rayon_pool();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RasterLab")

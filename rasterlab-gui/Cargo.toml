@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 rasterlab-core    = { workspace = true }
+rasterlab-render  = { workspace = true }
 rasterlab-library = { workspace = true }
 
 eframe       = { workspace = true }
@@ -20,7 +21,6 @@ serde        = { workspace = true }
 serde_json   = { workspace = true }
 serde_yaml   = "0.9"
 anyhow       = { workspace = true }
-rayon        = { workspace = true }
 dirs         = "5"
 walkdir      = "2"
 filetime     = "0.2"

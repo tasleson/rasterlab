@@ -26,6 +26,7 @@ use rasterlab_core::{
     project::{RlabFile, RlabMeta},
     traits::operation::Operation,
 };
+use rasterlab_render::{PREVIEW_SCALE, RenderMeta, RenderRequest, RenderResult};
 
 use super::{EditSession, EditingTool, ToolState, load_op_into_tools};
 
@@ -57,30 +58,10 @@ enum BgMessage {
         rlab: Box<RlabFile>,
         image: Image,
     },
-    /// Render finished; histogram was also computed in the same thread.
-    RenderComplete {
-        image: Arc<Image>,
-        hist: Box<HistogramData>,
-        /// One image per op in `ops[start_index..cursor]`.  Entry `k` is the
-        /// image state after op `start_index + k` was processed (unchanged for
-        /// disabled ops).  Safe to store into the pipeline step cache only when
-        /// `cache_gen` still matches `pipeline.step_cache_gen()`.
-        intermediates: Vec<Arc<Image>>,
-        /// The op index from which this render started.
-        start_index: usize,
-        /// Snapshot of `pipeline.step_cache_gen()` taken when the render began.
-        cache_gen: u64,
-        /// True when this was a downsampled preview render.  A full-res render
-        /// will be queued automatically after this result is displayed.
-        is_preview: bool,
-        /// When Some, this image is a full-resolution crop of just the visible
-        /// viewport — it should be drawn as an overlay at [x,y,w,h] in
-        /// full-res image coordinates rather than replacing `state.rendered`.
-        overlay_rect: Option<[u32; 4]>,
-    },
+    /// Result from the background render thread (via `rasterlab-render` crate).
+    Render(RenderResult),
+    /// Non-render error from a background thread (file load, export, etc.).
     Error(String),
-    /// The render thread aborted because [`core_cancel::request`] was called.
-    Cancelled,
     /// Progress update from a running import.
     ImportProgress(rasterlab_library::ImportProgress),
     /// Import finished; thumbnail cache should be invalidated.
@@ -89,10 +70,13 @@ enum BgMessage {
         errors: Vec<(StdPathBuf, String)>,
     },
     /// A thumbnail image was loaded from disk; ready to upload to egui.
-    ThumbLoaded {
-        hash: String,
-        bytes: Vec<u8>,
-    },
+    ThumbLoaded { hash: String, bytes: Vec<u8> },
+}
+
+impl From<RenderResult> for BgMessage {
+    fn from(r: RenderResult) -> Self {
+        BgMessage::Render(r)
+    }
 }
 
 /// What the split "before/after" view compares against.
@@ -378,78 +362,73 @@ impl AppState {
                     self.image_generation += 1;
                     self.request_render();
                 }
-                BgMessage::RenderComplete {
-                    image,
-                    hist,
-                    intermediates,
-                    start_index,
-                    cache_gen,
-                    is_preview,
-                    overlay_rect,
-                } => {
-                    self.histogram = Some(*hist);
-                    self.loading = false;
-                    self.nr_in_flight = false;
+                BgMessage::Render(result) => match result {
+                    RenderResult::Complete {
+                        image,
+                        hist,
+                        intermediates,
+                        start_index,
+                        cache_gen,
+                        is_preview,
+                        overlay_rect,
+                    } => {
+                        self.histogram = Some(*hist);
+                        self.loading = false;
+                        self.nr_in_flight = false;
 
-                    if let Some(rect) = overlay_rect {
-                        // Viewport overlay — draw on top of the existing base render.
-                        // Don't touch state.rendered so the canvas never goes blank.
-                        self.preview_overlay = Some(image);
-                        self.preview_overlay_rect = Some(rect);
-                    } else {
-                        // Full-res or fallback-scale render — update the base image.
-                        self.rendered = Some(image);
-                        self.rendered_is_preview = is_preview;
-                        self.rendered_scale = if is_preview { PREVIEW_SCALE } else { 1.0 };
-                        if !is_preview {
-                            self.preview_overlay = None;
-                            self.preview_overlay_rect = None;
+                        if let Some(rect) = overlay_rect {
+                            self.preview_overlay = Some(image);
+                            self.preview_overlay_rect = Some(rect);
+                        } else {
+                            self.rendered = Some(image);
+                            self.rendered_is_preview = is_preview;
+                            self.rendered_scale = if is_preview { PREVIEW_SCALE } else { 1.0 };
+                            if !is_preview {
+                                self.preview_overlay = None;
+                                self.preview_overlay_rect = None;
+                            }
+                        }
+
+                        if !is_preview && overlay_rect.is_none() {
+                            let elapsed_ms = self
+                                .render_start
+                                .take()
+                                .map(|t| t.elapsed().as_millis())
+                                .unwrap_or(0);
+                            self.status = format!("Ready  ({} ms)", elapsed_ms);
+                            if let Some(pipeline) = self.pipeline_mut()
+                                && cache_gen == pipeline.step_cache_gen()
+                            {
+                                pipeline.store_steps(start_index, intermediates);
+                            }
+                        }
+
+                        if self.needs_rerender {
+                            self.needs_rerender = false;
+                            self.request_render_inner(false);
+                        } else if is_preview || overlay_rect.is_some() {
+                            self.request_render_inner(true);
                         }
                     }
-
-                    if !is_preview && overlay_rect.is_none() {
-                        // Only report timing and populate the step cache for
-                        // full-res renders; preview intermediates are low-res.
-                        let elapsed_ms = self
-                            .render_start
-                            .take()
-                            .map(|t| t.elapsed().as_millis())
-                            .unwrap_or(0);
-                        self.status = format!("Ready  ({} ms)", elapsed_ms);
-                        if let Some(pipeline) = self.pipeline_mut()
-                            && cache_gen == pipeline.step_cache_gen()
-                        {
-                            pipeline.store_steps(start_index, intermediates);
+                    RenderResult::Error(e) => {
+                        self.status = format!("Error: {}", e);
+                        self.loading = false;
+                        self.nr_in_flight = false;
+                    }
+                    RenderResult::Cancelled => {
+                        self.loading = false;
+                        self.nr_in_flight = false;
+                        self.render_start = None;
+                        self.status = "Cancelled".into();
+                        if self.needs_rerender {
+                            self.needs_rerender = false;
+                            self.request_render_inner(false);
                         }
                     }
-
-                    if self.needs_rerender {
-                        self.needs_rerender = false;
-                        self.request_render_inner(false);
-                    } else if is_preview || overlay_rect.is_some() {
-                        // Preview displayed — follow up with a full-res render.
-                        self.request_render_inner(true);
-                    }
-                }
+                },
                 BgMessage::Error(e) => {
                     self.status = format!("Error: {}", e);
                     self.loading = false;
-                    self.nr_in_flight = false;
-                }
-                BgMessage::Cancelled => {
-                    self.loading = false;
-                    self.nr_in_flight = false;
-                    self.render_start = None;
-                    self.status = "Cancelled".into();
-                    // A follow-up render may already be queued (the Cancel
-                    // button clears the NR preview flag and calls
-                    // request_render, which sets needs_rerender while the
-                    // aborted render was still in flight).  Honour it now so
-                    // the canvas returns to the committed state.
-                    if self.needs_rerender {
-                        self.needs_rerender = false;
-                        self.request_render_inner(false);
-                    }
                 }
                 BgMessage::ImportProgress(p) => {
                     self.library.import_progress = Some(p);
@@ -1960,7 +1939,7 @@ impl AppState {
         }
         let (black, white) = {
             let hist = self.histogram.as_ref().unwrap();
-            percentile_levels(&hist.luma, 0.005, 0.995)
+            rasterlab_render::percentile_levels(&hist.luma, 0.005, 0.995)
         };
         self.cancel_all_previews();
         if let Some(store) = &mut self.copies {
@@ -2095,42 +2074,21 @@ impl AppState {
             None
         };
 
-        std::thread::Builder::new()
-            .name("rasterlab-render".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
-                let msg = match render_in_thread(
-                    start_image,
-                    committed_ops,
-                    preview_op,
-                    preview_scale,
-                    preview_viewport,
-                    overlay_viewport,
-                ) {
-                    Ok((image, hist, intermediates, overlay_rect)) => BgMessage::RenderComplete {
-                        image,
-                        hist: Box::new(hist),
-                        intermediates,
-                        start_index: start_idx,
-                        cache_gen,
-                        is_preview,
-                        overlay_rect,
-                    },
-                    Err(e) => {
-                        // If a cancel was requested, the op returned
-                        // RasterError::Cancelled — surface it as a clean
-                        // BgMessage::Cancelled rather than a red error.
-                        if core_cancel::is_requested() {
-                            BgMessage::Cancelled
-                        } else {
-                            BgMessage::Error(e)
-                        }
-                    }
-                };
-                let _ = tx.send(msg);
-                ctx.request_repaint();
-            })
-            .expect("failed to spawn render thread");
+        let request = RenderRequest {
+            start_image,
+            committed_ops,
+            preview_op,
+            preview_scale,
+            preview_viewport,
+            overlay_viewport,
+        };
+        let meta = RenderMeta {
+            start_index: start_idx,
+            cache_gen,
+            is_preview,
+        };
+        let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
+        rasterlab_render::spawn_render(request, meta, tx, repaint);
     }
 
     // -----------------------------------------------------------------------
@@ -2397,267 +2355,4 @@ fn straighten_crop_op(w: u32, h: u32, angle_deg: f32) -> CropOp {
     let y = (rot_h.saturating_sub(inner_h)) / 2;
 
     CropOp::new(x, y, inner_w.max(1), inner_h.max(1))
-}
-
-// ---------------------------------------------------------------------------
-// Free functions: run in the render thread
-// ---------------------------------------------------------------------------
-
-/// Linear scale factor used for the fast downsampled preview.
-/// 0.25 = 1/4 width × 1/4 height = 1/16 the pixels → ~16× faster ops.
-const PREVIEW_SCALE: f32 = 0.25;
-
-type RenderResult = Result<(Arc<Image>, HistogramData, Vec<Arc<Image>>, Option<[u32; 4]>), String>;
-
-/// Nearest-neighbour downsample via rayon row-parallel copy.
-fn downsample_nn(img: &Image, scale: f32) -> Image {
-    use rayon::prelude::*;
-    let new_w = ((img.width as f32 * scale) as u32).max(1);
-    let new_h = ((img.height as f32 * scale) as u32).max(1);
-    let mut out = Image::new(new_w, new_h);
-    let x_ratio = img.width as f32 / new_w as f32;
-    let y_ratio = img.height as f32 / new_h as f32;
-    let src_w = img.width as usize;
-    out.data
-        .par_chunks_mut(new_w as usize * 4)
-        .enumerate()
-        .for_each(|(y, row)| {
-            let src_y = (y as f32 * y_ratio) as usize;
-            for x in 0..new_w as usize {
-                let src_x = (x as f32 * x_ratio) as usize;
-                let src_off = (src_y * src_w + src_x) * 4;
-                let dst_off = x * 4;
-                row[dst_off..dst_off + 4].copy_from_slice(&img.data[src_off..src_off + 4]);
-            }
-        });
-    out
-}
-
-/// Run committed ops then an optional preview op.
-///
-/// When `preview_scale` is `Some(s)`, the starting image is downsampled to
-/// `s` of its original dimensions before any ops run — all work then happens
-/// on a small image, so the result is fast but low-resolution.  Intermediates
-/// are not returned for preview renders (they are low-res and must not be
-/// stored in the full-res step cache).
-/// Find the black and white points for auto-levels by clipping the histogram
-/// at `lo_pct` and `hi_pct` percentiles of the cumulative pixel count.
-/// Returns `(black, white)` as fractions in `[0.0, 1.0]`.
-fn percentile_levels(hist: &[u64; 256], lo_pct: f64, hi_pct: f64) -> (f32, f32) {
-    let total: u64 = hist.iter().sum();
-    if total == 0 {
-        return (0.0, 1.0);
-    }
-    let lo_target = ((total as f64 * lo_pct).ceil() as u64).max(1);
-    let hi_target = ((total as f64 * (1.0 - hi_pct)).ceil() as u64).max(1);
-
-    let mut black = 0usize;
-    let mut cumsum = 0u64;
-    for (i, &count) in hist.iter().enumerate() {
-        cumsum += count;
-        if cumsum >= lo_target {
-            black = i;
-            break;
-        }
-    }
-
-    let mut white = 255usize;
-    cumsum = 0;
-    for (i, &count) in hist.iter().enumerate().rev() {
-        cumsum += count;
-        if cumsum >= hi_target {
-            white = i;
-            break;
-        }
-    }
-
-    if white <= black {
-        return (0.0, 1.0); // degenerate — don't adjust
-    }
-    (black as f32 / 255.0, white as f32 / 255.0)
-}
-
-fn render_in_thread(
-    start_image: Arc<Image>,
-    committed_ops: Vec<Option<Box<dyn Operation>>>,
-    preview_op: Option<Box<dyn Operation>>,
-    preview_scale: Option<f32>,
-    preview_viewport: Option<[u32; 4]>,
-    overlay_viewport: Option<[u32; 4]>,
-) -> RenderResult {
-    // ── Overlay path ─────────────────────────────────────────────────────
-    // The pipeline is fully cached so committed_ops is empty.  Crop the
-    // committed result to exactly the visible viewport, apply the preview
-    // op at full resolution, and return it as a positioned overlay.  The
-    // main `state.rendered` image is never replaced, so the canvas stays
-    // stable and sharp.
-    if let (Some(op), Some([vp_x, vp_y, vp_w, vp_h])) = (&preview_op, overlay_viewport) {
-        let mut current = start_image;
-        // Run committed ops (should be empty — all_cached — but be safe).
-        for committed in committed_ops.iter().flatten() {
-            let img = match Arc::try_unwrap(current) {
-                Ok(img) => img,
-                Err(a) => a.as_ref().deep_clone(),
-            };
-            let result = committed
-                .apply(img)
-                .map_err(|e| format!("Op '{}' failed: {}", committed.name(), e))?;
-            debug_validate_image(&result, committed.name());
-            current = Arc::new(result);
-        }
-        // Clamp viewport to image bounds.
-        let x = vp_x.min(current.width.saturating_sub(1));
-        let y = vp_y.min(current.height.saturating_sub(1));
-        let w = vp_w.min(current.width.saturating_sub(x)).max(1);
-        let h = vp_h.min(current.height.saturating_sub(y)).max(1);
-
-        let crop = extract_region(current.as_ref(), x, y, w, h);
-        let processed = op
-            .apply(crop)
-            .map_err(|e| format!("Op '{}' (overlay) failed: {}", op.name(), e))?;
-        debug_validate_image(&processed, op.name());
-
-        let hist = HistogramData::compute(&processed);
-        return Ok((Arc::new(processed), hist, Vec::new(), Some([x, y, w, h])));
-    }
-
-    // ── Fallback: downsampled-blit path ───────────────────────────────────
-    let is_preview = preview_scale.is_some();
-    let mut current: Arc<Image> = match preview_scale {
-        Some(scale) => Arc::new(downsample_nn(start_image.as_ref(), scale)),
-        None => start_image,
-    };
-    let mut intermediates = if !is_preview {
-        Vec::with_capacity(committed_ops.len())
-    } else {
-        Vec::new()
-    };
-
-    for maybe_op in committed_ops {
-        if let Some(op) = maybe_op {
-            // Scale geometric ops (e.g. crop) so their pixel coordinates
-            // match the downsampled image dimensions.
-            let op = match preview_scale {
-                Some(s) => op.scaled_for_preview(s),
-                None => op,
-            };
-            let img = match Arc::try_unwrap(current) {
-                Ok(img) => img,
-                Err(a) => a.as_ref().deep_clone(),
-            };
-            let result = op
-                .apply(img)
-                .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?;
-            debug_validate_image(&result, op.name());
-            current = Arc::new(result);
-        }
-        if !is_preview {
-            intermediates.push(Arc::clone(&current));
-        }
-    }
-
-    if let Some(op) = preview_op {
-        if let Some([vp_x, vp_y, vp_w, vp_h]) = preview_viewport {
-            let scale = preview_scale.unwrap_or(1.0);
-            let sx = ((vp_x as f32 * scale) as u32).min(current.width.saturating_sub(1));
-            let sy = ((vp_y as f32 * scale) as u32).min(current.height.saturating_sub(1));
-            let sw = ((vp_w as f32 * scale).ceil() as u32)
-                .min(current.width.saturating_sub(sx))
-                .max(1);
-            let sh = ((vp_h as f32 * scale).ceil() as u32)
-                .min(current.height.saturating_sub(sy))
-                .max(1);
-            let crop = extract_region(current.as_ref(), sx, sy, sw, sh);
-            let processed = op
-                .apply(crop)
-                .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
-            debug_validate_image(&processed, op.name());
-            let base = match Arc::try_unwrap(current) {
-                Ok(img) => img,
-                Err(a) => a.as_ref().deep_clone(),
-            };
-            // If the op changed image dimensions (e.g. 90°/270° rotation) the
-            // crop-blit optimisation is invalid — fall back to full-image apply.
-            if processed.width == sw && processed.height == sh {
-                let mut base = base;
-                blit_region(&mut base, &processed, sx, sy);
-                current = Arc::new(base);
-            } else {
-                let result = op
-                    .apply(base)
-                    .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
-                debug_validate_image(&result, op.name());
-                current = Arc::new(result);
-            }
-        } else {
-            let img = match Arc::try_unwrap(current) {
-                Ok(img) => img,
-                Err(a) => a.as_ref().deep_clone(),
-            };
-            let result = op
-                .apply(img)
-                .map_err(|e| format!("Op '{}' (preview) failed: {}", op.name(), e))?;
-            debug_validate_image(&result, op.name());
-            current = Arc::new(result);
-        }
-    }
-
-    let hist = HistogramData::compute(current.as_ref());
-    Ok((current, hist, intermediates, None))
-}
-
-/// Debug-only validation that an Image's buffer matches its declared dimensions.
-#[inline]
-fn debug_validate_image(image: &Image, op_name: &str) {
-    debug_assert_eq!(
-        image.data.len(),
-        image.width as usize * image.height as usize * 4,
-        "Operation '{}' returned an Image with mismatched buffer: \
-         data.len()={} but {}x{}x4={}",
-        op_name,
-        image.data.len(),
-        image.width,
-        image.height,
-        image.width as usize * image.height as usize * 4,
-    );
-}
-
-/// Extract a rectangular region from `src` into a new Image without cloning
-/// the full source buffer.  Only `w × h × 4` bytes are read and written,
-/// compared with `src_w × src_h × 4` bytes for a deep_clone + CropOp.
-fn extract_region(src: &Image, x: u32, y: u32, w: u32, h: u32) -> Image {
-    use rayon::prelude::*;
-    let mut out = Image::new(w, h);
-    let src_stride = src.width as usize * 4;
-    let x_off = x as usize * 4;
-    let row_bytes = w as usize * 4;
-    out.data
-        .par_chunks_mut(row_bytes)
-        .enumerate()
-        .for_each(|(dst_y, dst_row)| {
-            let src_start = (y as usize + dst_y) * src_stride + x_off;
-            dst_row.copy_from_slice(&src.data[src_start..src_start + row_bytes]);
-        });
-    out
-}
-
-/// Copy `src` into `dst` at pixel offset `(x, y)`.  Caller must ensure the
-/// region fits within `dst`.
-fn blit_region(dst: &mut Image, src: &Image, x: u32, y: u32) {
-    use rayon::prelude::*;
-    let row_bytes = src.width as usize * 4;
-    let dst_stride = dst.width as usize * 4;
-    // Slice only the rows that receive data — avoids iterating the full image
-    // height and filtering in rayon (which still schedules tasks for empty rows).
-    let start = y as usize * dst_stride;
-    let end = start + src.height as usize * dst_stride;
-    let x_off = x as usize * 4;
-    dst.data[start..end]
-        .par_chunks_mut(dst_stride)
-        .enumerate()
-        .for_each(|(src_row, dst_row)| {
-            let src_off = src_row * row_bytes;
-            dst_row[x_off..x_off + row_bytes]
-                .copy_from_slice(&src.data[src_off..src_off + row_bytes]);
-        });
 }
