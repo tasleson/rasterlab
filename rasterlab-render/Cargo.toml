@@ -1,0 +1,10 @@
+[package]
+name        = "rasterlab-render"
+description = "Headless render thread and pipeline execution for RasterLab"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+
+[dependencies]
+rasterlab-core = { workspace = true }
+rayon          = { workspace = true }
