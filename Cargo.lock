@@ -3863,6 +3863,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rasterlab-gpu"
+version = "0.2.2"
+dependencies = [
+ "bytemuck",
+ "pollster",
+ "rasterlab-core",
+ "thiserror 2.0.18",
+ "wgpu",
+]
+
+[[package]]
 name = "rasterlab-gui"
 version = "0.2.2"
 dependencies = [
@@ -3874,6 +3885,7 @@ dependencies = [
  "filetime",
  "image",
  "rasterlab-core",
+ "rasterlab-gpu",
  "rasterlab-library",
  "rasterlab-render",
  "rfd",
@@ -3910,8 +3922,11 @@ version = "0.2.2"
 name = "rasterlab-render"
 version = "0.2.2"
 dependencies = [
+ "pollster",
  "rasterlab-core",
+ "rasterlab-gpu",
  "rayon",
+ "wgpu",
 ]
 
 [[package]]

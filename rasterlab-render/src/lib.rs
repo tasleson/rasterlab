@@ -8,6 +8,8 @@ use std::sync::{Arc, mpsc};
 use rasterlab_core::{
     Image, cancel as core_cancel, ops::HistogramData, traits::operation::Operation,
 };
+#[cfg(feature = "gpu")]
+use rasterlab_gpu::GpuContext;
 use rayon::prelude::*;
 
 /// Linear scale factor used for the fast downsampled preview.
@@ -37,6 +39,8 @@ pub struct RenderRequest {
     pub preview_scale: Option<f32>,
     pub preview_viewport: Option<[u32; 4]>,
     pub overlay_viewport: Option<[u32; 4]>,
+    #[cfg(feature = "gpu")]
+    pub gpu: Option<Arc<GpuContext>>,
 }
 
 /// Metadata carried alongside the render for result routing.
@@ -70,6 +74,8 @@ pub fn spawn_render<M>(
                 request.preview_scale,
                 request.preview_viewport,
                 request.overlay_viewport,
+                #[cfg(feature = "gpu")]
+                request.gpu,
             );
             let msg = match result {
                 Ok((image, hist, intermediates, overlay_rect)) => RenderResult::Complete {
@@ -154,6 +160,7 @@ fn render_pipeline(
     preview_scale: Option<f32>,
     preview_viewport: Option<[u32; 4]>,
     overlay_viewport: Option<[u32; 4]>,
+    #[cfg(feature = "gpu")] gpu: Option<Arc<GpuContext>>,
 ) -> PipelineResult {
     // ── Overlay path ─────────────────────────────────────────────────────
     if let (Some(op), Some([vp_x, vp_y, vp_w, vp_h])) = (&preview_op, overlay_viewport) {
@@ -196,26 +203,15 @@ fn render_pipeline(
         Vec::new()
     };
 
-    for maybe_op in committed_ops {
-        if let Some(op) = maybe_op {
-            let op = match preview_scale {
-                Some(s) => op.scaled_for_preview(s),
-                None => op,
-            };
-            let img = match Arc::try_unwrap(current) {
-                Ok(img) => img,
-                Err(a) => a.as_ref().deep_clone(),
-            };
-            let result = op
-                .apply(img)
-                .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?;
-            debug_validate_image(&result, op.name());
-            current = Arc::new(result);
-        }
-        if !is_preview {
-            intermediates.push(Arc::clone(&current));
-        }
-    }
+    apply_committed_ops(
+        &mut current,
+        committed_ops,
+        preview_scale,
+        is_preview,
+        &mut intermediates,
+        #[cfg(feature = "gpu")]
+        gpu.as_deref(),
+    )?;
 
     if let Some(op) = preview_op {
         if let Some([vp_x, vp_y, vp_w, vp_h]) = preview_viewport {
@@ -263,6 +259,113 @@ fn render_pipeline(
 
     let hist = HistogramData::compute(current.as_ref());
     Ok((current, hist, intermediates, None))
+}
+
+fn apply_committed_ops(
+    current: &mut Arc<Image>,
+    committed_ops: Vec<Option<Box<dyn Operation>>>,
+    preview_scale: Option<f32>,
+    is_preview: bool,
+    intermediates: &mut Vec<Arc<Image>>,
+    #[cfg(feature = "gpu")] gpu: Option<&GpuContext>,
+) -> Result<(), String> {
+    for maybe_op in committed_ops {
+        if let Some(op) = maybe_op {
+            let op = match preview_scale {
+                Some(s) => op.scaled_for_preview(s),
+                None => op,
+            };
+            let img = match Arc::try_unwrap(std::mem::replace(current, Arc::new(Image::new(1, 1))))
+            {
+                Ok(img) => img,
+                Err(a) => a.as_ref().deep_clone(),
+            };
+            let result = apply_one_with_optional_gpu(
+                img,
+                op.as_ref(),
+                #[cfg(feature = "gpu")]
+                gpu,
+            )
+            .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?;
+            debug_validate_image(&result, op.name());
+            *current = Arc::new(result);
+        }
+        if !is_preview {
+            intermediates.push(Arc::clone(current));
+        }
+    }
+    Ok(())
+}
+
+fn apply_one_with_optional_gpu(
+    image: Image,
+    op: &dyn Operation,
+    #[cfg(feature = "gpu")] gpu: Option<&GpuContext>,
+) -> Result<Image, String> {
+    #[cfg(feature = "gpu")]
+    {
+        if should_try_gpu(op, &image, gpu.is_some()) {
+            if let Some(ctx) = gpu {
+                match rasterlab_gpu::apply_one_to_image(ctx, op, &image) {
+                    Ok((out, timings))
+                        if out.width == image.width && out.height == image.height =>
+                    {
+                        log_gpu(&format!(
+                            "op={} pixels={} upload={:?} dispatch={:?} readback={:?}",
+                            op.name(),
+                            image.pixel_count(),
+                            timings.upload,
+                            timings.dispatch,
+                            timings.readback
+                        ));
+                        return Ok(out);
+                    }
+                    Ok((out, _)) => {
+                        log_gpu(&format!(
+                            "op={} invalid gpu shape {}x{}, falling back to cpu",
+                            op.name(),
+                            out.width,
+                            out.height
+                        ));
+                    }
+                    Err(e) => {
+                        log_gpu(&format!(
+                            "op={} gpu failed: {}; falling back to cpu",
+                            op.name(),
+                            e
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    let cpu_start = std::time::Instant::now();
+    let out = op.apply(image).map_err(|e| e.to_string())?;
+    #[cfg(feature = "gpu")]
+    log_gpu(&format!("op={} cpu={:?}", op.name(), cpu_start.elapsed()));
+    Ok(out)
+}
+
+#[cfg(feature = "gpu")]
+fn should_try_gpu(op: &dyn Operation, image: &Image, has_context: bool) -> bool {
+    if !has_context || !rasterlab_gpu::supports(op) {
+        return false;
+    }
+    match std::env::var("RASTERLAB_GPU").as_deref() {
+        Ok("0") => false,
+        Ok("force") => true,
+        Ok("1") => image.pixel_count() >= 2_000_000,
+        _ => image.pixel_count() >= 2_000_000,
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn log_gpu(message: &str) {
+    if std::env::var("RASTERLAB_GPU_LOG").as_deref() == Ok("1") {
+        eprintln!("[rasterlab-gpu] {message}");
+    }
 }
 
 /// Nearest-neighbour downsample via rayon row-parallel copy.
@@ -339,6 +442,30 @@ fn blit_region(dst: &mut Image, src: &Image, x: u32, y: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rasterlab_core::ops::BrightnessContrastOp;
+
+    #[cfg(feature = "gpu")]
+    async fn make_gpu_context() -> Option<GpuContext> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok()?;
+        let limits = adapter.limits();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("rasterlab render gpu test device"),
+                required_limits: limits.clone(),
+                ..Default::default()
+            })
+            .await
+            .ok()?;
+        Some(GpuContext::new(device, queue, limits))
+    }
 
     #[test]
     fn render_empty_pipeline() {
@@ -350,6 +477,8 @@ mod tests {
             preview_scale: None,
             preview_viewport: None,
             overlay_viewport: None,
+            #[cfg(feature = "gpu")]
+            gpu: None,
         };
         let (tx, rx) = std::sync::mpsc::channel::<RenderResult>();
         let repaint = Arc::new(|| {});
@@ -378,5 +507,73 @@ mod tests {
         let (black, white) = percentile_levels(&hist, 0.01, 0.99);
         assert!(black < 0.05);
         assert!(white > 0.95);
+    }
+
+    #[test]
+    fn disabled_ops_preserve_intermediate_slots() {
+        let mut img = Image::new(2, 1);
+        img.data = vec![10, 20, 30, 40, 50, 60, 70, 80];
+        let (out, _hist, intermediates, overlay) = render_pipeline(
+            Arc::new(img.deep_clone()),
+            vec![
+                None,
+                Some(Box::new(BrightnessContrastOp::new(0.1, 0.0))),
+                None,
+            ],
+            None,
+            None,
+            None,
+            None,
+            #[cfg(feature = "gpu")]
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(overlay, None);
+        assert_eq!(intermediates.len(), 3);
+        assert_eq!(intermediates[0].data, img.data);
+        assert_eq!(intermediates[1].data, out.data);
+        assert_eq!(intermediates[2].data, out.data);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn gpu_enabled_brightness_contrast_matches_cpu_render() {
+        let Some(gpu) = pollster::block_on(make_gpu_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let mut img = Image::new(2048, 1024);
+        for (i, pixel) in img.data.chunks_mut(4).enumerate() {
+            pixel[0] = (i * 3 % 256) as u8;
+            pixel[1] = (i * 5 % 256) as u8;
+            pixel[2] = (i * 7 % 256) as u8;
+            pixel[3] = (i * 11 % 256) as u8;
+        }
+        let op = || Some(Box::new(BrightnessContrastOp::new(0.18, -0.22)) as Box<dyn Operation>);
+
+        let (cpu, _, _, _) = render_pipeline(
+            Arc::new(img.deep_clone()),
+            vec![op()],
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (gpu_out, _, _, _) = render_pipeline(
+            Arc::new(img),
+            vec![op()],
+            None,
+            None,
+            None,
+            None,
+            Some(Arc::new(gpu)),
+        )
+        .unwrap();
+
+        assert_eq!(gpu_out.data, cpu.data);
     }
 }

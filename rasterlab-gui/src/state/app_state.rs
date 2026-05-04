@@ -22,6 +22,7 @@ use rasterlab_core::{
     project::{RlabFile, RlabMeta},
     traits::operation::Operation,
 };
+use rasterlab_gpu::GpuContext;
 use rasterlab_render::{PREVIEW_SCALE, RenderMeta, RenderRequest, RenderResult};
 
 use super::{EditSession, EditingTool, ToolState, load_op_into_tools};
@@ -148,6 +149,7 @@ pub struct AppState {
     bg_rx: mpsc::Receiver<BgMessage>,
     // egui context — needed to wake up the UI after background work completes
     ctx: Context,
+    gpu: Option<Arc<GpuContext>>,
 
     /// All per-tool input fields, preview flags, and export settings.
     pub tools: ToolState,
@@ -192,7 +194,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(ctx: Context) -> Self {
+    pub fn new(ctx: Context, gpu: Option<Arc<GpuContext>>) -> Self {
         let (bg_tx, bg_rx) = mpsc::channel();
         let prefs = Prefs::load();
         let mut tools = ToolState::new();
@@ -227,6 +229,7 @@ impl AppState {
             bg_tx,
             bg_rx,
             ctx,
+            gpu,
             tools,
             needs_rerender: false,
             render_start: None,
@@ -1176,6 +1179,7 @@ impl AppState {
             preview_scale,
             preview_viewport,
             overlay_viewport,
+            gpu: self.gpu.clone(),
         };
         let meta = RenderMeta {
             start_index: start_idx,
