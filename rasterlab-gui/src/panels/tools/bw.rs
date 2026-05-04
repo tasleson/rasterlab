@@ -1,7 +1,11 @@
-use egui::{ComboBox, DragValue, Ui};
+use std::any::Any;
 
-use super::shared::header_for_tool;
-use crate::state::{AppState, EditingTool};
+use egui::{ComboBox, DragValue};
+use rasterlab_core::ops::{BlackAndWhiteOp, BwMode};
+use rasterlab_core::traits::operation::Operation;
+
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
 
 const BW_MODES: &[&str] = &[
     "Luminance (BT.709)",
@@ -10,64 +14,89 @@ const BW_MODES: &[&str] = &[
     "Channel Mixer",
 ];
 
-/// Named channel-mixer presets: (label, R, G, B).
-/// Weights need not sum to 1 — clamped to [0,255] per-pixel in the op.
 const BW_PRESETS: &[(&str, f32, f32, f32)] = &[
-    ("Neutral", 0.2126, 0.7152, 0.0722),     // BT.709
-    ("Dramatic Contrast", 0.60, 0.40, 0.00), // red/yellow boost, dark skies
-    ("Red Filter", 1.00, 0.00, 0.00),        // mimics red lens filter
-    ("Green Filter", 0.00, 1.00, 0.00),      // maximum fine detail
-    ("Blue Filter", 0.00, 0.00, 1.00),       // hazy, atmospheric
-    ("Soften / Skin", 0.25, 0.55, 0.20),     // flatters skin tones
-    ("Urban / Cool", 0.00, 0.30, 0.70),      // gritty blue-channel look
-    ("High Key", 0.40, 0.50, 0.30),          // weights > sum→lifted midtones
-    ("Low Key", 0.10, 0.20, 0.05),           // weights < sum→crushed midtones
-    ("Infrared", 0.90, 0.10, -0.10),         // blown-out foliage simulation
+    ("Neutral", 0.2126, 0.7152, 0.0722),
+    ("Dramatic Contrast", 0.60, 0.40, 0.00),
+    ("Red Filter", 1.00, 0.00, 0.00),
+    ("Green Filter", 0.00, 1.00, 0.00),
+    ("Blue Filter", 0.00, 0.00, 1.00),
+    ("Soften / Skin", 0.25, 0.55, 0.20),
+    ("Urban / Cool", 0.00, 0.30, 0.70),
+    ("High Key", 0.40, 0.50, 0.30),
+    ("Low Key", 0.10, 0.20, 0.05),
+    ("Infrared", 0.90, 0.10, -0.10),
 ];
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Black & White ─────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("bw");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "◑  Black & White",
-        state.editing,
-        EditingTool::BlackAndWhite,
-    )
-    .id_salt("bw")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state
-            .editing
-            .is_some_and(|s| s.tool != EditingTool::BlackAndWhite)
-        {
-            ui.disable();
+pub struct BwTool {
+    pub mode_idx: usize,
+    pub mixer_r: f32,
+    pub mixer_g: f32,
+    pub mixer_b: f32,
+    pub preview_active: bool,
+}
+
+impl BwTool {
+    pub fn new() -> Self {
+        Self {
+            mode_idx: 0,
+            mixer_r: 0.2126,
+            mixer_g: 0.7152,
+            mixer_b: 0.0722,
+            preview_active: false,
         }
-        let old_idx = state.tools.bw_mode_idx;
+    }
+
+    fn make_op(&self) -> Box<dyn Operation> {
+        match self.mode_idx {
+            1 => Box::new(BlackAndWhiteOp::average()),
+            2 => Box::new(BlackAndWhiteOp::perceptual()),
+            3 => Box::new(BlackAndWhiteOp::channel_mixer(
+                self.mixer_r,
+                self.mixer_g,
+                self.mixer_b,
+            )),
+            _ => Box::new(BlackAndWhiteOp::luminance()),
+        }
+    }
+}
+
+impl Tool for BwTool {
+    fn id(&self) -> &'static str {
+        "bw"
+    }
+    fn display_name(&self) -> &'static str {
+        "◑  Black & White"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::BlackAndWhite)
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        let old_idx = self.mode_idx;
         let combo_resp = ComboBox::from_label("Mode")
-            .selected_text(BW_MODES[state.tools.bw_mode_idx])
+            .selected_text(BW_MODES[self.mode_idx])
             .show_ui(ui, |ui| {
                 for (i, &label) in BW_MODES.iter().enumerate() {
-                    ui.selectable_value(&mut state.tools.bw_mode_idx, i, label);
+                    ui.selectable_value(&mut self.mode_idx, i, label);
                 }
             });
-        if (combo_resp.response.changed() || state.tools.bw_mode_idx != old_idx) && has_image {
-            state.update_bw_preview();
+        if (combo_resp.response.changed() || self.mode_idx != old_idx) && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
 
-        // Channel mixer sliders — only shown when that mode is selected.
-        if state.tools.bw_mode_idx == 3 {
+        if self.mode_idx == 3 {
             let mut changed = false;
 
-            // Preset buttons — clicking one loads the weights and previews.
             ui.label("Presets:");
+            let mut preset_clicked = false;
             ui.horizontal_wrapped(|ui| {
                 for &(label, r, g, b) in BW_PRESETS {
-                    if ui.small_button(label).clicked() && has_image {
-                        state.tools.bw_mixer_r = r;
-                        state.tools.bw_mixer_g = g;
-                        state.tools.bw_mixer_b = b;
-                        state.update_bw_preview();
+                    if ui.small_button(label).clicked() && ctx.has_image {
+                        self.mixer_r = r;
+                        self.mixer_g = g;
+                        self.mixer_b = b;
+                        preset_clicked = true;
                     }
                 }
             });
@@ -80,7 +109,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     ui.label("R");
                     changed |= ui
                         .add(
-                            DragValue::new(&mut state.tools.bw_mixer_r)
+                            DragValue::new(&mut self.mixer_r)
                                 .speed(0.01)
                                 .range(-2.0..=2.0),
                         )
@@ -89,7 +118,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     ui.label("G");
                     changed |= ui
                         .add(
-                            DragValue::new(&mut state.tools.bw_mixer_g)
+                            DragValue::new(&mut self.mixer_g)
                                 .speed(0.01)
                                 .range(-2.0..=2.0),
                         )
@@ -98,41 +127,95 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     ui.label("B");
                     changed |= ui
                         .add(
-                            DragValue::new(&mut state.tools.bw_mixer_b)
+                            DragValue::new(&mut self.mixer_b)
                                 .speed(0.01)
                                 .range(-2.0..=2.0),
                         )
                         .changed();
                     ui.end_row();
                 });
-            if changed && has_image {
-                state.update_bw_preview();
+            if (changed || preset_clicked) && ctx.has_image {
+                self.preview_active = true;
+                return ToolAction::RequestRender;
             }
         }
 
+        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(has_image, egui::Button::new("Apply B&W"))
+                .add_enabled(ctx.has_image, egui::Button::new("Apply B&W"))
                 .clicked()
             {
-                state.push_bw();
+                self.preview_active = false;
+                action = ToolAction::PushOp(self.make_op());
+                self.mode_idx = 0;
+                self.mixer_r = 0.2126;
+                self.mixer_g = 0.7152;
+                self.mixer_b = 0.0722;
             }
-            if state.tools.bw_preview_active
+            if self.preview_active
                 && ui
-                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
                     .clicked()
             {
-                state.cancel_bw_preview();
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
             }
             if ui.button("Reset").clicked() {
-                state.reset_bw();
+                self.mode_idx = 0;
+                self.mixer_r = 0.2126;
+                self.mixer_g = 0.7152;
+                self.mixer_b = 0.0722;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
             }
         });
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("bw".to_string(), !default_open);
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(self.make_op())
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op
+            .as_any()
+            .and_then(|a| a.downcast_ref::<BlackAndWhiteOp>())
+        {
+            match o.mode {
+                BwMode::Luminance => self.mode_idx = 0,
+                BwMode::Average => self.mode_idx = 1,
+                BwMode::Perceptual => self.mode_idx = 2,
+                BwMode::ChannelMixer { r, g, b } => {
+                    self.mode_idx = 3;
+                    self.mixer_r = r;
+                    self.mixer_g = g;
+                    self.mixer_b = b;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

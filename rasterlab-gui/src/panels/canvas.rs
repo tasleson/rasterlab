@@ -6,6 +6,10 @@ use std::time::Duration;
 use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Ui, Vec2};
 use rasterlab_core::Image;
 
+use crate::panels::tools::crop::CropTool;
+use crate::panels::tools::heal::HealTool;
+use crate::panels::tools::perspective::PerspectiveTool;
+use crate::panels::tools::straighten::StraightenTool;
 use crate::state::{AppState, SplitMode};
 
 /// Persistent state for the canvas panel.
@@ -747,7 +751,11 @@ impl CanvasState {
         }
 
         // ── Straighten line reset when tool is deactivated ───────────────────
-        if !state.tools.straighten_active {
+        if !state
+            .tools
+            .find::<StraightenTool>()
+            .is_some_and(|t| t.active)
+        {
             self.straighten_line = None;
         }
 
@@ -827,7 +835,7 @@ impl CanvasState {
                 2 => draw_radial_mask_handles(painter, state, image_tl, display_size, canvas_rect),
                 _ => {}
             }
-        } else if state.tools.heal_active {
+        } else if state.tools.find::<HealTool>().is_some_and(|t| t.active) {
             // ── Heal tool ─────────────────────────────────────────────────────
             // Clear crop selection while heal mode is active.
             self.crop_start = None;
@@ -848,11 +856,13 @@ impl CanvasState {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
             }
 
+            let heal_radius = state.tools.find::<HealTool>().unwrap().radius;
+
             // Draw cursor ring at hover position
             if let Some(ptr) = ptr_pos
                 && over_canvas
             {
-                let r_screen = state.tools.heal_radius as f32 * self.zoom;
+                let r_screen = heal_radius as f32 * self.zoom;
                 painter.circle_stroke(
                     ptr,
                     r_screen,
@@ -868,10 +878,12 @@ impl CanvasState {
             // Hit-test existing spots for drag / remove
             let hit_spot = ptr_pos.and_then(|ptr| {
                 let img_pos = screen_to_image(ptr, image_tl, self.zoom);
-                let handle_r_img = (8.0 / self.zoom).max(state.tools.heal_radius as f32 * 0.4);
+                let handle_r_img = (8.0 / self.zoom).max(heal_radius as f32 * 0.4);
                 state
                     .tools
-                    .heal_spots
+                    .find::<HealTool>()
+                    .unwrap()
+                    .spots
                     .iter()
                     .enumerate()
                     .find_map(|(i, spot)| {
@@ -896,7 +908,13 @@ impl CanvasState {
             if primary_down && let (Some((idx, is_src)), Some(ptr)) = (self.heal_dragging, ptr_pos)
             {
                 let img_pos = screen_to_image(ptr, image_tl, self.zoom);
-                if let Some(spot) = state.tools.heal_spots.get_mut(idx) {
+                if let Some(spot) = state
+                    .tools
+                    .find_mut::<HealTool>()
+                    .unwrap()
+                    .spots
+                    .get_mut(idx)
+                {
                     if is_src {
                         spot.src_x = img_pos.x as i32;
                         spot.src_y = img_pos.y as i32;
@@ -926,11 +944,23 @@ impl CanvasState {
 
             // Right-click removes nearest spot
             if secondary_clicked && let Some((idx, _)) = hit_spot {
-                state.tools.heal_spots.remove(idx);
+                state
+                    .tools
+                    .find_mut::<HealTool>()
+                    .unwrap()
+                    .spots
+                    .remove(idx);
             }
 
             // Draw spot overlays
-            for (i, spot) in state.tools.heal_spots.iter().enumerate() {
+            for (i, spot) in state
+                .tools
+                .find::<HealTool>()
+                .unwrap()
+                .spots
+                .iter()
+                .enumerate()
+            {
                 let dst_screen = image_to_screen(
                     Pos2::new(spot.dest_x as f32, spot.dest_y as f32),
                     image_tl,
@@ -975,7 +1005,11 @@ impl CanvasState {
                 );
                 painter.circle_filled(dst_screen, 4.0, Color32::from_rgb(220, 60, 60));
             }
-        } else if state.tools.straighten_active {
+        } else if state
+            .tools
+            .find::<StraightenTool>()
+            .is_some_and(|t| t.active)
+        {
             // ── Straighten tool ──────────────────────────────────────────────
             // Clear crop selection while straighten mode is active.
             self.crop_start = None;
@@ -992,7 +1026,7 @@ impl CanvasState {
                 let half_w = img_w as f32 * 0.35;
                 self.straighten_line =
                     Some([Pos2::new(cx - half_w, cy), Pos2::new(cx + half_w, cy)]);
-                state.tools.straighten_angle = 0.0;
+                state.tools.find_mut::<StraightenTool>().unwrap().angle = 0.0;
                 state.update_straighten_preview();
             }
 
@@ -1028,7 +1062,7 @@ impl CanvasState {
                 // Recompute angle and update preview only while dragging.
                 let [p0, p1] = *pts;
                 let line_angle = (p1.y - p0.y).atan2(p1.x - p0.x).to_degrees();
-                state.tools.straighten_angle = -line_angle;
+                state.tools.find_mut::<StraightenTool>().unwrap().angle = -line_angle;
                 state.update_straighten_preview();
             }
 
@@ -1068,7 +1102,10 @@ impl CanvasState {
                 }
                 // Angle label near midpoint
                 let mid = Pos2::new((s0.x + s1.x) / 2.0, (s0.y + s1.y) / 2.0 - 14.0);
-                let angle_text = format!("{:.2}°", state.tools.straighten_angle);
+                let angle_text = format!(
+                    "{:.2}°",
+                    state.tools.find::<StraightenTool>().unwrap().angle
+                );
                 painter.text(
                     mid,
                     egui::Align2::CENTER_BOTTOM,
@@ -1179,10 +1216,11 @@ impl CanvasState {
                     }
                     _ => (x, y, w, h),
                 };
-                state.tools.crop_x = cx;
-                state.tools.crop_y = cy;
-                state.tools.crop_w = cw;
-                state.tools.crop_h = ch;
+                let crop = state.tools.find_mut::<CropTool>().unwrap();
+                crop.x = cx;
+                crop.y = cy;
+                crop.w = cw;
+                crop.h = ch;
                 // Snap the on-canvas rect to the clamped integer coords so a
                 // subsequent drag starts from the committed rectangle.
                 self.crop_start = Some(Pos2::new(cx as f32, cy as f32));
@@ -1225,9 +1263,12 @@ impl CanvasState {
             let img_rect = Rect::from_min_size(image_tl, display_size);
             let clipped = painter.with_clip_rect(img_rect);
             let grid_stroke = Stroke::new(0.5, Color32::from_white_alpha(70));
-            let cols = state.tools.perspective_grid_cols.max(1) as f32;
-            let rows = state.tools.perspective_grid_rows.max(1) as f32;
-            for c in 1..state.tools.perspective_grid_cols {
+            let persp = state.tools.find::<PerspectiveTool>().unwrap();
+            let cols = persp.grid_cols.max(1) as f32;
+            let rows = persp.grid_rows.max(1) as f32;
+            let grid_cols = persp.grid_cols;
+            let grid_rows = persp.grid_rows;
+            for c in 1..grid_cols {
                 let t = c as f32 / cols;
                 let x = img_rect.min.x + img_rect.width() * t;
                 clipped.line_segment(
@@ -1235,7 +1276,7 @@ impl CanvasState {
                     grid_stroke,
                 );
             }
-            for r in 1..state.tools.perspective_grid_rows {
+            for r in 1..grid_rows {
                 let t = r as f32 / rows;
                 let y = img_rect.min.y + img_rect.height() * t;
                 clipped.line_segment(

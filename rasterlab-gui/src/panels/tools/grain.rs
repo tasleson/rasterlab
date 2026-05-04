@@ -1,111 +1,156 @@
-use egui::{DragValue, Ui};
+use std::any::Any;
 
-use super::shared::header_for_tool;
-use crate::state::{AppState, EditingTool};
+use egui::DragValue;
+use rasterlab_core::ops::GrainOp;
+use rasterlab_core::traits::operation::Operation;
 
-/// Film-grain presets: (label, strength, size).
-/// Inspired by popular 35 mm film stocks.
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
+
 const GRAIN_PRESETS: &[(&str, f32, f32)] = &[
-    ("T-Max 100", 0.03, 1.0),   // finest grain, technical pan
-    ("Gold 200", 0.05, 1.3),    // Kodak Gold — fine, warm
-    ("Portra 400", 0.06, 1.5),  // Kodak Portra — portrait favourite
-    ("Pro 400H", 0.07, 1.2),    // Fuji Pro 400H — very fine for 400
-    ("HP5 400", 0.09, 1.6),     // Ilford HP5 — classic reportage
-    ("Tri-X 400", 0.10, 1.8),   // Kodak Tri-X — definitive B&W stock
-    ("Superia 400", 0.08, 1.5), // Fuji Superia — consumer colour
-    ("Portra 800", 0.12, 2.0),  // Kodak Portra 800 — low-light portrait
-    ("Neopan 1600", 0.18, 2.5), // Fuji Neopan 1600 — gritty documentary
-    ("T-Max 3200", 0.25, 3.0),  // Kodak T-Max P3200 — extreme push
-    ("Heavy Push", 0.35, 3.5),  // fictional heavy-push look
+    ("T-Max 100", 0.03, 1.0),
+    ("Gold 200", 0.05, 1.3),
+    ("Portra 400", 0.06, 1.5),
+    ("Pro 400H", 0.07, 1.2),
+    ("HP5 400", 0.09, 1.6),
+    ("Tri-X 400", 0.10, 1.8),
+    ("Superia 400", 0.08, 1.5),
+    ("Portra 800", 0.12, 2.0),
+    ("Neopan 1600", 0.18, 2.5),
+    ("T-Max 3200", 0.25, 3.0),
+    ("Heavy Push", 0.35, 3.5),
 ];
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, _has_image: bool) {
-    // ── Grain ─────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("grain");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "⣿  Grain",
-        state.editing,
-        EditingTool::Grain,
-    )
-    .id_salt("grain")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state.editing.is_some_and(|s| s.tool != EditingTool::Grain) {
-            ui.disable();
+pub struct GrainTool {
+    pub strength: f32,
+    pub size: f32,
+    pub seed: u64,
+    pub preview_active: bool,
+}
+
+impl GrainTool {
+    pub fn new() -> Self {
+        Self {
+            strength: 0.1,
+            size: 1.8,
+            seed: 42,
+            preview_active: false,
         }
-        grain_ui(ui, state);
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("grain".to_string(), !default_open);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Grain tool
-// ---------------------------------------------------------------------------
-
-fn grain_ui(ui: &mut Ui, state: &mut AppState) {
-    let has_image = state.pipeline().is_some();
-
-    // Film preset buttons.
-    ui.label("Film presets:");
-    ui.horizontal_wrapped(|ui| {
-        for &(label, strength, size) in GRAIN_PRESETS {
-            if ui.small_button(label).clicked() && has_image {
-                state.tools.grain_strength = strength;
-                state.tools.grain_size = size;
-                state.update_grain_preview();
-            }
-        }
-    });
-    ui.add_space(2.0);
-
-    // Strength and size sliders.
-    let mut changed = false;
-    egui::Grid::new("grain_grid")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            ui.label("Strength");
-            changed |= ui
-                .add(egui::Slider::new(&mut state.tools.grain_strength, 0.0..=1.0).step_by(0.01))
-                .changed();
-            ui.end_row();
-            ui.label("Size");
-            changed |= ui
-                .add(egui::Slider::new(&mut state.tools.grain_size, 1.0..=32.0).step_by(0.1))
-                .changed();
-            ui.end_row();
-            ui.label("Seed");
-            changed |= ui
-                .add(DragValue::new(&mut state.tools.grain_seed))
-                .changed();
-            ui.end_row();
-        });
-    if changed && has_image {
-        state.update_grain_preview();
+impl Tool for GrainTool {
+    fn id(&self) -> &'static str {
+        "grain"
+    }
+    fn display_name(&self) -> &'static str {
+        "⣿  Grain"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Grain)
     }
 
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(has_image, egui::Button::new("Apply Grain"))
-            .clicked()
-        {
-            state.push_grain();
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        ui.label("Film presets:");
+        let mut preset_changed = false;
+        ui.horizontal_wrapped(|ui| {
+            for &(label, strength, size) in GRAIN_PRESETS {
+                if ui.small_button(label).clicked() && ctx.has_image {
+                    self.strength = strength;
+                    self.size = size;
+                    preset_changed = true;
+                }
+            }
+        });
+        ui.add_space(2.0);
+
+        let mut changed = false;
+        egui::Grid::new("grain_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Strength");
+                changed |= ui
+                    .add(egui::Slider::new(&mut self.strength, 0.0..=1.0).step_by(0.01))
+                    .changed();
+                ui.end_row();
+                ui.label("Size");
+                changed |= ui
+                    .add(egui::Slider::new(&mut self.size, 1.0..=32.0).step_by(0.1))
+                    .changed();
+                ui.end_row();
+                ui.label("Seed");
+                changed |= ui.add(DragValue::new(&mut self.seed)).changed();
+                ui.end_row();
+            });
+        if (changed || preset_changed) && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
-        if state.tools.grain_preview_active
-            && ui
-                .add_enabled(has_image, egui::Button::new("Cancel"))
+        let mut action = ToolAction::None;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(ctx.has_image, egui::Button::new("Apply Grain"))
                 .clicked()
-        {
-            state.cancel_grain_preview();
+            {
+                self.preview_active = false;
+                action =
+                    ToolAction::PushOp(Box::new(GrainOp::new(self.strength, self.size, self.seed)));
+                self.strength = 0.1;
+                self.size = 1.8;
+                self.seed = 42;
+            }
+            if self.preview_active
+                && ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
+            }
+            if ui.button("Reset").clicked() {
+                self.strength = 0.1;
+                self.size = 1.8;
+                self.seed = 42;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
+            }
+        });
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(Box::new(GrainOp::new(self.strength, self.size, self.seed)))
+        } else {
+            None
         }
-        if ui.button("Reset").clicked() {
-            state.reset_grain();
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<GrainOp>()) {
+            self.strength = o.strength;
+            self.size = o.size;
+            self.seed = o.seed;
+            true
+        } else {
+            false
         }
-    });
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }

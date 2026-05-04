@@ -1,66 +1,121 @@
-use egui::Ui;
+use std::any::Any;
 
-use super::shared::header_for_tool;
-use crate::state::{AppState, EditingTool};
+use rasterlab_core::ops::ClarityTextureOp;
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Clarity / Texture ─────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("clarity_texture");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "◈  Clarity / Texture",
-        state.editing,
-        EditingTool::ClarityTexture,
-    )
-    .id_salt("clarity_texture")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state
-            .editing
-            .is_some_and(|s| s.tool != EditingTool::ClarityTexture)
-        {
-            ui.disable();
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
+
+pub struct ClarityTextureTool {
+    pub clarity: f32,
+    pub texture: f32,
+    pub preview_active: bool,
+}
+
+impl ClarityTextureTool {
+    pub fn new() -> Self {
+        Self {
+            clarity: 0.0,
+            texture: 0.0,
+            preview_active: false,
         }
+    }
+}
+
+impl Tool for ClarityTextureTool {
+    fn id(&self) -> &'static str {
+        "clarity_texture"
+    }
+    fn display_name(&self) -> &'static str {
+        "◈  Clarity / Texture"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::ClarityTexture)
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
         let c_changed = ui
             .add(
-                egui::Slider::new(&mut state.tools.clarity, -1.0..=1.0)
+                egui::Slider::new(&mut self.clarity, -1.0..=1.0)
                     .step_by(0.01)
                     .text("Clarity"),
             )
             .changed();
         let t_changed = ui
             .add(
-                egui::Slider::new(&mut state.tools.texture, -1.0..=1.0)
+                egui::Slider::new(&mut self.texture, -1.0..=1.0)
                     .step_by(0.01)
                     .text("Texture"),
             )
             .changed();
-        if (c_changed || t_changed) && has_image {
-            state.update_clarity_texture_preview();
+        if (c_changed || t_changed) && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
+        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(has_image, egui::Button::new("Apply"))
+                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
                 .clicked()
             {
-                state.push_clarity_texture();
+                self.preview_active = false;
+                action =
+                    ToolAction::PushOp(Box::new(ClarityTextureOp::new(self.clarity, self.texture)));
+                self.clarity = 0.0;
+                self.texture = 0.0;
             }
-            if state.tools.clarity_preview_active
+            if self.preview_active
                 && ui
-                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
                     .clicked()
             {
-                state.cancel_clarity_texture_preview();
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
             }
             if ui.button("Reset").clicked() {
-                state.reset_clarity_texture();
+                self.clarity = 0.0;
+                self.texture = 0.0;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
             }
         });
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("clarity_texture".to_string(), !default_open);
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(Box::new(ClarityTextureOp::new(self.clarity, self.texture)))
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op
+            .as_any()
+            .and_then(|a| a.downcast_ref::<ClarityTextureOp>())
+        {
+            self.clarity = o.clarity;
+            self.texture = o.texture;
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

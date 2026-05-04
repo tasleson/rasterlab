@@ -1,117 +1,260 @@
-use egui::{DragValue, Ui};
+use std::any::Any;
 
-use super::shared::header;
-use crate::state::AppState;
+use egui::DragValue;
+use rasterlab_core::ops::{CropOp, RotateOp};
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Rotate ───────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("rotate");
-    let resp = header(state.tools_force_open, "↻  Rotate")
-        .id_salt("rotate")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            if state.editing.is_some() {
-                ui.disable();
-            }
-            ui.horizontal(|ui| {
-                for deg in [90.0_f32, 180.0, 270.0] {
-                    if ui
-                        .add_enabled(has_image, egui::Button::new(format!("{deg}°")))
-                        .clicked()
-                    {
-                        // Accumulate and normalise to (-360, 360].
-                        state.tools.rotate_deg = (state.tools.rotate_deg + deg) % 360.0;
-                        state.update_rotate_preview();
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Angle:");
-                let changed = ui
-                    .add(
-                        DragValue::new(&mut state.tools.rotate_deg)
-                            .speed(0.5)
-                            .suffix("°")
-                            .range(-360.0..=360.0),
-                    )
-                    .changed();
-                if changed && has_image {
-                    state.update_rotate_preview();
-                }
-            });
-            ui.horizontal(|ui| {
-                // Only offer Apply when there is a net non-zero rotation.
-                let has_rotation = state.tools.rotate_preview_active
-                    && (state.tools.rotate_deg % 360.0).abs() > 0.001;
-                if has_rotation
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Apply"))
-                        .clicked()
-                {
-                    state.push_rotate_arbitrary();
-                }
-                if state.tools.rotate_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_rotate_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_rotate();
-                }
-            });
-            ui.checkbox(
-                &mut state.tools.rotate_crop,
-                "Crop to rectangle after apply",
-            );
-            ui.horizontal(|ui| {
-                let h_label = if state.tools.flip_h_pending {
-                    "Flip H ✓"
-                } else {
-                    "Flip H"
-                };
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+
+pub struct RotateTool {
+    pub deg: f32,
+    pub crop: bool,
+    pub preview_active: bool,
+    pub flip_h_pending: bool,
+    pub flip_v_pending: bool,
+    pub flip_preview_active: bool,
+}
+
+impl RotateTool {
+    pub fn new() -> Self {
+        Self {
+            deg: 0.0,
+            crop: true,
+            preview_active: false,
+            flip_h_pending: false,
+            flip_v_pending: false,
+            flip_preview_active: false,
+        }
+    }
+}
+
+impl Tool for RotateTool {
+    fn id(&self) -> &'static str {
+        "rotate"
+    }
+    fn display_name(&self) -> &'static str {
+        "↻  Rotate"
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        let mut action = ToolAction::None;
+
+        ui.horizontal(|ui| {
+            for deg in [90.0_f32, 180.0, 270.0] {
                 if ui
-                    .add_enabled(has_image, egui::Button::new(h_label))
+                    .add_enabled(ctx.has_image, egui::Button::new(format!("{deg}°")))
                     .clicked()
                 {
-                    state.tools.flip_h_pending = !state.tools.flip_h_pending;
-                    state.update_flip_preview();
+                    self.deg = (self.deg + deg) % 360.0;
+                    self.preview_active = true;
+                    action = ToolAction::RequestRender;
                 }
-                let v_label = if state.tools.flip_v_pending {
-                    "Flip V ✓"
-                } else {
-                    "Flip V"
-                };
-                if ui
-                    .add_enabled(has_image, egui::Button::new(v_label))
-                    .clicked()
-                {
-                    state.tools.flip_v_pending = !state.tools.flip_v_pending;
-                    state.update_flip_preview();
-                }
-            });
-            if state.tools.flip_preview_active {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(has_image, egui::Button::new("Apply"))
-                        .clicked()
-                    {
-                        state.push_flip_pending();
-                    }
-                    if ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                    {
-                        state.cancel_flip_preview();
-                    }
-                });
             }
         });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("rotate".to_string(), !default_open);
+        ui.horizontal(|ui| {
+            ui.label("Angle:");
+            let changed = ui
+                .add(
+                    DragValue::new(&mut self.deg)
+                        .speed(0.5)
+                        .suffix("°")
+                        .range(-360.0..=360.0),
+                )
+                .changed();
+            if changed && ctx.has_image {
+                self.preview_active = true;
+                action = ToolAction::RequestRender;
+            }
+        });
+        ui.horizontal(|ui| {
+            let has_rotation = self.preview_active && (self.deg % 360.0).abs() > 0.001;
+            if has_rotation
+                && ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Apply"))
+                    .clicked()
+            {
+                self.preview_active = false;
+                let angle = self.deg;
+                let is_right_angle = (angle % 90.0).abs() < 0.001;
+
+                let rotate_op: Box<dyn Operation> = match angle as i32 % 360 {
+                    90 | -270 => Box::new(RotateOp::cw90()),
+                    180 | -180 => Box::new(RotateOp::cw180()),
+                    270 | -90 => Box::new(RotateOp::cw270()),
+                    _ => Box::new(RotateOp::arbitrary(angle)),
+                };
+
+                let crop_op = if self.crop && !is_right_angle {
+                    ctx.rendered_dims.map(|(rw, rh)| {
+                        let w = (rw as f32 / ctx.rendered_scale).round() as u32;
+                        let h = (rh as f32 / ctx.rendered_scale).round() as u32;
+                        straighten_crop_op(w, h, angle)
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(crop) = crop_op {
+                    action = ToolAction::PushOps(vec![rotate_op, Box::new(crop)]);
+                } else {
+                    action = ToolAction::PushOp(rotate_op);
+                }
+                self.deg = 0.0;
+            }
+            if self.preview_active
+                && ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                self.preview_active = false;
+                self.deg = 0.0;
+                action = ToolAction::RequestRender;
+            }
+            if ui.button("Reset").clicked() {
+                self.deg = 0.0;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
+            }
+        });
+        ui.checkbox(&mut self.crop, "Crop to rectangle after apply");
+
+        ui.horizontal(|ui| {
+            let h_label = if self.flip_h_pending {
+                "Flip H ✓"
+            } else {
+                "Flip H"
+            };
+            if ui
+                .add_enabled(ctx.has_image, egui::Button::new(h_label))
+                .clicked()
+            {
+                self.flip_h_pending = !self.flip_h_pending;
+                self.flip_preview_active = self.flip_h_pending || self.flip_v_pending;
+                action = ToolAction::RequestRender;
+            }
+            let v_label = if self.flip_v_pending {
+                "Flip V ✓"
+            } else {
+                "Flip V"
+            };
+            if ui
+                .add_enabled(ctx.has_image, egui::Button::new(v_label))
+                .clicked()
+            {
+                self.flip_v_pending = !self.flip_v_pending;
+                self.flip_preview_active = self.flip_h_pending || self.flip_v_pending;
+                action = ToolAction::RequestRender;
+            }
+        });
+        if self.flip_preview_active {
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    let mut ops: Vec<Box<dyn Operation>> = Vec::new();
+                    if self.flip_h_pending {
+                        ops.push(Box::new(rasterlab_core::ops::FlipOp::horizontal()));
+                    }
+                    if self.flip_v_pending {
+                        ops.push(Box::new(rasterlab_core::ops::FlipOp::vertical()));
+                    }
+                    self.flip_h_pending = false;
+                    self.flip_v_pending = false;
+                    self.flip_preview_active = false;
+                    if !ops.is_empty() {
+                        action = ToolAction::PushOps(ops);
+                    }
+                }
+                if ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
+                    .clicked()
+                {
+                    self.flip_h_pending = false;
+                    self.flip_v_pending = false;
+                    self.flip_preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
+            });
+        }
+        action
     }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active || self.flip_preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+        self.flip_preview_active = false;
+        self.flip_h_pending = false;
+        self.flip_v_pending = false;
+        self.deg = 0.0;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active && (self.deg % 360.0).abs() > 0.001 {
+            Some(Box::new(RotateOp::arbitrary(self.deg)))
+        } else if self.flip_preview_active {
+            if self.flip_h_pending && self.flip_v_pending {
+                None // handled as multi-op
+            } else if self.flip_h_pending {
+                Some(Box::new(rasterlab_core::ops::FlipOp::horizontal()))
+            } else if self.flip_v_pending {
+                Some(Box::new(rasterlab_core::ops::FlipOp::vertical()))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<RotateOp>()) {
+            match o.mode {
+                rasterlab_core::ops::RotateMode::Cw90 => self.deg = 90.0,
+                rasterlab_core::ops::RotateMode::Cw180 => self.deg = 180.0,
+                rasterlab_core::ops::RotateMode::Cw270 => self.deg = 270.0,
+                rasterlab_core::ops::RotateMode::Arbitrary(d) => self.deg = d,
+            }
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+fn straighten_crop_op(w: u32, h: u32, angle_deg: f32) -> CropOp {
+    let theta = angle_deg.to_radians().abs();
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let wf = w as f32;
+    let hf = h as f32;
+    let r = wf / hf;
+
+    let b = f32::min(
+        wf / (2.0 * (r * cos_t + sin_t)),
+        hf / (2.0 * (r * sin_t + cos_t)),
+    );
+    let a = r * b;
+
+    let inner_w = (2.0 * a).floor() as u32;
+    let inner_h = (2.0 * b).floor() as u32;
+
+    let rot_w = (wf * cos_t + hf * sin_t).ceil() as u32;
+    let rot_h = (wf * sin_t + hf * cos_t).ceil() as u32;
+
+    let x = (rot_w.saturating_sub(inner_w)) / 2;
+    let y = (rot_h.saturating_sub(inner_h)) / 2;
+
+    CropOp::new(x, y, inner_w.max(1), inner_h.max(1))
 }

@@ -1,26 +1,39 @@
-use egui::Ui;
+use std::any::Any;
 
-use super::shared::header_for_tool;
-use crate::state::{AppState, EditingTool};
+use rasterlab_core::ops::ShadowExposureOp;
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Shadow Exposure ───────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("shadow_exposure");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "🌑  Shadow Exposure",
-        state.editing,
-        EditingTool::ShadowExposure,
-    )
-    .id_salt("shadow_exposure")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state
-            .editing
-            .is_some_and(|s| s.tool != EditingTool::ShadowExposure)
-        {
-            ui.disable();
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
+
+pub struct ShadowExposureTool {
+    pub ev: f32,
+    pub falloff: f32,
+    pub preview_active: bool,
+}
+
+impl ShadowExposureTool {
+    pub fn new() -> Self {
+        Self {
+            ev: 0.0,
+            falloff: 2.0,
+            preview_active: false,
         }
+    }
+}
+
+impl Tool for ShadowExposureTool {
+    fn id(&self) -> &'static str {
+        "shadow_exposure"
+    }
+    fn display_name(&self) -> &'static str {
+        "🌑  Shadow Exposure"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::ShadowExposure)
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
         let mut changed = false;
         egui::Grid::new("shadow_exp_grid")
             .num_columns(2)
@@ -29,7 +42,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                 ui.label("EV");
                 changed |= ui
                     .add(
-                        egui::Slider::new(&mut state.tools.shadow_ev, -3.0..=3.0)
+                        egui::Slider::new(&mut self.ev, -3.0..=3.0)
                             .step_by(0.05)
                             .suffix(" stops"),
                     )
@@ -38,9 +51,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                 ui.end_row();
                 ui.label("Falloff");
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut state.tools.shadow_falloff, 0.5..=4.0).step_by(0.05),
-                    )
+                    .add(egui::Slider::new(&mut self.falloff, 0.5..=4.0).step_by(0.05))
                     .on_hover_text(
                         "Higher values restrict the effect to deeper shadows;\n\
                              lower values reach further into the midtones",
@@ -48,32 +59,73 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     .changed();
                 ui.end_row();
             });
-        if changed && has_image {
-            state.update_shadow_exp_preview();
+        if changed && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
+        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(has_image, egui::Button::new("Apply"))
+                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
                 .clicked()
             {
-                state.push_shadow_exp();
+                self.preview_active = false;
+                action = ToolAction::PushOp(Box::new(ShadowExposureOp::new(self.ev, self.falloff)));
+                self.ev = 0.0;
+                self.falloff = 2.0;
             }
-            if state.tools.shadow_exp_preview_active
+            if self.preview_active
                 && ui
-                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
                     .clicked()
             {
-                state.cancel_shadow_exp_preview();
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
             }
             if ui.button("Reset").clicked() {
-                state.reset_shadow_exp();
+                self.ev = 0.0;
+                self.falloff = 2.0;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
             }
         });
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("shadow_exposure".to_string(), !default_open);
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(Box::new(ShadowExposureOp::new(self.ev, self.falloff)))
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op
+            .as_any()
+            .and_then(|a| a.downcast_ref::<ShadowExposureOp>())
+        {
+            self.ev = o.ev;
+            self.falloff = o.falloff;
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

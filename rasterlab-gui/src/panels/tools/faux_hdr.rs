@@ -1,65 +1,111 @@
-use egui::{Color32, Ui};
+use std::any::Any;
 
-use super::shared::header_for_tool;
-use crate::state::{AppState, EditingTool};
+use rasterlab_core::ops::FauxHdrOp;
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Faux HDR ──────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("faux_hdr");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "◈  Faux HDR",
-        state.editing,
-        EditingTool::FauxHdr,
-    )
-    .id_salt("faux_hdr")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state
-            .editing
-            .is_some_and(|s| s.tool != EditingTool::FauxHdr)
-        {
-            ui.disable();
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
+
+pub struct FauxHdrTool {
+    pub strength: f32,
+    pub preview_active: bool,
+}
+
+impl FauxHdrTool {
+    pub fn new() -> Self {
+        Self {
+            strength: 0.8,
+            preview_active: false,
         }
+    }
+}
+
+impl Tool for FauxHdrTool {
+    fn id(&self) -> &'static str {
+        "faux_hdr"
+    }
+    fn display_name(&self) -> &'static str {
+        "◈  Faux HDR"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::FauxHdr)
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
         ui.label(
             egui::RichText::new("Exposure fusion from ±1 stop virtual brackets")
                 .small()
-                .color(Color32::from_gray(140)),
+                .color(egui::Color32::from_gray(140)),
         );
         ui.add_space(2.0);
         let changed = ui
             .add(
-                egui::Slider::new(&mut state.tools.hdr_strength, 0.0..=1.0)
+                egui::Slider::new(&mut self.strength, 0.0..=1.0)
                     .text("Strength")
                     .step_by(0.01),
             )
             .changed();
-        if changed && has_image {
-            state.update_hdr_preview();
+        if changed && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
+        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(has_image, egui::Button::new("Apply"))
+                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
                 .clicked()
             {
-                state.push_hdr();
+                self.preview_active = false;
+                action = ToolAction::PushOp(Box::new(FauxHdrOp::new(self.strength)));
+                self.strength = 0.8;
             }
-            if state.tools.hdr_preview_active
+            if self.preview_active
                 && ui
-                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
                     .clicked()
             {
-                state.cancel_hdr_preview();
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
             }
             if ui.button("Reset").clicked() {
-                state.reset_hdr();
+                self.strength = 0.8;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
             }
         });
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("faux_hdr".to_string(), !default_open);
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(Box::new(FauxHdrOp::new(self.strength)))
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<FauxHdrOp>()) {
+            self.strength = o.strength;
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

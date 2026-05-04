@@ -1,26 +1,40 @@
-use egui::{DragValue, Ui};
+use std::any::Any;
 
-use super::shared::header_for_tool;
-use crate::state::{AppState, EditingTool};
+use egui::DragValue;
+use rasterlab_core::ops::DenoiseOp;
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Denoise ───────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("denoise");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "◌  Denoise",
-        state.editing,
-        EditingTool::Denoise,
-    )
-    .id_salt("denoise")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state
-            .editing
-            .is_some_and(|s| s.tool != EditingTool::Denoise)
-        {
-            ui.disable();
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
+
+pub struct DenoiseTool {
+    pub strength: f32,
+    pub radius: u32,
+    pub preview_active: bool,
+}
+
+impl DenoiseTool {
+    pub fn new() -> Self {
+        Self {
+            strength: 0.5,
+            radius: 3,
+            preview_active: false,
         }
+    }
+}
+
+impl Tool for DenoiseTool {
+    fn id(&self) -> &'static str {
+        "denoise"
+    }
+    fn display_name(&self) -> &'static str {
+        "◌  Denoise"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Denoise)
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
         let mut changed = false;
         egui::Grid::new("denoise_grid")
             .num_columns(2)
@@ -29,7 +43,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                 ui.label("Strength:");
                 changed |= ui
                     .add(
-                        DragValue::new(&mut state.tools.denoise_strength)
+                        DragValue::new(&mut self.strength)
                             .speed(0.01)
                             .range(0.01..=1.0_f32),
                     )
@@ -38,7 +52,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                 ui.label("Radius:");
                 changed |= ui
                     .add(
-                        DragValue::new(&mut state.tools.denoise_radius)
+                        DragValue::new(&mut self.radius)
                             .speed(1)
                             .range(1..=10_u32)
                             .suffix(" px"),
@@ -46,32 +60,70 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     .changed();
                 ui.end_row();
             });
-        if changed && has_image {
-            state.update_denoise_preview();
+        if changed && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
+        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(has_image, egui::Button::new("Apply Denoise"))
+                .add_enabled(ctx.has_image, egui::Button::new("Apply Denoise"))
                 .clicked()
             {
-                state.push_denoise();
+                self.preview_active = false;
+                action = ToolAction::PushOp(Box::new(DenoiseOp::new(self.strength, self.radius)));
+                self.strength = 0.5;
+                self.radius = 3;
             }
-            if state.tools.denoise_preview_active
+            if self.preview_active
                 && ui
-                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
                     .clicked()
             {
-                state.cancel_denoise_preview();
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
             }
             if ui.button("Reset").clicked() {
-                state.reset_denoise();
+                self.strength = 0.5;
+                self.radius = 3;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
             }
         });
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("denoise".to_string(), !default_open);
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(Box::new(DenoiseOp::new(self.strength, self.radius)))
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<DenoiseOp>()) {
+            self.strength = o.strength;
+            self.radius = o.radius;
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

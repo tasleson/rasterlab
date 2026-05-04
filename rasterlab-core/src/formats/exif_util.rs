@@ -91,10 +91,8 @@ fn populate_metadata(meta: &mut ImageMetadata, exif: &exif::Exif) {
             Tag::Software => {
                 meta.software = ascii_string(&field.value);
             }
-            Tag::DateTimeOriginal | Tag::DateTime => {
-                if meta.date_time.is_none() {
-                    meta.date_time = ascii_string(&field.value);
-                }
+            Tag::DateTimeOriginal | Tag::DateTime if meta.date_time.is_none() => {
+                meta.date_time = ascii_string(&field.value);
             }
             Tag::PhotographicSensitivity => {
                 if let Value::Short(v) = &field.value

@@ -1,92 +1,136 @@
-use egui::{Color32, Ui};
+use std::any::Any;
 
-use super::shared::{header, path_list_ui};
-use crate::state::AppState;
+use egui::Color32;
+use rasterlab_core::ops::FocusStackOp;
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Focus Stack ───────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("focus_stack");
-    let resp = header(state.tools_force_open, "🎯  Focus Stack")
-        .id_salt("focus_stack")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            if state.editing.is_some() {
-                ui.disable();
-            }
+use super::shared::path_list_ui;
+use super::tool_trait::{FileDialogKind, Tool, ToolAction, ToolUiCtx};
+
+pub struct FocusStackTool {
+    pub paths: Vec<String>,
+    pub preview_active: bool,
+}
+
+impl FocusStackTool {
+    pub fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            preview_active: false,
+        }
+    }
+}
+
+impl Tool for FocusStackTool {
+    fn id(&self) -> &'static str {
+        "focus_stack"
+    }
+    fn display_name(&self) -> &'static str {
+        "🎯  Focus Stack"
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        ui.label(
+            egui::RichText::new("Fuse multiple frames at different focus distances")
+                .small()
+                .color(Color32::from_gray(140)),
+        );
+        ui.add_space(2.0);
+
+        if self.paths.is_empty() {
             ui.label(
-                egui::RichText::new("Fuse multiple frames at different focus distances")
+                egui::RichText::new("No frames added yet.")
                     .small()
-                    .color(Color32::from_gray(140)),
+                    .italics(),
             );
-            ui.add_space(2.0);
-
-            if state.tools.focus_stack_paths.is_empty() {
-                ui.label(
-                    egui::RichText::new("No frames added yet.")
-                        .small()
-                        .italics(),
-                );
-            } else {
-                if let Some(idx) =
-                    path_list_ui(ui, &state.tools.focus_stack_paths, "focus_stack_list")
-                {
-                    state.tools.focus_stack_paths.remove(idx);
-                    if state.tools.focus_stack_paths.len() < 2 {
-                        state.cancel_focus_stack_preview();
-                    }
-                }
+        } else if let Some(idx) = path_list_ui(ui, &self.paths, "focus_stack_list") {
+            self.paths.remove(idx);
+            if self.paths.len() < 2 && self.preview_active {
+                self.preview_active = false;
+                return ToolAction::RequestRender;
             }
+        }
 
-            ui.add_space(4.0);
+        ui.add_space(4.0);
+        if ui
+            .add_enabled(ctx.has_image, egui::Button::new("+ Add Frame…"))
+            .clicked()
+        {
+            if self.paths.is_empty()
+                && let Some(p) = ctx.last_path
+            {
+                self.paths.push(p.to_string_lossy().into_owned());
+            }
+            return ToolAction::RequestFileDialog(FileDialogKind::FocusStackAddFrame);
+        }
+
+        ui.add_space(4.0);
+        let mut action = ToolAction::None;
+        ui.horizontal(|ui| {
+            let ready = self.paths.len() >= 2;
             if ui
-                .add_enabled(has_image, egui::Button::new("+ Add Frame…"))
+                .add_enabled(ctx.has_image && ready, egui::Button::new("Stack"))
                 .clicked()
             {
-                // Seed the list with the current image's path if it's the first entry.
-                if state.tools.focus_stack_paths.is_empty()
-                    && let Some(p) = state.last_path.as_ref()
-                {
-                    state
-                        .tools
-                        .focus_stack_paths
-                        .push(p.to_string_lossy().into_owned());
-                }
-                state.tools.focus_stack_dialog_requested = true;
+                self.preview_active = false;
+                action = ToolAction::PushOp(Box::new(FocusStackOp::new(self.paths.clone())));
+                self.paths.clear();
             }
-
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let ready = state.tools.focus_stack_paths.len() >= 2;
-                if ui
-                    .add_enabled(has_image && ready, egui::Button::new("Stack"))
+            if self.preview_active
+                && ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_focus_stack();
+            {
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
+            }
+            if ui.button("Reset").clicked() {
+                self.paths.clear();
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
                 }
-                if state.tools.focus_stack_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_focus_stack_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_focus_stack();
-                }
-            });
-
-            if state.tools.focus_stack_paths.len() == 1 {
-                ui.label(
-                    egui::RichText::new("Add at least one more frame to fuse.")
-                        .small()
-                        .color(egui::Color32::from_rgb(200, 150, 50)),
-                );
             }
         });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("focus_stack".to_string(), !default_open);
+
+        if self.paths.len() == 1 {
+            ui.label(
+                egui::RichText::new("Add at least one more frame to fuse.")
+                    .small()
+                    .color(egui::Color32::from_rgb(200, 150, 50)),
+            );
+        }
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active && self.paths.len() >= 2 {
+            Some(Box::new(FocusStackOp::new(self.paths.clone())))
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<FocusStackOp>()) {
+            self.paths = o.image_paths.clone();
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

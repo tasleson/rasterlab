@@ -1,133 +1,182 @@
-use egui::{Color32, CornerRadius, Rect, Ui, Vec2};
+use std::any::Any;
 
-use super::shared::header_for_tool;
-use crate::state::{AppState, EditingTool};
+use egui::{Color32, CornerRadius, Rect, Vec2};
+use rasterlab_core::ops::{HistogramData, LevelsOp};
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, _has_image: bool) {
-    // ── Levels ────────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("levels");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "▨  Levels",
-        state.editing,
-        EditingTool::Levels,
-    )
-    .id_salt("levels")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state.editing.is_some_and(|s| s.tool != EditingTool::Levels) {
-            ui.disable();
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
+
+pub struct LevelsTool {
+    pub black: f32,
+    pub mid: f32,
+    pub white: f32,
+    pub preview_active: bool,
+}
+
+impl LevelsTool {
+    pub fn new() -> Self {
+        Self {
+            black: 0.0,
+            mid: 1.0,
+            white: 1.0,
+            preview_active: false,
         }
-        levels_ui(ui, state);
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("levels".to_string(), !default_open);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Levels tool
-// ---------------------------------------------------------------------------
-
-fn levels_ui(ui: &mut Ui, state: &mut AppState) {
-    let has_image = state.pipeline().is_some();
-
-    // Combined histogram
-    draw_combined_histogram(ui, state);
-
-    ui.add_space(4.0);
-
-    // Black / midtone / white sliders
-    let mut changed = false;
-
-    egui::Grid::new("levels_grid")
-        .num_columns(2)
-        .spacing([8.0, 4.0])
-        .show(ui, |ui| {
-            ui.label("Black:");
-            let r = ui.add(
-                egui::Slider::new(&mut state.tools.levels_black, 0.0..=1.0)
-                    .clamping(egui::SliderClamping::Always)
-                    .step_by(0.001),
-            );
-            if r.changed() {
-                // Black point must not exceed white point
-                if state.tools.levels_black >= state.tools.levels_white {
-                    state.tools.levels_black = (state.tools.levels_white - 0.001).max(0.0);
-                }
-                changed = true;
-            }
-            ui.end_row();
-
-            ui.label("Mid:");
-            let r = ui.add(
-                egui::Slider::new(&mut state.tools.levels_mid, 0.10..=10.0)
-                    .clamping(egui::SliderClamping::Always)
-                    .step_by(0.01)
-                    .logarithmic(true),
-            );
-            if r.changed() {
-                changed = true;
-            }
-            ui.end_row();
-
-            ui.label("White:");
-            let r = ui.add(
-                egui::Slider::new(&mut state.tools.levels_white, 0.0..=1.0)
-                    .clamping(egui::SliderClamping::Always)
-                    .step_by(0.001),
-            );
-            if r.changed() {
-                // White point must not go below black point
-                if state.tools.levels_white <= state.tools.levels_black {
-                    state.tools.levels_white = (state.tools.levels_black + 0.001).min(1.0);
-                }
-                changed = true;
-            }
-            ui.end_row();
-        });
-
-    if changed && has_image {
-        state.update_levels_preview();
+impl Tool for LevelsTool {
+    fn id(&self) -> &'static str {
+        "levels"
+    }
+    fn display_name(&self) -> &'static str {
+        "▨  Levels"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Levels)
     }
 
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(has_image, egui::Button::new("Apply Levels"))
-            .clicked()
-        {
-            state.apply_levels();
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        draw_combined_histogram(ui, ctx.histogram, self.black, self.white, self.mid);
+
+        ui.add_space(4.0);
+
+        let mut changed = false;
+        egui::Grid::new("levels_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Black:");
+                let r = ui.add(
+                    egui::Slider::new(&mut self.black, 0.0..=1.0)
+                        .clamping(egui::SliderClamping::Always)
+                        .step_by(0.001),
+                );
+                if r.changed() {
+                    if self.black >= self.white {
+                        self.black = (self.white - 0.001).max(0.0);
+                    }
+                    changed = true;
+                }
+                ui.end_row();
+
+                ui.label("Mid:");
+                let r = ui.add(
+                    egui::Slider::new(&mut self.mid, 0.10..=10.0)
+                        .clamping(egui::SliderClamping::Always)
+                        .step_by(0.01)
+                        .logarithmic(true),
+                );
+                if r.changed() {
+                    changed = true;
+                }
+                ui.end_row();
+
+                ui.label("White:");
+                let r = ui.add(
+                    egui::Slider::new(&mut self.white, 0.0..=1.0)
+                        .clamping(egui::SliderClamping::Always)
+                        .step_by(0.001),
+                );
+                if r.changed() {
+                    if self.white <= self.black {
+                        self.white = (self.black + 0.001).min(1.0);
+                    }
+                    changed = true;
+                }
+                ui.end_row();
+            });
+
+        if changed && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
-        if state.tools.levels_preview_active
-            && ui
-                .add_enabled(has_image, egui::Button::new("Cancel"))
+
+        ui.add_space(4.0);
+        let mut action = ToolAction::None;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(ctx.has_image, egui::Button::new("Apply Levels"))
                 .clicked()
-        {
-            state.cancel_levels_preview();
+            {
+                self.preview_active = false;
+                action =
+                    ToolAction::PushOp(Box::new(LevelsOp::new(self.black, self.white, self.mid)));
+                self.black = 0.0;
+                self.mid = 1.0;
+                self.white = 1.0;
+            }
+            if self.preview_active
+                && ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
+            }
+            if ui.button("Reset").clicked() {
+                self.black = 0.0;
+                self.mid = 1.0;
+                self.white = 1.0;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
+            }
+        });
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(Box::new(LevelsOp::new(self.black, self.white, self.mid)))
+        } else {
+            None
         }
-        if ui.button("Reset").clicked() {
-            state.reset_levels();
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<LevelsOp>()) {
+            self.black = o.black_point;
+            self.mid = o.midtone;
+            self.white = o.white_point;
+            true
+        } else {
+            false
         }
-    });
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }
 
-/// Draw all four histogram channels (R, G, B, L) overlaid on a single canvas,
-/// with vertical markers for the current black and white point positions.
-fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
+fn draw_combined_histogram(
+    ui: &mut egui::Ui,
+    histogram: Option<&HistogramData>,
+    black: f32,
+    white: f32,
+    _mid: f32,
+) {
     const HEIGHT: f32 = 96.0;
 
     let width = ui.available_width().max(256.0);
     let (resp, painter) = ui.allocate_painter(Vec2::new(width, HEIGHT), egui::Sense::hover());
     let rect = resp.rect;
 
-    // Dark background
     painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_gray(20));
 
-    let Some(hist) = &state.histogram else {
+    let Some(hist) = histogram else {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -138,7 +187,6 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
         return;
     };
 
-    // Normalise all channels together so relative brightnesses are preserved.
     let peak = hist
         .red
         .iter()
@@ -186,13 +234,12 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
         }
     }
 
-    // Black-point marker (left, dark handle)
-    let bx = rect.left() + state.tools.levels_black * width;
+    // Black-point marker
+    let bx = rect.left() + black * width;
     painter.line_segment(
         [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
         egui::Stroke::new(1.5, Color32::from_gray(60)),
     );
-    // Small triangle handle at bottom
     let tp = egui::pos2(bx, rect.bottom());
     painter.add(egui::Shape::convex_polygon(
         vec![
@@ -204,8 +251,8 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
         egui::Stroke::NONE,
     ));
 
-    // White-point marker (right, bright handle)
-    let wx = rect.left() + state.tools.levels_white * width;
+    // White-point marker
+    let wx = rect.left() + white * width;
     painter.line_segment(
         [egui::pos2(wx, rect.top()), egui::pos2(wx, rect.bottom())],
         egui::Stroke::new(1.5, Color32::from_gray(220)),
@@ -221,9 +268,8 @@ fn draw_combined_histogram(ui: &mut Ui, state: &AppState) {
         egui::Stroke::NONE,
     ));
 
-    // Midtone marker — positioned at the geometric midpoint between black/white
-    let mid_frac =
-        state.tools.levels_black + (state.tools.levels_white - state.tools.levels_black) * 0.5;
+    // Midtone marker
+    let mid_frac = black + (white - black) * 0.5;
     let mx = rect.left() + mid_frac * width;
     painter.line_segment(
         [egui::pos2(mx, rect.top()), egui::pos2(mx, rect.bottom())],

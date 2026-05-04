@@ -131,7 +131,7 @@ pub fn list_entries() -> Vec<AutosaveEntry> {
         .collect();
 
     // Newest session first.
-    result.sort_by(|a, b| b.data.started_at.cmp(&a.data.started_at));
+    result.sort_by_key(|a| std::cmp::Reverse(a.data.started_at));
     result
 }
 

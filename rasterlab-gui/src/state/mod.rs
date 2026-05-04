@@ -1,5 +1,5 @@
 mod app_state;
-mod edit_session;
+pub mod edit_session;
 pub mod library_state;
 mod tool_state;
 mod virtual_copies;

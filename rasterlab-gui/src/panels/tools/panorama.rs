@@ -1,102 +1,152 @@
-use egui::Ui;
+use std::any::Any;
 
-use super::shared::{header, path_list_ui};
-use crate::state::AppState;
+use rasterlab_core::ops::PanoramaOp;
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Panorama ──────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("panorama");
-    let resp = header(state.tools_force_open, "🌅  Panorama")
-        .id_salt("panorama")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            if state.editing.is_some() {
-                ui.disable();
+use super::shared::path_list_ui;
+use super::tool_trait::{FileDialogKind, Tool, ToolAction, ToolUiCtx};
+
+pub struct PanoramaTool {
+    pub paths: Vec<String>,
+    pub feather_px: u32,
+    pub preview_active: bool,
+}
+
+impl PanoramaTool {
+    pub fn new() -> Self {
+        Self {
+            paths: Vec::new(),
+            feather_px: 80,
+            preview_active: false,
+        }
+    }
+}
+
+impl Tool for PanoramaTool {
+    fn id(&self) -> &'static str {
+        "panorama"
+    }
+    fn display_name(&self) -> &'static str {
+        "🌅  Panorama"
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        if self.paths.is_empty() {
+            ui.label(
+                egui::RichText::new("No images added yet.")
+                    .small()
+                    .italics(),
+            );
+        } else if let Some(idx) = path_list_ui(ui, &self.paths, "panorama_list") {
+            self.paths.remove(idx);
+            if self.paths.len() < 2 && self.preview_active {
+                self.preview_active = false;
+                return ToolAction::RequestRender;
             }
-            // Image list
-            if state.tools.panorama_paths.is_empty() {
-                ui.label(
-                    egui::RichText::new("No images added yet.")
-                        .small()
-                        .italics(),
-                );
-            } else {
-                if let Some(idx) = path_list_ui(ui, &state.tools.panorama_paths, "panorama_list") {
-                    state.tools.panorama_paths.remove(idx);
-                    if state.tools.panorama_paths.len() < 2 {
-                        state.cancel_panorama_preview();
-                    }
-                }
-            }
+        }
 
-            ui.add_space(4.0);
-            if ui
-                .add_enabled(has_image, egui::Button::new("+ Add Image…"))
-                .clicked()
+        ui.add_space(4.0);
+        if ui
+            .add_enabled(ctx.has_image, egui::Button::new("+ Add Image…"))
+            .clicked()
+        {
+            if self.paths.is_empty()
+                && let Some(p) = ctx.last_path
             {
-                // Seed the list with the current image's path if it's the first entry.
-                if state.tools.panorama_paths.is_empty()
-                    && let Some(p) = state.last_path.as_ref()
-                {
-                    state
-                        .tools
-                        .panorama_paths
-                        .push(p.to_string_lossy().into_owned());
-                }
-                state.tools.panorama_dialog_requested = true;
+                self.paths.push(p.to_string_lossy().into_owned());
             }
+            return ToolAction::RequestFileDialog(FileDialogKind::PanoramaAddImage);
+        }
 
-            ui.add_space(4.0);
-            egui::Grid::new("panorama_grid")
-                .num_columns(2)
-                .spacing([8.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Feather:");
-                    let changed = ui
-                        .add(
-                            egui::Slider::new(&mut state.tools.panorama_feather_px, 1u32..=300)
-                                .suffix(" px"),
-                        )
-                        .changed();
-                    ui.end_row();
-                    if changed && state.tools.panorama_paths.len() >= 2 {
-                        state.tools.panorama_preview_active = true;
-                        state.request_render();
-                    }
-                });
-
-            ui.horizontal(|ui| {
-                let ready = state.tools.panorama_paths.len() >= 2;
-                if ui
-                    .add_enabled(has_image && ready, egui::Button::new("Stitch"))
-                    .clicked()
-                {
-                    state.push_panorama();
-                }
-                if state.tools.panorama_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_panorama_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_panorama();
+        ui.add_space(4.0);
+        egui::Grid::new("panorama_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Feather:");
+                let changed = ui
+                    .add(egui::Slider::new(&mut self.feather_px, 1u32..=300).suffix(" px"))
+                    .changed();
+                ui.end_row();
+                if changed && self.paths.len() >= 2 {
+                    self.preview_active = true;
                 }
             });
 
-            if state.tools.panorama_paths.len() == 1 {
-                ui.label(
-                    egui::RichText::new("Add at least one more image to stitch.")
-                        .small()
-                        .color(egui::Color32::from_rgb(200, 150, 50)),
-                );
+        let mut action = ToolAction::None;
+        ui.horizontal(|ui| {
+            let ready = self.paths.len() >= 2;
+            if ui
+                .add_enabled(ctx.has_image && ready, egui::Button::new("Stitch"))
+                .clicked()
+            {
+                self.preview_active = false;
+                action = ToolAction::PushOp(Box::new(PanoramaOp::new(
+                    self.paths.clone(),
+                    self.feather_px,
+                )));
+                self.paths.clear();
+            }
+            if self.preview_active
+                && ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
+            }
+            if ui.button("Reset").clicked() {
+                self.paths.clear();
+                self.feather_px = 80;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
             }
         });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("panorama".to_string(), !default_open);
+
+        if self.paths.len() == 1 {
+            ui.label(
+                egui::RichText::new("Add at least one more image to stitch.")
+                    .small()
+                    .color(egui::Color32::from_rgb(200, 150, 50)),
+            );
+        }
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active && self.paths.len() >= 2 {
+            Some(Box::new(PanoramaOp::new(
+                self.paths.clone(),
+                self.feather_px,
+            )))
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<PanoramaOp>()) {
+            self.paths = o.image_paths.clone();
+            self.feather_px = o.feather_px;
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

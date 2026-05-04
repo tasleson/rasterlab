@@ -1,52 +1,53 @@
-use egui::Ui;
+use std::any::Any;
 
-use super::shared::{header, header_for_tool};
-use crate::state::{AppState, EditingTool};
+use rasterlab_core::ops::HslPanelOp;
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── HSL Panel ─────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("hsl_panel");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "🌈  HSL Panel",
-        state.editing,
-        EditingTool::HslPanel,
-    )
-    .id_salt("hsl_panel")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state
-            .editing
-            .is_some_and(|s| s.tool != EditingTool::HslPanel)
-        {
-            ui.disable();
-        }
-        hsl_panel_ui(ui, state, has_image);
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("hsl_panel".to_string(), !default_open);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HSL Panel tool
-// ---------------------------------------------------------------------------
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
 
 const HSL_BAND_NAMES: [&str; 8] = [
     "Reds", "Oranges", "Yellows", "Greens", "Aquas", "Blues", "Purples", "Magentas",
 ];
 
-fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    let mut changed = false;
+pub struct HslTool {
+    pub hue: [f32; 8],
+    pub saturation: [f32; 8],
+    pub luminance: [f32; 8],
+    pub preview_active: bool,
+}
 
-    let default_open = state.prefs.is_tool_open("hsl_hue");
-    let resp = header(state.tools_force_open, "Hue")
-        .id_salt("hsl_hue")
-        .default_open(default_open)
-        .show(ui, |ui| {
+impl HslTool {
+    pub fn new() -> Self {
+        Self {
+            hue: [0.0; 8],
+            saturation: [0.0; 8],
+            luminance: [0.0; 8],
+            preview_active: false,
+        }
+    }
+}
+
+impl Tool for HslTool {
+    fn id(&self) -> &'static str {
+        "hsl_panel"
+    }
+    fn display_name(&self) -> &'static str {
+        "🌈  HSL Panel"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::HslPanel)
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        let mut changed = false;
+
+        let hue_header = egui::CollapsingHeader::new("Hue").id_salt("hsl_hue");
+        let hue_header = match ctx.force_open {
+            Some(open) => hue_header.open(Some(open)),
+            None => hue_header,
+        };
+        hue_header.show(ui, |ui| {
             egui::Grid::new("hsl_hue_grid")
                 .num_columns(2)
                 .spacing([8.0, 2.0])
@@ -55,7 +56,7 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                         ui.label(*name);
                         changed |= ui
                             .add(
-                                egui::Slider::new(&mut state.tools.hsl_hue[i], -180.0..=180.0)
+                                egui::Slider::new(&mut self.hue[i], -180.0..=180.0)
                                     .text("°")
                                     .step_by(1.0),
                             )
@@ -64,18 +65,13 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     }
                 });
         });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("hsl_hue".to_string(), !default_open);
-    }
 
-    let default_open = state.prefs.is_tool_open("hsl_sat");
-    let resp = header(state.tools_force_open, "Saturation")
-        .id_salt("hsl_sat")
-        .default_open(default_open)
-        .show(ui, |ui| {
+        let sat_header = egui::CollapsingHeader::new("Saturation").id_salt("hsl_sat");
+        let sat_header = match ctx.force_open {
+            Some(open) => sat_header.open(Some(open)),
+            None => sat_header,
+        };
+        sat_header.show(ui, |ui| {
             egui::Grid::new("hsl_sat_grid")
                 .num_columns(2)
                 .spacing([8.0, 2.0])
@@ -84,7 +80,7 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                         ui.label(*name);
                         changed |= ui
                             .add(
-                                egui::Slider::new(&mut state.tools.hsl_sat[i], -1.0..=1.0)
+                                egui::Slider::new(&mut self.saturation[i], -1.0..=1.0)
                                     .step_by(0.01),
                             )
                             .changed();
@@ -92,18 +88,13 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                     }
                 });
         });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("hsl_sat".to_string(), !default_open);
-    }
 
-    let default_open = state.prefs.is_tool_open("hsl_lum");
-    let resp = header(state.tools_force_open, "Luminance")
-        .id_salt("hsl_lum")
-        .default_open(default_open)
-        .show(ui, |ui| {
+        let lum_header = egui::CollapsingHeader::new("Luminance").id_salt("hsl_lum");
+        let lum_header = match ctx.force_open {
+            Some(open) => lum_header.open(Some(open)),
+            None => lum_header,
+        };
+        lum_header.show(ui, |ui| {
             egui::Grid::new("hsl_lum_grid")
                 .num_columns(2)
                 .spacing([8.0, 2.0])
@@ -112,41 +103,90 @@ fn hsl_panel_ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                         ui.label(*name);
                         changed |= ui
                             .add(
-                                egui::Slider::new(&mut state.tools.hsl_lum[i], -0.5..=0.5)
-                                    .step_by(0.01),
+                                egui::Slider::new(&mut self.luminance[i], -0.5..=0.5).step_by(0.01),
                             )
                             .changed();
                         ui.end_row();
                     }
                 });
         });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("hsl_lum".to_string(), !default_open);
-    }
 
-    if changed && has_image {
-        state.update_hsl_preview();
-    }
-
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(has_image, egui::Button::new("Apply"))
-            .clicked()
-        {
-            state.push_hsl();
+        if changed && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
-        if state.tools.hsl_preview_active
-            && ui
-                .add_enabled(has_image, egui::Button::new("Cancel"))
+
+        let mut action = ToolAction::None;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
                 .clicked()
-        {
-            state.cancel_hsl_preview();
+            {
+                self.preview_active = false;
+                action = ToolAction::PushOp(Box::new(HslPanelOp::new(
+                    self.hue,
+                    self.saturation,
+                    self.luminance,
+                )));
+                self.hue = [0.0; 8];
+                self.saturation = [0.0; 8];
+                self.luminance = [0.0; 8];
+            }
+            if self.preview_active
+                && ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
+                    .clicked()
+            {
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
+            }
+            if ui.button("Reset").clicked() {
+                self.hue = [0.0; 8];
+                self.saturation = [0.0; 8];
+                self.luminance = [0.0; 8];
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
+            }
+        });
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(Box::new(HslPanelOp::new(
+                self.hue,
+                self.saturation,
+                self.luminance,
+            )))
+        } else {
+            None
         }
-        if ui.button("Reset").clicked() {
-            state.reset_hsl();
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<HslPanelOp>()) {
+            self.hue = o.hue;
+            self.saturation = o.saturation;
+            self.luminance = o.luminance;
+            true
+        } else {
+            false
         }
-    });
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
 }

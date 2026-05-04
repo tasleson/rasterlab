@@ -1,88 +1,183 @@
-use egui::{Ui, Vec2};
+use std::any::Any;
 
-use super::shared::header;
-use crate::state::AppState;
+use egui::Vec2;
+use rasterlab_core::ops::{CropOp, RotateOp};
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Straighten ───────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("straighten");
-    let straight_label = if state.tools.straighten_active {
-        format!("⟳  Straighten  [{:.2}°]", state.tools.straighten_angle)
-    } else {
-        "⟳  Straighten".to_string()
-    };
-    let resp = header(state.tools_force_open, straight_label)
-        .id_salt("straighten")
-        .default_open(default_open)
-        .show(ui, |ui| {
-            if state.editing.is_some() {
-                ui.disable();
-            }
-            let changed = ui
-                .add(
-                    egui::Slider::new(&mut state.tools.straighten_angle, -45.0..=45.0)
-                        .step_by(0.1)
-                        .text("Angle")
-                        .suffix("°"),
-                )
-                .changed();
-            if changed && has_image {
-                state.update_straighten_preview();
-            }
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 
-            ui.checkbox(
-                &mut state.tools.straighten_crop,
-                "Crop to rectangle after apply",
-            );
+pub struct StraightenTool {
+    pub angle: f32,
+    pub active: bool,
+    pub crop: bool,
+    pub preview_active: bool,
+}
 
-            let toggle_text = if state.tools.straighten_active {
-                "Hide Horizon Line"
-            } else {
-                "Show Horizon Line"
-            };
+impl StraightenTool {
+    pub fn new() -> Self {
+        Self {
+            angle: 0.0,
+            active: false,
+            crop: true,
+            preview_active: false,
+        }
+    }
+}
+
+impl Tool for StraightenTool {
+    fn id(&self) -> &'static str {
+        "straighten"
+    }
+    fn display_name(&self) -> &'static str {
+        "⟳  Straighten"
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        let changed = ui
+            .add(
+                egui::Slider::new(&mut self.angle, -45.0..=45.0)
+                    .step_by(0.1)
+                    .text("Angle")
+                    .suffix("°"),
+            )
+            .changed();
+        if changed && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
+        }
+
+        ui.checkbox(&mut self.crop, "Crop to rectangle after apply");
+
+        let toggle_text = if self.active {
+            "Hide Horizon Line"
+        } else {
+            "Show Horizon Line"
+        };
+        if ui
+            .add_enabled(
+                ctx.has_image,
+                egui::Button::new(toggle_text).min_size(Vec2::new(ui.available_width(), 0.0)),
+            )
+            .clicked()
+        {
+            self.active = !self.active;
+        }
+
+        let mut action = ToolAction::None;
+        ui.horizontal(|ui| {
             if ui
-                .add_enabled(
-                    has_image,
-                    egui::Button::new(toggle_text).min_size(Vec2::new(ui.available_width(), 0.0)),
-                )
+                .add_enabled(ctx.has_image, egui::Button::new("Apply Straighten"))
                 .clicked()
             {
-                state.tools.straighten_active = !state.tools.straighten_active;
+                self.preview_active = false;
+                let angle = self.angle;
+                let rotate_op: Box<dyn Operation> = Box::new(RotateOp::arbitrary(angle));
+
+                let crop_op = if self.crop {
+                    ctx.rendered_dims.map(|(rw, rh)| {
+                        let w = (rw as f32 / ctx.rendered_scale).round() as u32;
+                        let h = (rh as f32 / ctx.rendered_scale).round() as u32;
+                        straighten_crop_op(w, h, angle)
+                    })
+                } else {
+                    None
+                };
+
+                if let Some(crop) = crop_op {
+                    action = ToolAction::PushOps(vec![rotate_op, Box::new(crop)]);
+                } else {
+                    action = ToolAction::PushOp(rotate_op);
+                }
+                self.angle = 0.0;
+                self.active = false;
             }
-
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(has_image, egui::Button::new("Apply Straighten"))
+            if self.preview_active
+                && ui
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
                     .clicked()
-                {
-                    state.push_straighten();
+            {
+                self.preview_active = false;
+                self.angle = 0.0;
+                action = ToolAction::RequestRender;
+            }
+            if ui.button("Reset").clicked() {
+                self.angle = 0.0;
+                self.active = false;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
                 }
-                if state.tools.straighten_preview_active
-                    && ui
-                        .add_enabled(has_image, egui::Button::new("Cancel"))
-                        .clicked()
-                {
-                    state.cancel_straighten_preview();
-                }
-                if ui.button("Reset").clicked() {
-                    state.reset_straighten();
-                }
-            });
-
-            if state.tools.straighten_active {
-                ui.label(
-                    egui::RichText::new(
-                        "Drag the horizon line to match a level reference in the image.",
-                    )
-                    .small()
-                    .color(egui::Color32::from_gray(140)),
-                );
             }
         });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("straighten".to_string(), !default_open);
+
+        if self.active {
+            ui.label(
+                egui::RichText::new(
+                    "Drag the horizon line to match a level reference in the image.",
+                )
+                .small()
+                .color(egui::Color32::from_gray(140)),
+            );
+        }
+        action
     }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+        self.angle = 0.0;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active && self.angle.abs() > 0.001 {
+            Some(Box::new(RotateOp::arbitrary(self.angle)))
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<RotateOp>())
+            && let rasterlab_core::ops::RotateMode::Arbitrary(d) = o.mode
+        {
+            self.angle = d;
+            return true;
+        }
+        false
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+fn straighten_crop_op(w: u32, h: u32, angle_deg: f32) -> CropOp {
+    let theta = angle_deg.to_radians().abs();
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let wf = w as f32;
+    let hf = h as f32;
+    let r = wf / hf;
+
+    let b = f32::min(
+        wf / (2.0 * (r * cos_t + sin_t)),
+        hf / (2.0 * (r * sin_t + cos_t)),
+    );
+    let a = r * b;
+
+    let inner_w = (2.0 * a).floor() as u32;
+    let inner_h = (2.0 * b).floor() as u32;
+
+    let rot_w = (wf * cos_t + hf * sin_t).ceil() as u32;
+    let rot_h = (wf * sin_t + hf * cos_t).ceil() as u32;
+
+    let x = (rot_w.saturating_sub(inner_w)) / 2;
+    let y = (rot_h.saturating_sub(inner_h)) / 2;
+
+    CropOp::new(x, y, inner_w.max(1), inner_h.max(1))
 }

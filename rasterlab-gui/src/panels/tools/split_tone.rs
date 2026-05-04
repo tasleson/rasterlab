@@ -1,26 +1,46 @@
-use egui::{DragValue, Ui};
+use std::any::Any;
 
-use super::shared::header_for_tool;
-use crate::state::{AppState, EditingTool};
+use egui::DragValue;
+use rasterlab_core::ops::SplitToneOp;
+use rasterlab_core::traits::operation::Operation;
 
-pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
-    // ── Split Tone ────────────────────────────────────────────────────────
-    let default_open = state.prefs.is_tool_open("split_tone");
-    let resp = header_for_tool(
-        state.tools_force_open,
-        "🎨  Split Tone",
-        state.editing,
-        EditingTool::SplitTone,
-    )
-    .id_salt("split_tone")
-    .default_open(default_open)
-    .show(ui, |ui| {
-        if state
-            .editing
-            .is_some_and(|s| s.tool != EditingTool::SplitTone)
-        {
-            ui.disable();
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
+
+pub struct SplitToneTool {
+    pub shadow_hue: f32,
+    pub shadow_sat: f32,
+    pub highlight_hue: f32,
+    pub highlight_sat: f32,
+    pub balance: f32,
+    pub preview_active: bool,
+}
+
+impl SplitToneTool {
+    pub fn new() -> Self {
+        Self {
+            shadow_hue: 30.0,
+            shadow_sat: 0.0,
+            highlight_hue: 200.0,
+            highlight_sat: 0.0,
+            balance: 0.0,
+            preview_active: false,
         }
+    }
+}
+
+impl Tool for SplitToneTool {
+    fn id(&self) -> &'static str {
+        "split_tone"
+    }
+    fn display_name(&self) -> &'static str {
+        "🎨  Split Tone"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::SplitTone)
+    }
+
+    fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
         let mut changed = false;
 
         egui::Grid::new("split_tone_grid")
@@ -30,7 +50,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
                 ui.label("Shadow hue");
                 changed |= ui
                     .add(
-                        DragValue::new(&mut state.tools.split_shadow_hue)
+                        DragValue::new(&mut self.shadow_hue)
                             .speed(1.0)
                             .range(0.0..=359.9_f32)
                             .suffix("°"),
@@ -40,17 +60,14 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
 
                 ui.label("Shadow sat");
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut state.tools.split_shadow_sat, 0.0..=1.0)
-                            .step_by(0.01),
-                    )
+                    .add(egui::Slider::new(&mut self.shadow_sat, 0.0..=1.0).step_by(0.01))
                     .changed();
                 ui.end_row();
 
                 ui.label("Highlight hue");
                 changed |= ui
                     .add(
-                        DragValue::new(&mut state.tools.split_highlight_hue)
+                        DragValue::new(&mut self.highlight_hue)
                             .speed(1.0)
                             .range(0.0..=359.9_f32)
                             .suffix("°"),
@@ -60,49 +77,103 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
 
                 ui.label("Highlight sat");
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut state.tools.split_highlight_sat, 0.0..=1.0)
-                            .step_by(0.01),
-                    )
+                    .add(egui::Slider::new(&mut self.highlight_sat, 0.0..=1.0).step_by(0.01))
                     .changed();
                 ui.end_row();
 
                 ui.label("Balance");
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut state.tools.split_balance, -1.0..=1.0).step_by(0.01),
-                    )
+                    .add(egui::Slider::new(&mut self.balance, -1.0..=1.0).step_by(0.01))
                     .changed();
                 ui.end_row();
             });
 
-        if changed && has_image {
-            state.update_split_preview();
+        if changed && ctx.has_image {
+            self.preview_active = true;
+            return ToolAction::RequestRender;
         }
 
+        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(has_image, egui::Button::new("Apply"))
+                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
                 .clicked()
             {
-                state.push_split_tone();
+                self.preview_active = false;
+                action = ToolAction::PushOp(Box::new(SplitToneOp::new(
+                    self.shadow_hue,
+                    self.shadow_sat,
+                    self.highlight_hue,
+                    self.highlight_sat,
+                    self.balance,
+                )));
+                self.shadow_hue = 30.0;
+                self.shadow_sat = 0.0;
+                self.highlight_hue = 200.0;
+                self.highlight_sat = 0.0;
+                self.balance = 0.0;
             }
             if ui.button("Reset").clicked() {
-                state.reset_split_tone();
+                self.shadow_hue = 30.0;
+                self.shadow_sat = 0.0;
+                self.highlight_hue = 200.0;
+                self.highlight_sat = 0.0;
+                self.balance = 0.0;
+                if self.preview_active {
+                    self.preview_active = false;
+                    action = ToolAction::RequestRender;
+                }
             }
-            if state.tools.split_preview_active
+            if self.preview_active
                 && ui
-                    .add_enabled(has_image, egui::Button::new("Cancel"))
+                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
                     .clicked()
             {
-                state.cancel_split_preview();
+                self.preview_active = false;
+                action = ToolAction::RequestRender;
             }
         });
-    });
-    if resp.header_response.clicked() {
-        state
-            .prefs
-            .tools_open
-            .insert("split_tone".to_string(), !default_open);
+        action
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.preview_active {
+            Some(Box::new(SplitToneOp::new(
+                self.shadow_hue,
+                self.shadow_sat,
+                self.highlight_hue,
+                self.highlight_sat,
+                self.balance,
+            )))
+        } else {
+            None
+        }
+    }
+    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
+        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<SplitToneOp>()) {
+            self.shadow_hue = o.shadow_hue;
+            self.shadow_sat = o.shadow_sat;
+            self.highlight_hue = o.highlight_hue;
+            self.highlight_sat = o.highlight_sat;
+            self.balance = o.balance;
+            true
+        } else {
+            false
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }

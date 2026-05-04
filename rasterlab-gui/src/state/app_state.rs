@@ -15,12 +15,8 @@ use rasterlab_core::{
     Image, cancel as core_cancel,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, ClarityTextureOp, ColorBalanceOp,
-        ColorSpaceOp, CropOp, CurvesOp, DenoiseOp, FauxHdrOp, FlipOp, FocusStackOp, GrainOp,
-        HdrMergeOp, HealOp, HealSpot, HighlightsShadowsOp, HistogramData, HslPanelOp, HueShiftOp,
-        LevelsOp, LutOp, MaskedOp, NoiseReductionOp, NrMethod, PanoramaOp, PerspectiveOp, ResizeOp,
-        RotateOp, SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp,
-        VignetteOp, WhiteBalanceOp, auto_crop_rect,
+        BlackAndWhiteOp, BrightnessContrastOp, HistogramData, LevelsOp, MaskedOp, ResizeOp,
+        SaturationOp, SharpenOp, VignetteOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -263,12 +259,7 @@ impl AppState {
                 } => {
                     let w = image.width;
                     let h = image.height;
-                    self.tools.crop_w = w;
-                    self.tools.crop_h = h;
-                    self.tools.resize_w = w;
-                    self.tools.resize_h = h;
-                    self.tools.rotate_deg = 0.0;
-                    self.tools.rotate_preview_active = false;
+                    self.reset_tools_for_new_image(w, h);
                     self.last_path = Some(path.clone());
                     self.original_bytes = Some(original_bytes);
                     self.project_path = None;
@@ -322,12 +313,7 @@ impl AppState {
                 BgMessage::ProjectLoaded { path, rlab, image } => {
                     let w = image.width;
                     let h = image.height;
-                    self.tools.crop_w = w;
-                    self.tools.crop_h = h;
-                    self.tools.resize_w = w;
-                    self.tools.resize_h = h;
-                    self.tools.rotate_deg = 0.0;
-                    self.tools.rotate_preview_active = false;
+                    self.reset_tools_for_new_image(w, h);
                     self.last_path = rlab
                         .meta
                         .source_path
@@ -717,1007 +703,10 @@ impl AppState {
     // Pipeline mutations (always followed by request_render)
     // -----------------------------------------------------------------------
 
-    pub fn push_heal(&mut self) {
-        if self.tools.heal_spots.is_empty() {
-            return;
-        }
-        let spots = std::mem::take(&mut self.tools.heal_spots);
-        self.tools.heal_active = false;
-        self.push_op(Box::new(HealOp::new(spots)));
-    }
-
-    pub fn heal_place_spot(&mut self, dest_x: i32, dest_y: i32) {
-        let src = if let Some(rendered) = &self.rendered {
-            let (sx, sy) =
-                HealOp::auto_detect_source(rendered, dest_x, dest_y, self.tools.heal_radius);
-            (sx, sy)
-        } else {
-            (dest_x + self.tools.heal_radius as i32 * 2, dest_y)
-        };
-        self.tools.heal_spots.push(HealSpot {
-            dest_x,
-            dest_y,
-            src_x: src.0,
-            src_y: src.1,
-            radius: self.tools.heal_radius,
-        });
-    }
-
-    pub fn update_straighten_preview(&mut self) {
-        self.tools.straighten_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_straighten_preview(&mut self) {
-        if self.tools.straighten_preview_active {
-            self.tools.straighten_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn reset_straighten(&mut self) {
-        self.tools.straighten_angle = 0.0;
-        self.tools.straighten_active = false;
-        self.cancel_straighten_preview();
-    }
-
-    pub fn push_straighten(&mut self) {
-        if self.tools.straighten_angle.abs() < 0.001 {
-            return;
-        }
-        self.tools.straighten_preview_active = false;
-        let angle = self.tools.straighten_angle;
-        self.tools.straighten_angle = 0.0;
-        self.tools.straighten_active = false;
-
-        // Derive pre-rotation full-res dimensions from the current render.
-        let crop_op = if self.tools.straighten_crop {
-            self.rendered.as_ref().map(|img| {
-                let w = (img.width as f32 / self.rendered_scale).round() as u32;
-                let h = (img.height as f32 / self.rendered_scale).round() as u32;
-                straighten_crop_op(w, h, angle)
-            })
-        } else {
-            None
-        };
-
-        self.cancel_all_previews();
-        if let Some(store) = &mut self.copies {
-            let p = store.active_pipeline_mut();
-            p.push_op(Box::new(RotateOp::arbitrary(angle)));
-            if let Some(crop) = crop_op {
-                p.push_op(Box::new(crop));
-            }
-        }
-        if self.copies.is_some() {
-            self.mark_dirty();
-            self.request_render();
-        }
-    }
-
-    pub fn push_crop(&mut self) {
-        self.push_op(Box::new(CropOp::new(
-            self.tools.crop_x,
-            self.tools.crop_y,
-            self.tools.crop_w,
-            self.tools.crop_h,
-        )));
-    }
-    pub fn push_rotate_arbitrary(&mut self) {
-        self.tools.rotate_preview_active = false;
-        let angle = self.tools.rotate_deg;
-
-        // Auto-crop is only meaningful for non-right-angle rotations.
-        let is_right_angle = (angle % 90.0).abs() < 0.001;
-        let crop_op = if self.tools.rotate_crop && !is_right_angle {
-            self.rendered.as_ref().map(|img| {
-                let w = (img.width as f32 / self.rendered_scale).round() as u32;
-                let h = (img.height as f32 / self.rendered_scale).round() as u32;
-                straighten_crop_op(w, h, angle)
-            })
-        } else {
-            None
-        };
-
-        // Use lossless pixel-transposition fast paths for exact right-angle
-        // rotations; fall back to bilinear for all other angles.
-        let rotate_op: Box<dyn Operation> = match angle as i32 % 360 {
-            90 | -270 => Box::new(RotateOp::cw90()),
-            180 | -180 => Box::new(RotateOp::cw180()),
-            270 | -90 => Box::new(RotateOp::cw270()),
-            _ => Box::new(RotateOp::arbitrary(angle)),
-        };
-
-        self.cancel_all_previews();
-        if let Some(store) = &mut self.copies {
-            let p = store.active_pipeline_mut();
-            p.push_op(rotate_op);
-            if let Some(crop) = crop_op {
-                p.push_op(Box::new(crop));
-            }
-        }
-        if self.copies.is_some() {
-            self.mark_dirty();
-            self.request_render();
-        }
-    }
-
-    pub fn update_rotate_preview(&mut self) {
-        self.tools.rotate_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_rotate_preview(&mut self) {
-        if self.tools.rotate_preview_active {
-            self.tools.rotate_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn reset_rotate(&mut self) {
-        self.tools.rotate_deg = 0.0;
-        self.cancel_rotate_preview();
-    }
-    pub fn push_sharpen(&mut self) {
-        self.tools.sharpen_preview_active = false;
-        self.push_op(Box::new(SharpenOp::new(self.tools.sharpen_strength)));
-    }
-
-    pub fn update_sharpen_preview(&mut self) {
-        self.tools.sharpen_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_sharpen_preview(&mut self) {
-        if self.tools.sharpen_preview_active {
-            self.tools.sharpen_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn reset_sharpen(&mut self) {
-        self.tools.sharpen_strength = 1.0;
-        self.cancel_sharpen_preview();
-    }
-
-    pub fn push_clarity_texture(&mut self) {
-        self.tools.clarity_preview_active = false;
-        self.push_op(Box::new(ClarityTextureOp::new(
-            self.tools.clarity,
-            self.tools.texture,
-        )));
-    }
-
-    pub fn update_clarity_texture_preview(&mut self) {
-        self.tools.clarity_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_clarity_texture_preview(&mut self) {
-        if self.tools.clarity_preview_active {
-            self.tools.clarity_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn reset_clarity_texture(&mut self) {
-        self.tools.clarity = 0.0;
-        self.tools.texture = 0.0;
-        self.cancel_clarity_texture_preview();
-    }
-
-    pub fn push_flip_pending(&mut self) {
-        let h = self.tools.flip_h_pending;
-        let v = self.tools.flip_v_pending;
-        self.tools.flip_h_pending = false;
-        self.tools.flip_v_pending = false;
-        self.tools.flip_preview_active = false;
-        if h {
-            self.push_op(Box::new(FlipOp::horizontal()));
-        }
-        if v {
-            self.push_op(Box::new(FlipOp::vertical()));
-        }
-    }
-
-    pub fn update_flip_preview(&mut self) {
-        self.tools.flip_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_flip_preview(&mut self) {
-        if self.tools.flip_preview_active {
-            self.tools.flip_h_pending = false;
-            self.tools.flip_v_pending = false;
-            self.tools.flip_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn update_bc_preview(&mut self) {
-        self.tools.bc_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_bc_preview(&mut self) {
-        if self.tools.bc_preview_active {
-            self.tools.bc_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_bc(&mut self) {
-        self.tools.bc_preview_active = false;
-        self.push_op(Box::new(BrightnessContrastOp::new(
-            self.tools.bc_brightness,
-            self.tools.bc_contrast,
-        )));
-        self.tools.bc_brightness = 0.0;
-        self.tools.bc_contrast = 0.0;
-    }
-
-    pub fn reset_bc(&mut self) {
-        self.tools.bc_brightness = 0.0;
-        self.tools.bc_contrast = 0.0;
-        self.cancel_bc_preview();
-    }
-
-    pub fn update_sat_preview(&mut self) {
-        self.tools.sat_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_sat_preview(&mut self) {
-        if self.tools.sat_preview_active {
-            self.tools.sat_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_saturation(&mut self) {
-        self.tools.sat_preview_active = false;
-        self.push_op(Box::new(SaturationOp::new(self.tools.saturation)));
-        self.tools.saturation = 1.0;
-    }
-
-    pub fn reset_saturation(&mut self) {
-        self.tools.saturation = 1.0;
-        self.cancel_sat_preview();
-    }
-
-    pub fn update_curve_preview(&mut self) {
-        self.tools.curve_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_curve_preview(&mut self) {
-        if self.tools.curve_preview_active {
-            self.tools.curve_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_curves(&mut self) {
-        self.tools.curve_preview_active = false;
-        self.push_op(Box::new(CurvesOp {
-            points: self.tools.curve_points.clone(),
-        }));
-        self.tools.curve_points = vec![[0.0, 0.0], [1.0, 1.0]];
-    }
-
-    pub fn reset_curves(&mut self) {
-        self.tools.curve_points = vec![[0.0, 0.0], [1.0, 1.0]];
-        self.tools.curve_dragging_idx = None;
-        self.cancel_curve_preview();
-    }
-
-    pub fn update_vignette_preview(&mut self) {
-        self.tools.vignette_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_vignette_preview(&mut self) {
-        if self.tools.vignette_preview_active {
-            self.tools.vignette_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_vignette(&mut self) {
-        self.tools.vignette_preview_active = false;
-        self.push_op(Box::new(VignetteOp::new(
-            self.tools.vignette_strength,
-            self.tools.vignette_radius,
-            self.tools.vignette_feather,
-        )));
-    }
-
-    pub fn reset_vignette(&mut self) {
-        self.tools.vignette_strength = 0.5;
-        self.tools.vignette_radius = 0.65;
-        self.tools.vignette_feather = 0.5;
-        self.cancel_vignette_preview();
-    }
-
-    pub fn update_vibrance_preview(&mut self) {
-        self.tools.vibrance_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_vibrance_preview(&mut self) {
-        if self.tools.vibrance_preview_active {
-            self.tools.vibrance_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_vibrance(&mut self) {
-        self.tools.vibrance_preview_active = false;
-        self.push_op(Box::new(VibranceOp::new(self.tools.vibrance)));
-        self.tools.vibrance = 0.0;
-    }
-
-    pub fn reset_vibrance(&mut self) {
-        self.tools.vibrance = 0.0;
-        self.cancel_vibrance_preview();
-    }
-
-    pub fn push_sepia(&mut self) {
-        self.tools.sepia_preview_active = false;
-        self.push_op(Box::new(SepiaOp::new(self.tools.sepia_strength)));
-        self.tools.sepia_strength = 1.0;
-    }
-
-    pub fn update_sepia_preview(&mut self) {
-        self.tools.sepia_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_sepia_preview(&mut self) {
-        if self.tools.sepia_preview_active {
-            self.tools.sepia_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn reset_sepia(&mut self) {
-        self.tools.sepia_strength = 1.0;
-        self.cancel_sepia_preview();
-    }
-
-    pub fn push_split_tone(&mut self) {
-        self.tools.split_preview_active = false;
-        self.push_op(Box::new(SplitToneOp::new(
-            self.tools.split_shadow_hue,
-            self.tools.split_shadow_sat,
-            self.tools.split_highlight_hue,
-            self.tools.split_highlight_sat,
-            self.tools.split_balance,
-        )));
-    }
-
-    pub fn update_split_preview(&mut self) {
-        self.tools.split_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_split_preview(&mut self) {
-        if self.tools.split_preview_active {
-            self.tools.split_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn reset_split_tone(&mut self) {
-        let defaults = SplitToneOp::default();
-        self.tools.split_shadow_hue = defaults.shadow_hue;
-        self.tools.split_shadow_sat = defaults.shadow_sat;
-        self.tools.split_highlight_hue = defaults.highlight_hue;
-        self.tools.split_highlight_sat = defaults.highlight_sat;
-        self.tools.split_balance = defaults.balance;
-        self.cancel_split_preview();
-    }
-
-    pub fn push_resize(&mut self) {
-        self.push_op(Box::new(ResizeOp::new(
-            self.tools.resize_w,
-            self.tools.resize_h,
-            self.tools.resize_mode,
-        )));
-    }
-
-    pub fn update_blur_preview(&mut self) {
-        self.tools.blur_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_blur_preview(&mut self) {
-        if self.tools.blur_preview_active {
-            self.tools.blur_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_blur(&mut self) {
-        self.tools.blur_preview_active = false;
-        self.push_op(Box::new(BlurOp::new(self.tools.blur_radius)));
-    }
-
-    pub fn reset_blur(&mut self) {
-        self.tools.blur_radius = 2.0;
-        self.cancel_blur_preview();
-    }
-
-    pub fn update_denoise_preview(&mut self) {
-        self.tools.denoise_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_denoise_preview(&mut self) {
-        if self.tools.denoise_preview_active {
-            self.tools.denoise_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_denoise(&mut self) {
-        self.tools.denoise_preview_active = false;
-        self.push_op(Box::new(DenoiseOp::new(
-            self.tools.denoise_strength,
-            self.tools.denoise_radius,
-        )));
-    }
-
-    pub fn reset_denoise(&mut self) {
-        self.tools.denoise_strength = 0.1;
-        self.tools.denoise_radius = 3;
-        self.cancel_denoise_preview();
-    }
-
-    pub fn update_nr_preview(&mut self) {
-        self.tools.nr_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_nr_preview(&mut self) {
-        let had_preview = self.tools.nr_preview_active;
-        // Ask any in-flight noise-reduction op to abort promptly.  This is a
-        // no-op when nothing is running, and the cleared flag will be reset
-        // the next time a render is spawned.
-        if self.loading && self.nr_in_flight {
-            core_cancel::request();
-            // If the user cancelled a render for a noise-reduction op they
-            // had already committed via Apply, roll that op back off the
-            // pipeline so the canvas returns to the pre-NR state.  The
-            // preview case needs no pipeline mutation.
-            if !had_preview
-                && let Some(p) = self.pipeline_mut()
-                && p.cursor() > 0
-                && p.ops()[p.cursor() - 1].operation.name() == "noise_reduction"
-            {
-                p.undo();
-                self.mark_dirty();
-            }
-        }
-        if had_preview {
-            self.tools.nr_preview_active = false;
-        }
-        // Always kick a re-render so the canvas reflects whatever the current
-        // (post-cancel) pipeline state is.  When a render is already in flight
-        // this only sets needs_rerender; the post-cancel handler will honour
-        // it once the aborted render returns.
-        self.request_render();
-    }
-
     /// True while a render that includes a noise-reduction op is running.
     /// Used by the tools panel to decide whether to show the NR Cancel button.
     pub fn nr_in_flight(&self) -> bool {
         self.nr_in_flight && self.loading
-    }
-
-    pub fn push_noise_reduction(&mut self) {
-        self.tools.nr_preview_active = false;
-        self.push_op(Box::new(NoiseReductionOp {
-            method: self.tools.nr_method.clone(),
-            luma_strength: self.tools.nr_luma,
-            color_strength: self.tools.nr_color,
-            detail_preservation: self.tools.nr_detail,
-        }));
-    }
-
-    pub fn reset_noise_reduction(&mut self) {
-        self.tools.nr_method = NrMethod::Wavelet;
-        self.tools.nr_luma = 0.3;
-        self.tools.nr_color = 0.5;
-        self.tools.nr_detail = 0.5;
-        self.cancel_nr_preview();
-    }
-
-    pub fn panorama_add_image(&mut self, path: std::path::PathBuf) {
-        self.tools
-            .panorama_paths
-            .push(path.to_string_lossy().into_owned());
-        if self.tools.panorama_paths.len() >= 2 {
-            self.tools.panorama_preview_active = true;
-            self.request_render();
-        }
-    }
-
-    pub fn cancel_panorama_preview(&mut self) {
-        if self.tools.panorama_preview_active {
-            self.tools.panorama_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_panorama(&mut self) {
-        self.tools.panorama_preview_active = false;
-        self.push_op(Box::new(PanoramaOp::new(
-            self.tools.panorama_paths.clone(),
-            self.tools.panorama_feather_px,
-        )));
-        self.tools.panorama_paths.clear();
-    }
-
-    pub fn reset_panorama(&mut self) {
-        self.tools.panorama_paths.clear();
-        self.tools.panorama_feather_px = 80;
-        self.cancel_panorama_preview();
-    }
-
-    pub fn focus_stack_add_image(&mut self, path: std::path::PathBuf) {
-        self.tools
-            .focus_stack_paths
-            .push(path.to_string_lossy().into_owned());
-        if self.tools.focus_stack_paths.len() >= 2 {
-            self.tools.focus_stack_preview_active = true;
-            self.request_render();
-        }
-    }
-
-    pub fn cancel_focus_stack_preview(&mut self) {
-        if self.tools.focus_stack_preview_active {
-            self.tools.focus_stack_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_focus_stack(&mut self) {
-        self.tools.focus_stack_preview_active = false;
-        self.push_op(Box::new(FocusStackOp::new(
-            self.tools.focus_stack_paths.clone(),
-        )));
-        self.tools.focus_stack_paths.clear();
-    }
-
-    pub fn reset_focus_stack(&mut self) {
-        self.tools.focus_stack_paths.clear();
-        self.cancel_focus_stack_preview();
-    }
-
-    pub fn hdr_merge_add_image(&mut self, path: std::path::PathBuf) {
-        self.tools
-            .hdr_merge_paths
-            .push(path.to_string_lossy().into_owned());
-        if self.tools.hdr_merge_paths.len() >= 2 {
-            self.tools.hdr_merge_preview_active = true;
-            self.request_render();
-        }
-    }
-
-    pub fn cancel_hdr_merge_preview(&mut self) {
-        if self.tools.hdr_merge_preview_active {
-            self.tools.hdr_merge_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_hdr_merge(&mut self) {
-        self.tools.hdr_merge_preview_active = false;
-        self.push_op(Box::new(HdrMergeOp::new(
-            self.tools.hdr_merge_paths.clone(),
-        )));
-        self.tools.hdr_merge_paths.clear();
-    }
-
-    pub fn reset_hdr_merge(&mut self) {
-        self.tools.hdr_merge_paths.clear();
-        self.cancel_hdr_merge_preview();
-    }
-
-    pub fn update_perspective_preview(&mut self) {
-        self.tools.perspective_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_perspective_preview(&mut self) {
-        if self.tools.perspective_preview_active {
-            self.tools.perspective_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_perspective(&mut self) {
-        self.tools.perspective_preview_active = false;
-        let corners = self.tools.perspective_computed_corners();
-
-        let crop_op = if self.tools.perspective_crop {
-            self.rendered.as_ref().and_then(|img| {
-                let w = (img.width as f32 / self.rendered_scale).round() as u32;
-                let h = (img.height as f32 / self.rendered_scale).round() as u32;
-                auto_crop_rect(corners, w, h).map(|[cx, cy, cw, ch]| CropOp::new(cx, cy, cw, ch))
-            })
-        } else {
-            None
-        };
-
-        self.cancel_all_previews();
-        if let Some(store) = &mut self.copies {
-            let p = store.active_pipeline_mut();
-            p.push_op(Box::new(PerspectiveOp::new(corners)));
-            if let Some(crop) = crop_op {
-                p.push_op(Box::new(crop));
-            }
-        }
-        if self.copies.is_some() {
-            self.mark_dirty();
-            self.request_render();
-        }
-        self.tools.perspective_vertical = 0.0;
-        self.tools.perspective_horizontal = 0.0;
-        self.tools.perspective_scale = 100.0;
-    }
-
-    pub fn reset_perspective(&mut self) {
-        self.tools.perspective_vertical = 0.0;
-        self.tools.perspective_horizontal = 0.0;
-        self.tools.perspective_scale = 100.0;
-        self.cancel_perspective_preview();
-    }
-
-    pub fn push_color_space(&mut self) {
-        self.push_op(Box::new(ColorSpaceOp::new(
-            self.tools.color_space_conversion,
-        )));
-    }
-
-    /// Load a `.cube` file from `path` into `lut_op`.  Reports status on
-    /// success or failure.
-    pub fn load_lut(&mut self, path: std::path::PathBuf) {
-        match std::fs::read_to_string(&path) {
-            Ok(src) => match LutOp::from_cube_str(&src, self.tools.lut_strength) {
-                Ok(mut op) => {
-                    op.strength = self.tools.lut_strength;
-                    self.tools.lut_name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    self.status = format!("Loaded LUT: {}", self.tools.lut_name);
-                    self.tools.lut_op = Some(op);
-                    self.tools.lut_preview_active = false;
-                }
-                Err(e) => {
-                    self.status = format!("LUT parse error: {}", e);
-                }
-            },
-            Err(e) => {
-                self.status = format!("LUT read error: {}", e);
-            }
-        }
-    }
-
-    /// Apply the currently loaded LUT (with current strength) to the pipeline.
-    pub fn push_lut(&mut self) {
-        if let Some(mut op) = self.tools.lut_op.clone() {
-            self.tools.lut_preview_active = false;
-            op.strength = self.tools.lut_strength;
-            self.push_op(Box::new(op));
-        }
-    }
-
-    pub fn update_lut_preview(&mut self) {
-        self.tools.lut_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_lut_preview(&mut self) {
-        if self.tools.lut_preview_active {
-            self.tools.lut_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn reset_lut(&mut self) {
-        self.tools.lut_strength = 1.0;
-        self.cancel_lut_preview();
-    }
-
-    pub fn update_hue_preview(&mut self) {
-        self.tools.hue_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_hue_preview(&mut self) {
-        if self.tools.hue_preview_active {
-            self.tools.hue_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_hue(&mut self) {
-        self.tools.hue_preview_active = false;
-        self.push_op(Box::new(HueShiftOp::new(self.tools.hue_degrees)));
-        self.tools.hue_degrees = 0.0;
-    }
-
-    pub fn reset_hue(&mut self) {
-        self.tools.hue_degrees = 0.0;
-        self.cancel_hue_preview();
-    }
-
-    pub fn update_hl_preview(&mut self) {
-        self.tools.hl_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_hl_preview(&mut self) {
-        if self.tools.hl_preview_active {
-            self.tools.hl_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_hl(&mut self) {
-        self.tools.hl_preview_active = false;
-        self.push_op(Box::new(HighlightsShadowsOp::new(
-            self.tools.hl_highlights,
-            self.tools.hl_shadows,
-        )));
-        self.tools.hl_highlights = 0.0;
-        self.tools.hl_shadows = 0.0;
-    }
-
-    pub fn reset_hl(&mut self) {
-        self.tools.hl_highlights = 0.0;
-        self.tools.hl_shadows = 0.0;
-        self.cancel_hl_preview();
-    }
-
-    pub fn update_shadow_exp_preview(&mut self) {
-        self.tools.shadow_exp_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_shadow_exp_preview(&mut self) {
-        if self.tools.shadow_exp_preview_active {
-            self.tools.shadow_exp_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_shadow_exp(&mut self) {
-        self.tools.shadow_exp_preview_active = false;
-        self.push_op(Box::new(ShadowExposureOp::new(
-            self.tools.shadow_ev,
-            self.tools.shadow_falloff,
-        )));
-        self.tools.shadow_ev = 0.0;
-        self.tools.shadow_falloff = 2.0;
-    }
-
-    pub fn reset_shadow_exp(&mut self) {
-        self.tools.shadow_ev = 0.0;
-        self.tools.shadow_falloff = 2.0;
-        self.cancel_shadow_exp_preview();
-    }
-
-    pub fn update_wb_preview(&mut self) {
-        self.tools.wb_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_wb_preview(&mut self) {
-        if self.tools.wb_preview_active {
-            self.tools.wb_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_wb(&mut self) {
-        self.tools.wb_preview_active = false;
-        self.push_op(Box::new(WhiteBalanceOp::new(
-            self.tools.wb_temperature,
-            self.tools.wb_tint,
-        )));
-        self.tools.wb_temperature = 0.0;
-        self.tools.wb_tint = 0.0;
-    }
-
-    pub fn reset_wb(&mut self) {
-        self.tools.wb_temperature = 0.0;
-        self.tools.wb_tint = 0.0;
-        self.cancel_wb_preview();
-    }
-
-    pub fn update_hdr_preview(&mut self) {
-        self.tools.hdr_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_hdr_preview(&mut self) {
-        if self.tools.hdr_preview_active {
-            self.tools.hdr_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_hdr(&mut self) {
-        self.tools.hdr_preview_active = false;
-        self.push_op(Box::new(FauxHdrOp::new(self.tools.hdr_strength)));
-    }
-
-    pub fn reset_hdr(&mut self) {
-        self.tools.hdr_strength = 0.8;
-        self.cancel_hdr_preview();
-    }
-
-    pub fn update_grain_preview(&mut self) {
-        self.tools.grain_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_grain_preview(&mut self) {
-        if self.tools.grain_preview_active {
-            self.tools.grain_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_grain(&mut self) {
-        self.tools.grain_preview_active = false;
-        self.push_op(Box::new(GrainOp::new(
-            self.tools.grain_strength,
-            self.tools.grain_size,
-            self.tools.grain_seed,
-        )));
-        self.tools.grain_seed = self.tools.grain_seed.wrapping_add(1);
-    }
-
-    pub fn reset_grain(&mut self) {
-        self.tools.grain_strength = 0.10;
-        self.tools.grain_size = 1.8;
-        self.tools.grain_seed = 42;
-        self.cancel_grain_preview();
-    }
-
-    pub fn update_cb_preview(&mut self) {
-        self.tools.cb_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_cb_preview(&mut self) {
-        if self.tools.cb_preview_active {
-            self.tools.cb_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_cb(&mut self) {
-        self.tools.cb_preview_active = false;
-        self.push_op(Box::new(ColorBalanceOp::new(
-            self.tools.cb_cyan_red,
-            self.tools.cb_magenta_green,
-            self.tools.cb_yellow_blue,
-        )));
-        self.tools.cb_cyan_red = [0.0; 3];
-        self.tools.cb_magenta_green = [0.0; 3];
-        self.tools.cb_yellow_blue = [0.0; 3];
-    }
-
-    pub fn reset_cb(&mut self) {
-        self.tools.cb_cyan_red = [0.0; 3];
-        self.tools.cb_magenta_green = [0.0; 3];
-        self.tools.cb_yellow_blue = [0.0; 3];
-        self.cancel_cb_preview();
-    }
-
-    pub fn update_hsl_preview(&mut self) {
-        self.tools.hsl_preview_active = true;
-        self.request_render();
-    }
-
-    pub fn cancel_hsl_preview(&mut self) {
-        if self.tools.hsl_preview_active {
-            self.tools.hsl_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_hsl(&mut self) {
-        self.tools.hsl_preview_active = false;
-        self.push_op(Box::new(HslPanelOp::new(
-            self.tools.hsl_hue,
-            self.tools.hsl_sat,
-            self.tools.hsl_lum,
-        )));
-        self.tools.hsl_hue = [0.0; 8];
-        self.tools.hsl_sat = [0.0; 8];
-        self.tools.hsl_lum = [0.0; 8];
-    }
-
-    pub fn reset_hsl(&mut self) {
-        self.tools.hsl_hue = [0.0; 8];
-        self.tools.hsl_sat = [0.0; 8];
-        self.tools.hsl_lum = [0.0; 8];
-        self.cancel_hsl_preview();
-    }
-
-    /// Update the live levels preview and trigger a re-render.
-    /// Call this whenever a levels slider changes.
-    pub fn update_levels_preview(&mut self) {
-        self.tools.levels_preview_active = true;
-        self.request_render();
-    }
-
-    /// Commit the current levels settings as a permanent pipeline operation.
-    pub fn apply_levels(&mut self) {
-        self.tools.levels_preview_active = false;
-        self.push_op(Box::new(LevelsOp::new(
-            self.tools.levels_black,
-            self.tools.levels_white,
-            self.tools.levels_mid,
-        )));
-        // Reset sliders for the next use
-        self.tools.levels_black = 0.0;
-        self.tools.levels_mid = 1.0;
-        self.tools.levels_white = 1.0;
-    }
-
-    pub fn cancel_levels_preview(&mut self) {
-        if self.tools.levels_preview_active {
-            self.tools.levels_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    /// Discard the live levels preview and reset sliders.
-    pub fn reset_levels(&mut self) {
-        self.tools.levels_black = 0.0;
-        self.tools.levels_mid = 1.0;
-        self.tools.levels_white = 1.0;
-        if self.tools.levels_preview_active {
-            self.tools.levels_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    /// Show a live 1/4-scale preview of the selected B&W mode.
-    /// Call this whenever the mode combobox changes.
-    pub fn update_bw_preview(&mut self) {
-        self.tools.bw_preview_active = true;
-        self.request_render();
-    }
-
-    /// Discard the live B&W preview without committing.
-    pub fn cancel_bw_preview(&mut self) {
-        if self.tools.bw_preview_active {
-            self.tools.bw_preview_active = false;
-            self.request_render();
-        }
-    }
-
-    pub fn push_bw(&mut self) {
-        self.tools.bw_preview_active = false;
-        let op = self.tools.make_bw_op();
-        self.push_op(op);
-    }
-
-    pub fn reset_bw(&mut self) {
-        self.tools.bw_mode_idx = 0;
-        self.tools.bw_mixer_r = 0.2126;
-        self.tools.bw_mixer_g = 0.7152;
-        self.tools.bw_mixer_b = 0.0722;
-        self.cancel_bw_preview();
     }
 
     pub fn remove_op(&mut self, index: usize) {
@@ -1757,7 +746,7 @@ impl AppState {
     }
 
     /// Mark the project as having unsaved changes and schedule an autosave.
-    fn mark_dirty(&mut self) {
+    pub(crate) fn mark_dirty(&mut self) {
         self.is_dirty = true;
         self.autosave_pending = true;
     }
@@ -1866,33 +855,15 @@ impl AppState {
     }
 
     fn activate_preview_for(&mut self, tool: EditingTool) {
-        match tool {
-            EditingTool::Levels => self.tools.levels_preview_active = true,
-            EditingTool::BlackAndWhite => self.tools.bw_preview_active = true,
-            EditingTool::BrightnessContrast => self.tools.bc_preview_active = true,
-            EditingTool::Saturation => self.tools.sat_preview_active = true,
-            EditingTool::Sepia => self.tools.sepia_preview_active = true,
-            EditingTool::Sharpen => self.tools.sharpen_preview_active = true,
-            EditingTool::ClarityTexture => self.tools.clarity_preview_active = true,
-            EditingTool::SplitTone => self.tools.split_preview_active = true,
-            EditingTool::Curves => self.tools.curve_preview_active = true,
-            EditingTool::Vignette => self.tools.vignette_preview_active = true,
-            EditingTool::Vibrance => self.tools.vibrance_preview_active = true,
-            EditingTool::HueShift => self.tools.hue_preview_active = true,
-            EditingTool::HighlightsShadows => self.tools.hl_preview_active = true,
-            EditingTool::ShadowExposure => self.tools.shadow_exp_preview_active = true,
-            EditingTool::WhiteBalance => self.tools.wb_preview_active = true,
-            EditingTool::FauxHdr => self.tools.hdr_preview_active = true,
-            EditingTool::Grain => self.tools.grain_preview_active = true,
-            EditingTool::ColorBalance => self.tools.cb_preview_active = true,
-            EditingTool::HslPanel => self.tools.hsl_preview_active = true,
-            EditingTool::Blur => self.tools.blur_preview_active = true,
-            EditingTool::Denoise => self.tools.denoise_preview_active = true,
-            EditingTool::NoiseReduction => self.tools.nr_preview_active = true,
+        for t in &mut self.tools.tools {
+            if t.editing_tool() == Some(tool) {
+                t.activate_preview();
+                break;
+            }
         }
     }
 
-    fn push_op(&mut self, op: Box<dyn Operation>) {
+    pub(crate) fn push_op(&mut self, op: Box<dyn Operation>) {
         // When an edit session is active, the tool's Apply button replaces the
         // op under edit instead of pushing a new one.  The mask wrapper is
         // skipped in this path — editing preserves the structure of the
@@ -1958,10 +929,135 @@ impl AppState {
     /// other than a tool's own "Apply" button, so the committed state is always
     /// visible unobscured.  Slider/curve values are preserved so the user can
     /// resume adjusting after the other operation is complete.
-    fn cancel_all_previews(&mut self) {
+    pub(crate) fn cancel_all_previews(&mut self) {
         self.tools.cancel_all_previews();
         self.preview_overlay = None;
         self.preview_overlay_rect = None;
+    }
+
+    /// Reset tool-specific state when a new image is loaded.
+    fn reset_tools_for_new_image(&mut self, w: u32, h: u32) {
+        use crate::panels::tools::crop::CropTool;
+        use crate::panels::tools::resize::ResizeTool;
+        use crate::panels::tools::rotate::RotateTool;
+
+        if let Some(crop) = self.tools.find_mut::<CropTool>() {
+            crop.x = 0;
+            crop.y = 0;
+            crop.w = w;
+            crop.h = h;
+        }
+        if let Some(resize) = self.tools.find_mut::<ResizeTool>() {
+            resize.w = w;
+            resize.h = h;
+        }
+        if let Some(rotate) = self.tools.find_mut::<RotateTool>() {
+            rotate.deg = 0.0;
+            rotate.preview_active = false;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool-specific helpers (delegate to per-tool structs)
+    // -----------------------------------------------------------------------
+
+    pub fn load_lut(&mut self, path: std::path::PathBuf) {
+        use crate::panels::tools::lut::LutTool;
+        use rasterlab_core::ops::LutOp;
+
+        let strength = self.tools.find::<LutTool>().unwrap().strength;
+        match std::fs::read_to_string(&path) {
+            Ok(src) => match LutOp::from_cube_str(&src, strength) {
+                Ok(mut op) => {
+                    op.strength = strength;
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.status = format!("Loaded LUT: {name}");
+                    let tool = self.tools.find_mut::<LutTool>().unwrap();
+                    tool.name = name;
+                    tool.lut_op = Some(op);
+                    tool.preview_active = false;
+                }
+                Err(e) => {
+                    self.status = format!("LUT parse error: {e}");
+                }
+            },
+            Err(e) => {
+                self.status = format!("Cannot read LUT file: {e}");
+            }
+        }
+    }
+
+    pub fn panorama_add_image(&mut self, path: std::path::PathBuf) {
+        use crate::panels::tools::panorama::PanoramaTool;
+        let tool = self.tools.find_mut::<PanoramaTool>().unwrap();
+        tool.paths.push(path.to_string_lossy().into_owned());
+        let needs_render = tool.paths.len() >= 2;
+        if needs_render {
+            tool.preview_active = true;
+        }
+        if needs_render {
+            self.request_render();
+        }
+    }
+
+    pub fn focus_stack_add_image(&mut self, path: std::path::PathBuf) {
+        use crate::panels::tools::focus_stack::FocusStackTool;
+        let tool = self.tools.find_mut::<FocusStackTool>().unwrap();
+        tool.paths.push(path.to_string_lossy().into_owned());
+        let needs_render = tool.paths.len() >= 2;
+        if needs_render {
+            tool.preview_active = true;
+        }
+        if needs_render {
+            self.request_render();
+        }
+    }
+
+    pub fn hdr_merge_add_image(&mut self, path: std::path::PathBuf) {
+        use crate::panels::tools::hdr_merge::HdrMergeTool;
+        let tool = self.tools.find_mut::<HdrMergeTool>().unwrap();
+        tool.paths.push(path.to_string_lossy().into_owned());
+        let needs_render = tool.paths.len() >= 2;
+        if needs_render {
+            tool.preview_active = true;
+        }
+        if needs_render {
+            self.request_render();
+        }
+    }
+
+    pub fn heal_place_spot(&mut self, dest_x: i32, dest_y: i32) {
+        use crate::panels::tools::heal::HealTool;
+        use rasterlab_core::ops::{HealOp, HealSpot};
+        let radius = self.tools.find::<HealTool>().unwrap().radius;
+        let src = if let Some(rendered) = &self.rendered {
+            HealOp::auto_detect_source(rendered, dest_x, dest_y, radius)
+        } else {
+            (dest_x + radius as i32 * 2, dest_y)
+        };
+        self.tools
+            .find_mut::<HealTool>()
+            .unwrap()
+            .spots
+            .push(HealSpot {
+                dest_x,
+                dest_y,
+                src_x: src.0,
+                src_y: src.1,
+                radius,
+            });
+    }
+
+    pub fn update_straighten_preview(&mut self) {
+        use crate::panels::tools::straighten::StraightenTool;
+        self.tools
+            .find_mut::<StraightenTool>()
+            .unwrap()
+            .preview_active = true;
+        self.request_render();
     }
 
     // -----------------------------------------------------------------------
@@ -2038,10 +1134,9 @@ impl AppState {
 
         // Track whether the upcoming render involves noise reduction so the UI
         // can show a Cancel button while the (potentially slow) NLM runs.
-        let nr_in_flight = self.tools.nr_preview_active
-            || preview_op
-                .as_deref()
-                .is_some_and(|op| op.name() == "noise_reduction")
+        let nr_in_flight = preview_op
+            .as_deref()
+            .is_some_and(|op| op.name() == "noise_reduction")
             || committed_ops
                 .iter()
                 .flatten()
@@ -2313,46 +1408,4 @@ impl AppState {
             })
             .ok();
     }
-}
-
-// ---------------------------------------------------------------------------
-// Free functions
-// ---------------------------------------------------------------------------
-
-/// Compute the largest axis-aligned `CropOp` that fits inside a `W×H` image
-/// rotated by `angle_deg` degrees while preserving the original W:H aspect ratio.
-///
-/// After an arbitrary rotation the output has black/transparent corners.  This
-/// gives the tightest crop that removes all of them while keeping the same shape.
-fn straighten_crop_op(w: u32, h: u32, angle_deg: f32) -> CropOp {
-    let theta = angle_deg.to_radians().abs();
-    let cos_t = theta.cos();
-    let sin_t = theta.sin();
-    let wf = w as f32;
-    let hf = h as f32;
-    let r = wf / hf; // aspect ratio
-
-    // Solve for the half-height `b` of the largest inscribed rectangle with
-    // the same aspect ratio:  a = r·b,  subject to
-    //   a·cos_t + b·sin_t ≤ W/2
-    //   a·sin_t + b·cos_t ≤ H/2
-    let b = f32::min(
-        wf / (2.0 * (r * cos_t + sin_t)),
-        hf / (2.0 * (r * sin_t + cos_t)),
-    );
-    let a = r * b;
-
-    // Full-pixel inner dimensions (floor to stay inside the rotated image).
-    let inner_w = (2.0 * a).floor() as u32;
-    let inner_h = (2.0 * b).floor() as u32;
-
-    // Post-rotation bounding box dimensions (matches rotate_arbitrary).
-    let rot_w = (wf * cos_t + hf * sin_t).ceil() as u32;
-    let rot_h = (wf * sin_t + hf * cos_t).ceil() as u32;
-
-    // Centre the crop inside the rotated bounding box.
-    let x = (rot_w.saturating_sub(inner_w)) / 2;
-    let y = (rot_h.saturating_sub(inner_h)) / 2;
-
-    CropOp::new(x, y, inner_w.max(1), inner_h.max(1))
 }
