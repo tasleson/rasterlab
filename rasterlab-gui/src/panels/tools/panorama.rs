@@ -4,7 +4,8 @@ use rasterlab_core::ops::PanoramaOp;
 use rasterlab_core::traits::operation::Operation;
 
 use super::shared::path_list_ui;
-use super::tool_trait::{FileDialogKind, Tool, ToolAction, ToolUiCtx};
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::file_chooser::DialogKind;
 
 pub struct PanoramaTool {
     pub paths: Vec<String>,
@@ -55,7 +56,7 @@ impl Tool for PanoramaTool {
             {
                 self.paths.push(p.to_string_lossy().into_owned());
             }
-            return ToolAction::RequestFileDialog(FileDialogKind::PanoramaAddImage);
+            return ToolAction::RequestFileDialog(DialogKind::PanoramaAddImage);
         }
 
         ui.add_space(4.0);

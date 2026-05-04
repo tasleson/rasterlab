@@ -290,44 +290,15 @@ impl eframe::App for RasterLabApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.poll_dialogs(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
-        if self.state.tools.lut_dialog_requested {
-            self.state.tools.lut_dialog_requested = false;
-            self.chooser.load_lut(&ctx);
-        }
-        if self.state.tools.panorama_dialog_requested {
-            self.state.tools.panorama_dialog_requested = false;
-            self.chooser.panorama_add_image(&ctx);
-        }
-        if self.state.tools.focus_stack_dialog_requested {
-            self.state.tools.focus_stack_dialog_requested = false;
-            self.chooser.focus_stack_add_image(&ctx);
-        }
-        if self.state.tools.hdr_merge_dialog_requested {
-            self.state.tools.hdr_merge_dialog_requested = false;
-            self.chooser.hdr_merge_add_image(&ctx);
-        }
-        if self.state.tools.library_new_dialog_requested {
-            self.state.tools.library_new_dialog_requested = false;
-            self.chooser.new_library(&ctx);
-        }
-        if self.state.tools.library_open_dialog_requested {
-            self.state.tools.library_open_dialog_requested = false;
-            self.chooser.open_library(&ctx);
-        }
-        if self.state.tools.library_import_files_dialog_requested {
-            self.state.tools.library_import_files_dialog_requested = false;
-            self.chooser.import_files(&ctx);
-        }
-        if self.state.tools.library_import_folder_dialog_requested {
-            self.state.tools.library_import_folder_dialog_requested = false;
-            self.chooser.import_folder(&ctx);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.state.tools.export_dest_dialog_requested {
-            self.state.tools.export_dest_dialog_requested = false;
-            let start = self.state.tools.export_dialog.dest_dir.clone();
-            self.chooser
-                .choose_export_destination(&ctx, Some(start.as_path()));
+        if let Some(kind) = self.state.tools.pending_dialog.take() {
+            use crate::file_chooser::DialogKind;
+            if kind == DialogKind::ExportDestination {
+                let start = self.state.tools.export_dialog.dest_dir.clone();
+                self.chooser
+                    .choose_export_destination(&ctx, Some(start.as_path()));
+            } else {
+                self.chooser.open_kind(&ctx, kind);
+            }
         }
         if let Some((rlab_path, lib_root, hash)) = self.state.library.pending_open_photo.take() {
             self.request_open_library_photo(rlab_path, lib_root, hash);
@@ -447,11 +418,13 @@ impl eframe::App for RasterLabApp {
                         ui.separator();
                         if ui.button("New Library…").clicked() {
                             ui.close_kind(egui::UiKind::Menu);
-                            self.state.tools.library_new_dialog_requested = true;
+                            self.state.tools.pending_dialog =
+                                Some(crate::file_chooser::DialogKind::NewLibrary);
                         }
                         if ui.button("Open Library…").clicked() {
                             ui.close_kind(egui::UiKind::Menu);
-                            self.state.tools.library_open_dialog_requested = true;
+                            self.state.tools.pending_dialog =
+                                Some(crate::file_chooser::DialogKind::OpenLibrary);
                         }
                         {
                             let recent = self.state.prefs.recent_libraries.clone();
@@ -478,11 +451,13 @@ impl eframe::App for RasterLabApp {
                             ui.menu_button("Import Photos", |ui| {
                                 if ui.button("Select Files…").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);
-                                    self.state.tools.library_import_files_dialog_requested = true;
+                                    self.state.tools.pending_dialog =
+                                        Some(crate::file_chooser::DialogKind::ImportFiles);
                                 }
                                 if ui.button("Select Folder…").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);
-                                    self.state.tools.library_import_folder_dialog_requested = true;
+                                    self.state.tools.pending_dialog =
+                                        Some(crate::file_chooser::DialogKind::ImportFolder);
                                 }
                             });
                         });

@@ -5,7 +5,8 @@ use rasterlab_core::ops::FocusStackOp;
 use rasterlab_core::traits::operation::Operation;
 
 use super::shared::path_list_ui;
-use super::tool_trait::{FileDialogKind, Tool, ToolAction, ToolUiCtx};
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::file_chooser::DialogKind;
 
 pub struct FocusStackTool {
     pub paths: Vec<String>,
@@ -61,7 +62,7 @@ impl Tool for FocusStackTool {
             {
                 self.paths.push(p.to_string_lossy().into_owned());
             }
-            return ToolAction::RequestFileDialog(FileDialogKind::FocusStackAddFrame);
+            return ToolAction::RequestFileDialog(DialogKind::FocusStackAddImage);
         }
 
         ui.add_space(4.0);

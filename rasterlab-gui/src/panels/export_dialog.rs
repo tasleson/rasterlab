@@ -247,7 +247,7 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
         start_export(state);
     }
     if browse_requested {
-        state.tools.export_dest_dialog_requested = true;
+        state.tools.pending_dialog = Some(crate::file_chooser::DialogKind::ExportDestination);
     }
     if do_close || !open {
         state.tools.export_dialog.open = false;

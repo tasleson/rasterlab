@@ -4,6 +4,7 @@ use rasterlab_core::{
     traits::operation::Operation,
 };
 
+use crate::file_chooser::DialogKind;
 use crate::panels::tools::{
     blur::BlurTool, brightness_contrast::BrightnessContrastTool, bw::BwTool,
     clarity_texture::ClarityTextureTool, color_balance::ColorBalanceTool,
@@ -46,15 +47,7 @@ pub struct ToolState {
     pub export_dialog: crate::panels::export_dialog::ExportDialogState,
 
     // ── Dialog request flags ─────────────────────────────────────────────
-    pub lut_dialog_requested: bool,
-    pub panorama_dialog_requested: bool,
-    pub focus_stack_dialog_requested: bool,
-    pub hdr_merge_dialog_requested: bool,
-    pub library_new_dialog_requested: bool,
-    pub library_open_dialog_requested: bool,
-    pub library_import_files_dialog_requested: bool,
-    pub library_import_folder_dialog_requested: bool,
-    pub export_dest_dialog_requested: bool,
+    pub pending_dialog: Option<DialogKind>,
 }
 
 impl ToolState {
@@ -78,15 +71,7 @@ impl ToolState {
             export_resize_h: 0,
             export_resize_mode: ResampleMode::Bicubic,
             export_dialog: crate::panels::export_dialog::ExportDialogState::default(),
-            lut_dialog_requested: false,
-            panorama_dialog_requested: false,
-            focus_stack_dialog_requested: false,
-            hdr_merge_dialog_requested: false,
-            library_new_dialog_requested: false,
-            library_open_dialog_requested: false,
-            library_import_files_dialog_requested: false,
-            library_import_folder_dialog_requested: false,
-            export_dest_dialog_requested: false,
+            pending_dialog: None,
         }
     }
 

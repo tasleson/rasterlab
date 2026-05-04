@@ -45,7 +45,7 @@ pub mod white_balance;
 use egui::{Color32, Stroke, Ui};
 
 use self::shared::header_for_tool;
-use self::tool_trait::{FileDialogKind, ToolAction, ToolUiCtx};
+use self::tool_trait::{ToolAction, ToolUiCtx};
 use crate::state::AppState;
 
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
@@ -212,20 +212,9 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
                 state.request_render();
             }
         }
-        ToolAction::RequestFileDialog(kind) => match kind {
-            FileDialogKind::Lut => {
-                state.tools.lut_dialog_requested = true;
-            }
-            FileDialogKind::PanoramaAddImage => {
-                state.tools.panorama_dialog_requested = true;
-            }
-            FileDialogKind::FocusStackAddFrame => {
-                state.tools.focus_stack_dialog_requested = true;
-            }
-            FileDialogKind::HdrMergeAddExposure => {
-                state.tools.hdr_merge_dialog_requested = true;
-            }
-        },
+        ToolAction::RequestFileDialog(kind) => {
+            state.tools.pending_dialog = Some(kind);
+        }
     }
 }
 

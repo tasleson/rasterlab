@@ -13,6 +13,7 @@
 //! Call [`FileChooser::update`] once per frame (always, not only when a dialog
 //! is open) and dispatch on the returned `(DialogKind, PathBuf)` pair.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -20,17 +21,15 @@ use egui_file_dialog::{DialogState, FileDialog};
 use rasterlab_core::formats::raw::RAW_EXTENSIONS;
 
 // ---------------------------------------------------------------------------
-// Extension lists (kept as constants so both egui and rfd backends stay in sync)
+// Extension helpers
 // ---------------------------------------------------------------------------
 
-/// All image extensions accepted by the open-file dialog (no project files).
 fn image_exts() -> Vec<&'static str> {
     let mut v = vec!["jpg", "jpeg", "png"];
     v.extend_from_slice(RAW_EXTENSIONS);
     v
 }
 
-/// All extensions accepted by the open-file dialog (images + project files).
 fn all_supported_exts() -> Vec<&'static str> {
     let mut v = vec!["rlab", "jpg", "jpeg", "png"];
     v.extend_from_slice(RAW_EXTENSIONS);
@@ -38,12 +37,10 @@ fn all_supported_exts() -> Vec<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// Public types
+// DialogKind + spec
 // ---------------------------------------------------------------------------
 
-/// Which operation triggered the dialog — returned alongside the chosen path
-/// so the caller can dispatch without maintaining extra state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DialogKind {
     OpenFile,
     ExportImage,
@@ -53,132 +50,186 @@ pub enum DialogKind {
     PanoramaAddImage,
     FocusStackAddImage,
     HdrMergeAddImage,
-    /// Folder picker / creator for New Library.
     NewLibrary,
-    /// Folder picker for Open Library.
     OpenLibrary,
-    /// Multi-file picker for Import Photos > Select Files.
     ImportFiles,
-    /// Folder picker for Import Photos > Select Folder.
     ImportFolder,
-    /// Folder picker for the Export Selection destination directory.
     ExportDestination,
+}
+
+#[derive(Clone, Copy)]
+enum DialogMode {
+    PickFile,
+    SaveFile,
+    PickDirectory,
+    PickMultiple,
+}
+
+struct DialogSpec {
+    title: &'static str,
+    mode: DialogMode,
+    filters: Vec<(&'static str, Vec<&'static str>)>,
+    default_filename: Option<&'static str>,
+}
+
+impl DialogKind {
+    const ALL: &[Self] = &[
+        Self::OpenFile,
+        Self::ExportImage,
+        Self::SaveProject,
+        Self::ExportEditStack,
+        Self::LoadLut,
+        Self::PanoramaAddImage,
+        Self::FocusStackAddImage,
+        Self::HdrMergeAddImage,
+        Self::NewLibrary,
+        Self::OpenLibrary,
+        Self::ImportFiles,
+        Self::ImportFolder,
+        Self::ExportDestination,
+    ];
+
+    fn spec(self) -> DialogSpec {
+        match self {
+            Self::OpenFile => DialogSpec {
+                title: "Open Image or Project",
+                mode: DialogMode::PickFile,
+                filters: vec![
+                    ("All supported", all_supported_exts()),
+                    ("RasterLab Project", vec!["rlab"]),
+                    ("Images", image_exts()),
+                    ("JPEG", vec!["jpg", "jpeg"]),
+                    ("PNG", vec!["png"]),
+                    ("Camera RAW", RAW_EXTENSIONS.to_vec()),
+                ],
+                default_filename: None,
+            },
+            Self::ExportImage => DialogSpec {
+                title: "Export Image",
+                mode: DialogMode::SaveFile,
+                filters: vec![("JPEG", vec!["jpg", "jpeg"]), ("PNG", vec!["png"])],
+                default_filename: None,
+            },
+            Self::SaveProject => DialogSpec {
+                title: "Save Project",
+                mode: DialogMode::SaveFile,
+                filters: vec![("RasterLab Project", vec!["rlab"])],
+                default_filename: Some("project.rlab"),
+            },
+            Self::ExportEditStack => DialogSpec {
+                title: "Export Edit Stack",
+                mode: DialogMode::SaveFile,
+                filters: vec![("JSON", vec!["json"])],
+                default_filename: Some("edit_stack.json"),
+            },
+            Self::LoadLut => DialogSpec {
+                title: "Load LUT",
+                mode: DialogMode::PickFile,
+                filters: vec![("CUBE LUT", vec!["cube"])],
+                default_filename: None,
+            },
+            Self::PanoramaAddImage | Self::FocusStackAddImage | Self::HdrMergeAddImage => {
+                let title = match self {
+                    Self::PanoramaAddImage => "Add Image to Panorama",
+                    Self::FocusStackAddImage => "Add Frame to Focus Stack",
+                    _ => "Add Bracketed Exposure",
+                };
+                DialogSpec {
+                    title,
+                    mode: DialogMode::PickFile,
+                    filters: vec![
+                        ("Images", image_exts()),
+                        ("JPEG", vec!["jpg", "jpeg"]),
+                        ("PNG", vec!["png"]),
+                        ("Camera RAW", RAW_EXTENSIONS.to_vec()),
+                    ],
+                    default_filename: None,
+                }
+            }
+            Self::NewLibrary => DialogSpec {
+                title: "Create New Library",
+                mode: DialogMode::PickDirectory,
+                filters: vec![],
+                default_filename: None,
+            },
+            Self::OpenLibrary => DialogSpec {
+                title: "Select Library Folder",
+                mode: DialogMode::PickDirectory,
+                filters: vec![],
+                default_filename: None,
+            },
+            Self::ImportFiles => DialogSpec {
+                title: "Select Photos to Import",
+                mode: DialogMode::PickMultiple,
+                filters: vec![
+                    ("All supported", all_supported_exts()),
+                    ("Images", image_exts()),
+                    ("JPEG", vec!["jpg", "jpeg"]),
+                    ("PNG", vec!["png"]),
+                    ("Camera RAW", RAW_EXTENSIONS.to_vec()),
+                ],
+                default_filename: None,
+            },
+            Self::ImportFolder => DialogSpec {
+                title: "Select Folder to Import",
+                mode: DialogMode::PickDirectory,
+                filters: vec![],
+                default_filename: None,
+            },
+            Self::ExportDestination => DialogSpec {
+                title: "Select Export Destination",
+                mode: DialogMode::PickDirectory,
+                filters: vec![],
+                default_filename: None,
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // FileChooser
 // ---------------------------------------------------------------------------
 
-/// Owns both dialog backends and routes to the active one.
 pub struct FileChooser {
     use_native: bool,
 
-    // ── Inline (egui-file-dialog) backend ──────────────────────────────────
-    /// One pre-configured dialog per intent, preserving navigation state
-    /// (current directory, bookmarks) across multiple opens.
-    open_dlg: FileDialog,
-    export_dlg: FileDialog,
-    save_project_dlg: FileDialog,
-    export_stack_dlg: FileDialog,
-    lut_dlg: FileDialog,
-    panorama_dlg: FileDialog,
-    focus_stack_dlg: FileDialog,
-    hdr_merge_dlg: FileDialog,
-    lib_new_dlg: FileDialog,
-    lib_folder_dlg: FileDialog,
-    import_files_dlg: FileDialog,
-    import_folder_dlg: FileDialog,
-    export_dest_dlg: FileDialog,
-    /// Which kind is currently waiting for a result.
+    // ── Inline (egui-file-dialog) backend ─────────────────────────────────
+    dialogs: HashMap<DialogKind, FileDialog>,
     pending: Option<DialogKind>,
 
-    // ── Native (rfd) backend ───────────────────────────────────────────────
-    /// At most one rfd dialog is open at a time.  Vec is empty on cancel.
+    // ── Native (rfd) backend ──────────────────────────────────────────────
     rfd_rx: Option<(DialogKind, mpsc::Receiver<Vec<PathBuf>>)>,
-    /// Seeded by [`choose_export_destination`] so the native (rfd) dialog opens
-    /// at the right starting directory.  Consumed inside [`spawn_rfd`].
     pending_start_dir: Option<PathBuf>,
 }
 
 impl FileChooser {
-    /// `open_file_filter` – the filter name selected by default when the Open
-    /// dialog appears.  `None` means the library's "All Files" catch-all.
     pub fn new(use_native: bool, open_file_filter: Option<&str>) -> Self {
-        let mut open_dlg = FileDialog::new()
-            .title("Open Image or Project")
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .add_file_filter_extensions("All supported", all_supported_exts())
-            .add_file_filter_extensions("RasterLab Project", vec!["rlab"])
-            .add_file_filter_extensions("Images", image_exts())
-            .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
-            .add_file_filter_extensions("PNG", vec!["png"])
-            .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec());
-        if let Some(name) = open_file_filter {
-            open_dlg = open_dlg.default_file_filter(name);
+        let mut dialogs: HashMap<DialogKind, FileDialog> = DialogKind::ALL
+            .iter()
+            .map(|&kind| {
+                let spec = kind.spec();
+                let mut dlg = FileDialog::new()
+                    .title(spec.title)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO);
+                for (name, exts) in &spec.filters {
+                    dlg = dlg.add_file_filter_extensions(name, exts.clone());
+                }
+                if let Some(filename) = spec.default_filename {
+                    dlg = dlg.default_file_name(filename);
+                }
+                (kind, dlg)
+            })
+            .collect();
+
+        if let Some(name) = open_file_filter
+            && let Some(dlg) = dialogs.get_mut(&DialogKind::OpenFile)
+        {
+            dlg.config_mut().default_file_filter = Some(name.to_string());
         }
+
         Self {
             use_native,
-            open_dlg,
-            export_dlg: FileDialog::new()
-                .title("Export Image")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
-                .add_file_filter_extensions("PNG", vec!["png"]),
-            save_project_dlg: FileDialog::new()
-                .title("Save Project")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("RasterLab Project", vec!["rlab"])
-                .default_file_name("project.rlab"),
-            export_stack_dlg: FileDialog::new()
-                .title("Export Edit Stack")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("JSON", vec!["json"])
-                .default_file_name("edit_stack.json"),
-            lut_dlg: FileDialog::new()
-                .title("Load LUT")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("CUBE LUT", vec!["cube"]),
-            panorama_dlg: FileDialog::new()
-                .title("Add Image to Panorama")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("Images", image_exts())
-                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
-                .add_file_filter_extensions("PNG", vec!["png"])
-                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
-            focus_stack_dlg: FileDialog::new()
-                .title("Add Frame to Focus Stack")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("Images", image_exts())
-                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
-                .add_file_filter_extensions("PNG", vec!["png"])
-                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
-            hdr_merge_dlg: FileDialog::new()
-                .title("Add Bracketed Exposure")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("Images", image_exts())
-                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
-                .add_file_filter_extensions("PNG", vec!["png"])
-                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
-            lib_new_dlg: FileDialog::new()
-                .title("Create New Library")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
-            lib_folder_dlg: FileDialog::new()
-                .title("Select Library Folder")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
-            import_files_dlg: FileDialog::new()
-                .title("Select Photos to Import")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .add_file_filter_extensions("All supported", all_supported_exts())
-                .add_file_filter_extensions("Images", image_exts())
-                .add_file_filter_extensions("JPEG", vec!["jpg", "jpeg"])
-                .add_file_filter_extensions("PNG", vec!["png"])
-                .add_file_filter_extensions("Camera RAW", RAW_EXTENSIONS.to_vec()),
-            import_folder_dlg: FileDialog::new()
-                .title("Select Folder to Import")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
-            export_dest_dlg: FileDialog::new()
-                .title("Select Export Destination")
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO),
+            dialogs,
             pending: None,
             rfd_rx: None,
             pending_start_dir: None,
@@ -189,61 +240,29 @@ impl FileChooser {
         self.use_native = native;
     }
 
-    /// Update the default filter shown when the Open dialog next appears.
-    /// `None` restores the "All Files" catch-all.
     #[allow(dead_code)]
     pub fn set_open_file_filter(&mut self, filter: Option<&str>) {
-        self.open_dlg.config_mut().default_file_filter = filter.map(|s| s.to_string());
+        if let Some(dlg) = self.dialogs.get_mut(&DialogKind::OpenFile) {
+            dlg.config_mut().default_file_filter = filter.map(|s| s.to_string());
+        }
     }
 
     // ── Opening ─────────────────────────────────────────────────────────────
 
     pub fn open_image(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::OpenFile, false);
+        self.open(ctx, DialogKind::OpenFile);
     }
 
     pub fn export_image(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::ExportImage, true);
+        self.open(ctx, DialogKind::ExportImage);
     }
 
     pub fn save_project(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::SaveProject, true);
+        self.open(ctx, DialogKind::SaveProject);
     }
 
     pub fn export_edit_stack(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::ExportEditStack, true);
-    }
-
-    pub fn load_lut(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::LoadLut, false);
-    }
-
-    pub fn panorama_add_image(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::PanoramaAddImage, false);
-    }
-
-    pub fn focus_stack_add_image(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::FocusStackAddImage, false);
-    }
-
-    pub fn hdr_merge_add_image(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::HdrMergeAddImage, false);
-    }
-
-    pub fn new_library(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::NewLibrary, false);
-    }
-
-    pub fn open_library(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::OpenLibrary, false);
-    }
-
-    pub fn import_files(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::ImportFiles, false);
-    }
-
-    pub fn import_folder(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::ImportFolder, false);
+        self.open(ctx, DialogKind::ExportEditStack);
     }
 
     pub fn choose_export_destination(
@@ -252,17 +271,20 @@ impl FileChooser {
         start_dir: Option<&std::path::Path>,
     ) {
         if let Some(dir) = start_dir {
-            self.export_dest_dlg.config_mut().initial_directory = dir.to_path_buf();
+            if let Some(dlg) = self.dialogs.get_mut(&DialogKind::ExportDestination) {
+                dlg.config_mut().initial_directory = dir.to_path_buf();
+            }
             self.pending_start_dir = Some(dir.to_path_buf());
         }
-        self.open(ctx, DialogKind::ExportDestination, false);
+        self.open(ctx, DialogKind::ExportDestination);
+    }
+
+    pub fn open_kind(&mut self, ctx: &egui::Context, kind: DialogKind) {
+        self.open(ctx, kind);
     }
 
     // ── Per-frame polling ───────────────────────────────────────────────────
 
-    /// Must be called once per frame.  Returns `Some((kind, paths))` when the
-    /// user has confirmed a selection, `None` otherwise.  Single-file and
-    /// folder kinds return a one-element vec; `ImportFiles` may return many.
     pub fn update(&mut self, ctx: &egui::Context) -> Option<(DialogKind, Vec<PathBuf>)> {
         if self.use_native {
             self.poll_rfd()
@@ -273,25 +295,21 @@ impl FileChooser {
 
     // ── Private helpers ─────────────────────────────────────────────────────
 
-    fn open(&mut self, ctx: &egui::Context, kind: DialogKind, is_save: bool) {
-        // Ignore if a dialog of any kind is already open.
+    fn open(&mut self, ctx: &egui::Context, kind: DialogKind) {
         if self.is_busy() {
             return;
         }
 
         if self.use_native {
-            self.spawn_rfd(ctx, kind, is_save);
+            self.spawn_rfd(ctx, kind);
         } else {
             self.pending = Some(kind);
-            let dlg = self.dialog_mut(kind);
-            match kind {
-                DialogKind::NewLibrary
-                | DialogKind::OpenLibrary
-                | DialogKind::ImportFolder
-                | DialogKind::ExportDestination => dlg.pick_directory(),
-                DialogKind::ImportFiles => dlg.pick_multiple(),
-                _ if is_save => dlg.save_file(),
-                _ => dlg.pick_file(),
+            let dlg = self.dialogs.get_mut(&kind).unwrap();
+            match kind.spec().mode {
+                DialogMode::PickDirectory => dlg.pick_directory(),
+                DialogMode::PickMultiple => dlg.pick_multiple(),
+                DialogMode::SaveFile => dlg.save_file(),
+                DialogMode::PickFile => dlg.pick_file(),
             }
         }
     }
@@ -304,123 +322,40 @@ impl FileChooser {
         }
     }
 
-    fn dialog_mut(&mut self, kind: DialogKind) -> &mut FileDialog {
-        match kind {
-            DialogKind::OpenFile => &mut self.open_dlg,
-            DialogKind::ExportImage => &mut self.export_dlg,
-            DialogKind::SaveProject => &mut self.save_project_dlg,
-            DialogKind::ExportEditStack => &mut self.export_stack_dlg,
-            DialogKind::LoadLut => &mut self.lut_dlg,
-            DialogKind::PanoramaAddImage => &mut self.panorama_dlg,
-            DialogKind::FocusStackAddImage => &mut self.focus_stack_dlg,
-            DialogKind::HdrMergeAddImage => &mut self.hdr_merge_dlg,
-            DialogKind::NewLibrary => &mut self.lib_new_dlg,
-            DialogKind::OpenLibrary => &mut self.lib_folder_dlg,
-            DialogKind::ImportFiles => &mut self.import_files_dlg,
-            DialogKind::ImportFolder => &mut self.import_folder_dlg,
-            DialogKind::ExportDestination => &mut self.export_dest_dlg,
-        }
-    }
-
     // ── rfd (native) backend ────────────────────────────────────────────────
 
-    fn spawn_rfd(&mut self, ctx: &egui::Context, kind: DialogKind, is_save: bool) {
+    fn spawn_rfd(&mut self, ctx: &egui::Context, kind: DialogKind) {
         let (tx, rx) = mpsc::channel::<Vec<PathBuf>>();
         self.rfd_rx = Some((kind, rx));
         let ctx = ctx.clone();
+        let spec = kind.spec();
         let start_dir = self.pending_start_dir.take();
 
         std::thread::spawn(move || {
-            let paths: Vec<PathBuf> = match kind {
-                DialogKind::OpenFile => rfd::FileDialog::new()
-                    .add_filter("All supported", &all_supported_exts())
-                    .add_filter("RasterLab Project", &["rlab"])
-                    .add_filter("Images", &image_exts())
-                    .add_filter("JPEG", &["jpg", "jpeg"])
-                    .add_filter("PNG", &["png"])
-                    .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_file()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
-                DialogKind::ExportImage => rfd::FileDialog::new()
-                    .add_filter("JPEG", &["jpg", "jpeg"])
-                    .add_filter("PNG", &["png"])
-                    .save_file()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
-                DialogKind::SaveProject => rfd::FileDialog::new()
-                    .add_filter("RasterLab Project", &["rlab"])
-                    .save_file()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
-                DialogKind::ExportEditStack => rfd::FileDialog::new()
-                    .add_filter("JSON", &["json"])
-                    .save_file()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
-                DialogKind::LoadLut => rfd::FileDialog::new()
-                    .add_filter("CUBE LUT", &["cube"])
-                    .pick_file()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
-                DialogKind::PanoramaAddImage => rfd::FileDialog::new()
-                    .add_filter("Images", &image_exts())
-                    .add_filter("JPEG", &["jpg", "jpeg"])
-                    .add_filter("PNG", &["png"])
-                    .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_file()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
-                DialogKind::FocusStackAddImage => rfd::FileDialog::new()
-                    .add_filter("Images", &image_exts())
-                    .add_filter("JPEG", &["jpg", "jpeg"])
-                    .add_filter("PNG", &["png"])
-                    .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_file()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
-                DialogKind::HdrMergeAddImage => rfd::FileDialog::new()
-                    .add_filter("Images", &image_exts())
-                    .add_filter("JPEG", &["jpg", "jpeg"])
-                    .add_filter("PNG", &["png"])
-                    .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_file()
-                    .map(|p| vec![p])
-                    .unwrap_or_default(),
-                DialogKind::NewLibrary
-                | DialogKind::OpenLibrary
-                | DialogKind::ImportFolder
-                | DialogKind::ExportDestination => {
-                    let mut d = rfd::FileDialog::new();
-                    if let Some(start) = &start_dir {
-                        d = d.set_directory(start);
-                    }
-                    d.pick_folder().map(|p| vec![p]).unwrap_or_default()
-                }
-                DialogKind::ImportFiles => rfd::FileDialog::new()
-                    .add_filter("All supported", &all_supported_exts())
-                    .add_filter("Images", &image_exts())
-                    .add_filter("JPEG", &["jpg", "jpeg"])
-                    .add_filter("PNG", &["png"])
-                    .add_filter("Camera RAW", RAW_EXTENSIONS)
-                    .pick_files()
-                    .unwrap_or_default(),
+            let mut dlg = rfd::FileDialog::new();
+            for (name, exts) in &spec.filters {
+                dlg = dlg.add_filter(*name, exts);
+            }
+            if let Some(start) = &start_dir {
+                dlg = dlg.set_directory(start);
+            }
+            let paths = match spec.mode {
+                DialogMode::PickFile => dlg.pick_file().map(|p| vec![p]).unwrap_or_default(),
+                DialogMode::SaveFile => dlg.save_file().map(|p| vec![p]).unwrap_or_default(),
+                DialogMode::PickDirectory => dlg.pick_folder().map(|p| vec![p]).unwrap_or_default(),
+                DialogMode::PickMultiple => dlg.pick_files().unwrap_or_default(),
             };
             let _ = tx.send(paths);
             ctx.request_repaint();
         });
-
-        // rfd picks open/save per kind above; is_save not needed here
-        let _ = is_save;
     }
 
     fn poll_rfd(&mut self) -> Option<(DialogKind, Vec<PathBuf>)> {
         let (kind, rx) = self.rfd_rx.take()?;
         match rx.try_recv() {
             Ok(paths) if !paths.is_empty() => Some((kind, paths)),
-            Ok(_) => None, // cancelled (empty vec)
+            Ok(_) => None,
             Err(mpsc::TryRecvError::Empty) => {
-                // Still waiting — put it back.
                 self.rfd_rx = Some((kind, rx));
                 None
             }
@@ -432,7 +367,7 @@ impl FileChooser {
 
     fn poll_egui(&mut self, ctx: &egui::Context) -> Option<(DialogKind, Vec<PathBuf>)> {
         let kind = self.pending?;
-        let dlg = self.dialog_mut(kind);
+        let dlg = self.dialogs.get_mut(&kind).unwrap();
         dlg.update(ctx);
 
         let result = if kind == DialogKind::ImportFiles {
@@ -446,8 +381,6 @@ impl FileChooser {
             return result;
         }
 
-        // If the dialog was cancelled or closed without a pick, clear pending
-        // so the next open call is not blocked.
         if matches!(dlg.state(), DialogState::Cancelled | DialogState::Closed) {
             self.pending = None;
         }

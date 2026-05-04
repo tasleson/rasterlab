@@ -3,6 +3,7 @@ use std::any::Any;
 use rasterlab_core::ops::HistogramData;
 use rasterlab_core::traits::operation::Operation;
 
+use crate::file_chooser::DialogKind;
 use crate::state::edit_session::{EditSession, EditingTool};
 
 #[allow(dead_code)]
@@ -23,14 +24,7 @@ pub enum ToolAction {
     RequestRender,
     PushOp(Box<dyn Operation>),
     PushOps(Vec<Box<dyn Operation>>),
-    RequestFileDialog(FileDialogKind),
-}
-
-pub enum FileDialogKind {
-    Lut,
-    PanoramaAddImage,
-    FocusStackAddFrame,
-    HdrMergeAddExposure,
+    RequestFileDialog(DialogKind),
 }
 
 pub trait Tool: Any {

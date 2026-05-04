@@ -3,7 +3,8 @@ use std::any::Any;
 use rasterlab_core::ops::LutOp;
 use rasterlab_core::traits::operation::Operation;
 
-use super::tool_trait::{FileDialogKind, Tool, ToolAction, ToolUiCtx};
+use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::file_chooser::DialogKind;
 
 pub struct LutTool {
     pub lut_op: Option<LutOp>,
@@ -38,7 +39,7 @@ impl Tool for LutTool {
         let mut action = ToolAction::None;
 
         if ui.button("Load .cube LUT…").clicked() {
-            return ToolAction::RequestFileDialog(FileDialogKind::Lut);
+            return ToolAction::RequestFileDialog(DialogKind::LoadLut);
         }
         if !self.name.is_empty() {
             ui.label(format!("Loaded: {}", self.name));
