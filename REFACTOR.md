@@ -9,7 +9,7 @@ between steps, open this file, follow the next one.
 - [x] **Step 1 — Golden-image regression tests** (commit `2dee981`)
 - [x] **Step 2 — Split `panels/tools.rs` into per-tool files** (commit `b4378f5`)
 - [x] **Step 3 — Extract `rasterlab-render` crate** (commit `05ccaef`)
-- [ ] **Step 4 — `Tool` trait abstraction**
+- [x] **Step 4 — `Tool` trait abstraction** (commit `b671916`)
 - [ ] **Step 5 — Collapse the three file-dialog stacks**
 
 ## Conventions for every step
