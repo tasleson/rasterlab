@@ -43,7 +43,6 @@ impl Tool for StraightenTool {
             .changed();
         if changed && ctx.has_image {
             self.preview_active = true;
-            return ToolAction::RequestRender;
         }
 
         ui.checkbox(&mut self.crop, "Crop to rectangle after apply");
@@ -63,7 +62,11 @@ impl Tool for StraightenTool {
             self.active = !self.active;
         }
 
-        let mut action = ToolAction::None;
+        let mut action = if changed && ctx.has_image {
+            ToolAction::RequestRender
+        } else {
+            ToolAction::None
+        };
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ctx.has_image, egui::Button::new("Apply Straighten"))

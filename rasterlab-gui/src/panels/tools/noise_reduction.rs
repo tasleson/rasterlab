@@ -90,16 +90,16 @@ impl Tool for NoiseReductionTool {
             );
         }
 
+        let mut action = ToolAction::None;
         let manual_preview = self.method == NrMethod::NonLocalMeans;
         if changed && ctx.has_image {
             if manual_preview {
                 self.preview_active = false;
             } else {
                 self.preview_active = true;
-                return ToolAction::RequestRender;
+                action = ToolAction::RequestRender;
             }
         }
-        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if manual_preview
                 && ui

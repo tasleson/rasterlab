@@ -80,9 +80,10 @@ impl Tool for BwTool {
                     ui.selectable_value(&mut self.mode_idx, i, label);
                 }
             });
+        let mut action = ToolAction::None;
         if (combo_resp.response.changed() || self.mode_idx != old_idx) && ctx.has_image {
             self.preview_active = true;
-            return ToolAction::RequestRender;
+            action = ToolAction::RequestRender;
         }
 
         if self.mode_idx == 3 {
@@ -136,11 +137,10 @@ impl Tool for BwTool {
                 });
             if (changed || preset_clicked) && ctx.has_image {
                 self.preview_active = true;
-                return ToolAction::RequestRender;
+                action = ToolAction::RequestRender;
             }
         }
 
-        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ctx.has_image, egui::Button::new("Apply B&W"))

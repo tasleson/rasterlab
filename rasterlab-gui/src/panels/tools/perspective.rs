@@ -76,7 +76,6 @@ impl Tool for PerspectiveTool {
 
         if changed && ctx.has_image {
             self.preview_active = true;
-            return ToolAction::RequestRender;
         }
 
         ui.horizontal(|ui| {
@@ -95,7 +94,11 @@ impl Tool for PerspectiveTool {
             );
         });
 
-        let mut action = ToolAction::None;
+        let mut action = if changed && ctx.has_image {
+            ToolAction::RequestRender
+        } else {
+            ToolAction::None
+        };
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ctx.has_image, egui::Button::new("Apply"))

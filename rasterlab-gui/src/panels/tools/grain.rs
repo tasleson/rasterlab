@@ -83,11 +83,11 @@ impl Tool for GrainTool {
                 changed |= ui.add(DragValue::new(&mut self.seed)).changed();
                 ui.end_row();
             });
+        let mut action = ToolAction::None;
         if (changed || preset_changed) && ctx.has_image {
             self.preview_active = true;
-            return ToolAction::RequestRender;
+            action = ToolAction::RequestRender;
         }
-        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ctx.has_image, egui::Button::new("Apply Grain"))

@@ -38,6 +38,7 @@ impl Tool for HdrMergeTool {
         );
         ui.add_space(2.0);
 
+        let mut action = ToolAction::None;
         if self.paths.is_empty() {
             ui.label(
                 egui::RichText::new("No exposures added yet.")
@@ -48,7 +49,7 @@ impl Tool for HdrMergeTool {
             self.paths.remove(idx);
             if self.paths.len() < 2 && self.preview_active {
                 self.preview_active = false;
-                return ToolAction::RequestRender;
+                action = ToolAction::RequestRender;
             }
         }
 
@@ -66,7 +67,6 @@ impl Tool for HdrMergeTool {
         }
 
         ui.add_space(4.0);
-        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             let ready = self.paths.len() >= 2;
             if ui

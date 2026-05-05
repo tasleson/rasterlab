@@ -32,6 +32,7 @@ impl Tool for PanoramaTool {
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+        let mut action = ToolAction::None;
         if self.paths.is_empty() {
             ui.label(
                 egui::RichText::new("No images added yet.")
@@ -42,7 +43,7 @@ impl Tool for PanoramaTool {
             self.paths.remove(idx);
             if self.paths.len() < 2 && self.preview_active {
                 self.preview_active = false;
-                return ToolAction::RequestRender;
+                action = ToolAction::RequestRender;
             }
         }
 
@@ -74,7 +75,6 @@ impl Tool for PanoramaTool {
                 }
             });
 
-        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             let ready = self.paths.len() >= 2;
             if ui

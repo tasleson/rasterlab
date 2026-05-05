@@ -48,11 +48,11 @@ impl Tool for ClarityTextureTool {
                     .text("Texture"),
             )
             .changed();
+        let mut action = ToolAction::None;
         if (c_changed || t_changed) && ctx.has_image {
             self.preview_active = true;
-            return ToolAction::RequestRender;
+            action = ToolAction::RequestRender;
         }
-        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ctx.has_image, egui::Button::new("Apply"))

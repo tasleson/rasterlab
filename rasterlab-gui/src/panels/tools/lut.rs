@@ -52,7 +52,7 @@ impl Tool for LutTool {
                 .changed();
             if changed && ctx.has_image {
                 self.preview_active = true;
-                return ToolAction::RequestRender;
+                action = ToolAction::RequestRender;
             }
             ui.horizontal(|ui| {
                 if ui

@@ -35,11 +35,11 @@ impl Tool for VibranceTool {
         let changed = ui
             .add(egui::Slider::new(&mut self.vibrance, -1.0..=1.0).step_by(0.01))
             .changed();
+        let mut action = ToolAction::None;
         if changed && ctx.has_image {
             self.preview_active = true;
-            return ToolAction::RequestRender;
+            action = ToolAction::RequestRender;
         }
-        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ctx.has_image, egui::Button::new("Apply"))

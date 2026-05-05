@@ -84,11 +84,11 @@ impl Tool for ColorBalanceTool {
             });
         ui.add_space(4.0);
 
+        let mut action = ToolAction::None;
         if changed && ctx.has_image {
             self.preview_active = true;
-            return ToolAction::RequestRender;
+            action = ToolAction::RequestRender;
         }
-        let mut action = ToolAction::None;
         ui.horizontal(|ui| {
             if ui
                 .add_enabled(ctx.has_image, egui::Button::new("Apply"))
