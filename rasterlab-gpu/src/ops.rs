@@ -19,157 +19,87 @@ use crate::{
     pipeline::{GpuPipeline, GpuTimings},
 };
 
+enum SupportedGpuOp<'a> {
+    BrightnessContrast(&'a BrightnessContrastOp),
+    Curves(&'a CurvesOp),
+    HueShift(&'a HueShiftOp),
+    Saturation(&'a SaturationOp),
+    Vibrance(&'a VibranceOp),
+    WhiteBalance(&'a WhiteBalanceOp),
+    NoiseReductionNlm(&'a NoiseReductionOp),
+    Sepia(&'a SepiaOp),
+    Levels(&'a LevelsOp),
+    HighlightsShadows(&'a HighlightsShadowsOp),
+    Vignette(&'a VignetteOp),
+    ShadowExposure(&'a ShadowExposureOp),
+    SplitTone(&'a SplitToneOp),
+    BlackAndWhite(&'a BlackAndWhiteOp),
+    Blur(&'a BlurOp),
+    ColorBalance(&'a ColorBalanceOp),
+    ColorSpace(&'a ColorSpaceOp),
+    Denoise(&'a DenoiseOp),
+    HslPanel(&'a HslPanelOp),
+    Sharpen(&'a SharpenOp),
+    FauxHdr(&'a FauxHdrOp),
+    ClarityTexture(&'a ClarityTextureOp),
+}
+
+fn classify(op: &dyn Operation) -> Option<SupportedGpuOp<'_>> {
+    let any = op.as_any()?;
+
+    if let Some(op) = any.downcast_ref::<BrightnessContrastOp>() {
+        Some(SupportedGpuOp::BrightnessContrast(op))
+    } else if let Some(op) = any.downcast_ref::<CurvesOp>() {
+        Some(SupportedGpuOp::Curves(op))
+    } else if let Some(op) = any.downcast_ref::<HueShiftOp>() {
+        Some(SupportedGpuOp::HueShift(op))
+    } else if let Some(op) = any.downcast_ref::<SaturationOp>() {
+        Some(SupportedGpuOp::Saturation(op))
+    } else if let Some(op) = any.downcast_ref::<VibranceOp>() {
+        Some(SupportedGpuOp::Vibrance(op))
+    } else if let Some(op) = any.downcast_ref::<WhiteBalanceOp>() {
+        Some(SupportedGpuOp::WhiteBalance(op))
+    } else if let Some(op) = any
+        .downcast_ref::<NoiseReductionOp>()
+        .filter(|op| op.method == NrMethod::NonLocalMeans)
+    {
+        Some(SupportedGpuOp::NoiseReductionNlm(op))
+    } else if let Some(op) = any.downcast_ref::<SepiaOp>() {
+        Some(SupportedGpuOp::Sepia(op))
+    } else if let Some(op) = any.downcast_ref::<LevelsOp>() {
+        Some(SupportedGpuOp::Levels(op))
+    } else if let Some(op) = any.downcast_ref::<HighlightsShadowsOp>() {
+        Some(SupportedGpuOp::HighlightsShadows(op))
+    } else if let Some(op) = any.downcast_ref::<VignetteOp>() {
+        Some(SupportedGpuOp::Vignette(op))
+    } else if let Some(op) = any.downcast_ref::<ShadowExposureOp>() {
+        Some(SupportedGpuOp::ShadowExposure(op))
+    } else if let Some(op) = any.downcast_ref::<SplitToneOp>() {
+        Some(SupportedGpuOp::SplitTone(op))
+    } else if let Some(op) = any.downcast_ref::<BlackAndWhiteOp>() {
+        Some(SupportedGpuOp::BlackAndWhite(op))
+    } else if let Some(op) = any.downcast_ref::<BlurOp>() {
+        Some(SupportedGpuOp::Blur(op))
+    } else if let Some(op) = any.downcast_ref::<ColorBalanceOp>() {
+        Some(SupportedGpuOp::ColorBalance(op))
+    } else if let Some(op) = any.downcast_ref::<ColorSpaceOp>() {
+        Some(SupportedGpuOp::ColorSpace(op))
+    } else if let Some(op) = any.downcast_ref::<DenoiseOp>() {
+        Some(SupportedGpuOp::Denoise(op))
+    } else if let Some(op) = any.downcast_ref::<HslPanelOp>() {
+        Some(SupportedGpuOp::HslPanel(op))
+    } else if let Some(op) = any.downcast_ref::<SharpenOp>() {
+        Some(SupportedGpuOp::Sharpen(op))
+    } else if let Some(op) = any.downcast_ref::<FauxHdrOp>() {
+        Some(SupportedGpuOp::FauxHdr(op))
+    } else {
+        any.downcast_ref::<ClarityTextureOp>()
+            .map(SupportedGpuOp::ClarityTexture)
+    }
+}
+
 pub fn supports(op: &dyn Operation) -> bool {
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<BrightnessContrastOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<CurvesOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<HueShiftOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<SaturationOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<VibranceOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<WhiteBalanceOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<NoiseReductionOp>())
-        .is_some_and(|op| op.method == NrMethod::NonLocalMeans)
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<SepiaOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<LevelsOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<HighlightsShadowsOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<VignetteOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<ShadowExposureOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<SplitToneOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<BlackAndWhiteOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<BlurOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<ColorBalanceOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<ColorSpaceOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<DenoiseOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<HslPanelOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<SharpenOp>())
-        .is_some()
-    {
-        return true;
-    }
-    if op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<FauxHdrOp>())
-        .is_some()
-    {
-        return true;
-    }
-    op.as_any()
-        .and_then(|any| any.downcast_ref::<ClarityTextureOp>())
-        .is_some()
+    classify(op).is_some()
 }
 
 pub fn apply_one(
@@ -177,86 +107,30 @@ pub fn apply_one(
     op: &dyn Operation,
     image: GpuImage,
 ) -> Result<GpuImage, GpuError> {
-    if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<BrightnessContrastOp>())
-    {
-        apply_brightness_contrast(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<CurvesOp>()) {
-        apply_curves(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<HueShiftOp>()) {
-        apply_hue_shift(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<SaturationOp>())
-    {
-        apply_saturation(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<VibranceOp>()) {
-        apply_vibrance(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<WhiteBalanceOp>())
-    {
-        apply_white_balance(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<NoiseReductionOp>())
-        .filter(|op| op.method == NrMethod::NonLocalMeans)
-    {
-        apply_noise_reduction_nlm(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<SepiaOp>()) {
-        apply_sepia(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<LevelsOp>()) {
-        apply_levels(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<HighlightsShadowsOp>())
-    {
-        apply_highlights_shadows(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<VignetteOp>()) {
-        apply_vignette(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<ShadowExposureOp>())
-    {
-        apply_shadow_exposure(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<SplitToneOp>())
-    {
-        apply_split_tone(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<BlackAndWhiteOp>())
-    {
-        apply_black_and_white(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<BlurOp>()) {
-        apply_blur(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<ColorBalanceOp>())
-    {
-        apply_color_balance(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<ColorSpaceOp>())
-    {
-        apply_color_space(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<DenoiseOp>()) {
-        apply_denoise(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<HslPanelOp>()) {
-        apply_hsl_panel(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<SharpenOp>()) {
-        apply_sharpen(ctx, op, image)
-    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<FauxHdrOp>()) {
-        apply_faux_hdr(ctx, op, image)
-    } else if let Some(op) = op
-        .as_any()
-        .and_then(|any| any.downcast_ref::<ClarityTextureOp>())
-    {
-        apply_clarity_texture(ctx, op, image)
-    } else {
-        Err(GpuError::UnsupportedOperation(op.name()))
+    match classify(op) {
+        Some(SupportedGpuOp::BrightnessContrast(op)) => apply_brightness_contrast(ctx, op, image),
+        Some(SupportedGpuOp::Curves(op)) => apply_curves(ctx, op, image),
+        Some(SupportedGpuOp::HueShift(op)) => apply_hue_shift(ctx, op, image),
+        Some(SupportedGpuOp::Saturation(op)) => apply_saturation(ctx, op, image),
+        Some(SupportedGpuOp::Vibrance(op)) => apply_vibrance(ctx, op, image),
+        Some(SupportedGpuOp::WhiteBalance(op)) => apply_white_balance(ctx, op, image),
+        Some(SupportedGpuOp::NoiseReductionNlm(op)) => apply_noise_reduction_nlm(ctx, op, image),
+        Some(SupportedGpuOp::Sepia(op)) => apply_sepia(ctx, op, image),
+        Some(SupportedGpuOp::Levels(op)) => apply_levels(ctx, op, image),
+        Some(SupportedGpuOp::HighlightsShadows(op)) => apply_highlights_shadows(ctx, op, image),
+        Some(SupportedGpuOp::Vignette(op)) => apply_vignette(ctx, op, image),
+        Some(SupportedGpuOp::ShadowExposure(op)) => apply_shadow_exposure(ctx, op, image),
+        Some(SupportedGpuOp::SplitTone(op)) => apply_split_tone(ctx, op, image),
+        Some(SupportedGpuOp::BlackAndWhite(op)) => apply_black_and_white(ctx, op, image),
+        Some(SupportedGpuOp::Blur(op)) => apply_blur(ctx, op, image),
+        Some(SupportedGpuOp::ColorBalance(op)) => apply_color_balance(ctx, op, image),
+        Some(SupportedGpuOp::ColorSpace(op)) => apply_color_space(ctx, op, image),
+        Some(SupportedGpuOp::Denoise(op)) => apply_denoise(ctx, op, image),
+        Some(SupportedGpuOp::HslPanel(op)) => apply_hsl_panel(ctx, op, image),
+        Some(SupportedGpuOp::Sharpen(op)) => apply_sharpen(ctx, op, image),
+        Some(SupportedGpuOp::FauxHdr(op)) => apply_faux_hdr(ctx, op, image),
+        Some(SupportedGpuOp::ClarityTexture(op)) => apply_clarity_texture(ctx, op, image),
+        None => Err(GpuError::UnsupportedOperation(op.name())),
     }
 }
 
