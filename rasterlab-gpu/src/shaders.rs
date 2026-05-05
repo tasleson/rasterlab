@@ -1,4 +1,6 @@
-pub(crate) const BRIGHTNESS_CONTRAST_WGSL: &str = r#"
+macro_rules! lut_shader {
+    () => {
+        r#"
 struct Params {
     width: u32,
     height: u32,
@@ -33,55 +35,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let a = px & 0xff000000u;
     output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
 }
-"#;
+"#
+    };
+}
 
-pub(crate) const CURVES_WGSL: &str = r#"
+pub(crate) const BRIGHTNESS_CONTRAST_WGSL: &str = lut_shader!();
+pub(crate) const CURVES_WGSL: &str = lut_shader!();
+
+macro_rules! hsl_shader {
+    ($params:literal, $body:literal) => {
+        concat!(
+            r#"
 struct Params {
     width: u32,
     height: u32,
     pixel_count: u32,
     _pad: u32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-@group(0) @binding(3) var<storage, read> lut: array<u32>;
-
-fn channel(byte: u32) -> u32 {
-    return lut[byte] & 0xffu;
-}
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) {
-        return;
-    }
-
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) {
-        return;
-    }
-
-    let px = input_pixels[i];
-    let r = channel(px & 0xffu);
-    let g = channel((px >> 8u) & 0xffu);
-    let b = channel((px >> 16u) & 0xffu);
-    let a = px & 0xff000000u;
-    output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
-}
-"#;
-
-pub(crate) const HUE_SHIFT_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    shift: f32,
-    _pad2: f32,
-    _pad3: f32,
-    _pad4: f32,
+"#,
+            $params,
+            r#"
 };
 
 @group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
@@ -166,7 +138,19 @@ fn pack_rgba(rgb: vec3<f32>, alpha: u32) -> u32 {
     let b = u32(scaled.b);
     return r | (g << 8u) | (b << 16u) | alpha;
 }
+"#,
+            $body
+        )
+    };
+}
 
+pub(crate) const HUE_SHIFT_WGSL: &str = hsl_shader!(
+    r#"    shift: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+"#,
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= params.width || gid.y >= params.height) {
@@ -185,103 +169,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rgb = hsl_to_rgb(vec3<f32>(wrapped_hue, hsl.y, hsl.z));
     output_pixels[i] = pack_rgba(rgb, px & 0xff000000u);
 }
-"#;
+"#
+);
 
-pub(crate) const SATURATION_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
+pub(crate) const SATURATION_WGSL: &str = hsl_shader!(
+    r#"
     saturation: f32,
     _pad2: f32,
     _pad3: f32,
     _pad4: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-fn hue_to_rgb(p: f32, q: f32, t_in: f32) -> f32 {
-    var t = t_in;
-    if (t < 0.0) {
-        t = t + 1.0;
-    }
-    if (t > 1.0) {
-        t = t - 1.0;
-    }
-    if (t < 1.0 / 6.0) {
-        return p + (q - p) * 6.0 * t;
-    }
-    if (t < 0.5) {
-        return q;
-    }
-    if (t < 2.0 / 3.0) {
-        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-    }
-    return p;
-}
-
-fn rgb_to_hsl(rgb: vec3<f32>) -> vec3<f32> {
-    let max_c = max(max(rgb.r, rgb.g), rgb.b);
-    let min_c = min(min(rgb.r, rgb.g), rgb.b);
-    let l = (max_c + min_c) * 0.5;
-
-    if (abs(max_c - min_c) < 1e-9) {
-        return vec3<f32>(0.0, 0.0, l);
-    }
-
-    let d = max_c - min_c;
-    let s = select(d / (max_c + min_c), d / (2.0 - max_c - min_c), l > 0.5);
-
-    var h: f32;
-    if (abs(max_c - rgb.r) < 1e-9) {
-        h = (rgb.g - rgb.b) / d;
-        if (rgb.g < rgb.b) {
-            h = h + 6.0;
-        }
-    } else if (abs(max_c - rgb.g) < 1e-9) {
-        h = (rgb.b - rgb.r) / d + 2.0;
-    } else {
-        h = (rgb.r - rgb.g) / d + 4.0;
-    }
-
-    return vec3<f32>(h / 6.0, s, l);
-}
-
-fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
-    let h = hsl.x;
-    let s = hsl.y;
-    let l = hsl.z;
-    if (s < 1e-9) {
-        return vec3<f32>(l, l, l);
-    }
-    let q = select(l + s - l * s, l * (1.0 + s), l < 0.5);
-    let p = 2.0 * l - q;
-    return vec3<f32>(
-        hue_to_rgb(p, q, h + 1.0 / 3.0),
-        hue_to_rgb(p, q, h),
-        hue_to_rgb(p, q, h - 1.0 / 3.0)
-    );
-}
-
-fn unpack_rgb(px: u32) -> vec3<f32> {
-    return vec3<f32>(
-        f32(px & 0xffu) / 255.0,
-        f32((px >> 8u) & 0xffu) / 255.0,
-        f32((px >> 16u) & 0xffu) / 255.0
-    );
-}
-
-fn pack_rgba(rgb: vec3<f32>, alpha: u32) -> u32 {
-    let scaled = clamp(rgb * 255.0, vec3<f32>(0.0), vec3<f32>(255.0));
-    let r = u32(scaled.r);
-    let g = u32(scaled.g);
-    let b = u32(scaled.b);
-    return r | (g << 8u) | (b << 16u) | alpha;
-}
-
+"#,
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= params.width || gid.y >= params.height) {
@@ -299,103 +197,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rgb = hsl_to_rgb(vec3<f32>(hsl.x, new_s, hsl.z));
     output_pixels[i] = pack_rgba(rgb, px & 0xff000000u);
 }
-"#;
+"#
+);
 
-pub(crate) const VIBRANCE_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
+pub(crate) const VIBRANCE_WGSL: &str = hsl_shader!(
+    r#"
     strength: f32,
     _pad2: f32,
     _pad3: f32,
     _pad4: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-fn hue_to_rgb(p: f32, q: f32, t_in: f32) -> f32 {
-    var t = t_in;
-    if (t < 0.0) {
-        t = t + 1.0;
-    }
-    if (t > 1.0) {
-        t = t - 1.0;
-    }
-    if (t < 1.0 / 6.0) {
-        return p + (q - p) * 6.0 * t;
-    }
-    if (t < 0.5) {
-        return q;
-    }
-    if (t < 2.0 / 3.0) {
-        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-    }
-    return p;
-}
-
-fn rgb_to_hsl(rgb: vec3<f32>) -> vec3<f32> {
-    let max_c = max(max(rgb.r, rgb.g), rgb.b);
-    let min_c = min(min(rgb.r, rgb.g), rgb.b);
-    let l = (max_c + min_c) * 0.5;
-
-    if (abs(max_c - min_c) < 1e-9) {
-        return vec3<f32>(0.0, 0.0, l);
-    }
-
-    let d = max_c - min_c;
-    let s = select(d / (max_c + min_c), d / (2.0 - max_c - min_c), l > 0.5);
-
-    var h: f32;
-    if (abs(max_c - rgb.r) < 1e-9) {
-        h = (rgb.g - rgb.b) / d;
-        if (rgb.g < rgb.b) {
-            h = h + 6.0;
-        }
-    } else if (abs(max_c - rgb.g) < 1e-9) {
-        h = (rgb.b - rgb.r) / d + 2.0;
-    } else {
-        h = (rgb.r - rgb.g) / d + 4.0;
-    }
-
-    return vec3<f32>(h / 6.0, s, l);
-}
-
-fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
-    let h = hsl.x;
-    let s = hsl.y;
-    let l = hsl.z;
-    if (s < 1e-9) {
-        return vec3<f32>(l, l, l);
-    }
-    let q = select(l + s - l * s, l * (1.0 + s), l < 0.5);
-    let p = 2.0 * l - q;
-    return vec3<f32>(
-        hue_to_rgb(p, q, h + 1.0 / 3.0),
-        hue_to_rgb(p, q, h),
-        hue_to_rgb(p, q, h - 1.0 / 3.0)
-    );
-}
-
-fn unpack_rgb(px: u32) -> vec3<f32> {
-    return vec3<f32>(
-        f32(px & 0xffu) / 255.0,
-        f32((px >> 8u) & 0xffu) / 255.0,
-        f32((px >> 16u) & 0xffu) / 255.0
-    );
-}
-
-fn pack_rgba(rgb: vec3<f32>, alpha: u32) -> u32 {
-    let scaled = clamp(rgb * 255.0, vec3<f32>(0.0), vec3<f32>(255.0));
-    let r = u32(scaled.r);
-    let g = u32(scaled.g);
-    let b = u32(scaled.b);
-    return r | (g << 8u) | (b << 16u) | alpha;
-}
-
+"#,
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= params.width || gid.y >= params.height) {
@@ -419,7 +231,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rgb = hsl_to_rgb(vec3<f32>(hsl.x, new_s, hsl.z));
     output_pixels[i] = pack_rgba(rgb, px & 0xff000000u);
 }
-"#;
+"#
+);
 
 pub(crate) const WHITE_BALANCE_WGSL: &str = r#"
 struct Params {

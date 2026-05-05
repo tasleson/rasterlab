@@ -123,17 +123,7 @@ impl Operation for ColorBalanceOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn grey(v: u8) -> Image {
-        let mut img = Image::new(4, 4);
-        img.data.chunks_mut(4).for_each(|p| {
-            p[0] = v;
-            p[1] = v;
-            p[2] = v;
-            p[3] = 255;
-        });
-        img
-    }
+    use crate::ops::test_utils::grey;
 
     #[test]
     fn identity() {

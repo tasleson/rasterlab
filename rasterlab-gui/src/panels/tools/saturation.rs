@@ -1,5 +1,3 @@
-use std::any::Any;
-
 use rasterlab_core::ops::SaturationOp;
 use rasterlab_core::traits::operation::Operation;
 
@@ -68,22 +66,8 @@ impl Tool for SaturationTool {
         action
     }
 
-    fn is_preview_active(&self) -> bool {
-        self.preview_active
-    }
-    fn cancel_preview(&mut self) {
-        self.preview_active = false;
-    }
-    fn activate_preview(&mut self) {
-        self.preview_active = true;
-    }
-    fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active {
-            Some(Box::new(SaturationOp::new(self.saturation)))
-        } else {
-            None
-        }
-    }
+    super::shared::impl_preview_tool!(tool => SaturationOp::new(tool.saturation));
+
     fn load_from_op(&mut self, op: &dyn Operation) -> bool {
         if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<SaturationOp>()) {
             self.saturation = o.saturation;
@@ -91,11 +75,5 @@ impl Tool for SaturationTool {
         } else {
             false
         }
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 }

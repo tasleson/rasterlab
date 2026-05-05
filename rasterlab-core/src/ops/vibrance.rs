@@ -93,17 +93,7 @@ impl Operation for VibranceOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn solid(r: u8, g: u8, b: u8) -> Image {
-        let mut img = Image::new(4, 4);
-        img.data.chunks_mut(4).for_each(|p| {
-            p[0] = r;
-            p[1] = g;
-            p[2] = b;
-            p[3] = 255;
-        });
-        img
-    }
+    use crate::ops::test_utils::solid;
 
     #[test]
     fn zero_strength_is_identity() {

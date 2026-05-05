@@ -92,15 +92,7 @@ impl Tool for LutTool {
         action
     }
 
-    fn is_preview_active(&self) -> bool {
-        self.preview_active
-    }
-    fn cancel_preview(&mut self) {
-        self.preview_active = false;
-    }
-    fn activate_preview(&mut self) {
-        self.preview_active = true;
-    }
+    super::shared::impl_preview_controls!();
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
         if self.preview_active {
             self.lut_op.as_ref().map(|lut| {

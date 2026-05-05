@@ -116,15 +116,7 @@ impl Tool for PanoramaTool {
         action
     }
 
-    fn is_preview_active(&self) -> bool {
-        self.preview_active
-    }
-    fn cancel_preview(&mut self) {
-        self.preview_active = false;
-    }
-    fn activate_preview(&mut self) {
-        self.preview_active = true;
-    }
+    super::shared::impl_preview_controls!();
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
         if self.preview_active && self.paths.len() >= 2 {
             Some(Box::new(PanoramaOp::new(

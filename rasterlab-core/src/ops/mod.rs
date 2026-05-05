@@ -71,6 +71,26 @@ pub use vibrance::VibranceOp;
 pub use vignette::VignetteOp;
 pub use white_balance::WhiteBalanceOp;
 
+#[cfg(test)]
+pub(super) mod test_utils {
+    use crate::image::Image;
+
+    pub fn solid(r: u8, g: u8, b: u8) -> Image {
+        let mut img = Image::new(4, 4);
+        img.data.chunks_mut(4).for_each(|p| {
+            p[0] = r;
+            p[1] = g;
+            p[2] = b;
+            p[3] = 255;
+        });
+        img
+    }
+
+    pub fn grey(v: u8) -> Image {
+        solid(v, v, v)
+    }
+}
+
 // ── Shared pixel utilities ────────────────────────────────────────────────────
 
 /// sRGB gamma → linear (exact IEC 61966-2-1 piecewise formula).

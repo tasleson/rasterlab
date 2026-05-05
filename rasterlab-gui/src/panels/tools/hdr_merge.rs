@@ -67,32 +67,17 @@ impl Tool for HdrMergeTool {
         }
 
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let ready = self.paths.len() >= 2;
-            if ui
-                .add_enabled(ctx.has_image && ready, egui::Button::new("Merge"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(HdrMergeOp::new(self.paths.clone())));
-                self.paths.clear();
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.paths.clear();
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
+        let button_action = super::shared::path_stack_buttons(
+            ui,
+            ctx.has_image,
+            &mut self.paths,
+            &mut self.preview_active,
+            "Merge",
+            |paths| Box::new(HdrMergeOp::new(paths)),
+        );
+        if !matches!(button_action, ToolAction::None) {
+            action = button_action;
+        }
 
         if self.paths.len() == 1 {
             ui.label(
@@ -104,15 +89,7 @@ impl Tool for HdrMergeTool {
         action
     }
 
-    fn is_preview_active(&self) -> bool {
-        self.preview_active
-    }
-    fn cancel_preview(&mut self) {
-        self.preview_active = false;
-    }
-    fn activate_preview(&mut self) {
-        self.preview_active = true;
-    }
+    super::shared::impl_preview_controls!();
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
         if self.preview_active && self.paths.len() >= 2 {
             Some(Box::new(HdrMergeOp::new(self.paths.clone())))

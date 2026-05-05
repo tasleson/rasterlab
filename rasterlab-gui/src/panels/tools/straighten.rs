@@ -1,9 +1,10 @@
 use std::any::Any;
 
 use egui::Vec2;
-use rasterlab_core::ops::{CropOp, RotateOp};
+use rasterlab_core::ops::RotateOp;
 use rasterlab_core::traits::operation::Operation;
 
+use super::shared::straighten_crop_op;
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 
 pub struct StraightenTool {
@@ -157,30 +158,4 @@ impl Tool for StraightenTool {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
-}
-
-fn straighten_crop_op(w: u32, h: u32, angle_deg: f32) -> CropOp {
-    let theta = angle_deg.to_radians().abs();
-    let cos_t = theta.cos();
-    let sin_t = theta.sin();
-    let wf = w as f32;
-    let hf = h as f32;
-    let r = wf / hf;
-
-    let b = f32::min(
-        wf / (2.0 * (r * cos_t + sin_t)),
-        hf / (2.0 * (r * sin_t + cos_t)),
-    );
-    let a = r * b;
-
-    let inner_w = (2.0 * a).floor() as u32;
-    let inner_h = (2.0 * b).floor() as u32;
-
-    let rot_w = (wf * cos_t + hf * sin_t).ceil() as u32;
-    let rot_h = (wf * sin_t + hf * cos_t).ceil() as u32;
-
-    let x = (rot_w.saturating_sub(inner_w)) / 2;
-    let y = (rot_h.saturating_sub(inner_h)) / 2;
-
-    CropOp::new(x, y, inner_w.max(1), inner_h.max(1))
 }
