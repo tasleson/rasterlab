@@ -10,13 +10,17 @@ fn main() -> eframe::Result<()> {
     // Optional positional argument: path to an image file to open on startup.
     let initial_file: Option<std::path::PathBuf> =
         std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    let icon =
+        eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon/rasterlab_icon.png"))
+            .expect("embedded app icon must be a valid PNG");
 
     rasterlab_render::init_rayon_pool();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RasterLab")
             .with_inner_size([1400.0, 900.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_min_inner_size([900.0, 600.0])
+            .with_icon(icon),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
                 eframe::egui_wgpu::WgpuSetupCreateNew {
