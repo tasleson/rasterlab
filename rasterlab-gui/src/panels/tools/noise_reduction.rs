@@ -90,12 +90,28 @@ impl Tool for NoiseReductionTool {
             );
         }
 
+        let manual_preview = self.method == NrMethod::NonLocalMeans;
         if changed && ctx.has_image {
-            self.preview_active = true;
-            return ToolAction::RequestRender;
+            if manual_preview {
+                self.preview_active = false;
+            } else {
+                self.preview_active = true;
+                return ToolAction::RequestRender;
+            }
         }
         let mut action = ToolAction::None;
         ui.horizontal(|ui| {
+            if manual_preview
+                && ui
+                    .add_enabled(
+                        ctx.has_image && !ctx.nr_in_flight,
+                        egui::Button::new("Preview"),
+                    )
+                    .clicked()
+            {
+                self.preview_active = true;
+                action = ToolAction::RequestRender;
+            }
             if ui
                 .add_enabled(ctx.has_image, egui::Button::new("Apply Noise Reduction"))
                 .clicked()
@@ -118,7 +134,7 @@ impl Tool for NoiseReductionTool {
                     .clicked()
             {
                 self.preview_active = false;
-                action = ToolAction::RequestRender;
+                action = ToolAction::CancelRender;
             }
             if ui.button("Reset").clicked() {
                 self.method = NrMethod::Wavelet;

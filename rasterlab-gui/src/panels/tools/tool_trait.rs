@@ -22,6 +22,7 @@ pub struct ToolUiCtx<'a> {
 pub enum ToolAction {
     None,
     RequestRender,
+    CancelRender,
     PushOp(Box<dyn Operation>),
     PushOps(Vec<Box<dyn Operation>>),
     RequestFileDialog(DialogKind),

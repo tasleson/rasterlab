@@ -388,6 +388,9 @@ fn apply_nlm(
             let mut row_cr = vec![0.0f32; w];
 
             for px in 0..w {
+                if cancel::is_requested() {
+                    return (vec![0.0f32; w], vec![0.0f32; w], vec![0.0f32; w]);
+                }
                 let mut sum_wy = 0.0f32;
                 let mut sum_wc = 0.0f32;
                 let mut acc_y = 0.0f32;
@@ -400,6 +403,9 @@ fn apply_nlm(
                 let qx_hi = (px + search_r + 1).min(w);
 
                 for qy in qy_lo..qy_hi {
+                    if cancel::is_requested() {
+                        return (vec![0.0f32; w], vec![0.0f32; w], vec![0.0f32; w]);
+                    }
                     for qx in qx_lo..qx_hi {
                         // Compute patch distance for Y
                         let mut dist_y = 0.0f32;

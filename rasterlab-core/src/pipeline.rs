@@ -381,6 +381,15 @@ impl EditPipeline {
         self.cache.store_batch(start_index, images);
     }
 
+    /// Store sparse intermediate results produced by the background render thread.
+    ///
+    /// Each tuple is `(relative_step, image)`, where `relative_step` is offset
+    /// from `start_index`. GPU render runs use this to cache only points where
+    /// pixels are already back on the CPU.
+    pub fn store_sparse_steps(&mut self, start_index: usize, images: Vec<(usize, Arc<Image>)>) {
+        self.cache.store_sparse(start_index, images);
+    }
+
     /// Generation counter for the step cache.
     ///
     /// Incremented whenever cached entries are invalidated.  Callers can

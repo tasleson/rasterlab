@@ -15,13 +15,14 @@ use rasterlab_core::{
     Image, cancel as core_cancel,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BrightnessContrastOp, HistogramData, LevelsOp, MaskedOp, ResizeOp,
-        SaturationOp, SharpenOp, VignetteOp,
+        BlackAndWhiteOp, BrightnessContrastOp, HistogramData, LevelsOp, MaskedOp, NoiseReductionOp,
+        NrMethod, ResizeOp, SaturationOp, SharpenOp, VignetteOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
     traits::operation::Operation,
 };
+use rasterlab_gpu::GpuContext;
 use rasterlab_render::{PREVIEW_SCALE, RenderMeta, RenderRequest, RenderResult};
 
 use super::{EditSession, EditingTool, ToolState, load_op_into_tools};
@@ -35,6 +36,34 @@ pub enum AppMode {
     #[default]
     Editor,
     Library,
+}
+
+#[derive(Clone)]
+struct ReusableNrPreview {
+    copy_index: usize,
+    cursor: usize,
+    cache_gen: u64,
+    signature: NrPreviewSignature,
+    image: Arc<Image>,
+}
+
+#[derive(Clone, PartialEq)]
+struct NrPreviewSignature {
+    method: NrMethod,
+    luma_strength: f32,
+    color_strength: f32,
+    detail_preservation: f32,
+}
+
+impl NrPreviewSignature {
+    fn from_op(op: &NoiseReductionOp) -> Self {
+        Self {
+            method: op.method.clone(),
+            luma_strength: op.luma_strength,
+            color_strength: op.color_strength,
+            detail_preservation: op.detail_preservation,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +177,7 @@ pub struct AppState {
     bg_rx: mpsc::Receiver<BgMessage>,
     // egui context — needed to wake up the UI after background work completes
     ctx: Context,
+    gpu: Option<Arc<GpuContext>>,
 
     /// All per-tool input fields, preview flags, and export settings.
     pub tools: ToolState,
@@ -161,6 +191,8 @@ pub struct AppState {
     /// as the active preview or as a committed pipeline step).  Drives the
     /// visibility of the NR Cancel button so the user can abort a slow NLM run.
     nr_in_flight: bool,
+    reusable_nr_preview: Option<ReusableNrPreview>,
+    pending_nr_preview_key: Option<(usize, usize, u64, NrPreviewSignature)>,
 
     // ── Autosave ────────────────────────────────────────────────────────────
     /// Unix timestamp identifying the current editing session.  Used as the
@@ -192,7 +224,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(ctx: Context) -> Self {
+    pub fn new(ctx: Context, gpu: Option<Arc<GpuContext>>) -> Self {
         let (bg_tx, bg_rx) = mpsc::channel();
         let prefs = Prefs::load();
         let mut tools = ToolState::new();
@@ -227,10 +259,13 @@ impl AppState {
             bg_tx,
             bg_rx,
             ctx,
+            gpu,
             tools,
             needs_rerender: false,
             render_start: None,
             nr_in_flight: false,
+            reusable_nr_preview: None,
+            pending_nr_preview_key: None,
             autosave_session_id: None,
             autosave_pending: false,
             autosave_restore: None,
@@ -356,16 +391,31 @@ impl AppState {
                         start_index,
                         cache_gen,
                         is_preview,
+                        follow_up_full_res,
                         overlay_rect,
                     } => {
                         self.histogram = Some(*hist);
                         self.loading = false;
                         self.nr_in_flight = false;
+                        let reusable_nr_key = self.pending_nr_preview_key.take();
 
                         if let Some(rect) = overlay_rect {
                             self.preview_overlay = Some(image);
                             self.preview_overlay_rect = Some(rect);
                         } else {
+                            if let Some((copy_index, cursor, key_cache_gen, signature)) =
+                                reusable_nr_key
+                                && !self.needs_rerender
+                                && cache_gen == key_cache_gen
+                            {
+                                self.reusable_nr_preview = Some(ReusableNrPreview {
+                                    copy_index,
+                                    cursor,
+                                    cache_gen,
+                                    signature,
+                                    image: Arc::clone(&image),
+                                });
+                            }
                             self.rendered = Some(image);
                             self.rendered_is_preview = is_preview;
                             self.rendered_scale = if is_preview { PREVIEW_SCALE } else { 1.0 };
@@ -385,14 +435,21 @@ impl AppState {
                             if let Some(pipeline) = self.pipeline_mut()
                                 && cache_gen == pipeline.step_cache_gen()
                             {
-                                pipeline.store_steps(start_index, intermediates);
+                                pipeline.store_sparse_steps(start_index, intermediates);
                             }
+                        } else if !follow_up_full_res {
+                            let elapsed_ms = self
+                                .render_start
+                                .take()
+                                .map(|t| t.elapsed().as_millis())
+                                .unwrap_or(0);
+                            self.status = format!("Preview ready  ({} ms)", elapsed_ms);
                         }
 
                         if self.needs_rerender {
                             self.needs_rerender = false;
                             self.request_render_inner(false);
-                        } else if is_preview || overlay_rect.is_some() {
+                        } else if follow_up_full_res && (is_preview || overlay_rect.is_some()) {
                             self.request_render_inner(true);
                         }
                     }
@@ -400,10 +457,12 @@ impl AppState {
                         self.status = format!("Error: {}", e);
                         self.loading = false;
                         self.nr_in_flight = false;
+                        self.pending_nr_preview_key = None;
                     }
                     RenderResult::Cancelled => {
                         self.loading = false;
                         self.nr_in_flight = false;
+                        self.pending_nr_preview_key = None;
                         self.render_start = None;
                         self.status = "Cancelled".into();
                         if self.needs_rerender {
@@ -873,6 +932,9 @@ impl AppState {
             self.commit_edit(op);
             return;
         }
+        if self.try_push_reusable_nr_preview(op.as_ref()) {
+            return;
+        }
         // Wrap in MaskedOp when masking is active.
         let op: Box<dyn Operation> = match self.tools.current_mask_shape() {
             Some(mask) => Box::new(MaskedOp { inner: op, mask }),
@@ -884,6 +946,53 @@ impl AppState {
             self.mark_dirty();
             self.request_render();
         }
+    }
+
+    fn try_push_reusable_nr_preview(&mut self, op: &dyn Operation) -> bool {
+        if self.tools.current_mask_shape().is_some() {
+            return false;
+        }
+        let Some(nr) = op
+            .as_any()
+            .and_then(|any| any.downcast_ref::<NoiseReductionOp>())
+            .filter(|nr| nr.method == NrMethod::NonLocalMeans)
+        else {
+            return false;
+        };
+        let Some(preview) = self.reusable_nr_preview.as_ref() else {
+            return false;
+        };
+        let Some(store) = self.copies.as_ref() else {
+            return false;
+        };
+        let pipeline = store.active_pipeline();
+        if preview.copy_index != store.active_index()
+            || preview.cursor != pipeline.cursor()
+            || preview.cache_gen != pipeline.step_cache_gen()
+            || preview.signature != NrPreviewSignature::from_op(nr)
+        {
+            return false;
+        }
+
+        let image = Arc::clone(&preview.image);
+        self.tools.cancel_all_previews();
+        self.preview_overlay = None;
+        self.preview_overlay_rect = None;
+        self.pending_nr_preview_key = None;
+        self.reusable_nr_preview = None;
+
+        if let Some(store) = &mut self.copies {
+            let pipeline = store.active_pipeline_mut();
+            let start_index = pipeline.cursor();
+            pipeline.push_op(op.clone_box());
+            pipeline.store_steps(start_index, vec![Arc::clone(&image)]);
+        }
+        self.rendered = Some(image);
+        self.rendered_is_preview = false;
+        self.rendered_scale = 1.0;
+        self.mark_dirty();
+        self.status = "Applied Noise Reduction from preview".into();
+        true
     }
 
     /// One-click auto-enhance: stretch levels to the 0.5/99.5 percentile,
@@ -933,6 +1042,8 @@ impl AppState {
         self.tools.cancel_all_previews();
         self.preview_overlay = None;
         self.preview_overlay_rect = None;
+        self.pending_nr_preview_key = None;
+        self.reusable_nr_preview = None;
     }
 
     /// Reset tool-specific state when a new image is loaded.
@@ -1073,6 +1184,22 @@ impl AppState {
         self.request_render_inner(false);
     }
 
+    pub fn cancel_render(&mut self) {
+        self.tools.cancel_all_previews();
+        self.preview_overlay = None;
+        self.preview_overlay_rect = None;
+        self.pending_nr_preview_key = None;
+        self.reusable_nr_preview = None;
+        self.needs_rerender = false;
+        if self.loading {
+            core_cancel::request();
+            self.status = "Cancelling...".into();
+            self.ctx.request_repaint();
+        } else {
+            self.status = "Cancelled".into();
+        }
+    }
+
     /// `force_full_res` bypasses the downsampled-preview path even when a
     /// preview op is active.  Used internally to follow up a preview render
     /// with a full-resolution render.
@@ -1086,10 +1213,21 @@ impl AppState {
             return;
         }
 
+        // Preview op — applied on top of committed result but NOT cached.
+        let preview_op: Option<Box<dyn Operation>> = self.tools.preview_op();
+        let reusable_nr_signature = preview_op
+            .as_deref()
+            .and_then(|op| op.as_any())
+            .and_then(|any| any.downcast_ref::<NoiseReductionOp>())
+            .filter(|nr| nr.method == NrMethod::NonLocalMeans)
+            .map(NrPreviewSignature::from_op);
+        let reusable_nr_preview = reusable_nr_signature.is_some() && !force_full_res;
+
         // Render at reduced scale when a preview op is active so ops run on
-        // a fraction of the pixels (~16× fewer at 25%).  Full-res renders are
-        // queued automatically once the preview is displayed.
-        let is_preview = self.tools.any_preview_active() && !force_full_res;
+        // a fraction of the pixels (~16× fewer at 25%). Manual NLM previews
+        // are full-resolution so Apply can reuse the exact result.
+        let preview_requested = self.tools.any_preview_active() && !force_full_res;
+        let is_preview = preview_requested && !reusable_nr_preview;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
         } else {
@@ -1129,8 +1267,7 @@ impl AppState {
             self.pipeline_mut().unwrap().take_start_for_render().1
         };
 
-        // Preview op — applied on top of committed result but NOT cached.
-        let preview_op: Option<Box<dyn Operation>> = self.tools.preview_op();
+        let follow_up_full_res = preview_op.is_some() && reusable_nr_signature.is_none();
 
         // Track whether the upcoming render involves noise reduction so the UI
         // can show a Cancel button while the (potentially slow) NLM runs.
@@ -1149,6 +1286,11 @@ impl AppState {
         self.nr_in_flight = nr_in_flight;
         self.status = "Rendering…".into();
         self.render_start = Some(std::time::Instant::now());
+        self.pending_nr_preview_key = reusable_nr_signature.and_then(|signature| {
+            self.copies
+                .as_ref()
+                .map(|store| (store.active_index(), pipeline_cursor, cache_gen, signature))
+        });
 
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
@@ -1176,11 +1318,13 @@ impl AppState {
             preview_scale,
             preview_viewport,
             overlay_viewport,
+            gpu: self.gpu.clone(),
         };
         let meta = RenderMeta {
             start_index: start_idx,
             cache_gen,
             is_preview,
+            follow_up_full_res,
         };
         let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
         rasterlab_render::spawn_render(request, meta, tx, repaint);

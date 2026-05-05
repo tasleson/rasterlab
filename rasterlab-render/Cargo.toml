@@ -8,3 +8,12 @@ license.workspace   = true
 [dependencies]
 rasterlab-core = { workspace = true }
 rayon          = { workspace = true }
+rasterlab-gpu  = { workspace = true, optional = true }
+
+[features]
+default = []
+gpu = ["dep:rasterlab-gpu"]
+
+[dev-dependencies]
+pollster = "0.4"
+wgpu = { workspace = true }

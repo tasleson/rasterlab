@@ -79,6 +79,23 @@ impl RenderCache {
         }
     }
 
+    /// Store sparse intermediate results produced by the render thread.
+    ///
+    /// Each tuple is `(relative_step, image)`, where `relative_step` is offset
+    /// from `start`. This allows GPU runs to cache only readback boundaries
+    /// instead of forcing a CPU readback after every GPU operation.
+    pub fn store_sparse(&mut self, start: usize, images: Vec<(usize, Arc<Image>)>) {
+        let Some(max_step) = images.iter().map(|(step, _)| start + *step).max() else {
+            return;
+        };
+        if self.steps.len() <= max_step {
+            self.steps.resize(max_step + 1, None);
+        }
+        for (step, img) in images {
+            self.steps[start + step] = Some(img);
+        }
+    }
+
     /// Invalidate all entries at `from` and beyond, bump generationeration.
     pub fn invalidate_from(&mut self, from: usize) {
         if from < self.steps.len() {

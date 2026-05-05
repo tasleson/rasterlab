@@ -1,6 +1,6 @@
 //! Main application struct that wires together all panels.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use egui::{Context, Key, Modifiers};
 
@@ -53,7 +53,25 @@ pub struct RasterLabApp {
 
 impl RasterLabApp {
     pub fn new(cc: &eframe::CreationContext, initial_file: Option<PathBuf>) -> Self {
-        let mut state = AppState::new(cc.egui_ctx.clone());
+        let gpu = cc.wgpu_render_state.as_ref().map(|render_state| {
+            Arc::new(rasterlab_gpu::GpuContext::new(
+                render_state.device.clone(),
+                render_state.queue.clone(),
+                render_state.device.limits(),
+            ))
+        });
+        if std::env::var("RASTERLAB_GPU_LOG").as_deref() == Ok("1") {
+            match gpu.as_ref() {
+                Some(gpu) => eprintln!(
+                    "[rasterlab-gpu] initialized wgpu context max_texture_dimension_2d={}",
+                    gpu.limits().max_texture_dimension_2d
+                ),
+                None => eprintln!(
+                    "[rasterlab-gpu] no eframe wgpu render state; GPU operations unavailable"
+                ),
+            }
+        }
+        let mut state = AppState::new(cc.egui_ctx.clone(), gpu);
 
         // Apply the stored theme preference.  For ThemePreference::System the fallback
         // is set to Light so the app looks correct on platforms where winit cannot

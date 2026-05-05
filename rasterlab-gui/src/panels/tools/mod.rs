@@ -196,6 +196,9 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
         ToolAction::RequestRender => {
             state.request_render();
         }
+        ToolAction::CancelRender => {
+            state.cancel_render();
+        }
         ToolAction::PushOp(op) => {
             state.push_op(op);
         }
