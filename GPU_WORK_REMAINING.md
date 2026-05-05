@@ -7,12 +7,12 @@ Last commit: `03f23ee` — "Add GPU ops: black & white, blur, color balance, col
 
 ## Current state
 
-20 of 35 ops have GPU support. All GPU code lives in `rasterlab-gpu/src/lib.rs` (one big file, ~5300 lines).
+22 of 35 ops have GPU support. All GPU code lives in `rasterlab-gpu/src/lib.rs` (one big file, ~5600 lines).
 
 ### Already GPU-accelerated
-`BlackAndWhiteOp`, `BlurOp`, `BrightnessContrastOp`, `ColorBalanceOp`, `ColorSpaceOp`, `CurvesOp`, `DenoiseOp` (bilateral), `HighlightsShadowsOp`, `HslPanelOp`, `HueShiftOp`, `LevelsOp`, `NoiseReductionOp` (NLM only), `SaturationOp`, `SepiaOp`, `ShadowExposureOp`, `SharpenOp`, `SplitToneOp`, `VibranceOp`, `VignetteOp`, `WhiteBalanceOp`
+`BlackAndWhiteOp`, `BlurOp`, `BrightnessContrastOp`, `ClarityTextureOp`, `ColorBalanceOp`, `ColorSpaceOp`, `CurvesOp`, `DenoiseOp` (bilateral), `FauxHdrOp`, `HighlightsShadowsOp`, `HslPanelOp`, `HueShiftOp`, `LevelsOp`, `NoiseReductionOp` (NLM only), `SaturationOp`, `SepiaOp`, `ShadowExposureOp`, `SharpenOp`, `SplitToneOp`, `VibranceOp`, `VignetteOp`, `WhiteBalanceOp`
 
-### Still CPU-only (15 ops)
+### Still CPU-only (13 ops — all in Tier 4 skip)
 See priority table below.
 
 ---

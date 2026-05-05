@@ -13,10 +13,10 @@ use rasterlab_core::{
     Image,
     image::ImageMetadata,
     ops::{
-        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, BwMode, ColorBalanceOp,
-        ColorSpaceConversion, ColorSpaceOp, CurvesOp, DenoiseOp, HighlightsShadowsOp, HslPanelOp,
-        HueShiftOp, LevelsOp, NoiseReductionOp, NrMethod, SaturationOp, SepiaOp, ShadowExposureOp,
-        SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, BwMode, ClarityTextureOp, ColorBalanceOp,
+        ColorSpaceConversion, ColorSpaceOp, CurvesOp, DenoiseOp, FauxHdrOp, HighlightsShadowsOp,
+        HslPanelOp, HueShiftOp, LevelsOp, NoiseReductionOp, NrMethod, SaturationOp, SepiaOp,
+        ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::operation::Operation,
 };
@@ -69,6 +69,8 @@ pub struct GpuContext {
     denoise: Arc<DenoiseKernel>,
     hsl_panel: Arc<HslPanelKernel>,
     sharpen: Arc<SharpenKernel>,
+    faux_hdr: Arc<FauxHdrKernel>,
+    clarity_texture: Arc<ClarityTextureKernel>,
 }
 
 impl GpuContext {
@@ -93,6 +95,8 @@ impl GpuContext {
         let denoise = Arc::new(DenoiseKernel::new(&device));
         let hsl_panel = Arc::new(HslPanelKernel::new(&device));
         let sharpen = Arc::new(SharpenKernel::new(&device));
+        let faux_hdr = Arc::new(FauxHdrKernel::new(&device));
+        let clarity_texture = Arc::new(ClarityTextureKernel::new(&device));
         Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -117,6 +121,8 @@ impl GpuContext {
             denoise,
             hsl_panel,
             sharpen,
+            faux_hdr,
+            clarity_texture,
         }
     }
 
@@ -331,8 +337,22 @@ pub fn supports(op: &dyn Operation) -> bool {
     {
         return true;
     }
-    op.as_any()
+    if op
+        .as_any()
         .and_then(|any| any.downcast_ref::<SharpenOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<FauxHdrOp>())
+        .is_some()
+    {
+        return true;
+    }
+    op.as_any()
+        .and_then(|any| any.downcast_ref::<ClarityTextureOp>())
         .is_some()
 }
 
@@ -412,6 +432,13 @@ pub fn apply_one(
         apply_hsl_panel(ctx, op, image)
     } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<SharpenOp>()) {
         apply_sharpen(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<FauxHdrOp>()) {
+        apply_faux_hdr(ctx, op, image)
+    } else if let Some(op) = op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<ClarityTextureOp>())
+    {
+        apply_clarity_texture(ctx, op, image)
     } else {
         Err(GpuError::UnsupportedOperation(op.name()))
     }
@@ -592,6 +619,20 @@ struct HslPanelKernel {
 struct SharpenKernel {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct FauxHdrKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct ClarityTextureKernel {
+    three_bind_layout: wgpu::BindGroupLayout,
+    extract_luma_pipeline: wgpu::ComputePipeline,
+    box_blur_h_pipeline: wgpu::ComputePipeline,
+    box_blur_v_pipeline: wgpu::ComputePipeline,
+    four_bind_layout: wgpu::BindGroupLayout,
+    apply_detail_pipeline: wgpu::ComputePipeline,
 }
 
 impl BrightnessContrastKernel {
@@ -1336,6 +1377,67 @@ impl SharpenKernel {
         Self {
             pipeline,
             bind_group_layout,
+        }
+    }
+}
+
+impl FauxHdrKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab faux_hdr bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            FAUX_HDR_WGSL,
+            &bind_group_layout,
+            "rasterlab faux_hdr shader",
+            "rasterlab faux_hdr pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl ClarityTextureKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let three_bind_layout = make_3binding_layout(device, "rasterlab clarity 3-bind layout");
+        let four_bind_layout = make_4binding_layout(device, "rasterlab clarity 4-bind layout");
+        let extract_luma_pipeline = make_simple_pipeline(
+            device,
+            CLARITY_EXTRACT_LUMA_WGSL,
+            &three_bind_layout,
+            "rasterlab clarity extract_luma shader",
+            "rasterlab clarity extract_luma pipeline",
+        );
+        let box_blur_h_pipeline = make_simple_pipeline(
+            device,
+            CLARITY_BOX_BLUR_H_WGSL,
+            &three_bind_layout,
+            "rasterlab clarity box_blur_h shader",
+            "rasterlab clarity box_blur_h pipeline",
+        );
+        let box_blur_v_pipeline = make_simple_pipeline(
+            device,
+            CLARITY_BOX_BLUR_V_WGSL,
+            &three_bind_layout,
+            "rasterlab clarity box_blur_v shader",
+            "rasterlab clarity box_blur_v pipeline",
+        );
+        let apply_detail_pipeline = make_simple_pipeline(
+            device,
+            CLARITY_APPLY_DETAIL_WGSL,
+            &four_bind_layout,
+            "rasterlab clarity apply_detail shader",
+            "rasterlab clarity apply_detail pipeline",
+        );
+        Self {
+            three_bind_layout,
+            extract_luma_pipeline,
+            box_blur_h_pipeline,
+            box_blur_v_pipeline,
+            four_bind_layout,
+            apply_detail_pipeline,
         }
     }
 }
@@ -3155,6 +3257,50 @@ struct SharpenParams {
     _pad3: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct FauxHdrParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    strength: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ClarityLumaParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ClarityBlurParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    radius: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ClarityDetailParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    midtone_weight: u32,
+    amount: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
+}
+
 const SRGB_TO_P3: [f32; 9] = [
     0.822_458, 0.177_542, 0.000_000, 0.033_194, 0.966_806, 0.000_000, 0.017_082, 0.072_397,
     0.910_521,
@@ -4667,6 +4813,589 @@ fn detail_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+fn apply_faux_hdr(ctx: &GpuContext, op: &FauxHdrOp, image: GpuImage) -> Result<GpuImage, GpuError> {
+    if op.strength < 1e-5 {
+        return Ok(image);
+    }
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab faux_hdr output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = FauxHdrParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        strength: op.strength,
+        _pad2: 0.0,
+        _pad3: 0.0,
+        _pad4: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab faux_hdr params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.faux_hdr.pipeline,
+        &ctx.faux_hdr.bind_group_layout,
+        "rasterlab faux_hdr",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_clarity_3binding(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    layout: &wgpu::BindGroupLayout,
+    label: &str,
+    b0: &wgpu::Buffer,
+    b1: &wgpu::Buffer,
+    b2: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+) {
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: b0.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: b1.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: b2.as_entire_binding(),
+            },
+        ],
+    });
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bg, &[]);
+    pass.dispatch_workgroups(
+        width.div_ceil(WORKGROUP_SIZE_X),
+        height.div_ceil(WORKGROUP_SIZE_Y),
+        1,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_clarity_4binding(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    layout: &wgpu::BindGroupLayout,
+    label: &str,
+    b0: &wgpu::Buffer,
+    b1: &wgpu::Buffer,
+    b2: &wgpu::Buffer,
+    b3: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+) {
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: b0.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: b1.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: b2.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: b3.as_entire_binding(),
+            },
+        ],
+    });
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bg, &[]);
+    pass.dispatch_workgroups(
+        width.div_ceil(WORKGROUP_SIZE_X),
+        height.div_ceil(WORKGROUP_SIZE_Y),
+        1,
+    );
+}
+
+fn apply_clarity_texture(
+    ctx: &GpuContext,
+    op: &ClarityTextureOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    if op.clarity == 0.0 && op.texture == 0.0 {
+        return Ok(image);
+    }
+
+    let w = image.width;
+    let h = image.height;
+    let min_dim = w.min(h);
+    let pixel_count = w.saturating_mul(h);
+    let rgba_byte_len = expected_rgba_len(w, h) as u64;
+    let luma_byte_len = pixel_count as u64 * 4;
+
+    let clarity_radius = ((min_dim as f32 * 0.03).round() as u32).max(2);
+    let texture_radius = ((min_dim as f32 * 0.005).round() as u32).max(1);
+
+    let do_clarity = op.clarity != 0.0;
+    let do_texture = op.texture != 0.0;
+
+    let luma_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab clarity luma_a"),
+        size: luma_byte_len,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let luma_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab clarity luma_b"),
+        size: luma_byte_len,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+
+    // Intermediate RGBA buffer written by clarity pass.
+    // Has COPY_SRC when clarity is the final (only) stage.
+    let intermediate = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab clarity intermediate rgba"),
+        size: rgba_byte_len,
+        usage: if do_texture {
+            wgpu::BufferUsages::STORAGE
+        } else {
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC
+        },
+        mapped_at_creation: false,
+    });
+
+    // Final output buffer (needed only when texture pass is active).
+    let output = if do_texture {
+        Some(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rasterlab clarity output rgba"),
+            size: rgba_byte_len,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }))
+    } else {
+        None
+    };
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rasterlab clarity encoder"),
+        });
+
+    let luma_params_buf = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab clarity luma params"),
+            contents: bytemuck::bytes_of(&ClarityLumaParams {
+                width: w,
+                height: h,
+                pixel_count,
+                _pad: 0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+    if do_clarity {
+        let blur_params_buf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rasterlab clarity blur params"),
+                contents: bytemuck::bytes_of(&ClarityBlurParams {
+                    width: w,
+                    height: h,
+                    pixel_count,
+                    radius: clarity_radius,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let detail_params_buf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rasterlab clarity detail params"),
+                contents: bytemuck::bytes_of(&ClarityDetailParams {
+                    width: w,
+                    height: h,
+                    pixel_count,
+                    midtone_weight: 1,
+                    amount: op.clarity,
+                    _pad1: 0.0,
+                    _pad2: 0.0,
+                    _pad3: 0.0,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        // Extract luma from input pixels → luma_a
+        encode_clarity_3binding(
+            &ctx.device,
+            &mut encoder,
+            &ctx.clarity_texture.extract_luma_pipeline,
+            &ctx.clarity_texture.three_bind_layout,
+            "clarity extract_luma",
+            &image.buffer,
+            &luma_a,
+            &luma_params_buf,
+            w,
+            h,
+        );
+
+        // 3 passes of box blur (H then V), ping-pong luma_a ↔ luma_b
+        // After 3 full H+V passes the result is back in luma_a
+        for _ in 0..3 {
+            encode_clarity_3binding(
+                &ctx.device,
+                &mut encoder,
+                &ctx.clarity_texture.box_blur_h_pipeline,
+                &ctx.clarity_texture.three_bind_layout,
+                "clarity box_blur_h",
+                &luma_a,
+                &luma_b,
+                &blur_params_buf,
+                w,
+                h,
+            );
+            encode_clarity_3binding(
+                &ctx.device,
+                &mut encoder,
+                &ctx.clarity_texture.box_blur_v_pipeline,
+                &ctx.clarity_texture.three_bind_layout,
+                "clarity box_blur_v",
+                &luma_b,
+                &luma_a,
+                &blur_params_buf,
+                w,
+                h,
+            );
+        }
+
+        // Apply clarity detail: input rgba + blurred luma (luma_a) → intermediate
+        encode_clarity_4binding(
+            &ctx.device,
+            &mut encoder,
+            &ctx.clarity_texture.apply_detail_pipeline,
+            &ctx.clarity_texture.four_bind_layout,
+            "clarity apply_detail",
+            &image.buffer,
+            &intermediate,
+            &detail_params_buf,
+            &luma_a,
+            w,
+            h,
+        );
+    }
+
+    if do_texture {
+        let output_buf = output.as_ref().unwrap();
+        let src = if do_clarity {
+            &intermediate
+        } else {
+            &image.buffer
+        };
+
+        let blur_params_buf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rasterlab texture blur params"),
+                contents: bytemuck::bytes_of(&ClarityBlurParams {
+                    width: w,
+                    height: h,
+                    pixel_count,
+                    radius: texture_radius,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let detail_params_buf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("rasterlab texture detail params"),
+                contents: bytemuck::bytes_of(&ClarityDetailParams {
+                    width: w,
+                    height: h,
+                    pixel_count,
+                    midtone_weight: 0,
+                    amount: op.texture,
+                    _pad1: 0.0,
+                    _pad2: 0.0,
+                    _pad3: 0.0,
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        // Extract luma from post-clarity pixels → luma_a
+        encode_clarity_3binding(
+            &ctx.device,
+            &mut encoder,
+            &ctx.clarity_texture.extract_luma_pipeline,
+            &ctx.clarity_texture.three_bind_layout,
+            "texture extract_luma",
+            src,
+            &luma_a,
+            &luma_params_buf,
+            w,
+            h,
+        );
+
+        for _ in 0..3 {
+            encode_clarity_3binding(
+                &ctx.device,
+                &mut encoder,
+                &ctx.clarity_texture.box_blur_h_pipeline,
+                &ctx.clarity_texture.three_bind_layout,
+                "texture box_blur_h",
+                &luma_a,
+                &luma_b,
+                &blur_params_buf,
+                w,
+                h,
+            );
+            encode_clarity_3binding(
+                &ctx.device,
+                &mut encoder,
+                &ctx.clarity_texture.box_blur_v_pipeline,
+                &ctx.clarity_texture.three_bind_layout,
+                "texture box_blur_v",
+                &luma_b,
+                &luma_a,
+                &blur_params_buf,
+                w,
+                h,
+            );
+        }
+
+        // Apply texture detail: src rgba + blurred luma → output
+        encode_clarity_4binding(
+            &ctx.device,
+            &mut encoder,
+            &ctx.clarity_texture.apply_detail_pipeline,
+            &ctx.clarity_texture.four_bind_layout,
+            "texture apply_detail",
+            src,
+            output_buf,
+            &detail_params_buf,
+            &luma_a,
+            w,
+            h,
+        );
+    }
+
+    ctx.queue.submit(Some(encoder.finish()));
+    ctx.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| GpuError::Poll(e.to_string()))?;
+
+    let final_buf = if do_texture {
+        output.unwrap()
+    } else {
+        intermediate
+    };
+
+    Ok(GpuImage {
+        width: w,
+        height: h,
+        buffer: final_buf,
+    })
+}
+
+const FAUX_HDR_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    strength: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let luma_over = min(luma * 2.0, 1.0);
+    let luma_under = luma * 0.5;
+
+    // well-exposedness: exp(-0.5 * ((luma - 0.5) / 0.35)^2)
+    let inv_sigma2 = 1.0 / (2.0 * 0.35 * 0.35);
+    let dv0 = luma_over - 0.5;
+    let dv1 = luma - 0.5;
+    let dv2 = luma_under - 0.5;
+    let w0 = exp(-dv0 * dv0 * inv_sigma2);
+    let w1 = exp(-dv1 * dv1 * inv_sigma2);
+    let w2 = exp(-dv2 * dv2 * inv_sigma2);
+    let wsum = w0 + w1 + w2 + 1e-6;
+
+    let luma_fused = (w0 * luma_over + w1 * luma + w2 * luma_under) / wsum;
+
+    var scale = 1.0;
+    if (luma > 1e-6) {
+        scale = min(luma_fused / luma, 4.0);
+    }
+
+    let s = params.strength;
+    let nr = clamp(r + (r * scale - r) * s, 0.0, 1.0);
+    let ng = clamp(g + (g * scale - g) * s, 0.0, 1.0);
+    let nb = clamp(b + (b * scale - b) * s, 0.0, 1.0);
+
+    output_pixels[i] = u32(nr * 255.0 + 0.5) | (u32(ng * 255.0 + 0.5) << 8u)
+        | (u32(nb * 255.0 + 0.5) << 16u) | a;
+}
+"#;
+
+const CLARITY_EXTRACT_LUMA_WGSL: &str = r#"
+struct Params { width: u32, height: u32, pixel_count: u32, _pad: u32 };
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> luma: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    luma[i] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+"#;
+
+const CLARITY_BOX_BLUR_H_WGSL: &str = r#"
+struct Params { width: u32, height: u32, pixel_count: u32, radius: u32 };
+
+@group(0) @binding(0) var<storage, read> input_luma: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output_luma: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let r = params.radius;
+    let x0 = u32(max(i32(gid.x) - i32(r), 0));
+    let x1 = min(gid.x + r, params.width - 1u);
+    var sum = 0.0;
+    for (var x = x0; x <= x1; x += 1u) {
+        sum += input_luma[gid.y * params.width + x];
+    }
+    output_luma[gid.y * params.width + gid.x] = sum / f32(x1 - x0 + 1u);
+}
+"#;
+
+const CLARITY_BOX_BLUR_V_WGSL: &str = r#"
+struct Params { width: u32, height: u32, pixel_count: u32, radius: u32 };
+
+@group(0) @binding(0) var<storage, read> input_luma: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output_luma: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let r = params.radius;
+    let y0 = u32(max(i32(gid.y) - i32(r), 0));
+    let y1 = min(gid.y + r, params.height - 1u);
+    var sum = 0.0;
+    for (var y = y0; y <= y1; y += 1u) {
+        sum += input_luma[y * params.width + gid.x];
+    }
+    output_luma[gid.y * params.width + gid.x] = sum / f32(y1 - y0 + 1u);
+}
+"#;
+
+const CLARITY_APPLY_DETAIL_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    midtone_weight: u32,
+    amount: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read> blurred_luma: array<f32>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+
+    let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let detail = l - blurred_luma[i];
+    let weight = select(1.0, 4.0 * l * (1.0 - l), params.midtone_weight != 0u);
+    let boost = params.amount * detail * weight;
+
+    let nr = clamp(r + boost, 0.0, 1.0);
+    let ng = clamp(g + boost, 0.0, 1.0);
+    let nb = clamp(b + boost, 0.0, 1.0);
+
+    output_pixels[i] = u32(nr * 255.0 + 0.5) | (u32(ng * 255.0 + 0.5) << 8u)
+        | (u32(nb * 255.0 + 0.5) << 16u) | a;
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5306,5 +6035,81 @@ mod tests {
             assert_eq!(a[3], b[3]);
         }
         assert!(max_delta <= 2, "sharpen max_delta={max_delta}");
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn faux_hdr_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(32, 24);
+        let op = FauxHdrOp::new(0.8);
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+            assert_eq!(o[3], i[3]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn faux_hdr_roughly_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(24, 18);
+        let op = FauxHdrOp::new(0.8);
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        let mut max_delta = 0u8;
+        for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
+            for ch in 0..3 {
+                max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
+            }
+            assert_eq!(a[3], b[3]);
+        }
+        assert!(max_delta <= 1, "faux_hdr max_delta={max_delta}");
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn clarity_texture_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(64, 48);
+        let op = ClarityTextureOp::new(0.5, 0.3);
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+            assert_eq!(o[3], i[3]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn clarity_texture_roughly_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(48, 36);
+        let op = ClarityTextureOp::new(0.4, 0.0);
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        let mut max_delta = 0u8;
+        for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
+            for ch in 0..3 {
+                max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
+            }
+            assert_eq!(a[3], b[3]);
+        }
+        assert!(max_delta <= 2, "clarity_texture max_delta={max_delta}");
     }
 }
