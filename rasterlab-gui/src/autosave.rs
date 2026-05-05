@@ -2,7 +2,7 @@
 //!
 //! After each edit the active pipeline state is written to a small JSON file in
 //! the platform data directory.  If the user quits without saving, or the app
-//! crashes, these files are listed under File → Previous Unsaved Work and can
+//! crashes, these files are listed under File → Previously Unsaved Work and can
 //! be restored.
 //!
 //! Files live in:
@@ -35,12 +35,12 @@ pub fn unix_now() -> u64 {
 }
 
 /// Contents of one autosave file.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AutosaveFile {
     /// Absolute path of the source image on disk (used when restoring).
     pub source_path: String,
     /// Absolute path of the `.rlab` project file, if one was open.
-    /// Used for display only — restoring always reopens `source_path`.
+    /// Preferred restore target when present; also used for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_path: Option<String>,
     /// Unix timestamp when this editing session started (also the filename stem).
@@ -54,6 +54,7 @@ pub struct AutosaveFile {
 }
 
 /// A parsed autosave entry ready to display in the UI.
+#[derive(Clone)]
 pub struct AutosaveEntry {
     pub data: AutosaveFile,
 }
@@ -61,7 +62,8 @@ pub struct AutosaveEntry {
 /// Write (or overwrite) the autosave file for `session_id`.
 ///
 /// `project_path` should be `Some` when the user has a `.rlab` project open;
-/// it is stored for display purposes only (restore always reopens `source_path`).
+/// restore prefers it so autosaved project edits do not depend on the original
+/// source path still existing.
 ///
 /// Silently returns without writing if the autosave directory cannot be
 /// created or the data cannot be serialised.
@@ -95,20 +97,6 @@ pub fn write(
 pub fn delete(session_id: u64) {
     let Some(dir) = autosave_dir() else { return };
     let _ = std::fs::remove_file(dir.join(format!("{}.json", session_id)));
-}
-
-/// Delete all autosave files from the autosave directory.
-pub fn delete_all() {
-    let Some(dir) = autosave_dir() else { return };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|x| x == "json") {
-            let _ = std::fs::remove_file(path);
-        }
-    }
 }
 
 /// Scan the autosave directory and return all valid entries, newest first.

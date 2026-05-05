@@ -361,22 +361,31 @@ impl AppState {
                     self.is_dirty = false;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.rename_pending = None;
-                    // Mint a new autosave session so edits made after opening
-                    // a project are recoverable if the user quits without saving.
-                    // The autosave file is deleted on the next successful save.
-                    self.autosave_session_id = Some(crate::autosave::unix_now());
+                    // Determine the session ID: reuse the one from an autosave
+                    // restore (for correct cleanup on save) or mint a fresh one.
+                    self.autosave_session_id = Some(
+                        self.autosave_restore_session_id
+                            .take()
+                            .unwrap_or_else(crate::autosave::unix_now),
+                    );
                     self.autosave_pending = false;
-                    match VirtualCopyStore::load_from_saved(
-                        Arc::new(image),
-                        rlab.copies,
-                        rlab.active_copy_index,
-                    ) {
-                        Ok(store) => self.copies = Some(store),
+                    let display_name = rlab.lmta.as_ref().and_then(|l| l.original_filename.clone());
+                    let restored_autosave = self.autosave_restore.is_some();
+                    let (copies, active_copy) = match self.autosave_restore.take() {
+                        Some((saved_copies, saved_active)) => (saved_copies, saved_active),
+                        None => (rlab.copies, rlab.active_copy_index),
+                    };
+                    match VirtualCopyStore::load_from_saved(Arc::new(image), copies, active_copy) {
+                        Ok(store) => {
+                            self.copies = Some(store);
+                            if restored_autosave {
+                                self.mark_dirty();
+                            }
+                        }
                         Err(e) => {
                             self.status = format!("Warning: could not restore edit stack: {}", e);
                         }
                     }
-                    let display_name = rlab.lmta.as_ref().and_then(|l| l.original_filename.clone());
                     self.prefs.push_recent(path, display_name);
                     self.prefs.save();
                     self.loading = false;
@@ -838,15 +847,20 @@ impl AppState {
 
     /// Begin restoring an autosave session.
     ///
-    /// Stores the pipeline data from `entry` and opens the source image.
-    /// When the image finishes loading the pipeline state will be applied
-    /// automatically.  If the source file no longer exists, the error will
-    /// appear in the status bar.
+    /// Stores the pipeline data from `entry` and opens the project file when
+    /// available, falling back to the original source image. When loading
+    /// finishes, the autosaved pipeline state is applied automatically.
     pub fn restore_autosave(&mut self, entry: crate::autosave::AutosaveEntry) {
-        let source_path = std::path::PathBuf::from(&entry.data.source_path);
+        let restore_path = entry
+            .data
+            .project_path
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| std::path::PathBuf::from(&entry.data.source_path));
         self.autosave_restore = Some((entry.data.copies, entry.data.active_copy));
         self.autosave_restore_session_id = Some(entry.data.started_at);
-        self.open_file(source_path);
+        self.open_file(restore_path);
     }
 
     /// Start editing the pipeline op at `index`.  Copies its parameters into

@@ -403,10 +403,21 @@ impl eframe::App for RasterLabApp {
                             // Exclude the currently active session — it isn't "previous" work.
                             .filter(|e| Some(e.data.started_at) != current_session)
                             .collect::<Vec<_>>();
-                        ui.add_enabled_ui(!autosave_entries.is_empty(), |ui| {
-                            ui.menu_button("Previous Unsaved Work", |ui| {
-                                for entry in autosave_entries {
-                                    let name = crate::autosave::display_name(&entry.data);
+                        let has_autosave_entries = !autosave_entries.is_empty();
+                        ui.menu_button("Previously Unsaved Work", |ui| {
+                            if !has_autosave_entries {
+                                ui.add_enabled(false, egui::Button::new("No previous work"));
+                            } else {
+                                for entry in &autosave_entries {
+                                    let name = entry
+                                        .data
+                                        .project_path
+                                        .as_deref()
+                                        .map(std::path::Path::new)
+                                        .map(|p| self.state.prefs.recent_display_name(p))
+                                        .unwrap_or_else(|| {
+                                            crate::autosave::display_name(&entry.data)
+                                        });
                                     let label = format!(
                                         "{}  —  {}",
                                         name,
@@ -419,15 +430,23 @@ impl eframe::App for RasterLabApp {
                                         .unwrap_or(&entry.data.source_path);
                                     if ui.button(label).on_hover_text(hover).clicked() {
                                         ui.close_kind(egui::UiKind::Menu);
-                                        self.request_restore_autosave(entry);
+                                        self.request_restore_autosave(entry.clone());
                                     }
                                 }
-                                ui.separator();
-                                if ui.button("Clear All Previous Work").clicked() {
-                                    ui.close_kind(egui::UiKind::Menu);
-                                    crate::autosave::delete_all();
+                            }
+                            ui.separator();
+                            if ui
+                                .add_enabled(
+                                    has_autosave_entries,
+                                    egui::Button::new("Clear Previously Unsaved Work"),
+                                )
+                                .clicked()
+                            {
+                                ui.close_kind(egui::UiKind::Menu);
+                                for entry in &autosave_entries {
+                                    crate::autosave::delete(entry.data.started_at);
                                 }
-                            });
+                            }
                         });
                     }
                     // ── Library ──────────────────────────────────────────────
