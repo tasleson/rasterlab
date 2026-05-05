@@ -13,9 +13,10 @@ use rasterlab_core::{
     Image,
     image::ImageMetadata,
     ops::{
-        BrightnessContrastOp, CurvesOp, HighlightsShadowsOp, HueShiftOp, LevelsOp,
-        NoiseReductionOp, NrMethod, SaturationOp, SepiaOp, ShadowExposureOp, SplitToneOp,
-        VibranceOp, VignetteOp, WhiteBalanceOp,
+        BlackAndWhiteOp, BlurOp, BrightnessContrastOp, BwMode, ColorBalanceOp,
+        ColorSpaceConversion, ColorSpaceOp, CurvesOp, DenoiseOp, HighlightsShadowsOp, HslPanelOp,
+        HueShiftOp, LevelsOp, NoiseReductionOp, NrMethod, SaturationOp, SepiaOp, ShadowExposureOp,
+        SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::operation::Operation,
 };
@@ -61,6 +62,13 @@ pub struct GpuContext {
     vignette: Arc<VignetteKernel>,
     shadow_exposure: Arc<ShadowExposureKernel>,
     split_tone: Arc<SplitToneKernel>,
+    black_and_white: Arc<BlackAndWhiteKernel>,
+    blur: Arc<BlurKernel>,
+    color_balance: Arc<ColorBalanceKernel>,
+    color_space: Arc<ColorSpaceKernel>,
+    denoise: Arc<DenoiseKernel>,
+    hsl_panel: Arc<HslPanelKernel>,
+    sharpen: Arc<SharpenKernel>,
 }
 
 impl GpuContext {
@@ -78,6 +86,13 @@ impl GpuContext {
         let vignette = Arc::new(VignetteKernel::new(&device));
         let shadow_exposure = Arc::new(ShadowExposureKernel::new(&device));
         let split_tone = Arc::new(SplitToneKernel::new(&device));
+        let black_and_white = Arc::new(BlackAndWhiteKernel::new(&device));
+        let blur = Arc::new(BlurKernel::new(&device));
+        let color_balance = Arc::new(ColorBalanceKernel::new(&device));
+        let color_space = Arc::new(ColorSpaceKernel::new(&device));
+        let denoise = Arc::new(DenoiseKernel::new(&device));
+        let hsl_panel = Arc::new(HslPanelKernel::new(&device));
+        let sharpen = Arc::new(SharpenKernel::new(&device));
         Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -95,6 +110,13 @@ impl GpuContext {
             vignette,
             shadow_exposure,
             split_tone,
+            black_and_white,
+            blur,
+            color_balance,
+            color_space,
+            denoise,
+            hsl_panel,
+            sharpen,
         }
     }
 
@@ -260,8 +282,57 @@ pub fn supports(op: &dyn Operation) -> bool {
     {
         return true;
     }
-    op.as_any()
+    if op
+        .as_any()
         .and_then(|any| any.downcast_ref::<SplitToneOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<BlackAndWhiteOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<BlurOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<ColorBalanceOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<ColorSpaceOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<DenoiseOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<HslPanelOp>())
+        .is_some()
+    {
+        return true;
+    }
+    op.as_any()
+        .and_then(|any| any.downcast_ref::<SharpenOp>())
         .is_some()
 }
 
@@ -318,6 +389,29 @@ pub fn apply_one(
         .and_then(|any| any.downcast_ref::<SplitToneOp>())
     {
         apply_split_tone(ctx, op, image)
+    } else if let Some(op) = op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<BlackAndWhiteOp>())
+    {
+        apply_black_and_white(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<BlurOp>()) {
+        apply_blur(ctx, op, image)
+    } else if let Some(op) = op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<ColorBalanceOp>())
+    {
+        apply_color_balance(ctx, op, image)
+    } else if let Some(op) = op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<ColorSpaceOp>())
+    {
+        apply_color_space(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<DenoiseOp>()) {
+        apply_denoise(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<HslPanelOp>()) {
+        apply_hsl_panel(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<SharpenOp>()) {
+        apply_sharpen(ctx, op, image)
     } else {
         Err(GpuError::UnsupportedOperation(op.name()))
     }
@@ -460,6 +554,42 @@ struct ShadowExposureKernel {
 }
 
 struct SplitToneKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct BlackAndWhiteKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct BlurKernel {
+    h_pipeline: wgpu::ComputePipeline,
+    v_pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct ColorBalanceKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct ColorSpaceKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct DenoiseKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct HslPanelKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct SharpenKernel {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -1060,6 +1190,148 @@ impl SplitToneKernel {
             &bind_group_layout,
             "rasterlab split_tone shader",
             "rasterlab split_tone pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl BlackAndWhiteKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab black_and_white bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            BLACK_AND_WHITE_WGSL,
+            &bind_group_layout,
+            "rasterlab black_and_white shader",
+            "rasterlab black_and_white pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl BlurKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout = make_3binding_layout(device, "rasterlab blur bind group layout");
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rasterlab blur shader"),
+            source: wgpu::ShaderSource::Wgsl(BLUR_WGSL.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rasterlab blur pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let h_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("rasterlab blur h_pipeline"),
+            layout: Some(&layout),
+            module: &shader,
+            entry_point: Some("main_h"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let v_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("rasterlab blur v_pipeline"),
+            layout: Some(&layout),
+            module: &shader,
+            entry_point: Some("main_v"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        Self {
+            h_pipeline,
+            v_pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl ColorBalanceKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab color_balance bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            COLOR_BALANCE_WGSL,
+            &bind_group_layout,
+            "rasterlab color_balance shader",
+            "rasterlab color_balance pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl ColorSpaceKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab color_space bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            COLOR_SPACE_WGSL,
+            &bind_group_layout,
+            "rasterlab color_space shader",
+            "rasterlab color_space pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl DenoiseKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout = make_3binding_layout(device, "rasterlab denoise bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            DENOISE_WGSL,
+            &bind_group_layout,
+            "rasterlab denoise shader",
+            "rasterlab denoise pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl HslPanelKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab hsl_panel bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            HSL_PANEL_WGSL,
+            &bind_group_layout,
+            "rasterlab hsl_panel shader",
+            "rasterlab hsl_panel pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl SharpenKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout = make_3binding_layout(device, "rasterlab sharpen bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            SHARPEN_WGSL,
+            &bind_group_layout,
+            "rasterlab sharpen shader",
+            "rasterlab sharpen pipeline",
         );
         Self {
             pipeline,
@@ -2229,6 +2501,436 @@ fn apply_split_tone(
     })
 }
 
+fn apply_black_and_white(
+    ctx: &GpuContext,
+    op: &BlackAndWhiteOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    let (mode, rw, gw, bw) = match &op.mode {
+        BwMode::Luminance => (0u32, 0.0f32, 0.0, 0.0),
+        BwMode::Average => (1, 0.0, 0.0, 0.0),
+        BwMode::Perceptual => (2, 0.0, 0.0, 0.0),
+        BwMode::ChannelMixer { r, g, b } => (3, *r, *g, *b),
+    };
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab black_and_white output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = BlackAndWhiteParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        mode,
+        _pad2: 0,
+        _pad3: 0,
+        _pad4: 0,
+        rw,
+        gw,
+        bw,
+        _pad5: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab black_and_white params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.black_and_white.pipeline,
+        &ctx.black_and_white.bind_group_layout,
+        "rasterlab black_and_white",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_blur(ctx: &GpuContext, op: &BlurOp, image: GpuImage) -> Result<GpuImage, GpuError> {
+    let sigma = op.radius.clamp(0.1, 100.0);
+    let kernel_radius = (sigma * 3.0).ceil().clamp(1.0, 300.0) as u32;
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+
+    let intermediate = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab blur intermediate"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab blur output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = BlurParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        kernel_radius,
+        sigma,
+        _pad: 0.0,
+        _pad2: 0.0,
+        _pad3: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab blur params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+    let h_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("rasterlab blur h bind group"),
+        layout: &ctx.blur.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: image.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: intermediate.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    let v_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("rasterlab blur v bind group"),
+        layout: &ctx.blur.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: intermediate.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rasterlab blur encoder"),
+        });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("rasterlab blur h pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&ctx.blur.h_pipeline);
+        pass.set_bind_group(0, &h_bind_group, &[]);
+        pass.dispatch_workgroups(
+            params.width.div_ceil(WORKGROUP_SIZE_X),
+            params.height.div_ceil(WORKGROUP_SIZE_Y),
+            1,
+        );
+    }
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("rasterlab blur v pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&ctx.blur.v_pipeline);
+        pass.set_bind_group(0, &v_bind_group, &[]);
+        pass.dispatch_workgroups(
+            params.width.div_ceil(WORKGROUP_SIZE_X),
+            params.height.div_ceil(WORKGROUP_SIZE_Y),
+            1,
+        );
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    ctx.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| GpuError::Poll(e.to_string()))?;
+
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_color_balance(
+    ctx: &GpuContext,
+    op: &ColorBalanceOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    if op.is_identity() {
+        return Ok(image);
+    }
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab color_balance output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = ColorBalanceParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        cr0: op.cyan_red[0],
+        cr1: op.cyan_red[1],
+        cr2: op.cyan_red[2],
+        _pad2: 0.0,
+        mg0: op.magenta_green[0],
+        mg1: op.magenta_green[1],
+        mg2: op.magenta_green[2],
+        _pad3: 0.0,
+        yb0: op.yellow_blue[0],
+        yb1: op.yellow_blue[1],
+        yb2: op.yellow_blue[2],
+        _pad4: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab color_balance params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.color_balance.pipeline,
+        &ctx.color_balance.bind_group_layout,
+        "rasterlab color_balance",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_color_space(
+    ctx: &GpuContext,
+    op: &ColorSpaceOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    let mat = match op.conversion {
+        ColorSpaceConversion::SrgbToDisplayP3 => &SRGB_TO_P3,
+        ColorSpaceConversion::DisplayP3ToSrgb => &P3_TO_SRGB,
+    };
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab color_space output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = ColorSpaceParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        m0: mat[0],
+        m1: mat[1],
+        m2: mat[2],
+        _pad2: 0.0,
+        m3: mat[3],
+        m4: mat[4],
+        m5: mat[5],
+        _pad3: 0.0,
+        m6: mat[6],
+        m7: mat[7],
+        m8: mat[8],
+        _pad4: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab color_space params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.color_space.pipeline,
+        &ctx.color_space.bind_group_layout,
+        "rasterlab color_space",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_denoise(ctx: &GpuContext, op: &DenoiseOp, image: GpuImage) -> Result<GpuImage, GpuError> {
+    let sigma_r = op.strength.clamp(0.01, 1.0);
+    let r = op.radius.clamp(1, 10) as f32;
+    let sigma_s = r.max(1.0) * 0.5;
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab denoise output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = DenoiseParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        radius: op.radius.clamp(1, 10),
+        sigma_r2: 2.0 * sigma_r * sigma_r,
+        sigma_s2: 2.0 * sigma_s * sigma_s,
+        _pad: 0.0,
+        _pad2: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab denoise params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.denoise.pipeline,
+        &ctx.denoise.bind_group_layout,
+        "rasterlab denoise",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_hsl_panel(
+    ctx: &GpuContext,
+    op: &HslPanelOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    if op.is_identity() {
+        return Ok(image);
+    }
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab hsl_panel output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = HslPanelParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        hue: op.hue,
+        sat: op.saturation,
+        lum: op.luminance,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab hsl_panel params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.hsl_panel.pipeline,
+        &ctx.hsl_panel.bind_group_layout,
+        "rasterlab hsl_panel",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_sharpen(ctx: &GpuContext, op: &SharpenOp, image: GpuImage) -> Result<GpuImage, GpuError> {
+    if op.strength <= 0.0 {
+        return Ok(image);
+    }
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab sharpen output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = SharpenParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        luminance_only: if op.luminance_only { 1u32 } else { 0u32 },
+        strength: op.strength,
+        _pad: 0.0,
+        _pad2: 0.0,
+        _pad3: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab sharpen params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.sharpen.pipeline,
+        &ctx.sharpen.bind_group_layout,
+        "rasterlab sharpen",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
 fn apply_noise_reduction_nlm(
     ctx: &GpuContext,
     op: &NoiseReductionOp,
@@ -2342,6 +3044,125 @@ fn apply_noise_reduction_nlm(
         buffer: output,
     })
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BlackAndWhiteParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    mode: u32,
+    _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
+    rw: f32,
+    gw: f32,
+    bw: f32,
+    _pad5: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ColorBalanceParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    cr0: f32,
+    cr1: f32,
+    cr2: f32,
+    _pad2: f32,
+    mg0: f32,
+    mg1: f32,
+    mg2: f32,
+    _pad3: f32,
+    yb0: f32,
+    yb1: f32,
+    yb2: f32,
+    _pad4: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ColorSpaceParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    m0: f32,
+    m1: f32,
+    m2: f32,
+    _pad2: f32,
+    m3: f32,
+    m4: f32,
+    m5: f32,
+    _pad3: f32,
+    m6: f32,
+    m7: f32,
+    m8: f32,
+    _pad4: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct DenoiseParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    radius: u32,
+    sigma_r2: f32,
+    sigma_s2: f32,
+    _pad: f32,
+    _pad2: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct HslPanelParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    hue: [f32; 8],
+    sat: [f32; 8],
+    lum: [f32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct BlurParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    kernel_radius: u32,
+    sigma: f32,
+    _pad: f32,
+    _pad2: f32,
+    _pad3: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SharpenParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    luminance_only: u32,
+    strength: f32,
+    _pad: f32,
+    _pad2: f32,
+    _pad3: f32,
+}
+
+const SRGB_TO_P3: [f32; 9] = [
+    0.822_458, 0.177_542, 0.000_000, 0.033_194, 0.966_806, 0.000_000, 0.017_082, 0.072_397,
+    0.910_521,
+];
+const P3_TO_SRGB: [f32; 9] = [
+    1.224_94, -0.224_94, 0.000_00, -0.042_057, 1.042_057, 0.000_00, -0.019_637, -0.078_636,
+    1.098_273,
+];
 
 fn expected_rgba_len(width: u32, height: u32) -> usize {
     width as usize * height as usize * 4
@@ -3087,6 +3908,542 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+const BLACK_AND_WHITE_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    mode: u32,
+    _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
+    rw: f32,
+    gw: f32,
+    bw: f32,
+    _pad5: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+
+    var gray: f32;
+    if (params.mode == 0u) {
+        gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    } else if (params.mode == 1u) {
+        gray = (r + g + b) / 3.0;
+    } else if (params.mode == 2u) {
+        gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    } else {
+        gray = params.rw * r + params.gw * g + params.bw * b;
+    }
+    gray = clamp(gray, 0.0, 1.0);
+    let out = u32(gray * 255.0 + 0.5);
+    output_pixels[i] = out | (out << 8u) | (out << 16u) | a;
+}
+"#;
+
+const BLUR_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    kernel_radius: u32,
+    sigma: f32,
+    _pad: f32,
+    _pad2: f32,
+    _pad3: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main_h(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    var sum_r = 0.0;
+    var sum_g = 0.0;
+    var sum_b = 0.0;
+    var sum_a = 0.0;
+    var weight_sum = 0.0;
+
+    let sigma2 = params.sigma * params.sigma;
+    let r = i32(params.kernel_radius);
+    for (var ki: i32 = -r; ki <= r; ki = ki + 1) {
+        let sx = clamp(i32(gid.x) + ki, 0, i32(params.width) - 1);
+        let src_px = input_pixels[gid.y * params.width + u32(sx)];
+        let kv = exp(-0.5 * f32(ki * ki) / sigma2);
+        sum_r += kv * f32(src_px & 0xffu);
+        sum_g += kv * f32((src_px >> 8u) & 0xffu);
+        sum_b += kv * f32((src_px >> 16u) & 0xffu);
+        sum_a += kv * f32((src_px >> 24u) & 0xffu);
+        weight_sum += kv;
+    }
+
+    let nr = u32(clamp(sum_r / weight_sum, 0.0, 255.0));
+    let ng = u32(clamp(sum_g / weight_sum, 0.0, 255.0));
+    let nb = u32(clamp(sum_b / weight_sum, 0.0, 255.0));
+    let na = u32(clamp(sum_a / weight_sum, 0.0, 255.0));
+    output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | (na << 24u);
+}
+
+@compute @workgroup_size(16, 16)
+fn main_v(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    var sum_r = 0.0;
+    var sum_g = 0.0;
+    var sum_b = 0.0;
+    var sum_a = 0.0;
+    var weight_sum = 0.0;
+
+    let sigma2 = params.sigma * params.sigma;
+    let r = i32(params.kernel_radius);
+    for (var ki: i32 = -r; ki <= r; ki = ki + 1) {
+        let sy = clamp(i32(gid.y) + ki, 0, i32(params.height) - 1);
+        let src_px = input_pixels[u32(sy) * params.width + gid.x];
+        let kv = exp(-0.5 * f32(ki * ki) / sigma2);
+        sum_r += kv * f32(src_px & 0xffu);
+        sum_g += kv * f32((src_px >> 8u) & 0xffu);
+        sum_b += kv * f32((src_px >> 16u) & 0xffu);
+        sum_a += kv * f32((src_px >> 24u) & 0xffu);
+        weight_sum += kv;
+    }
+
+    let nr = u32(clamp(sum_r / weight_sum, 0.0, 255.0));
+    let ng = u32(clamp(sum_g / weight_sum, 0.0, 255.0));
+    let nb = u32(clamp(sum_b / weight_sum, 0.0, 255.0));
+    let na = u32(clamp(sum_a / weight_sum, 0.0, 255.0));
+    output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | (na << 24u);
+}
+"#;
+
+const COLOR_BALANCE_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    cr0: f32,
+    cr1: f32,
+    cr2: f32,
+    _pad2: f32,
+    mg0: f32,
+    mg1: f32,
+    mg2: f32,
+    _pad3: f32,
+    yb0: f32,
+    yb1: f32,
+    yb2: f32,
+    _pad4: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let sh = (1.0 - luma) * (1.0 - luma);
+    let mt = 4.0 * luma * (1.0 - luma);
+    let hl = luma * luma;
+
+    let dr = (params.cr0 * sh + params.cr1 * mt + params.cr2 * hl) * 0.4;
+    let dg = (params.mg0 * sh + params.mg1 * mt + params.mg2 * hl) * 0.4;
+    let db = (params.yb0 * sh + params.yb1 * mt + params.yb2 * hl) * 0.4;
+
+    let nr = u32(clamp((r + dr) * 255.0, 0.0, 255.0));
+    let ng = u32(clamp((g + dg) * 255.0, 0.0, 255.0));
+    let nb = u32(clamp((b + db) * 255.0, 0.0, 255.0));
+    output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
+}
+"#;
+
+const COLOR_SPACE_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    m0: f32,
+    m1: f32,
+    m2: f32,
+    _pad2: f32,
+    m3: f32,
+    m4: f32,
+    m5: f32,
+    _pad3: f32,
+    m6: f32,
+    m7: f32,
+    m8: f32,
+    _pad4: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if (c <= 0.04045) {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    if (c <= 0.0031308) {
+        return 12.92 * c;
+    }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+
+    let rl = srgb_to_linear(r);
+    let gl = srgb_to_linear(g);
+    let bl = srgb_to_linear(b);
+
+    let out_rl = clamp(params.m0 * rl + params.m1 * gl + params.m2 * bl, 0.0, 1.0);
+    let out_gl = clamp(params.m3 * rl + params.m4 * gl + params.m5 * bl, 0.0, 1.0);
+    let out_bl = clamp(params.m6 * rl + params.m7 * gl + params.m8 * bl, 0.0, 1.0);
+
+    let nr = u32(clamp(linear_to_srgb(out_rl) * 255.0, 0.0, 255.0));
+    let ng = u32(clamp(linear_to_srgb(out_gl) * 255.0, 0.0, 255.0));
+    let nb = u32(clamp(linear_to_srgb(out_bl) * 255.0, 0.0, 255.0));
+    output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
+}
+"#;
+
+const DENOISE_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    radius: u32,
+    sigma_r2: f32,
+    sigma_s2: f32,
+    _pad: f32,
+    _pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let cr = f32(px & 0xffu);
+    let cg = f32((px >> 8u) & 0xffu);
+    let cb = f32((px >> 16u) & 0xffu);
+    let a = px & 0xff000000u;
+
+    var sum_r = 0.0;
+    var sum_g = 0.0;
+    var sum_b = 0.0;
+    var sum_w = 0.0;
+
+    for (var dy: i32 = -i32(params.radius); dy <= i32(params.radius); dy = dy + 1) {
+        for (var dx: i32 = -i32(params.radius); dx <= i32(params.radius); dx = dx + 1) {
+            let nx = clamp(i32(gid.x) + dx, 0, i32(params.width) - 1);
+            let ny = clamp(i32(gid.y) + dy, 0, i32(params.height) - 1);
+            let npx = input_pixels[u32(ny) * params.width + u32(nx)];
+            let nr = f32(npx & 0xffu);
+            let ng = f32((npx >> 8u) & 0xffu);
+            let nb = f32((npx >> 16u) & 0xffu);
+
+            let spatial_d = f32(dx * dx + dy * dy);
+            let s_w = exp(-spatial_d / params.sigma_s2);
+
+            let dr = nr - cr;
+            let dg = ng - cg;
+            let db = nb - cb;
+            let color_d = dr * dr + dg * dg + db * db;
+            let r_w = exp(-color_d / params.sigma_r2);
+
+            let w = s_w * r_w;
+            sum_r += w * nr;
+            sum_g += w * ng;
+            sum_b += w * nb;
+            sum_w += w;
+        }
+    }
+
+    if (sum_w > 1e-9) {
+        let out_r = u32(clamp(sum_r / sum_w, 0.0, 255.0));
+        let out_g = u32(clamp(sum_g / sum_w, 0.0, 255.0));
+        let out_b = u32(clamp(sum_b / sum_w, 0.0, 255.0));
+        output_pixels[i] = out_r | (out_g << 8u) | (out_b << 16u) | a;
+    } else {
+        output_pixels[i] = px;
+    }
+}
+"#;
+
+const HSL_PANEL_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    hue: array<f32, 8>,
+    sat: array<f32, 8>,
+    lum: array<f32, 8>,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn hue_to_rgb(p: f32, q: f32, t_in: f32) -> f32 {
+    var t = t_in;
+    if (t < 0.0) { t = t + 1.0; }
+    if (t > 1.0) { t = t - 1.0; }
+    if (t < 1.0 / 6.0) { return p + (q - p) * 6.0 * t; }
+    if (t < 0.5) { return q; }
+    if (t < 2.0 / 3.0) { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+    return p;
+}
+
+fn rgb_to_hsl(rgb: vec3<f32>) -> vec3<f32> {
+    let max_c = max(max(rgb.r, rgb.g), rgb.b);
+    let min_c = min(min(rgb.r, rgb.g), rgb.b);
+    let l = (max_c + min_c) * 0.5;
+    if (abs(max_c - min_c) < 1e-9) { return vec3<f32>(0.0, 0.0, l); }
+    let d = max_c - min_c;
+    let s = select(d / (max_c + min_c), d / (2.0 - max_c - min_c), l > 0.5);
+    var h: f32;
+    if (abs(max_c - rgb.r) < 1e-9) {
+        h = (rgb.g - rgb.b) / d;
+        if (rgb.g < rgb.b) { h = h + 6.0; }
+    } else if (abs(max_c - rgb.g) < 1e-9) {
+        h = (rgb.b - rgb.r) / d + 2.0;
+    } else {
+        h = (rgb.r - rgb.g) / d + 4.0;
+    }
+    return vec3<f32>(h / 6.0, s, l);
+}
+
+fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
+    let h = hsl.x;
+    let s = hsl.y;
+    let l = hsl.z;
+    if (s < 1e-9) { return vec3<f32>(l, l, l); }
+    let q = select(l + s - l * s, l * (1.0 + s), l < 0.5);
+    let p = 2.0 * l - q;
+    return vec3<f32>(
+        hue_to_rgb(p, q, h + 1.0 / 3.0),
+        hue_to_rgb(p, q, h),
+        hue_to_rgb(p, q, h - 1.0 / 3.0)
+    );
+}
+
+fn unpack_rgb(px: u32) -> vec3<f32> {
+    return vec3<f32>(
+        f32(px & 0xffu) / 255.0,
+        f32((px >> 8u) & 0xffu) / 255.0,
+        f32((px >> 16u) & 0xffu) / 255.0
+    );
+}
+
+fn pack_rgba(rgb: vec3<f32>, alpha: u32) -> u32 {
+    let scaled = clamp(rgb * 255.0, vec3<f32>(0.0), vec3<f32>(255.0));
+    let r = u32(scaled.r);
+    let g = u32(scaled.g);
+    let b = u32(scaled.b);
+    return r | (g << 8u) | (b << 16u) | alpha;
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let hsl = rgb_to_hsl(unpack_rgb(px));
+    let h = hsl.x;
+    let s = hsl.y;
+    let l = hsl.z;
+
+    let centres = array<f32, 8>(0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875);
+    let half_width = 0.125;
+
+    var dh = 0.0;
+    var ds = 0.0;
+    var dl = 0.0;
+    var w_sum = 0.0;
+
+    for (var bi: i32 = 0; bi < 8; bi = bi + 1) {
+        let centre = centres[bi];
+        let raw_d = abs(h - centre);
+        let d = select(raw_d, 1.0 - raw_d, raw_d > 0.5);
+        let w = max(0.0, 1.0 - d / half_width);
+        dh += w * params.hue[bi];
+        ds += w * params.sat[bi];
+        dl += w * params.lum[bi];
+        w_sum += w;
+    }
+
+    if (w_sum < 1e-6) {
+        output_pixels[i] = px;
+        return;
+    }
+
+    let new_h = fract(h + dh / (360.0 * w_sum));
+    let new_s = clamp(s + ds / w_sum, 0.0, 1.0);
+    let new_l = clamp(l + dl / w_sum, 0.0, 1.0);
+    let rgb = hsl_to_rgb(vec3<f32>(new_h, new_s, new_l));
+    output_pixels[i] = pack_rgba(rgb, px & 0xff000000u);
+}
+"#;
+
+const SHARPEN_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    luminance_only: u32,
+    strength: f32,
+    _pad: f32,
+    _pad2: f32,
+    _pad3: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn read_pixel(x: i32, y: i32) -> u32 {
+    let cx = u32(clamp(x, 0, i32(params.width) - 1));
+    let cy = u32(clamp(y, 0, i32(params.height) - 1));
+    return input_pixels[cy * params.width + cx];
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let xi = i32(gid.x);
+    let yi = i32(gid.y);
+
+    let c_px = read_pixel(xi, yi);
+    let t_px = read_pixel(xi, yi - 1);
+    let b_px = read_pixel(xi, yi + 1);
+    let l_px = read_pixel(xi - 1, yi);
+    let r_px = read_pixel(xi + 1, yi);
+
+    let a = c_px & 0xff000000u;
+    let s = params.strength;
+
+    if (params.luminance_only == 0u) {
+        let c_r = f32(c_px & 0xffu);
+        let c_g = f32((c_px >> 8u) & 0xffu);
+        let c_b = f32((c_px >> 16u) & 0xffu);
+
+        let t_r = f32(t_px & 0xffu);
+        let t_g = f32((t_px >> 8u) & 0xffu);
+        let t_b = f32((t_px >> 16u) & 0xffu);
+
+        let b_r = f32(b_px & 0xffu);
+        let b_g = f32((b_px >> 8u) & 0xffu);
+        let b_b = f32((b_px >> 16u) & 0xffu);
+
+        let l_r = f32(l_px & 0xffu);
+        let l_g = f32((l_px >> 8u) & 0xffu);
+        let l_b = f32((l_px >> 16u) & 0xffu);
+
+        let r_r = f32(r_px & 0xffu);
+        let r_g = f32((r_px >> 8u) & 0xffu);
+        let r_b = f32((r_px >> 16u) & 0xffu);
+
+        let nr = u32(clamp((1.0 + 4.0 * s) * c_r - s * (t_r + b_r + l_r + r_r), 0.0, 255.0));
+        let ng = u32(clamp((1.0 + 4.0 * s) * c_g - s * (t_g + b_g + l_g + r_g), 0.0, 255.0));
+        let nb = u32(clamp((1.0 + 4.0 * s) * c_b - s * (t_b + b_b + l_b + r_b), 0.0, 255.0));
+        output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
+    } else {
+        let c_r = f32(c_px & 0xffu);
+        let c_g = f32((c_px >> 8u) & 0xffu);
+        let c_b = f32((c_px >> 16u) & 0xffu);
+        let luma_c = 0.2126 * c_r + 0.7152 * c_g + 0.0722 * c_b;
+
+        let t_r = f32(t_px & 0xffu);
+        let t_g = f32((t_px >> 8u) & 0xffu);
+        let t_b = f32((t_px >> 16u) & 0xffu);
+        let luma_t = 0.2126 * t_r + 0.7152 * t_g + 0.0722 * t_b;
+
+        let b_r = f32(b_px & 0xffu);
+        let b_g = f32((b_px >> 8u) & 0xffu);
+        let b_b = f32((b_px >> 16u) & 0xffu);
+        let luma_b = 0.2126 * b_r + 0.7152 * b_g + 0.0722 * b_b;
+
+        let l_r = f32(l_px & 0xffu);
+        let l_g = f32((l_px >> 8u) & 0xffu);
+        let l_b = f32((l_px >> 16u) & 0xffu);
+        let luma_l = 0.2126 * l_r + 0.7152 * l_g + 0.0722 * l_b;
+
+        let r_r = f32(r_px & 0xffu);
+        let r_g = f32((r_px >> 8u) & 0xffu);
+        let r_b = f32((r_px >> 16u) & 0xffu);
+        let luma_r = 0.2126 * r_r + 0.7152 * r_g + 0.0722 * r_b;
+
+        let sharpened_luma = clamp((1.0 + 4.0 * s) * luma_c - s * (luma_t + luma_b + luma_l + luma_r), 0.0, 255.0);
+        let delta = sharpened_luma - luma_c;
+
+        let nr = u32(clamp(c_r + delta, 0.0, 255.0));
+        let ng = u32(clamp(c_g + delta, 0.0, 255.0));
+        let nb = u32(clamp(c_b + delta, 0.0, 255.0));
+        output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
+    }
+}
+"#;
+
 const NOISE_REDUCTION_NLM_WGSL: &str = r#"
 struct Params {
     width: u32,
@@ -3662,5 +5019,292 @@ mod tests {
             mean_delta <= 3.0 && max_delta <= 16,
             "GPU NLM drifted too far from CPU: mean_delta={mean_delta:.2} max_delta={max_delta}"
         );
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn black_and_white_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(32, 24);
+        let op = BlackAndWhiteOp {
+            mode: BwMode::Luminance,
+        };
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+            assert_eq!(o[3], i[3]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn black_and_white_roughly_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(24, 18);
+        let op = BlackAndWhiteOp {
+            mode: BwMode::Perceptual,
+        };
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        let mut max_delta = 0u8;
+        for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
+            for ch in 0..3 {
+                max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
+            }
+            assert_eq!(a[3], b[3]);
+        }
+        assert!(max_delta <= 1, "black_and_white max_delta={max_delta}");
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn blur_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        // Create a bright spot in a dark image
+        let mut src = Image::new(32, 32);
+        // Set most pixels dark
+        for chunk in src.data.chunks_mut(4) {
+            chunk[0] = 10;
+            chunk[1] = 10;
+            chunk[2] = 10;
+            chunk[3] = 255;
+        }
+        // Bright centre pixel
+        let cx = 16usize;
+        let cy = 16usize;
+        let idx = (cy * 32 + cx) * 4;
+        src.data[idx] = 255;
+        src.data[idx + 1] = 255;
+        src.data[idx + 2] = 255;
+        src.data[idx + 3] = 255;
+
+        let op = BlurOp::new(2.0);
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        // The bright spot should be dimmed after blur
+        assert!(
+            out.data[idx] < 255,
+            "bright centre should dim after blur, got {}",
+            out.data[idx]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn color_balance_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(32, 24);
+        let op = ColorBalanceOp::new([0.5, 0.0, -0.5], [0.0, 0.3, 0.0], [-0.2, 0.0, 0.4]);
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+            assert_eq!(o[3], i[3]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn color_balance_roughly_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(24, 18);
+        let op = ColorBalanceOp::new([0.3, 0.0, -0.2], [0.0, 0.2, 0.0], [-0.1, 0.0, 0.3]);
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        let mut max_delta = 0u8;
+        for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
+            for ch in 0..3 {
+                max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
+            }
+            assert_eq!(a[3], b[3]);
+        }
+        assert!(max_delta <= 2, "color_balance max_delta={max_delta}");
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn color_space_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(32, 24);
+        let op = ColorSpaceOp {
+            conversion: ColorSpaceConversion::SrgbToDisplayP3,
+        };
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+            assert_eq!(o[3], i[3]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn color_space_roughly_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(24, 18);
+        let op = ColorSpaceOp {
+            conversion: ColorSpaceConversion::SrgbToDisplayP3,
+        };
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        let mut max_delta = 0u8;
+        for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
+            for ch in 0..3 {
+                max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
+            }
+            assert_eq!(a[3], b[3]);
+        }
+        assert!(max_delta <= 2, "color_space max_delta={max_delta}");
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn denoise_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(32, 24);
+        let op = DenoiseOp {
+            strength: 0.3,
+            radius: 2,
+        };
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+            assert_eq!(o[3], i[3]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn denoise_roughly_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(24, 18);
+        let op = DenoiseOp {
+            strength: 0.3,
+            radius: 2,
+        };
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        let mut max_delta = 0u8;
+        for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
+            for ch in 0..3 {
+                max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
+            }
+            assert_eq!(a[3], b[3]);
+        }
+        assert!(max_delta <= 3, "denoise max_delta={max_delta}");
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn hsl_panel_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(32, 24);
+        let op = HslPanelOp::new(
+            [30.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+            assert_eq!(o[3], i[3]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn hsl_panel_roughly_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(24, 18);
+        let op = HslPanelOp::new(
+            [20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        let mut max_delta = 0u8;
+        for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
+            for ch in 0..3 {
+                max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
+            }
+            assert_eq!(a[3], b[3]);
+        }
+        assert!(max_delta <= 2, "hsl_panel max_delta={max_delta}");
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn sharpen_runs_on_gpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(32, 24);
+        let op = SharpenOp::new(1.0);
+        let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_eq!(out.width, src.width);
+        assert_eq!(out.height, src.height);
+        for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+            assert_eq!(o[3], i[3]);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn sharpen_roughly_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let src = test_image(24, 18);
+        let op = SharpenOp::new(1.0);
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        let mut max_delta = 0u8;
+        for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
+            for ch in 0..3 {
+                max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
+            }
+            assert_eq!(a[3], b[3]);
+        }
+        assert!(max_delta <= 2, "sharpen max_delta={max_delta}");
     }
 }
