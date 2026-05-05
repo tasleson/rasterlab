@@ -13,8 +13,9 @@ use rasterlab_core::{
     Image,
     image::ImageMetadata,
     ops::{
-        BrightnessContrastOp, CurvesOp, HueShiftOp, NoiseReductionOp, NrMethod, SaturationOp,
-        VibranceOp, WhiteBalanceOp,
+        BrightnessContrastOp, CurvesOp, HighlightsShadowsOp, HueShiftOp, LevelsOp,
+        NoiseReductionOp, NrMethod, SaturationOp, SepiaOp, ShadowExposureOp, SplitToneOp,
+        VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::operation::Operation,
 };
@@ -54,6 +55,12 @@ pub struct GpuContext {
     vibrance: Arc<VibranceKernel>,
     white_balance: Arc<WhiteBalanceKernel>,
     noise_reduction_nlm: Arc<NoiseReductionNlmKernel>,
+    sepia: Arc<SepiaKernel>,
+    levels: Arc<LevelsKernel>,
+    highlights_shadows: Arc<HighlightsShadowsKernel>,
+    vignette: Arc<VignetteKernel>,
+    shadow_exposure: Arc<ShadowExposureKernel>,
+    split_tone: Arc<SplitToneKernel>,
 }
 
 impl GpuContext {
@@ -65,6 +72,12 @@ impl GpuContext {
         let vibrance = Arc::new(VibranceKernel::new(&device));
         let white_balance = Arc::new(WhiteBalanceKernel::new(&device));
         let noise_reduction_nlm = Arc::new(NoiseReductionNlmKernel::new(&device));
+        let sepia = Arc::new(SepiaKernel::new(&device));
+        let levels = Arc::new(LevelsKernel::new(&device));
+        let highlights_shadows = Arc::new(HighlightsShadowsKernel::new(&device));
+        let vignette = Arc::new(VignetteKernel::new(&device));
+        let shadow_exposure = Arc::new(ShadowExposureKernel::new(&device));
+        let split_tone = Arc::new(SplitToneKernel::new(&device));
         Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -76,6 +89,12 @@ impl GpuContext {
             vibrance,
             white_balance,
             noise_reduction_nlm,
+            sepia,
+            levels,
+            highlights_shadows,
+            vignette,
+            shadow_exposure,
+            split_tone,
         }
     }
 
@@ -199,9 +218,51 @@ pub fn supports(op: &dyn Operation) -> bool {
     {
         return true;
     }
-    op.as_any()
+    if op
+        .as_any()
         .and_then(|any| any.downcast_ref::<NoiseReductionOp>())
         .is_some_and(|op| op.method == NrMethod::NonLocalMeans)
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<SepiaOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<LevelsOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<HighlightsShadowsOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<VignetteOp>())
+        .is_some()
+    {
+        return true;
+    }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<ShadowExposureOp>())
+        .is_some()
+    {
+        return true;
+    }
+    op.as_any()
+        .and_then(|any| any.downcast_ref::<SplitToneOp>())
+        .is_some()
 }
 
 pub fn apply_one(
@@ -236,6 +297,27 @@ pub fn apply_one(
         .filter(|op| op.method == NrMethod::NonLocalMeans)
     {
         apply_noise_reduction_nlm(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<SepiaOp>()) {
+        apply_sepia(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<LevelsOp>()) {
+        apply_levels(ctx, op, image)
+    } else if let Some(op) = op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<HighlightsShadowsOp>())
+    {
+        apply_highlights_shadows(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<VignetteOp>()) {
+        apply_vignette(ctx, op, image)
+    } else if let Some(op) = op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<ShadowExposureOp>())
+    {
+        apply_shadow_exposure(ctx, op, image)
+    } else if let Some(op) = op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<SplitToneOp>())
+    {
+        apply_split_tone(ctx, op, image)
     } else {
         Err(GpuError::UnsupportedOperation(op.name()))
     }
@@ -348,6 +430,36 @@ struct VibranceKernel {
 }
 
 struct WhiteBalanceKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct SepiaKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct LevelsKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct HighlightsShadowsKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct VignetteKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct ShadowExposureKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+struct SplitToneKernel {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -738,6 +850,224 @@ impl WhiteBalanceKernel {
     }
 }
 
+fn make_3binding_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn make_4binding_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    })
+}
+
+fn make_simple_pipeline(
+    device: &wgpu::Device,
+    wgsl: &str,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    shader_label: &str,
+    pipeline_label: &str,
+) -> wgpu::ComputePipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(shader_label),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(pipeline_label),
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(pipeline_label),
+        layout: Some(&layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    })
+}
+
+impl SepiaKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout = make_3binding_layout(device, "rasterlab sepia bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            SEPIA_WGSL,
+            &bind_group_layout,
+            "rasterlab sepia shader",
+            "rasterlab sepia pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl LevelsKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout = make_4binding_layout(device, "rasterlab levels bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            LEVELS_WGSL,
+            &bind_group_layout,
+            "rasterlab levels shader",
+            "rasterlab levels pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl HighlightsShadowsKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab highlights_shadows bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            HIGHLIGHTS_SHADOWS_WGSL,
+            &bind_group_layout,
+            "rasterlab highlights_shadows shader",
+            "rasterlab highlights_shadows pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl VignetteKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab vignette bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            VIGNETTE_WGSL,
+            &bind_group_layout,
+            "rasterlab vignette shader",
+            "rasterlab vignette pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl ShadowExposureKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab shadow_exposure bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            SHADOW_EXPOSURE_WGSL,
+            &bind_group_layout,
+            "rasterlab shadow_exposure shader",
+            "rasterlab shadow_exposure pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl SplitToneKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let bind_group_layout =
+            make_3binding_layout(device, "rasterlab split_tone bind group layout");
+        let pipeline = make_simple_pipeline(
+            device,
+            SPLIT_TONE_WGSL,
+            &bind_group_layout,
+            "rasterlab split_tone shader",
+            "rasterlab split_tone pipeline",
+        );
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
 struct NoiseReductionNlmKernel {
     nlm_pipeline: wgpu::ComputePipeline,
     nlm_bind_group_layout: wgpu::BindGroupLayout,
@@ -1103,6 +1433,79 @@ struct WhiteBalanceParams {
     _pad2: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SepiaParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    strength: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct HighlightsShadowsParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    highlights: f32,
+    shadows: f32,
+    _pad2: f32,
+    _pad3: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct VignetteParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    strength: f32,
+    inner: f32,
+    zone: f32,
+    _pad2: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ShadowExposureParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    ev: f32,
+    falloff: f32,
+    _pad2: f32,
+    _pad3: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SplitToneParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    sh_r: f32,
+    sh_g: f32,
+    sh_b: f32,
+    shadow_sat: f32,
+    hi_r: f32,
+    hi_g: f32,
+    hi_b: f32,
+    highlight_sat: f32,
+    balance: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+}
+
 fn apply_hue_shift(
     ctx: &GpuContext,
     op: &HueShiftOp,
@@ -1412,6 +1815,413 @@ fn apply_white_balance(
         .poll(wgpu::PollType::wait_indefinitely())
         .map_err(|e| GpuError::Poll(e.to_string()))?;
 
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_3binding(
+    ctx: &GpuContext,
+    pipeline: &wgpu::ComputePipeline,
+    layout: &wgpu::BindGroupLayout,
+    label: &str,
+    input: &wgpu::Buffer,
+    output: &wgpu::Buffer,
+    params: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+) -> Result<(), GpuError> {
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params.as_entire_binding(),
+            },
+        ],
+    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(label),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            width.div_ceil(WORKGROUP_SIZE_X),
+            height.div_ceil(WORKGROUP_SIZE_Y),
+            1,
+        );
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    ctx.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| GpuError::Poll(e.to_string()))?;
+    Ok(())
+}
+
+fn hue_to_rgb_f32(hue: f32) -> (f32, f32, f32) {
+    let h = hue.rem_euclid(360.0) / 60.0;
+    let i = h.floor() as u32;
+    let f = h - i as f32;
+    match i {
+        0 => (1.0, f, 0.0),
+        1 => (1.0 - f, 1.0, 0.0),
+        2 => (0.0, 1.0, f),
+        3 => (0.0, 1.0 - f, 1.0),
+        4 => (f, 0.0, 1.0),
+        _ => (1.0, 0.0, 1.0 - f),
+    }
+}
+
+fn apply_sepia(ctx: &GpuContext, op: &SepiaOp, image: GpuImage) -> Result<GpuImage, GpuError> {
+    if op.strength < 1e-5 {
+        return Ok(image);
+    }
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab sepia output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = SepiaParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        strength: op.strength.clamp(0.0, 1.0),
+        _pad2: 0.0,
+        _pad3: 0.0,
+        _pad4: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab sepia params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.sepia.pipeline,
+        &ctx.sepia.bind_group_layout,
+        "rasterlab sepia",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_levels(ctx: &GpuContext, op: &LevelsOp, image: GpuImage) -> Result<GpuImage, GpuError> {
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab levels output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = LutParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab levels params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    let lut = op.build_lut();
+    let lut_u32: [u32; 256] = lut.map(u32::from);
+    let lut_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab levels lut"),
+            contents: bytemuck::cast_slice(&lut_u32),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("rasterlab levels bind group"),
+        layout: &ctx.levels.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: image.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: lut_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rasterlab levels encoder"),
+        });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("rasterlab levels pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&ctx.levels.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            params.width.div_ceil(WORKGROUP_SIZE_X),
+            params.height.div_ceil(WORKGROUP_SIZE_Y),
+            1,
+        );
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    ctx.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| GpuError::Poll(e.to_string()))?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_highlights_shadows(
+    ctx: &GpuContext,
+    op: &HighlightsShadowsOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    if op.highlights.abs() < 1e-5 && op.shadows.abs() < 1e-5 {
+        return Ok(image);
+    }
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab highlights_shadows output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = HighlightsShadowsParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        highlights: op.highlights.clamp(-1.0, 1.0),
+        shadows: op.shadows.clamp(-1.0, 1.0),
+        _pad2: 0.0,
+        _pad3: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab highlights_shadows params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.highlights_shadows.pipeline,
+        &ctx.highlights_shadows.bind_group_layout,
+        "rasterlab highlights_shadows",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_vignette(
+    ctx: &GpuContext,
+    op: &VignetteOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    if op.strength < 1e-5 {
+        return Ok(image);
+    }
+    let inner = op.radius;
+    let outer = inner + op.feather * (1.0 - inner);
+    let zone = (outer - inner).max(1e-6);
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab vignette output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = VignetteParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        strength: op.strength.clamp(0.0, 1.0),
+        inner,
+        zone,
+        _pad2: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab vignette params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.vignette.pipeline,
+        &ctx.vignette.bind_group_layout,
+        "rasterlab vignette",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_shadow_exposure(
+    ctx: &GpuContext,
+    op: &ShadowExposureOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    if op.ev.abs() < 1e-5 {
+        return Ok(image);
+    }
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab shadow_exposure output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = ShadowExposureParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        ev: op.ev.clamp(-3.0, 3.0),
+        falloff: op.falloff.clamp(0.5, 4.0),
+        _pad2: 0.0,
+        _pad3: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab shadow_exposure params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.shadow_exposure.pipeline,
+        &ctx.shadow_exposure.bind_group_layout,
+        "rasterlab shadow_exposure",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_split_tone(
+    ctx: &GpuContext,
+    op: &SplitToneOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    if op.shadow_sat < 1e-4 && op.highlight_sat < 1e-4 {
+        return Ok(image);
+    }
+    let (sh_r, sh_g, sh_b) = hue_to_rgb_f32(op.shadow_hue);
+    let (hi_r, hi_g, hi_b) = hue_to_rgb_f32(op.highlight_hue);
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab split_tone output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = SplitToneParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+        sh_r,
+        sh_g,
+        sh_b,
+        shadow_sat: op.shadow_sat,
+        hi_r,
+        hi_g,
+        hi_b,
+        highlight_sat: op.highlight_sat,
+        balance: op.balance * 0.5,
+        _pad2: 0.0,
+        _pad3: 0.0,
+        _pad4: 0.0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab split_tone params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    dispatch_3binding(
+        ctx,
+        &ctx.split_tone.pipeline,
+        &ctx.split_tone.bind_group_layout,
+        "rasterlab split_tone",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        params.width,
+        params.height,
+    )?;
     Ok(GpuImage {
         width: image.width,
         height: image.height,
@@ -2011,6 +2821,269 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b = scaled_channel((px >> 16u) & 0xffu, params.b_scale);
     let a = px & 0xff000000u;
     output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
+}
+"#;
+
+const SEPIA_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    strength: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu);
+    let g = f32((px >> 8u) & 0xffu);
+    let b = f32((px >> 16u) & 0xffu);
+    let a = px & 0xff000000u;
+
+    let sr = min(r * 0.393 + g * 0.769 + b * 0.189, 255.0);
+    let sg = min(r * 0.349 + g * 0.686 + b * 0.168, 255.0);
+    let sb = min(r * 0.272 + g * 0.534 + b * 0.131, 255.0);
+
+    let s = params.strength;
+    let nr = u32(r + (sr - r) * s);
+    let ng = u32(g + (sg - g) * s);
+    let nb = u32(b + (sb - b) * s);
+    output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
+}
+"#;
+
+const LEVELS_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read> lut: array<u32>;
+
+fn channel(byte: u32) -> u32 {
+    return lut[byte] & 0xffu;
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = channel(px & 0xffu);
+    let g = channel((px >> 8u) & 0xffu);
+    let b = channel((px >> 16u) & 0xffu);
+    let a = px & 0xff000000u;
+    output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
+}
+"#;
+
+const HIGHLIGHTS_SHADOWS_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    highlights: f32,
+    shadows: f32,
+    _pad2: f32,
+    _pad3: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let hl_weight = pow(max((luma - 0.5) * 2.0, 0.0), 2.0);
+    let sh_weight = pow(max((0.5 - luma) * 2.0, 0.0), 2.0);
+    let delta = params.highlights * hl_weight * 0.5 + params.shadows * sh_weight * 0.5;
+
+    let nr = u32(clamp((r + delta) * 255.0, 0.0, 255.0));
+    let ng = u32(clamp((g + delta) * 255.0, 0.0, 255.0));
+    let nb = u32(clamp((b + delta) * 255.0, 0.0, 255.0));
+    output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
+}
+"#;
+
+const VIGNETTE_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    strength: f32,
+    inner: f32,
+    zone: f32,
+    _pad2: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+const INV_SQRT2: f32 = 0.70710678118654752;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let half_w = f32(params.width) * 0.5;
+    let half_h = f32(params.height) * 0.5;
+    let dx = (f32(gid.x) + 0.5 - half_w) / half_w;
+    let dy = (f32(gid.y) + 0.5 - half_h) / half_h;
+    let d = sqrt(dx * dx + dy * dy) * INV_SQRT2;
+
+    let t = clamp((d - params.inner) / params.zone, 0.0, 1.0);
+    let t_smooth = t * t * (3.0 - 2.0 * t);
+    let factor = 1.0 - params.strength * t_smooth;
+
+    let px = input_pixels[i];
+    let r = u32(clamp(f32(px & 0xffu) * factor, 0.0, 255.0));
+    let g = u32(clamp(f32((px >> 8u) & 0xffu) * factor, 0.0, 255.0));
+    let b = u32(clamp(f32((px >> 16u) & 0xffu) * factor, 0.0, 255.0));
+    let a = px & 0xff000000u;
+    output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
+}
+"#;
+
+const SHADOW_EXPOSURE_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    ev: f32,
+    falloff: f32,
+    _pad2: f32,
+    _pad3: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn srgb_to_linear(c: f32) -> f32 {
+    if (c <= 0.04045) {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    if (c <= 0.0031308) {
+        return 12.92 * c;
+    }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let weight = pow(clamp(1.0 - luma, 0.0, 1.0), params.falloff);
+    let gain = exp2(params.ev * weight);
+
+    let rl = srgb_to_linear(r) * gain;
+    let gl = srgb_to_linear(g) * gain;
+    let bl = srgb_to_linear(b) * gain;
+
+    let nr = u32(clamp(linear_to_srgb(rl) * 255.0, 0.0, 255.0));
+    let ng = u32(clamp(linear_to_srgb(gl) * 255.0, 0.0, 255.0));
+    let nb = u32(clamp(linear_to_srgb(bl) * 255.0, 0.0, 255.0));
+    output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
+}
+"#;
+
+const SPLIT_TONE_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    sh_r: f32,
+    sh_g: f32,
+    sh_b: f32,
+    shadow_sat: f32,
+    hi_r: f32,
+    hi_g: f32,
+    hi_b: f32,
+    highlight_sat: f32,
+    balance: f32,
+    _pad2: f32,
+    _pad3: f32,
+    _pad4: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+
+    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let luma_b = clamp(luma + params.balance, 0.0, 1.0);
+
+    let shadow_w = (1.0 - luma_b) * (1.0 - luma_b) * params.shadow_sat;
+    let highlight_w = luma_b * luma_b * params.highlight_sat;
+
+    let nr = clamp(r + (params.sh_r - r) * shadow_w + (params.hi_r - r) * highlight_w, 0.0, 1.0);
+    let ng = clamp(g + (params.sh_g - g) * shadow_w + (params.hi_g - g) * highlight_w, 0.0, 1.0);
+    let nb = clamp(b + (params.sh_b - b) * shadow_w + (params.hi_b - b) * highlight_w, 0.0, 1.0);
+
+    output_pixels[i] = u32(nr * 255.0 + 0.5) | (u32(ng * 255.0 + 0.5) << 8u)
+        | (u32(nb * 255.0 + 0.5) << 16u) | a;
 }
 "#;
 

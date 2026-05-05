@@ -29,7 +29,7 @@ impl LevelsOp {
     }
 
     /// Build a lookup table (u8 → u8) for the levels curve.
-    fn build_lut(&self) -> [u8; 256] {
+    pub fn build_lut(&self) -> [u8; 256] {
         let black = self.black_point;
         let white = self.white_point;
         let gamma = 1.0 / self.midtone.max(0.01);
