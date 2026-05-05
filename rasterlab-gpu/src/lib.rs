@@ -12,7 +12,7 @@ use bytemuck::{Pod, Zeroable};
 use rasterlab_core::{
     Image,
     image::ImageMetadata,
-    ops::{BrightnessContrastOp, NoiseReductionOp, NrMethod},
+    ops::{BrightnessContrastOp, CurvesOp, NoiseReductionOp, NrMethod},
     traits::operation::Operation,
 };
 use thiserror::Error;
@@ -45,18 +45,21 @@ pub struct GpuContext {
     queue: Arc<wgpu::Queue>,
     limits: wgpu::Limits,
     brightness_contrast: Arc<BrightnessContrastKernel>,
+    curves: Arc<CurvesKernel>,
     noise_reduction_nlm: Arc<NoiseReductionNlmKernel>,
 }
 
 impl GpuContext {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, limits: wgpu::Limits) -> Self {
         let brightness_contrast = Arc::new(BrightnessContrastKernel::new(&device));
+        let curves = Arc::new(CurvesKernel::new(&device));
         let noise_reduction_nlm = Arc::new(NoiseReductionNlmKernel::new(&device));
         Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
             limits,
             brightness_contrast,
+            curves,
             noise_reduction_nlm,
         }
     }
@@ -146,6 +149,13 @@ pub fn supports(op: &dyn Operation) -> bool {
     {
         return true;
     }
+    if op
+        .as_any()
+        .and_then(|any| any.downcast_ref::<CurvesOp>())
+        .is_some()
+    {
+        return true;
+    }
     op.as_any()
         .and_then(|any| any.downcast_ref::<NoiseReductionOp>())
         .is_some_and(|op| op.method == NrMethod::NonLocalMeans)
@@ -161,6 +171,8 @@ pub fn apply_one(
         .and_then(|any| any.downcast_ref::<BrightnessContrastOp>())
     {
         apply_brightness_contrast(ctx, op, image)
+    } else if let Some(op) = op.as_any().and_then(|any| any.downcast_ref::<CurvesOp>()) {
+        apply_curves(ctx, op, image)
     } else if let Some(op) = op
         .as_any()
         .and_then(|any| any.downcast_ref::<NoiseReductionOp>())
@@ -258,6 +270,11 @@ struct BrightnessContrastKernel {
     bind_group_layout: wgpu::BindGroupLayout,
 }
 
+struct CurvesKernel {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
 impl BrightnessContrastKernel {
     fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -316,6 +333,77 @@ impl BrightnessContrastKernel {
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("rasterlab brightness_contrast pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+impl CurvesKernel {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rasterlab curves shader"),
+            source: wgpu::ShaderSource::Wgsl(CURVES_WGSL.into()),
+        });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rasterlab curves bind group layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rasterlab curves pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("rasterlab curves pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
             entry_point: Some("main"),
@@ -462,7 +550,7 @@ impl NoiseReductionNlmKernel {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct BcParams {
+struct LutParams {
     width: u32,
     height: u32,
     pixel_count: u32,
@@ -481,7 +569,7 @@ fn apply_brightness_contrast(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
-    let params = BcParams {
+    let params = LutParams {
         width: image.width,
         height: image.height,
         pixel_count: image.width.saturating_mul(image.height),
@@ -537,6 +625,87 @@ fn apply_brightness_contrast(
             timestamp_writes: None,
         });
         pass.set_pipeline(&ctx.brightness_contrast.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        let groups_x = params.width.div_ceil(WORKGROUP_SIZE_X);
+        let groups_y = params.height.div_ceil(WORKGROUP_SIZE_Y);
+        pass.dispatch_workgroups(groups_x, groups_y, 1);
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    ctx.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| GpuError::Poll(e.to_string()))?;
+
+    Ok(GpuImage {
+        width: image.width,
+        height: image.height,
+        buffer: output,
+    })
+}
+
+fn apply_curves(ctx: &GpuContext, op: &CurvesOp, image: GpuImage) -> Result<GpuImage, GpuError> {
+    let byte_len = expected_rgba_len(image.width, image.height) as u64;
+    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab curves output"),
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let params = LutParams {
+        width: image.width,
+        height: image.height,
+        pixel_count: image.width.saturating_mul(image.height),
+        _pad: 0,
+    };
+    let params_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab curves params"),
+            contents: bytemuck::bytes_of(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    let lut = CurvesOp::build_lut(&op.points);
+    let lut_u32: [u32; 256] = lut.map(u32::from);
+    let lut_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab curves lut"),
+            contents: bytemuck::cast_slice(&lut_u32),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("rasterlab curves bind group"),
+        layout: &ctx.curves.bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: image.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: params_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: lut_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rasterlab curves encoder"),
+        });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("rasterlab curves pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&ctx.curves.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         let groups_x = params.width.div_ceil(WORKGROUP_SIZE_X);
         let groups_y = params.height.div_ceil(WORKGROUP_SIZE_Y);
@@ -700,6 +869,43 @@ fn build_brightness_contrast_lut(brightness: f32, contrast: f32) -> [u8; 256] {
 }
 
 const BRIGHTNESS_CONTRAST_WGSL: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read> lut: array<u32>;
+
+fn channel(byte: u32) -> u32 {
+    return lut[byte] & 0xffu;
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) {
+        return;
+    }
+
+    let px = input_pixels[i];
+    let r = channel(px & 0xffu);
+    let g = channel((px >> 8u) & 0xffu);
+    let b = channel((px >> 16u) & 0xffu);
+    let a = px & 0xff000000u;
+    output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
+}
+"#;
+
+const CURVES_WGSL: &str = r#"
 struct Params {
     width: u32,
     height: u32,
@@ -1037,6 +1243,29 @@ mod tests {
 
     #[test]
     #[ignore = "requires a working wgpu adapter"]
+    fn curves_matches_cpu() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+        let cases = [
+            vec![[0.0, 0.0], [1.0, 1.0]],
+            vec![[0.0, 1.0], [1.0, 0.0]],
+            vec![[0.0, 0.0], [0.35, 0.2], [0.7, 0.86], [1.0, 1.0]],
+            vec![[0.0, 0.08], [0.18, 0.12], [0.62, 0.74], [1.0, 0.95]],
+        ];
+        for points in cases {
+            let src = test_image(31, 17);
+            let op = CurvesOp { points };
+            let expected = op.apply(src.deep_clone()).unwrap();
+            let gpu = GpuImage::from_image(&ctx, &src).unwrap();
+            let actual = apply_one(&ctx, &op, gpu).unwrap().into_image(&ctx).unwrap();
+            assert_eq!(actual.data, expected.data);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
     fn gpu_pipeline_chains_ops_with_single_readback() {
         let Some(ctx) = pollster::block_on(make_context()) else {
             eprintln!("skipping: no wgpu adapter available");
@@ -1046,6 +1275,33 @@ mod tests {
         let src = test_image(257, 129);
         let op_a = BrightnessContrastOp::new(0.12, -0.18);
         let op_b = BrightnessContrastOp::new(-0.08, 0.22);
+        let expected = op_b.apply(op_a.apply(src.deep_clone()).unwrap()).unwrap();
+
+        let mut pipeline = GpuPipeline::from_image(&ctx, &src).unwrap();
+        pipeline.apply_op(&ctx, &op_a).unwrap();
+        pipeline.apply_op(&ctx, &op_b).unwrap();
+        assert_eq!(pipeline.op_count(), 2);
+        let (actual, timings) = pipeline.into_image(&ctx).unwrap();
+
+        assert_eq!(actual.data, expected.data);
+        assert!(timings.upload > Default::default());
+        assert!(timings.dispatch > Default::default());
+        assert!(timings.readback > Default::default());
+    }
+
+    #[test]
+    #[ignore = "requires a working wgpu adapter"]
+    fn gpu_pipeline_chains_brightness_and_curves() {
+        let Some(ctx) = pollster::block_on(make_context()) else {
+            eprintln!("skipping: no wgpu adapter available");
+            return;
+        };
+
+        let src = test_image(257, 129);
+        let op_a = BrightnessContrastOp::new(0.12, -0.18);
+        let op_b = CurvesOp {
+            points: vec![[0.0, 0.02], [0.3, 0.18], [0.74, 0.9], [1.0, 1.0]],
+        };
         let expected = op_b.apply(op_a.apply(src.deep_clone()).unwrap()).unwrap();
 
         let mut pipeline = GpuPipeline::from_image(&ctx, &src).unwrap();
