@@ -1,6 +1,7 @@
 use std::{
     path::PathBuf as StdPathBuf,
     sync::{Arc, mpsc},
+    time::Duration,
 };
 
 use image as img_crate;
@@ -62,6 +63,114 @@ impl NrPreviewSignature {
             luma_strength: op.luma_strength,
             color_strength: op.color_strength,
             detail_preservation: op.detail_preservation,
+        }
+    }
+}
+
+fn estimate_processing_backend(
+    start_image: &Image,
+    committed_ops: &[Option<Box<dyn Operation>>],
+    preview_op: Option<&dyn Operation>,
+    preview_scale: Option<f32>,
+    preview_viewport: Option<[u32; 4]>,
+    overlay_viewport: Option<[u32; 4]>,
+    has_gpu: bool,
+) -> ProcessingBackend {
+    let committed_pixels = preview_scale
+        .map(|scale| scaled_pixel_count(start_image.width, start_image.height, scale))
+        .unwrap_or_else(|| start_image.pixel_count());
+    let preview_pixels = overlay_viewport
+        .map(|[_x, _y, w, h]| w as usize * h as usize)
+        .or_else(|| {
+            preview_viewport.and_then(|[_x, _y, w, h]| {
+                preview_scale.map(|scale| scaled_pixel_count(w, h, scale))
+            })
+        })
+        .unwrap_or(committed_pixels);
+
+    let mut saw_cpu = false;
+    let mut saw_gpu = false;
+
+    let mut index = 0;
+    while index < committed_ops.len() {
+        let Some(op) = &committed_ops[index] else {
+            index += 1;
+            continue;
+        };
+        if has_gpu && rasterlab_gpu::supports(op.as_ref()) {
+            let start = index;
+            let mut end = index + 1;
+            while end < committed_ops.len() {
+                let Some(next_op) = &committed_ops[end] else {
+                    break;
+                };
+                if !rasterlab_gpu::supports(next_op.as_ref()) {
+                    break;
+                }
+                end += 1;
+            }
+            if end - start > 1 {
+                let ops = committed_ops[start..end]
+                    .iter()
+                    .filter_map(|op| op.as_deref())
+                    .collect::<Vec<_>>();
+                if rasterlab_render::would_use_gpu_for_batch(&ops, committed_pixels, has_gpu) {
+                    saw_gpu = true;
+                    index = end;
+                    continue;
+                }
+            }
+        }
+        if rasterlab_render::would_use_gpu_for_operation(op.as_ref(), committed_pixels, has_gpu) {
+            saw_gpu = true;
+        } else {
+            saw_cpu = true;
+        }
+        index += 1;
+    }
+    if let Some(op) = preview_op {
+        if rasterlab_render::would_use_gpu_for_operation(op, preview_pixels, has_gpu) {
+            saw_gpu = true;
+        } else {
+            saw_cpu = true;
+        }
+    }
+
+    match (saw_cpu, saw_gpu) {
+        (false, true) => ProcessingBackend::Gpu,
+        (true, true) => ProcessingBackend::Mixed,
+        _ => ProcessingBackend::Cpu,
+    }
+}
+
+fn scaled_pixel_count(width: u32, height: u32, scale: f32) -> usize {
+    let scaled_width = ((width as f32 * scale) as u32).max(1);
+    let scaled_height = ((height as f32 * scale) as u32).max(1);
+    scaled_width as usize * scaled_height as usize
+}
+
+fn format_processing_elapsed(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs_f32();
+    if secs < 10.0 {
+        format!("{secs:.1} s")
+    } else {
+        format!("{} s", elapsed.as_secs())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessingBackend {
+    Cpu,
+    Gpu,
+    Mixed,
+}
+
+impl ProcessingBackend {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cpu => "CPU",
+            Self::Gpu => "GPU",
+            Self::Mixed => "CPU/GPU",
         }
     }
 }
@@ -187,6 +296,7 @@ pub struct AppState {
     needs_rerender: bool,
     /// Wall-clock time at which the most recent render thread was spawned.
     render_start: Option<std::time::Instant>,
+    render_backend: Option<ProcessingBackend>,
     /// True when the in-flight render includes a noise-reduction op (either
     /// as the active preview or as a committed pipeline step).  Drives the
     /// visibility of the NR Cancel button so the user can abort a slow NLM run.
@@ -263,6 +373,7 @@ impl AppState {
             tools,
             needs_rerender: false,
             render_start: None,
+            render_backend: None,
             nr_in_flight: false,
             reusable_nr_preview: None,
             pending_nr_preview_key: None,
@@ -440,7 +551,8 @@ impl AppState {
                                 .take()
                                 .map(|t| t.elapsed().as_millis())
                                 .unwrap_or(0);
-                            self.status = format!("Ready  ({} ms)", elapsed_ms);
+                            self.status = self.render_ready_status("Ready", elapsed_ms);
+                            self.render_backend = None;
                             if let Some(pipeline) = self.pipeline_mut()
                                 && cache_gen == pipeline.step_cache_gen()
                             {
@@ -452,7 +564,8 @@ impl AppState {
                                 .take()
                                 .map(|t| t.elapsed().as_millis())
                                 .unwrap_or(0);
-                            self.status = format!("Preview ready  ({} ms)", elapsed_ms);
+                            self.status = self.render_ready_status("Preview ready", elapsed_ms);
+                            self.render_backend = None;
                         }
 
                         if self.needs_rerender {
@@ -466,6 +579,8 @@ impl AppState {
                         self.status = format!("Error: {}", e);
                         self.loading = false;
                         self.nr_in_flight = false;
+                        self.render_start = None;
+                        self.render_backend = None;
                         self.pending_nr_preview_key = None;
                     }
                     RenderResult::Cancelled => {
@@ -473,6 +588,7 @@ impl AppState {
                         self.nr_in_flight = false;
                         self.pending_nr_preview_key = None;
                         self.render_start = None;
+                        self.render_backend = None;
                         self.status = "Cancelled".into();
                         if self.needs_rerender {
                             self.needs_rerender = false;
@@ -521,6 +637,7 @@ impl AppState {
                 }
             }
         }
+        self.update_processing_status();
         self.maybe_write_autosave();
     }
 
@@ -1185,6 +1302,34 @@ impl AppState {
         self.request_render();
     }
 
+    fn update_processing_status(&mut self) {
+        let Some(start) = self.render_start else {
+            return;
+        };
+        let Some(backend) = self.render_backend else {
+            return;
+        };
+
+        let elapsed = start.elapsed();
+        self.status = if elapsed >= Duration::from_secs(1) {
+            format!(
+                "Processing ({})… {}",
+                backend.label(),
+                format_processing_elapsed(elapsed)
+            )
+        } else {
+            format!("Processing ({})…", backend.label())
+        };
+        self.ctx.request_repaint_after(Duration::from_millis(250));
+    }
+
+    fn render_ready_status(&self, label: &str, elapsed_ms: u128) -> String {
+        match self.render_backend {
+            Some(backend) => format!("{label}  ({}, {elapsed_ms} ms)", backend.label()),
+            None => format!("{label}  ({elapsed_ms} ms)"),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Background rendering
     // -----------------------------------------------------------------------
@@ -1205,6 +1350,7 @@ impl AppState {
         self.pending_nr_preview_key = None;
         self.reusable_nr_preview = None;
         self.needs_rerender = false;
+        self.render_backend = None;
         if self.loading {
             core_cancel::request();
             self.status = "Cancelling...".into();
@@ -1296,19 +1442,6 @@ impl AppState {
         // Clear any cancel request left over from a previous render.
         core_cancel::reset();
 
-        self.loading = true;
-        self.nr_in_flight = nr_in_flight;
-        self.status = "Rendering…".into();
-        self.render_start = Some(std::time::Instant::now());
-        self.pending_nr_preview_key = reusable_nr_signature.and_then(|signature| {
-            self.copies
-                .as_ref()
-                .map(|store| (store.active_index(), pipeline_cursor, cache_gen, signature))
-        });
-
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
-
         // Use the overlay path when the entire pipeline is cached (committed_ops
         // is empty) and we have a known viewport — run the preview op only on the
         // visible pixels at full resolution, return as an overlay.
@@ -1324,6 +1457,30 @@ impl AppState {
         } else {
             None
         };
+
+        let render_backend = estimate_processing_backend(
+            start_image.as_ref(),
+            &committed_ops,
+            preview_op.as_deref(),
+            preview_scale,
+            preview_viewport,
+            overlay_viewport,
+            self.gpu.is_some(),
+        );
+
+        self.loading = true;
+        self.nr_in_flight = nr_in_flight;
+        self.render_start = Some(std::time::Instant::now());
+        self.render_backend = Some(render_backend);
+        self.update_processing_status();
+        self.pending_nr_preview_key = reusable_nr_signature.and_then(|signature| {
+            self.copies
+                .as_ref()
+                .map(|store| (store.active_index(), pipeline_cursor, cache_gen, signature))
+        });
+
+        let tx = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
 
         let request = RenderRequest {
             start_image,

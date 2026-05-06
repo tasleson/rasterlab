@@ -402,7 +402,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-pub(crate) const INV_SQRT2: f32 = 0.70710678118654752;
+const INV_SQRT2: f32 = 0.70710678118654752;
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -859,9 +859,9 @@ struct Params {
     height: u32,
     pixel_count: u32,
     _pad: u32,
-    hue: array<f32, 8>,
-    sat: array<f32, 8>,
-    lum: array<f32, 8>,
+    hue: array<vec4<f32>, 2>,
+    sat: array<vec4<f32>, 2>,
+    lum: array<vec4<f32>, 2>,
 };
 
 @group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
@@ -927,6 +927,10 @@ fn pack_rgba(rgb: vec3<f32>, alpha: u32) -> u32 {
     return r | (g << 8u) | (b << 16u) | alpha;
 }
 
+fn param_at(values: array<vec4<f32>, 2>, i: u32) -> f32 {
+    return values[i / 4u][i % 4u];
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= params.width || gid.y >= params.height) { return; }
@@ -947,14 +951,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dl = 0.0;
     var w_sum = 0.0;
 
-    for (var bi: i32 = 0; bi < 8; bi = bi + 1) {
+    for (var bi: u32 = 0u; bi < 8u; bi = bi + 1u) {
         let centre = centres[bi];
         let raw_d = abs(h - centre);
         let d = select(raw_d, 1.0 - raw_d, raw_d > 0.5);
         let w = max(0.0, 1.0 - d / half_width);
-        dh += w * params.hue[bi];
-        ds += w * params.sat[bi];
-        dl += w * params.lum[bi];
+        dh += w * param_at(params.hue, bi);
+        ds += w * param_at(params.sat, bi);
+        dl += w * param_at(params.lum, bi);
         w_sum += w;
     }
 

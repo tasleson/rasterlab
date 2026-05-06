@@ -4,6 +4,8 @@
 //! No `egui`/`eframe` dependency — rendering can be tested headlessly.
 
 use std::sync::{Arc, mpsc};
+#[cfg(feature = "gpu")]
+use std::time::{Duration, Instant};
 
 use rasterlab_core::{
     Image, cancel as core_cancel, ops::HistogramData, traits::operation::Operation,
@@ -110,6 +112,42 @@ pub fn init_rayon_pool() {
         .stack_size(32 * 1024 * 1024)
         .build_global()
         .expect("failed to build rayon thread pool");
+}
+
+#[cfg(feature = "gpu")]
+pub fn would_use_gpu_for_operation(
+    op: &dyn Operation,
+    pixel_count: usize,
+    has_context: bool,
+) -> bool {
+    gpu_skip_reason_for_pixels(op, pixel_count, has_context).is_none()
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn would_use_gpu_for_operation(
+    _op: &dyn Operation,
+    _pixel_count: usize,
+    _has_context: bool,
+) -> bool {
+    false
+}
+
+#[cfg(feature = "gpu")]
+pub fn would_use_gpu_for_batch(
+    ops: &[&dyn Operation],
+    pixel_count: usize,
+    has_context: bool,
+) -> bool {
+    gpu_batch_skip_reason(ops, pixel_count, has_context).is_none()
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn would_use_gpu_for_batch(
+    _ops: &[&dyn Operation],
+    _pixel_count: usize,
+    _has_context: bool,
+) -> bool {
+    false
 }
 
 /// Find the black and white points for auto-levels by clipping the histogram
@@ -321,7 +359,7 @@ fn apply_committed_ops(
         if let Some(op) = maybe_op {
             #[cfg(feature = "gpu")]
             if let Some(gpu) = gpu
-                && gpu_skip_reason(op.as_ref(), current.as_ref(), true).is_none()
+                && rasterlab_gpu::supports(op.as_ref())
             {
                 let start = index;
                 let mut end = index + 1;
@@ -329,7 +367,7 @@ fn apply_committed_ops(
                     let Some(next_op) = &committed_ops[end] else {
                         break;
                     };
-                    if gpu_skip_reason(next_op.as_ref(), current.as_ref(), true).is_some() {
+                    if !rasterlab_gpu::supports(next_op.as_ref()) {
                         break;
                     }
                     end += 1;
@@ -340,21 +378,26 @@ fn apply_committed_ops(
                         .iter()
                         .filter_map(|op| op.as_deref())
                         .collect::<Vec<_>>();
-                    let img = match Arc::try_unwrap(std::mem::replace(
-                        current,
-                        Arc::new(Image::new(1, 1)),
-                    )) {
-                        Ok(img) => img,
-                        Err(a) => a.as_ref().deep_clone(),
-                    };
-                    let result = apply_gpu_batch_or_cpu(img, &ops, gpu)?;
-                    for op in ops {
-                        debug_validate_image(&result, op.name());
+                    if gpu_batch_skip_reason(&ops, current.pixel_count(), true).is_some() {
+                        // This contiguous GPU-supported run is too cheap or too
+                        // numerically divergent for the default GPU policy.
+                    } else {
+                        let img = match Arc::try_unwrap(std::mem::replace(
+                            current,
+                            Arc::new(Image::new(1, 1)),
+                        )) {
+                            Ok(img) => img,
+                            Err(a) => a.as_ref().deep_clone(),
+                        };
+                        let result = apply_gpu_batch_or_cpu(img, &ops, gpu)?;
+                        for op in ops {
+                            debug_validate_image(&result, op.name());
+                        }
+                        *current = Arc::new(result);
+                        intermediates.push((end - 1, Arc::clone(current)));
+                        index = end;
+                        continue;
                     }
-                    *current = Arc::new(result);
-                    intermediates.push((end - 1, Arc::clone(current)));
-                    index = end;
-                    continue;
                 }
             }
 
@@ -393,7 +436,7 @@ fn apply_committed_ops_batched_for_preview(
 
         #[cfg(feature = "gpu")]
         if let Some(gpu) = gpu
-            && gpu_skip_reason(op.as_ref(), current.as_ref(), true).is_none()
+            && rasterlab_gpu::supports(op.as_ref())
         {
             let start = index;
             let mut end = index + 1;
@@ -401,7 +444,7 @@ fn apply_committed_ops_batched_for_preview(
                 let Some(next_op) = &committed_ops[end] else {
                     break;
                 };
-                if gpu_skip_reason(next_op.as_ref(), current.as_ref(), true).is_some() {
+                if !rasterlab_gpu::supports(next_op.as_ref()) {
                     break;
                 }
                 end += 1;
@@ -412,18 +455,25 @@ fn apply_committed_ops_batched_for_preview(
                     .iter()
                     .filter_map(|op| op.as_deref())
                     .collect::<Vec<_>>();
-                let img =
-                    match Arc::try_unwrap(std::mem::replace(current, Arc::new(Image::new(1, 1)))) {
+                if gpu_batch_skip_reason(&ops, current.pixel_count(), true).is_some() {
+                    // This contiguous GPU-supported run is too cheap or too
+                    // numerically divergent for the default GPU policy.
+                } else {
+                    let img = match Arc::try_unwrap(std::mem::replace(
+                        current,
+                        Arc::new(Image::new(1, 1)),
+                    )) {
                         Ok(img) => img,
                         Err(a) => a.as_ref().deep_clone(),
                     };
-                let result = apply_gpu_batch_or_cpu(img, &ops, gpu)?;
-                for op in ops {
-                    debug_validate_image(&result, op.name());
+                    let result = apply_gpu_batch_or_cpu(img, &ops, gpu)?;
+                    for op in ops {
+                        debug_validate_image(&result, op.name());
+                    }
+                    *current = Arc::new(result);
+                    index = end;
+                    continue;
                 }
-                *current = Arc::new(result);
-                index = end;
-                continue;
             }
         }
 
@@ -452,7 +502,8 @@ fn apply_gpu_batch_or_cpu(
     gpu: &GpuContext,
 ) -> Result<Image, String> {
     let op_names = ops.iter().map(|op| op.name()).collect::<Vec<_>>().join(",");
-    match apply_gpu_batch(&image, ops, gpu) {
+    let gpu_result = apply_gpu_batch(&image, ops, gpu);
+    match gpu_result {
         Ok((out, timings)) if out.width == image.width && out.height == image.height => {
             log_gpu(&format!(
                 "batch ops={} count={} pixels={} upload={:?} dispatch={:?} readback={:?}",
@@ -463,6 +514,18 @@ fn apply_gpu_batch_or_cpu(
                 timings.dispatch,
                 timings.readback
             ));
+            if gpu_bench_enabled() {
+                let cpu_start = Instant::now();
+                let cpu_out = apply_ops_cpu(image.deep_clone(), ops)?;
+                log_gpu_bench_comparison(
+                    "batch",
+                    &op_names,
+                    image.pixel_count(),
+                    cpu_start.elapsed(),
+                    Some(gpu_timings_total(timings)),
+                    compare_images(&cpu_out, &out),
+                );
+            }
             Ok(out)
         }
         Ok((out, _)) => {
@@ -528,6 +591,21 @@ fn apply_one_with_optional_gpu(
                                 timings.dispatch,
                                 timings.readback
                             ));
+                            if gpu_bench_enabled() {
+                                let cpu_start = Instant::now();
+                                let cpu_out = op.apply(image.deep_clone()).map_err(|e| {
+                                    format!("Op '{}' CPU benchmark failed: {}", op.name(), e)
+                                })?;
+                                debug_validate_image(&cpu_out, op.name());
+                                log_gpu_bench_comparison(
+                                    "op",
+                                    op.name(),
+                                    image.pixel_count(),
+                                    cpu_start.elapsed(),
+                                    Some(gpu_timings_total(timings)),
+                                    compare_images(&cpu_out, &out),
+                                );
+                            }
                             return Ok(out);
                         }
                         Ok((out, _)) => {
@@ -562,6 +640,15 @@ fn apply_one_with_optional_gpu(
 
 #[cfg(feature = "gpu")]
 fn gpu_skip_reason(op: &dyn Operation, image: &Image, has_context: bool) -> Option<&'static str> {
+    gpu_skip_reason_for_pixels(op, image.pixel_count(), has_context)
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_skip_reason_for_pixels(
+    op: &dyn Operation,
+    pixel_count: usize,
+    has_context: bool,
+) -> Option<&'static str> {
     if !has_context {
         return Some("no wgpu context");
     }
@@ -571,27 +658,168 @@ fn gpu_skip_reason(op: &dyn Operation, image: &Image, has_context: bool) -> Opti
     match std::env::var("RASTERLAB_GPU").as_deref() {
         Ok("0") => Some("RASTERLAB_GPU=0"),
         Ok("force") => None,
-        Ok("1") | Err(_) => {
-            if image.pixel_count() >= 2_000_000 {
-                None
-            } else {
-                Some("below 2MP threshold")
-            }
-        }
-        _ => {
-            if image.pixel_count() >= 2_000_000 {
-                None
-            } else {
-                Some("below 2MP threshold")
-            }
-        }
+        _ => default_gpu_op_skip_reason(op.name(), pixel_count),
     }
 }
 
 #[cfg(feature = "gpu")]
+fn gpu_batch_skip_reason(
+    ops: &[&dyn Operation],
+    pixel_count: usize,
+    has_context: bool,
+) -> Option<&'static str> {
+    if !has_context {
+        return Some("no wgpu context");
+    }
+    if ops.is_empty() || ops.iter().any(|op| !rasterlab_gpu::supports(*op)) {
+        return Some("unsupported op or parameters");
+    }
+    match std::env::var("RASTERLAB_GPU").as_deref() {
+        Ok("0") => Some("RASTERLAB_GPU=0"),
+        Ok("force") => None,
+        _ => default_gpu_batch_skip_reason(ops, pixel_count),
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn default_gpu_op_skip_reason(op_name: &str, pixel_count: usize) -> Option<&'static str> {
+    match op_name {
+        "noise_reduction" => None,
+        "denoise" => Some("denoise gpu drift review"),
+        "shadow_exposure" | "hsl_panel" | "blur" => {
+            if pixel_count >= 8_000_000 {
+                None
+            } else {
+                Some("below op GPU threshold")
+            }
+        }
+        _ => Some("cpu faster by policy"),
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn default_gpu_batch_skip_reason(
+    ops: &[&dyn Operation],
+    pixel_count: usize,
+) -> Option<&'static str> {
+    if ops.iter().any(|op| op.name() == "denoise") {
+        return Some("denoise gpu drift review");
+    }
+    if ops.iter().any(|op| op.name() == "noise_reduction") {
+        return None;
+    }
+    if pixel_count < 8_000_000 {
+        return Some("below batch GPU threshold");
+    }
+    if ops.iter().map(|op| gpu_batch_score(op.name())).sum::<u32>() >= 6 {
+        None
+    } else {
+        Some("batch too cheap for GPU")
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_batch_score(op_name: &str) -> u32 {
+    match op_name {
+        "shadow_exposure" | "hsl_panel" => 3,
+        "hue_shift" | "vibrance" | "sharpen" | "blur" => 2,
+        "saturation" | "sepia" | "white_balance" | "vignette" | "highlights_shadows"
+        | "split_tone" => 1,
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_bench_enabled() -> bool {
+    std::env::var("RASTERLAB_GPU_BENCH").as_deref() == Ok("1")
+}
+
+#[cfg(feature = "gpu")]
 fn log_gpu(message: &str) {
-    if std::env::var("RASTERLAB_GPU_LOG").as_deref() == Ok("1") {
+    if std::env::var("RASTERLAB_GPU_LOG").as_deref() == Ok("1") || gpu_bench_enabled() {
         eprintln!("[rasterlab-gpu] {message}");
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn log_gpu_bench_comparison(
+    kind: &str,
+    name: &str,
+    pixels: usize,
+    cpu: Duration,
+    gpu: Option<Duration>,
+    comparison: ImageComparison,
+) {
+    match gpu {
+        Some(gpu) => eprintln!(
+            "[rasterlab-gpu-bench] {kind}={name} pixels={pixels} cpu={cpu:?} gpu_total={gpu:?} speedup={:.2}x max_delta={} mean_delta={:.3} mismatched_pixels={}",
+            duration_ratio(cpu, gpu),
+            comparison.max_delta,
+            comparison.mean_delta,
+            comparison.mismatched_pixels
+        ),
+        None => eprintln!(
+            "[rasterlab-gpu-bench] {kind}={name} pixels={pixels} cpu={cpu:?} gpu_total=n/a max_delta={} mean_delta={:.3} mismatched_pixels={}",
+            comparison.max_delta, comparison.mean_delta, comparison.mismatched_pixels
+        ),
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_timings_total(timings: rasterlab_gpu::GpuTimings) -> Duration {
+    timings.upload + timings.dispatch + timings.readback
+}
+
+#[cfg(feature = "gpu")]
+fn duration_ratio(cpu: Duration, gpu: Duration) -> f64 {
+    let gpu_secs = gpu.as_secs_f64();
+    if gpu_secs <= f64::EPSILON {
+        0.0
+    } else {
+        cpu.as_secs_f64() / gpu_secs
+    }
+}
+
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone, Copy)]
+struct ImageComparison {
+    max_delta: u8,
+    mean_delta: f64,
+    mismatched_pixels: usize,
+}
+
+#[cfg(feature = "gpu")]
+fn compare_images(cpu: &Image, gpu: &Image) -> ImageComparison {
+    if cpu.width != gpu.width || cpu.height != gpu.height || cpu.data.len() != gpu.data.len() {
+        return ImageComparison {
+            max_delta: u8::MAX,
+            mean_delta: f64::INFINITY,
+            mismatched_pixels: usize::MAX,
+        };
+    }
+
+    let mut max_delta = 0u8;
+    let mut sum_delta = 0u64;
+    let mut channel_count = 0u64;
+    let mut mismatched_pixels = 0usize;
+    for (cpu_px, gpu_px) in cpu.data.chunks_exact(4).zip(gpu.data.chunks_exact(4)) {
+        let mut pixel_mismatched = false;
+        for channel in 0..4 {
+            let delta = cpu_px[channel].abs_diff(gpu_px[channel]);
+            max_delta = max_delta.max(delta);
+            sum_delta += u64::from(delta);
+            channel_count += 1;
+            pixel_mismatched |= delta != 0;
+        }
+        if pixel_mismatched {
+            mismatched_pixels += 1;
+        }
+    }
+
+    ImageComparison {
+        max_delta,
+        mean_delta: sum_delta as f64 / channel_count.max(1) as f64,
+        mismatched_pixels,
     }
 }
 
@@ -670,6 +898,8 @@ fn blit_region(dst: &mut Image, src: &Image, x: u32, y: u32) {
 mod tests {
     use super::*;
     use rasterlab_core::ops::BrightnessContrastOp;
+    #[cfg(feature = "gpu")]
+    use rasterlab_core::ops::{LevelsOp, SaturationOp, SepiaOp, ShadowExposureOp, SharpenOp};
 
     #[cfg(feature = "gpu")]
     async fn make_gpu_context() -> Option<GpuContext> {
@@ -763,6 +993,65 @@ mod tests {
         assert_eq!(intermediates[1].1.data, out.data);
         assert_eq!(intermediates[2].0, 2);
         assert_eq!(intermediates[2].1.data, out.data);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn image_comparison_reports_pixel_drift() {
+        let mut cpu = Image::new(2, 1);
+        cpu.data = vec![10, 20, 30, 255, 50, 60, 70, 255];
+        let mut gpu = cpu.deep_clone();
+        gpu.data[1] = 23;
+        gpu.data[4] = 49;
+
+        let comparison = compare_images(&cpu, &gpu);
+        assert_eq!(comparison.max_delta, 3);
+        assert_eq!(comparison.mismatched_pixels, 2);
+        assert!((comparison.mean_delta - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_policy_keeps_cheap_ops_on_cpu_but_allows_winning_batches() {
+        assert_eq!(
+            default_gpu_op_skip_reason("brightness_contrast", 20_000_000),
+            Some("cpu faster by policy")
+        );
+        assert_eq!(
+            default_gpu_op_skip_reason("denoise", 20_000_000),
+            Some("denoise gpu drift review")
+        );
+        assert_eq!(default_gpu_op_skip_reason("noise_reduction", 1), None);
+        assert_eq!(
+            default_gpu_op_skip_reason("shadow_exposure", 1_000_000),
+            Some("below op GPU threshold")
+        );
+        assert_eq!(
+            default_gpu_op_skip_reason("shadow_exposure", 20_000_000),
+            None
+        );
+
+        let levels = LevelsOp::new(0.02, 0.98, 1.0);
+        let saturation = SaturationOp::new(1.1);
+        let sepia = SepiaOp::new(0.3);
+        let shadow = ShadowExposureOp::new(0.5, 1.5);
+        let sharpen = SharpenOp::new(0.5);
+
+        let cheap_batch: [&dyn Operation; 3] = [&levels, &saturation, &sharpen];
+        assert_eq!(
+            default_gpu_batch_skip_reason(&cheap_batch, 45_000_000),
+            Some("batch too cheap for GPU")
+        );
+
+        let winning_batch: [&dyn Operation; 4] = [&saturation, &sepia, &shadow, &sharpen];
+        assert_eq!(
+            default_gpu_batch_skip_reason(&winning_batch, 1_000_000),
+            Some("below batch GPU threshold")
+        );
+        assert_eq!(
+            default_gpu_batch_skip_reason(&winning_batch, 20_000_000),
+            None
+        );
     }
 
     #[cfg(feature = "gpu")]

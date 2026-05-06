@@ -1529,9 +1529,9 @@ fn apply_hsl_panel(
         height: image.height,
         pixel_count: image.width.saturating_mul(image.height),
         _pad: 0,
-        hue: op.hue,
-        sat: op.saturation,
-        lum: op.luminance,
+        hue: pack_hsl_panel_values(op.hue),
+        sat: pack_hsl_panel_values(op.saturation),
+        lum: pack_hsl_panel_values(op.luminance),
     };
     let params_buffer = ctx
         .device
@@ -1556,6 +1556,13 @@ fn apply_hsl_panel(
         height: image.height,
         buffer: output,
     })
+}
+
+fn pack_hsl_panel_values(values: [f32; 8]) -> [[f32; 4]; 2] {
+    [
+        [values[0], values[1], values[2], values[3]],
+        [values[4], values[5], values[6], values[7]],
+    ]
 }
 
 fn apply_sharpen(ctx: &GpuContext, op: &SharpenOp, image: GpuImage) -> Result<GpuImage, GpuError> {
@@ -1797,9 +1804,9 @@ struct HslPanelParams {
     height: u32,
     pixel_count: u32,
     _pad: u32,
-    hue: [f32; 8],
-    sat: [f32; 8],
-    lum: [f32; 8],
+    hue: [[f32; 4]; 2],
+    sat: [[f32; 4]; 2],
+    lum: [[f32; 4]; 2],
 }
 
 #[repr(C)]
