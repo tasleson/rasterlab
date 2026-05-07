@@ -187,50 +187,18 @@ fn apply_brightness_contrast(
             contents: bytemuck::cast_slice(&lut_u32),
             usage: wgpu::BufferUsages::STORAGE,
         });
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab brightness_contrast bind group"),
-        layout: &ctx.brightness_contrast.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: lut_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab brightness_contrast encoder"),
-        });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab brightness_contrast pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.brightness_contrast.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let groups_x = params.width.div_ceil(WORKGROUP_SIZE_X);
-        let groups_y = params.height.div_ceil(WORKGROUP_SIZE_Y);
-        pass.dispatch_workgroups(groups_x, groups_y, 1);
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
-
+    dispatch_4binding(
+        ctx,
+        &ctx.brightness_contrast.pipeline,
+        &ctx.brightness_contrast.bind_group_layout,
+        "rasterlab brightness_contrast",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        &lut_buffer,
+        image.width,
+        image.height,
+    )?;
     Ok(GpuImage {
         width: image.width,
         height: image.height,
@@ -268,50 +236,18 @@ fn apply_curves(ctx: &GpuContext, op: &CurvesOp, image: GpuImage) -> Result<GpuI
             contents: bytemuck::cast_slice(&lut_u32),
             usage: wgpu::BufferUsages::STORAGE,
         });
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab curves bind group"),
-        layout: &ctx.curves.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: lut_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab curves encoder"),
-        });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab curves pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.curves.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let groups_x = params.width.div_ceil(WORKGROUP_SIZE_X);
-        let groups_y = params.height.div_ceil(WORKGROUP_SIZE_Y);
-        pass.dispatch_workgroups(groups_x, groups_y, 1);
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
-
+    dispatch_4binding(
+        ctx,
+        &ctx.curves.pipeline,
+        &ctx.curves.bind_group_layout,
+        "rasterlab curves",
+        &image.buffer,
+        &output,
+        &params_buffer,
+        &lut_buffer,
+        image.width,
+        image.height,
+    )?;
     Ok(GpuImage {
         width: image.width,
         height: image.height,
@@ -794,6 +730,64 @@ fn dispatch_3binding(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: params.as_entire_binding(),
+            },
+        ],
+    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(label),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            width.div_ceil(WORKGROUP_SIZE_X),
+            height.div_ceil(WORKGROUP_SIZE_Y),
+            1,
+        );
+    }
+    ctx.queue.submit(Some(encoder.finish()));
+    ctx.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| GpuError::Poll(e.to_string()))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_4binding(
+    ctx: &GpuContext,
+    pipeline: &wgpu::ComputePipeline,
+    layout: &wgpu::BindGroupLayout,
+    label: &str,
+    b0: &wgpu::Buffer,
+    b1: &wgpu::Buffer,
+    b2: &wgpu::Buffer,
+    b3: &wgpu::Buffer,
+    width: u32,
+    height: u32,
+) -> Result<(), GpuError> {
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: b0.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: b1.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: b2.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: b3.as_entire_binding(),
             },
         ],
     });
