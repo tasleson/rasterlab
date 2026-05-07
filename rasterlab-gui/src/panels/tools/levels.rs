@@ -158,7 +158,7 @@ fn draw_combined_histogram(
     histogram: Option<&HistogramData>,
     black: f32,
     white: f32,
-    _mid: f32,
+    mid: f32,
 ) {
     const HEIGHT: f32 = 96.0;
 
@@ -260,8 +260,8 @@ fn draw_combined_histogram(
         egui::Stroke::NONE,
     ));
 
-    // Midtone marker
-    let mid_frac = black + (white - black) * 0.5;
+    // Midtone marker: input value whose gamma-corrected output is 0.5 is 0.5^(1/mid).
+    let mid_frac = black + (white - black) * 0.5_f32.powf(1.0 / mid.clamp(0.01, 10.0));
     let mx = rect.left() + mid_frac * width;
     painter.line_segment(
         [egui::pos2(mx, rect.top()), egui::pos2(mx, rect.bottom())],

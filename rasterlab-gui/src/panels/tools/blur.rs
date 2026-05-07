@@ -57,6 +57,7 @@ impl Tool for BlurTool {
             {
                 self.preview_active = false;
                 action = ToolAction::PushOp(Box::new(BlurOp::new(self.radius)));
+                self.radius = 2.0;
             }
             if self.preview_active
                 && ui
