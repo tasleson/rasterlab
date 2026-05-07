@@ -480,3 +480,444 @@ fn v3_still_reads() {
     assert!(report.file_hash_ok);
     assert!(!report.recc_present);
 }
+
+// ── Error-walk and escalation tests ──────────────────────────────────────────
+//
+// These tests fill the gaps that hardcoded-offset tests leave open:
+//
+//   • Every data shard (1 .. data_shards-1) is independently detectable and
+//     repairable — no "dark spots" in RECC coverage.
+//   • Escalating damage from 1 shard to parity_shards all repair; one shard
+//     beyond that fails gracefully.
+//   • Sub-shard error size is irrelevant: 1 byte, 512 bytes, and 4 KiB − 1
+//     byte of damage in the same shard produce identical outcomes (per-shard
+//     Blake3 detection is binary).
+//   • A burst straddling a shard boundary creates two erasures and requires
+//     two parity shards.
+//   • Non-ORIG chunks (META) in the protected region are detectable and
+//     repairable.
+//   • detect-only mode (repair_to = None) must not modify the source file.
+//
+// NOTE — shard 0 is skipped in the sweep.  Shard 0 contains the file magic
+// and chunk tag/length fields that scan_chunks needs to bootstrap RECC
+// discovery.  Corruption hitting those fields prevents the repair from
+// locating RECC at all, so recovery is not guaranteed.  Corruption in chunk
+// DATA within shard 0 (e.g. the META payload) is still recoverable — the
+// chunk walker only needs the tag/length fields to navigate.  That scenario
+// is covered explicitly by meta_chunk_corruption_detected_and_repaired.
+
+/// Walk a single-byte corruption through the midpoint of every data shard
+/// (shards 1 .. data_shards − 1).  Each position must be independently
+/// detected and repaired within the parity budget.
+#[test]
+fn shard_sweep_every_position_detectable_and_repairable() {
+    // 100 KiB → 26 data shards, 2 parity. Any single-shard erasure is within budget.
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let clean = std::fs::read(tmp.path()).unwrap();
+    let (shard_size, data_shards, _parity) = read_recc_header(&clean);
+
+    for shard_idx in 1..data_shards {
+        let mut corrupt = clean.clone();
+        corrupt[shard_idx * shard_size + shard_size / 2] ^= 0xFF;
+
+        let orig_tmp = NamedTempFile::new().unwrap();
+        std::fs::write(orig_tmp.path(), &corrupt).unwrap();
+
+        let repaired_tmp = NamedTempFile::new().unwrap();
+        let report = verify_and_repair(orig_tmp.path(), Some(repaired_tmp.path())).unwrap();
+
+        assert!(
+            !report.file_hash_ok,
+            "shard {shard_idx}: corruption must be detected"
+        );
+        assert!(
+            report.repaired,
+            "shard {shard_idx}: single shard within 2-parity budget must be repairable; {report:?}"
+        );
+
+        let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+        assert_eq!(
+            loaded.original_bytes, rlab.original_bytes,
+            "shard {shard_idx}: recovered data must match original"
+        );
+    }
+}
+
+/// Damage 1, 2, … parity_shards distinct shards — each must repair.  One
+/// shard beyond the budget must fail gracefully (no panic, no false success).
+/// Uses the 100 KiB fixture (parity_shards = 2) for a predictable threshold.
+#[test]
+fn progressive_escalation_hits_parity_limit() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let clean = std::fs::read(tmp.path()).unwrap();
+    let (shard_size, _, parity_shards) = read_recc_header(&clean);
+    assert!(
+        parity_shards >= 2,
+        "fixture assumption: 100 KiB → ≥ 2 parity shards; got {parity_shards}"
+    );
+
+    // 1 .. parity_shards damaged shards: every count must repair.
+    for n in 1..=parity_shards {
+        let mut corrupt = clean.clone();
+        for i in 0..n {
+            corrupt[(i + 1) * shard_size + 100] ^= 0xFF; // shards 1, 2, …
+        }
+        let orig_tmp = NamedTempFile::new().unwrap();
+        std::fs::write(orig_tmp.path(), &corrupt).unwrap();
+
+        let repaired_tmp = NamedTempFile::new().unwrap();
+        let report = verify_and_repair(orig_tmp.path(), Some(repaired_tmp.path())).unwrap();
+        assert!(
+            report.repaired,
+            "{n} damaged shard(s) ≤ {parity_shards} parity: must repair; {report:?}"
+        );
+        let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+        assert_eq!(
+            loaded.original_bytes, rlab.original_bytes,
+            "{n} shards: recovered data must match original"
+        );
+    }
+
+    // parity_shards + 1 shards damaged: must fail gracefully.
+    let n_over = parity_shards + 1;
+    {
+        let mut corrupt = clean.clone();
+        for i in 0..n_over {
+            corrupt[(i + 1) * shard_size + 100] ^= 0xFF;
+        }
+        let orig_tmp = NamedTempFile::new().unwrap();
+        std::fs::write(orig_tmp.path(), &corrupt).unwrap();
+
+        let repaired_tmp = NamedTempFile::new().unwrap();
+        let report = verify_and_repair(orig_tmp.path(), Some(repaired_tmp.path())).unwrap();
+        assert!(
+            !report.repaired,
+            "{n_over} shards damaged (> {parity_shards} parity): must be unrepairable; {report:?}"
+        );
+        assert!(!report.file_hash_ok);
+    }
+}
+
+/// Corruption size within a single shard does not affect recovery.  Blake3
+/// per-shard detection is binary: any sub-shard damage erases the whole shard
+/// and triggers the same RS reconstruction path regardless of damage extent.
+#[test]
+fn intra_shard_error_size_does_not_affect_recovery() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let clean = std::fs::read(tmp.path()).unwrap();
+    let (shard_size, _, _) = read_recc_header(&clean);
+    let shard_base = shard_size; // shard 1
+
+    for corrupt_len in [1_usize, 512, shard_size - 1] {
+        let mut corrupt = clean.clone();
+        for b in corrupt[shard_base..shard_base + corrupt_len].iter_mut() {
+            *b ^= 0xFF;
+        }
+
+        let orig_tmp = NamedTempFile::new().unwrap();
+        std::fs::write(orig_tmp.path(), &corrupt).unwrap();
+
+        let repaired_tmp = NamedTempFile::new().unwrap();
+        let report = verify_and_repair(orig_tmp.path(), Some(repaired_tmp.path())).unwrap();
+        assert!(
+            report.repaired,
+            "{corrupt_len}-byte corruption in shard 1 must be repairable; {report:?}"
+        );
+
+        let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+        assert_eq!(
+            loaded.original_bytes, rlab.original_bytes,
+            "{corrupt_len}-byte corruption: data must be fully recovered"
+        );
+    }
+}
+
+/// A burst straddling a shard boundary creates two separate erasures.  With
+/// parity_shards ≥ 2 (100 KiB) it is repairable; with parity_shards = 1
+/// (32 KiB) it is not.
+#[test]
+fn burst_across_shard_boundary_counts_as_two_erasures() {
+    // 100 KiB, 2 parity: boundary burst IS repairable.
+    {
+        let rlab = make_rlab_large();
+        let tmp = NamedTempFile::new().unwrap();
+        rlab.write_v4(tmp.path()).unwrap();
+
+        let clean = std::fs::read(tmp.path()).unwrap();
+        let (shard_size, _, parity_shards) = read_recc_header(&clean);
+        assert!(parity_shards >= 2);
+
+        // 8 bytes: last 4 in shard 1, first 4 in shard 2.
+        let boundary = 2 * shard_size;
+        let mut corrupt = clean.clone();
+        for b in corrupt[boundary - 4..boundary + 4].iter_mut() {
+            *b ^= 0xFF;
+        }
+
+        let orig_tmp = NamedTempFile::new().unwrap();
+        std::fs::write(orig_tmp.path(), &corrupt).unwrap();
+        let repaired_tmp = NamedTempFile::new().unwrap();
+        let report = verify_and_repair(orig_tmp.path(), Some(repaired_tmp.path())).unwrap();
+        assert!(
+            report.repaired,
+            "boundary burst (2 erasures, {parity_shards} parity): must repair; {report:?}"
+        );
+        let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+        assert_eq!(loaded.original_bytes, rlab.original_bytes);
+    }
+
+    // 32 KiB, 1 parity: boundary burst IS NOT repairable.
+    {
+        let rlab = make_rlab();
+        let tmp = NamedTempFile::new().unwrap();
+        rlab.write_v4(tmp.path()).unwrap();
+
+        let clean = std::fs::read(tmp.path()).unwrap();
+        let (shard_size, _, parity_shards) = read_recc_header(&clean);
+        assert_eq!(parity_shards, 1, "32 KiB fixture should have exactly 1 parity shard");
+
+        let boundary = 2 * shard_size;
+        let mut corrupt = clean.clone();
+        for b in corrupt[boundary - 4..boundary + 4].iter_mut() {
+            *b ^= 0xFF;
+        }
+
+        let orig_tmp = NamedTempFile::new().unwrap();
+        std::fs::write(orig_tmp.path(), &corrupt).unwrap();
+        let repaired_tmp = NamedTempFile::new().unwrap();
+        let report = verify_and_repair(orig_tmp.path(), Some(repaired_tmp.path())).unwrap();
+        assert!(
+            !report.repaired,
+            "boundary burst (2 erasures, {parity_shards} parity): must be unrepairable; {report:?}"
+        );
+    }
+}
+
+/// META-chunk payload is inside the RECC-protected region. Corruption there
+/// must be detected and repaired — restoring the original metadata — even
+/// though it falls in shard 0.  The chunk walker can still locate RECC
+/// because chunk tag and length fields (the fields it uses to navigate) are
+/// not modified.
+#[test]
+fn meta_chunk_corruption_detected_and_repaired() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    // META is the first chunk, starting at byte 10 (after magic[8] + version[2]).
+    // Data begins at byte 22 (10 + tag[4] + len[8]).  Flip two bytes 18 and 19
+    // bytes into the JSON body — well past the chunk header fields.
+    const META_DATA_START: usize = 10 + 4 + 8; // = 22
+    bytes[META_DATA_START + 18] ^= 0xFF;
+    bytes[META_DATA_START + 19] ^= 0xFF;
+    std::fs::write(tmp.path(), &bytes).unwrap();
+
+    let repaired_tmp = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(tmp.path(), Some(repaired_tmp.path())).unwrap();
+    assert!(
+        report.damaged_chunks.iter().any(|t| t == "META"),
+        "META corruption must be reported in damaged_chunks; {report:?}"
+    );
+    assert!(report.repaired, "META corruption must be repairable; {report:?}");
+
+    let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+    assert_eq!(
+        loaded.meta.app_version, rlab.meta.app_version,
+        "repaired META must restore original app_version"
+    );
+    assert_eq!(loaded.original_bytes, rlab.original_bytes);
+}
+
+/// verify_and_repair with repair_to = None must detect damage and report it
+/// without writing anything or modifying the source file.
+#[test]
+fn detect_without_repair_leaves_file_unchanged() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let clean = std::fs::read(tmp.path()).unwrap();
+    let (shard_size, _, _) = read_recc_header(&clean);
+
+    let mut corrupt = clean.clone();
+    flip_16_bytes(&mut corrupt, shard_size + 100);
+    std::fs::write(tmp.path(), &corrupt).unwrap();
+
+    let report = verify_and_repair(tmp.path(), None).unwrap();
+
+    assert!(!report.file_hash_ok, "damage must be detected");
+    assert!(report.recc_present);
+    assert!(!report.repaired, "repair_to=None must not produce a repair");
+    assert_eq!(
+        std::fs::read(tmp.path()).unwrap(),
+        corrupt,
+        "source file must not be modified by detect-only verify"
+    );
+}
+
+/// If a file is truncated before the RECC copies, verification must report
+/// corruption without panicking or claiming a repair. There is no valid parity
+/// payload left to reconstruct from.
+#[test]
+fn truncated_file_without_recc_reports_unrepairable() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let clean = std::fs::read(tmp.path()).unwrap();
+    let first_recc = find_recc_tag_offsets(&clean)[0];
+    let truncated = &clean[..first_recc];
+    std::fs::write(tmp.path(), truncated).unwrap();
+
+    let repaired_tmp = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(tmp.path(), Some(repaired_tmp.path())).unwrap();
+
+    assert!(!report.file_hash_ok, "truncation must fail file hash");
+    assert!(!report.recc_present, "truncated file has no readable RECC chunk");
+    assert!(
+        !report.repaired,
+        "truncated file without RECC must not report repaired: {report:?}"
+    );
+}
+
+// ── Documented bitrot / silent-corruption patterns ───────────────────────────
+//
+// These mirror corruption modes discussed in storage-integrity literature:
+// single-bit media decay, spatially local checksum mismatches, misdirected
+// writes, lost/stale writes, and parity/checksum-region damage.
+
+#[test]
+fn documented_single_bit_flip_repairs() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    let (shard_size, _, _) = read_recc_header(&bytes);
+    bytes[shard_size + 123] ^= 0b0000_0001;
+    std::fs::write(tmp.path(), &bytes).unwrap();
+
+    let repaired_tmp = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(tmp.path(), Some(repaired_tmp.path())).unwrap();
+    assert!(report.repaired, "single-bit flip must repair: {report:?}");
+
+    let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+    assert_eq!(loaded.original_bytes, rlab.original_bytes);
+}
+
+#[test]
+fn documented_spatially_local_corruption_repairs_within_budget() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    let (shard_size, _, parity_shards) = read_recc_header(&bytes);
+    assert!(parity_shards >= 2);
+
+    // Two nearby corruptions in adjacent shards: spatial locality consumes two
+    // erasures, but remains within this fixture's parity budget.
+    bytes[shard_size + shard_size - 32] ^= 0x5A;
+    bytes[2 * shard_size + 32] ^= 0xA5;
+    std::fs::write(tmp.path(), &bytes).unwrap();
+
+    let repaired_tmp = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(tmp.path(), Some(repaired_tmp.path())).unwrap();
+    assert!(
+        report.repaired,
+        "adjacent-shard localized corruption must repair: {report:?}"
+    );
+
+    let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+    assert_eq!(loaded.original_bytes, rlab.original_bytes);
+}
+
+#[test]
+fn documented_misdirected_write_like_shard_swap_repairs() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    let (shard_size, _, parity_shards) = read_recc_header(&bytes);
+    assert!(parity_shards >= 2);
+
+    // Simulate data written to the wrong location by swapping two complete data
+    // shards. Both locations contain valid-looking bytes, but their shard hashes
+    // identify them as two erasures.
+    let shard_1 = shard_size..2 * shard_size;
+    let shard_3 = 3 * shard_size..4 * shard_size;
+    let saved = bytes[shard_1.clone()].to_vec();
+    bytes.copy_within(shard_3.clone(), shard_1.start);
+    bytes[shard_3].copy_from_slice(&saved);
+    std::fs::write(tmp.path(), &bytes).unwrap();
+
+    let repaired_tmp = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(tmp.path(), Some(repaired_tmp.path())).unwrap();
+    assert!(
+        report.repaired,
+        "misdirected-write-like shard swap must repair: {report:?}"
+    );
+
+    let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+    assert_eq!(loaded.original_bytes, rlab.original_bytes);
+}
+
+#[test]
+fn documented_lost_write_like_zeroed_shard_repairs() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    let (shard_size, _, _) = read_recc_header(&bytes);
+    bytes[shard_size..2 * shard_size].fill(0);
+    std::fs::write(tmp.path(), &bytes).unwrap();
+
+    let repaired_tmp = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(tmp.path(), Some(repaired_tmp.path())).unwrap();
+    assert!(
+        report.repaired,
+        "lost-write-like zeroed shard must repair: {report:?}"
+    );
+
+    let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
+    assert_eq!(loaded.original_bytes, rlab.original_bytes);
+}
+
+#[test]
+fn documented_parity_region_corruption_is_healed_from_duplicate_copy() {
+    let rlab = make_rlab_large();
+    let tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(tmp.path()).unwrap();
+
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    let recc_offsets = find_recc_tag_offsets(&bytes);
+    flip_inside_recc_copy(&mut bytes, recc_offsets[0]);
+    std::fs::write(tmp.path(), &bytes).unwrap();
+
+    let repaired_tmp = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(tmp.path(), Some(repaired_tmp.path())).unwrap();
+    assert!(
+        report.damaged_chunks.iter().any(|t| t == "RECC"),
+        "parity-region corruption should be reported: {report:?}"
+    );
+    assert!(
+        report.repaired,
+        "duplicate RECC copy must heal parity-region corruption: {report:?}"
+    );
+
+    let clean = verify_and_repair(repaired_tmp.path(), None).unwrap();
+    assert!(clean.file_hash_ok);
+    assert!(clean.damaged_chunks.is_empty());
+}
