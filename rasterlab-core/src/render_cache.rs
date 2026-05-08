@@ -124,3 +124,137 @@ impl RenderCache {
         self.generation
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::Image;
+
+    fn make_img() -> Arc<Image> {
+        Arc::new(Image::new(1, 1))
+    }
+
+    fn make_source() -> Arc<Image> {
+        make_img()
+    }
+
+    #[test]
+    fn generation_starts_zero() {
+        assert_eq!(RenderCache::new().generation(), 0);
+    }
+
+    #[test]
+    fn empty_cache_returns_source_at_zero() {
+        let cache = RenderCache::new();
+        let src = make_source();
+        let (idx, img) = cache.best_start(&src, 5);
+        assert_eq!(idx, 0);
+        assert!(Arc::ptr_eq(&img, &src));
+    }
+
+    #[test]
+    fn store_and_best_start() {
+        let mut cache = RenderCache::new();
+        let src = make_source();
+        let stored = make_img();
+        cache.store(0, Arc::clone(&stored));
+        let (idx, img) = cache.best_start(&src, 2);
+        assert_eq!(idx, 1);
+        assert!(Arc::ptr_eq(&img, &stored));
+    }
+
+    #[test]
+    fn best_start_returns_closest() {
+        let mut cache = RenderCache::new();
+        let src = make_source();
+        let img0 = make_img();
+        let img2 = make_img();
+        cache.store(0, Arc::clone(&img0));
+        cache.store(2, Arc::clone(&img2));
+        let (idx, img) = cache.best_start(&src, 5);
+        assert_eq!(idx, 3);
+        assert!(Arc::ptr_eq(&img, &img2));
+    }
+
+    #[test]
+    fn invalidate_from_clears_and_bumps_gen() {
+        let mut cache = RenderCache::new();
+        let src = make_source();
+        let img0 = make_img();
+        cache.store(0, Arc::clone(&img0));
+        cache.store(1, make_img());
+        cache.store(2, make_img());
+        let gen_before = cache.generation();
+        cache.invalidate_from(1);
+        assert!(cache.generation() > gen_before);
+        // img at index 0 is still present
+        let (idx, img) = cache.best_start(&src, 3);
+        assert_eq!(idx, 1);
+        assert!(Arc::ptr_eq(&img, &img0));
+    }
+
+    #[test]
+    fn truncate_shrinks() {
+        let mut cache = RenderCache::new();
+        let src = make_source();
+        let img0 = make_img();
+        cache.store(0, Arc::clone(&img0));
+        cache.store(1, make_img());
+        cache.store(2, make_img());
+        cache.truncate(1);
+        let (idx, img) = cache.best_start(&src, 3);
+        assert_eq!(idx, 1);
+        assert!(Arc::ptr_eq(&img, &img0));
+    }
+
+    #[test]
+    fn clear_empties_and_bumps_gen() {
+        let mut cache = RenderCache::new();
+        let src = make_source();
+        cache.store(0, make_img());
+        let gen_before = cache.generation();
+        cache.clear();
+        assert!(cache.generation() > gen_before);
+        let (idx, _) = cache.best_start(&src, 3);
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn take_start_vacates_slot() {
+        let mut cache = RenderCache::new();
+        let src = make_source();
+        let stored = make_img();
+        cache.store(0, Arc::clone(&stored));
+        let (idx, img) = cache.take_start(&src, 2);
+        assert_eq!(idx, 1);
+        assert!(Arc::ptr_eq(&img, &stored));
+        // Slot is now vacated — falls back to source
+        let (idx2, img2) = cache.best_start(&src, 2);
+        assert_eq!(idx2, 0);
+        assert!(Arc::ptr_eq(&img2, &src));
+    }
+
+    #[test]
+    fn store_batch_fills_correctly() {
+        let mut cache = RenderCache::new();
+        let src = make_source();
+        let img_a = make_img();
+        let img_b = make_img();
+        cache.store_batch(1, vec![Arc::clone(&img_a), Arc::clone(&img_b)]);
+        let (idx, img) = cache.best_start(&src, 4);
+        assert_eq!(idx, 3);
+        assert!(Arc::ptr_eq(&img, &img_b));
+    }
+
+    #[test]
+    fn store_sparse_fills_at_right_positions() {
+        let mut cache = RenderCache::new();
+        let src = make_source();
+        let img_a = make_img();
+        let img_b = make_img();
+        cache.store_sparse(1, vec![(0, Arc::clone(&img_a)), (2, Arc::clone(&img_b))]);
+        let (idx, img) = cache.best_start(&src, 5);
+        assert_eq!(idx, 4);
+        assert!(Arc::ptr_eq(&img, &img_b));
+    }
+}

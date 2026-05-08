@@ -545,3 +545,170 @@ fn apply_op(current: Arc<Image>, entry: &EditEntry) -> RasterResult<Arc<Image>> 
     })?;
     Ok(Arc::new(result))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::flip::FlipOp;
+    use crate::ops::sepia::SepiaOp;
+
+    fn make_pipeline() -> EditPipeline {
+        EditPipeline::new(Image::new(4, 4))
+    }
+
+    fn sepia_op(strength: f32) -> Box<dyn Operation> {
+        Box::new(SepiaOp::new(strength))
+    }
+
+    fn solid_red_pipeline() -> EditPipeline {
+        let mut img = Image::new(4, 4);
+        img.data.chunks_mut(4).for_each(|p| {
+            p[0] = 255;
+            p[1] = 0;
+            p[2] = 0;
+            p[3] = 255;
+        });
+        EditPipeline::new(img)
+    }
+
+    #[test]
+    fn new_pipeline_is_empty() {
+        let p = make_pipeline();
+        assert_eq!(p.cursor(), 0);
+        assert!(p.ops().is_empty());
+        assert!(!p.can_undo());
+        assert!(!p.can_redo());
+    }
+
+    #[test]
+    fn push_advances_cursor() {
+        let mut p = make_pipeline();
+        p.push_op(sepia_op(1.0));
+        assert_eq!(p.cursor(), 1);
+        assert_eq!(p.ops().len(), 1);
+    }
+
+    #[test]
+    fn push_truncates_redo() {
+        let mut p = make_pipeline();
+        p.push_op(sepia_op(1.0));
+        p.undo();
+        assert!(p.can_redo());
+        p.push_op(sepia_op(0.5));
+        assert!(!p.can_redo());
+    }
+
+    #[test]
+    fn render_empty_returns_source_dims() {
+        let mut p = make_pipeline();
+        let result = p.render().unwrap();
+        assert_eq!(result.width, 4);
+        assert_eq!(result.height, 4);
+    }
+
+    #[test]
+    fn render_applies_op() {
+        let mut p = solid_red_pipeline();
+        p.push_op(sepia_op(1.0));
+        let result = p.render().unwrap();
+        // Sepia on pure red changes the green/blue channels
+        let g = result.data[1];
+        let b = result.data[2];
+        // Full-sepia pure red: G = 0.349*255 ≈ 89, B = 0.272*255 ≈ 69
+        assert!(g > 0, "sepia should add green to red");
+        assert!(b > 0, "sepia should add blue to red");
+    }
+
+    #[test]
+    fn render_disabled_op_is_skipped() {
+        let mut p = solid_red_pipeline();
+        p.push_op(sepia_op(1.0));
+        p.toggle_op(0);
+        let result = p.render().unwrap();
+        assert_eq!(result.data[0], 255);
+        assert_eq!(result.data[1], 0);
+        assert_eq!(result.data[2], 0);
+    }
+
+    #[test]
+    fn undo_decrements_cursor() {
+        let mut p = make_pipeline();
+        p.push_op(sepia_op(0.5));
+        p.push_op(sepia_op(1.0));
+        p.undo();
+        assert_eq!(p.cursor(), 1);
+        assert!(p.can_redo());
+    }
+
+    #[test]
+    fn redo_increments_cursor() {
+        let mut p = make_pipeline();
+        p.push_op(sepia_op(0.5));
+        p.push_op(sepia_op(1.0));
+        p.undo();
+        p.redo();
+        assert_eq!(p.cursor(), 2);
+        assert!(!p.can_redo());
+    }
+
+    #[test]
+    fn undo_empty_returns_false() {
+        let mut p = make_pipeline();
+        assert!(!p.undo());
+    }
+
+    #[test]
+    fn redo_empty_returns_false() {
+        let mut p = make_pipeline();
+        assert!(!p.redo());
+    }
+
+    #[test]
+    fn remove_op_works() {
+        let mut p = make_pipeline();
+        p.push_op(sepia_op(0.5));
+        p.push_op(sepia_op(1.0));
+        assert!(p.remove_op(0));
+        assert_eq!(p.ops().len(), 1);
+        assert_eq!(p.cursor(), 1);
+    }
+
+    #[test]
+    fn remove_op_out_of_bounds_returns_false() {
+        let mut p = make_pipeline();
+        assert!(!p.remove_op(0));
+    }
+
+    #[test]
+    fn reorder_op_swaps_entries() {
+        let mut p = make_pipeline();
+        p.push_op(sepia_op(0.1));
+        p.push_op(sepia_op(0.9));
+        assert!(p.reorder_op(0, 1));
+        let first = p.ops()[0]
+            .operation
+            .as_any()
+            .and_then(|a| a.downcast_ref::<SepiaOp>())
+            .unwrap();
+        assert!((first.strength - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn toggle_op_flips_enabled() {
+        let mut p = make_pipeline();
+        p.push_op(sepia_op(1.0));
+        assert!(p.ops()[0].enabled);
+        p.toggle_op(0);
+        assert!(!p.ops()[0].enabled);
+        p.toggle_op(0);
+        assert!(p.ops()[0].enabled);
+    }
+
+    #[test]
+    fn geo_gen_increases_on_geometric_op() {
+        let mut p = make_pipeline();
+        let gen_before = p.geometric_gen();
+        p.push_op(Box::new(FlipOp::horizontal()));
+        assert!(p.geometric_gen() > gen_before);
+    }
+}

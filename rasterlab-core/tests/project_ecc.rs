@@ -683,7 +683,10 @@ fn burst_across_shard_boundary_counts_as_two_erasures() {
 
         let clean = std::fs::read(tmp.path()).unwrap();
         let (shard_size, _, parity_shards) = read_recc_header(&clean);
-        assert_eq!(parity_shards, 1, "32 KiB fixture should have exactly 1 parity shard");
+        assert_eq!(
+            parity_shards, 1,
+            "32 KiB fixture should have exactly 1 parity shard"
+        );
 
         let boundary = 2 * shard_size;
         let mut corrupt = clean.clone();
@@ -728,7 +731,10 @@ fn meta_chunk_corruption_detected_and_repaired() {
         report.damaged_chunks.iter().any(|t| t == "META"),
         "META corruption must be reported in damaged_chunks; {report:?}"
     );
-    assert!(report.repaired, "META corruption must be repairable; {report:?}");
+    assert!(
+        report.repaired,
+        "META corruption must be repairable; {report:?}"
+    );
 
     let loaded = RlabFile::read(repaired_tmp.path()).unwrap();
     assert_eq!(
@@ -783,7 +789,10 @@ fn truncated_file_without_recc_reports_unrepairable() {
     let report = verify_and_repair(tmp.path(), Some(repaired_tmp.path())).unwrap();
 
     assert!(!report.file_hash_ok, "truncation must fail file hash");
-    assert!(!report.recc_present, "truncated file has no readable RECC chunk");
+    assert!(
+        !report.recc_present,
+        "truncated file has no readable RECC chunk"
+    );
     assert!(
         !report.repaired,
         "truncated file without RECC must not report repaired: {report:?}"

@@ -62,3 +62,98 @@ pub(super) fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
     }
     p
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPS: f32 = 1e-5;
+
+    #[test]
+    fn black_is_achromatic() {
+        let (_, s, l) = rgb_to_hsl(0.0, 0.0, 0.0);
+        assert!((l).abs() < EPS);
+        assert!((s).abs() < EPS);
+    }
+
+    #[test]
+    fn white_is_achromatic() {
+        let (_, s, l) = rgb_to_hsl(1.0, 1.0, 1.0);
+        assert!((l - 1.0).abs() < EPS);
+        assert!((s).abs() < EPS);
+    }
+
+    #[test]
+    fn pure_red() {
+        let (h, s, l) = rgb_to_hsl(1.0, 0.0, 0.0);
+        assert!((h).abs() < EPS, "h={h}");
+        assert!((s - 1.0).abs() < EPS, "s={s}");
+        assert!((l - 0.5).abs() < EPS, "l={l}");
+    }
+
+    #[test]
+    fn pure_green() {
+        let (h, s, l) = rgb_to_hsl(0.0, 1.0, 0.0);
+        assert!((h - 1.0 / 3.0).abs() < EPS, "h={h}");
+        assert!((s - 1.0).abs() < EPS, "s={s}");
+        assert!((l - 0.5).abs() < EPS, "l={l}");
+    }
+
+    #[test]
+    fn pure_blue() {
+        let (h, s, l) = rgb_to_hsl(0.0, 0.0, 1.0);
+        assert!((h - 2.0 / 3.0).abs() < EPS, "h={h}");
+        assert!((s - 1.0).abs() < EPS, "s={s}");
+        assert!((l - 0.5).abs() < EPS, "l={l}");
+    }
+
+    #[test]
+    fn round_trip() {
+        let cases = [
+            (0.8, 0.2, 0.5),
+            (0.1, 0.9, 0.3),
+            (0.5, 0.5, 0.5),
+            (0.0, 0.4, 0.8),
+            (1.0, 0.6, 0.0),
+        ];
+        for (r, g, b) in cases {
+            let (h, s, l) = rgb_to_hsl(r, g, b);
+            let (r2, g2, b2) = hsl_to_rgb(h, s, l);
+            assert!((r - r2).abs() < EPS, "r mismatch for ({r},{g},{b}): {r2}");
+            assert!((g - g2).abs() < EPS, "g mismatch for ({r},{g},{b}): {g2}");
+            assert!((b - b2).abs() < EPS, "b mismatch for ({r},{g},{b}): {b2}");
+        }
+    }
+
+    #[test]
+    fn grey_stays_grey_round_trip() {
+        for v in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
+            let (h, s, l) = rgb_to_hsl(v, v, v);
+            assert!((s).abs() < EPS, "s should be 0 for grey v={v}: {s}");
+            let (r2, g2, b2) = hsl_to_rgb(h, 0.0, l);
+            assert!((r2 - l).abs() < EPS, "r2 should equal l for grey v={v}");
+            assert!((g2 - l).abs() < EPS, "g2 should equal l for grey v={v}");
+            assert!((b2 - l).abs() < EPS, "b2 should equal l for grey v={v}");
+        }
+    }
+
+    #[test]
+    fn hue_to_rgb_boundary_values() {
+        let p = 0.2f32;
+        let q = 0.8f32;
+        // t slightly below 0 should wrap to near 1.0 — same result as t+1
+        let below = hue_to_rgb(p, q, -0.1);
+        let wrapped = hue_to_rgb(p, q, 0.9);
+        assert!(
+            (below - wrapped).abs() < EPS,
+            "below={below} wrapped={wrapped}"
+        );
+        // t slightly above 1 should wrap to near 0 — same result as t-1
+        let above = hue_to_rgb(p, q, 1.1);
+        let wrapped2 = hue_to_rgb(p, q, 0.1);
+        assert!(
+            (above - wrapped2).abs() < EPS,
+            "above={above} wrapped2={wrapped2}"
+        );
+    }
+}

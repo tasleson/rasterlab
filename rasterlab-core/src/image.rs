@@ -206,3 +206,91 @@ impl Image {
         self.width as usize * self.height as usize
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_correct_size() {
+        let img = Image::new(3, 5);
+        assert_eq!(img.data.len(), 60);
+        assert_eq!(img.width, 3);
+        assert_eq!(img.height, 5);
+    }
+
+    #[test]
+    fn new_zeroed() {
+        let img = Image::new(4, 4);
+        assert!(img.data.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn from_rgba8_valid() {
+        let data = vec![0u8; 3 * 2 * 4];
+        assert!(Image::from_rgba8(3, 2, data).is_ok());
+        let bad = vec![0u8; 10];
+        assert!(Image::from_rgba8(3, 2, bad).is_err());
+    }
+
+    #[test]
+    fn row_stride() {
+        assert_eq!(Image::new(7, 3).row_stride(), 28);
+    }
+
+    #[test]
+    fn pixel_offset_formula() {
+        let img = Image::new(5, 5);
+        for y in 0..5u32 {
+            for x in 0..5u32 {
+                let expected = (y as usize * 5 + x as usize) * 4;
+                assert_eq!(img.pixel_offset(x, y), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn set_and_get_pixel() {
+        let mut img = Image::new(4, 4);
+        img.set_pixel(1, 2, [10, 20, 30, 40]);
+        assert_eq!(img.pixel(1, 2), [10, 20, 30, 40]);
+        // Neighbour is unaffected
+        assert_eq!(img.pixel(0, 0), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn pixel_count() {
+        let img = Image::new(6, 7);
+        assert_eq!(img.pixel_count(), 6 * 7);
+    }
+
+    #[test]
+    fn deep_clone_independent() {
+        let img = Image::new(4, 4);
+        let mut clone = img.deep_clone();
+        clone.set_pixel(0, 0, [255, 255, 255, 255]);
+        assert_eq!(img.pixel(0, 0), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn sample_bilinear_exact_corner() {
+        let mut img = Image::new(4, 4);
+        img.set_pixel(2, 1, [100, 150, 200, 255]);
+        let result = img.sample_bilinear(2.0, 1.0);
+        assert_eq!(result, [100, 150, 200, 255]);
+    }
+
+    #[test]
+    fn sample_bilinear_midpoint_2x2() {
+        let mut img = Image::new(2, 2);
+        img.set_pixel(0, 0, [0, 0, 0, 0]);
+        img.set_pixel(1, 0, [100, 0, 0, 0]);
+        img.set_pixel(0, 1, [0, 100, 0, 0]);
+        img.set_pixel(1, 1, [0, 0, 100, 0]);
+        // Average of all four corners
+        let result = img.sample_bilinear(0.5, 0.5);
+        assert_eq!(result[0], 25);
+        assert_eq!(result[1], 25);
+        assert_eq!(result[2], 25);
+    }
+}
