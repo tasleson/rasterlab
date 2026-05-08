@@ -413,17 +413,18 @@ impl CanvasState {
         // ── Middle-mouse / right-mouse pan + Ctrl+scroll-wheel zoom ─────────
         // In egui 0.34 Ctrl+scroll is translated into zoom_delta() (not smooth_scroll_delta).
         ui.input(|i| {
-            if i.pointer.button_down(egui::PointerButton::Middle)
-                || i.pointer.button_down(egui::PointerButton::Secondary)
-            {
-                self.pan_offset += i.pointer.delta();
-            }
-            let zoom_factor = i.zoom_delta();
             let over = i
                 .pointer
                 .hover_pos()
                 .map(|p| canvas_rect.contains(p))
                 .unwrap_or(false);
+            if (i.pointer.button_down(egui::PointerButton::Middle)
+                || i.pointer.button_down(egui::PointerButton::Secondary))
+                && over
+            {
+                self.pan_offset += i.pointer.delta();
+            }
+            let zoom_factor = i.zoom_delta();
             if zoom_factor != 1.0 && over {
                 let old_zoom = self.zoom;
                 self.zoom = (self.zoom * zoom_factor).clamp(0.05, 32.0);
@@ -670,7 +671,7 @@ impl CanvasState {
         // Cursor priority: divider drag > middle-mouse pan > ctrl zoom.
         if near_divider || self.split_dragging {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        } else if middle_down {
+        } else if middle_down && over_canvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
         } else if ctrl_held && over_canvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
@@ -744,7 +745,7 @@ impl CanvasState {
         // ── Cursor icon ──────────────────────────────────────────────────────
         if state.tools.mask_sel > 0 && over_canvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-        } else if middle_down {
+        } else if middle_down && over_canvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::AllScroll);
         } else if ctrl_held && over_canvas {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ZoomIn);
