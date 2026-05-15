@@ -64,7 +64,8 @@ fn utc_now() -> String {
 
     let mut year = 1970u32;
     loop {
-        let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+        let leap =
+            (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
         let days_in_year: u64 = if leap { 366 } else { 365 };
         if rem < days_in_year {
             break;
