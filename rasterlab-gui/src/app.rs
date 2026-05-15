@@ -47,6 +47,11 @@ pub struct RasterLabApp {
     /// The action to execute once the user confirms the open-discard dialog.
     #[cfg(not(target_arch = "wasm32"))]
     pending_open: Option<PendingOpen>,
+    /// Index of the photo in `library.results` that the user asked to delete
+    /// from the editor. `Some` while the confirmation dialog is open; used to
+    /// navigate to the adjacent photo if the deletion is confirmed.
+    #[cfg(not(target_arch = "wasm32"))]
+    editor_delete_at_idx: Option<usize>,
     /// The last title sent to the window; used to avoid redundant viewport commands.
     last_title: String,
 }
@@ -109,11 +114,23 @@ impl RasterLabApp {
             open_confirm_open: false,
             #[cfg(not(target_arch = "wasm32"))]
             pending_open: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            editor_delete_at_idx: None,
             last_title: String::new(),
         }
     }
 
     fn handle_keyboard(&mut self, ctx: &Context) {
+        // Compute editor-navigation preconditions outside input_mut to avoid
+        // re-borrowing self inside a closure that already captures it mutably.
+        #[cfg(not(target_arch = "wasm32"))]
+        let in_library_editor = self.state.mode == AppMode::Editor
+            && self.state.library_context.is_some()
+            && self.state.library.library.is_some();
+        // Only steal arrow/delete keys when no widget (text field, slider, …) has focus.
+        #[cfg(not(target_arch = "wasm32"))]
+        let no_focus = ctx.memory(|m| m.focused().is_none());
+
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::CTRL, Key::Z) {
                 self.state.undo();
@@ -137,7 +154,69 @@ impl RasterLabApp {
             if i.consume_key(Modifiers::CTRL, Key::E) {
                 self.chooser.export_image(ctx);
             }
+
+            // ── Library-editor navigation ────────────────────────────────────
+            #[cfg(not(target_arch = "wasm32"))]
+            if in_library_editor && no_focus {
+                if i.consume_key(Modifiers::NONE, Key::ArrowLeft) {
+                    self.navigate_library(-1);
+                }
+                if i.consume_key(Modifiers::NONE, Key::ArrowRight) {
+                    self.navigate_library(1);
+                }
+                if i.consume_key(Modifiers::NONE, Key::Delete) {
+                    self.trigger_editor_delete();
+                }
+            }
         });
+    }
+
+    /// Navigate to the adjacent photo in the library results list.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn navigate_library(&mut self, delta: i32) {
+        let Some((lib_root, current_hash)) = self.state.library_context.clone() else {
+            return;
+        };
+        let Some(lib) = self.state.library.library.clone() else {
+            return;
+        };
+        // Borrow results only long enough to find the adjacent photo, then drop.
+        let adjacent = {
+            let results = &self.state.library.results;
+            let Some(idx) = results.iter().position(|p| p.hash == current_hash) else {
+                return;
+            };
+            let new_idx = (idx as i64 + delta as i64).clamp(0, results.len() as i64 - 1) as usize;
+            if new_idx == idx {
+                return;
+            }
+            results[new_idx].clone()
+        };
+        let rlab_path = lib.rlab_path(&adjacent.hash);
+        self.request_open_library_photo(rlab_path, lib_root, adjacent.hash);
+    }
+
+    /// Select the currently-open library photo and raise the delete confirmation.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn trigger_editor_delete(&mut self) {
+        let Some((_, ref hash)) = self.state.library_context.clone() else {
+            return;
+        };
+        let hash = hash.clone();
+        let Some((idx, photo)) = self
+            .state
+            .library
+            .results
+            .iter()
+            .enumerate()
+            .find(|(_, p)| p.hash == hash)
+            .map(|(i, p)| (i, p.clone()))
+        else {
+            return;
+        };
+        self.state.library.select_only(photo.id);
+        self.state.library.confirm_delete = true;
+        self.editor_delete_at_idx = Some(idx);
     }
 
     /// Open the file picker, prompting to discard unsaved changes first if needed.
@@ -359,8 +438,13 @@ impl eframe::App for RasterLabApp {
         egui::Panel::top("menu_bar").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 // ── Mode toggle ──────────────────────────────────────────────
+                let prev_mode = self.state.mode;
                 ui.selectable_value(&mut self.state.mode, AppMode::Editor, "Editor");
                 ui.selectable_value(&mut self.state.mode, AppMode::Library, "Library");
+                if prev_mode == AppMode::Editor && self.state.mode == AppMode::Library {
+                    self.state.library.scroll_to_hash =
+                        self.state.library_context.as_ref().map(|(_, h)| h.clone());
+                }
                 ui.separator();
 
                 ui.menu_button("File", |ui| {
@@ -748,6 +832,48 @@ impl eframe::App for RasterLabApp {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     self.canvas.ui(ui, &mut self.state);
                 });
+            }
+        }
+
+        // ── Delete confirmation (editor mode) ────────────────────────────
+        // The confirmation dialog lives in library_panel but must also appear
+        // when the user presses Delete while editing a library photo.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.state.mode == AppMode::Editor {
+            library_panel::confirm_delete_dialog(&ctx, &mut self.state);
+
+            // If a delete was triggered from the editor and the dialog has been
+            // dismissed (confirmed or cancelled), decide what to do next.
+            if let Some(old_idx) = self.editor_delete_at_idx
+                && !self.state.library.confirm_delete
+            {
+                self.editor_delete_at_idx = None;
+                // A hash_gone check distinguishes confirmed vs. cancelled:
+                // after cancel the photo is still in results.
+                let hash_gone = self
+                    .state
+                    .library_context
+                    .as_ref()
+                    .map(|(_, h)| !self.state.library.results.iter().any(|p| p.hash == *h))
+                    .unwrap_or(false);
+                if hash_gone {
+                    // Deletion confirmed — navigate to the photo now at the
+                    // same slot (or the last one if we were at the end).
+                    let lib = self.state.library.library.clone();
+                    let lib_root = self.state.library_context.as_ref().map(|(r, _)| r.clone());
+                    let results = &self.state.library.results;
+                    if results.is_empty() {
+                        self.state.mode = AppMode::Library;
+                        self.state.library_context = None;
+                    } else if let Some((lib, lib_root)) = lib.zip(lib_root) {
+                        let nav_idx = old_idx.min(results.len() - 1);
+                        let photo = results[nav_idx].clone();
+                        let rlab_path = lib.rlab_path(&photo.hash);
+                        // open_library_photo skips the unsaved-changes prompt
+                        // (nothing to save — we just deleted the current photo).
+                        self.open_library_photo(rlab_path, lib_root, photo.hash);
+                    }
+                }
             }
         }
 

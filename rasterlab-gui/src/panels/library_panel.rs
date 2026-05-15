@@ -110,10 +110,28 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
 // ── Confirmation dialog ───────────────────────────────────────────────────────
 
-fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
+pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
     if !state.library.confirm_delete {
         return;
     }
+
+    // Keyboard shortcuts: Enter = confirm, Escape = cancel.
+    let (enter, esc) = ctx.input_mut(|i| {
+        (
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+        )
+    });
+    if enter {
+        state.library.confirm_delete = false;
+        state.library.delete_selected();
+        return;
+    }
+    if esc {
+        state.library.confirm_delete = false;
+        return;
+    }
+
     let n = state.library.selected.len();
     let title = if n == 1 {
         "Move to Trash?".to_owned()
