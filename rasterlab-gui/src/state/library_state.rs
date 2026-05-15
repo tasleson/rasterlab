@@ -69,7 +69,7 @@ impl Default for LibraryState {
             library: None,
             view: LibraryView::default(),
             filter: SearchFilter::default(),
-            sort: SortOrder::ImportDateDesc,
+            sort: SortOrder::CaptureDateDesc,
             results: Vec::new(),
             selected: Vec::new(),
             thumb_scale: 0.5,
