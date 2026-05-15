@@ -505,6 +505,78 @@ fn validation_popup(
         });
 }
 
+// ── Keyboard navigation ───────────────────────────────────────────────────────
+
+fn keyboard_nav(ui: &mut egui::Ui, state: &mut AppState, cols: usize) {
+    // Don't steal keys from text fields or the delete-confirm dialog.
+    if ui.ctx().egui_wants_keyboard_input()
+        || state.library.confirm_delete
+        || state.library.results.is_empty()
+    {
+        return;
+    }
+
+    let current_idx = state
+        .library
+        .selected
+        .first()
+        .and_then(|&id| state.library.results.iter().position(|p| p.id == id));
+
+    let (left, right, up, down, enter) = ui.ctx().input_mut(|i| {
+        (
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+        )
+    });
+
+    let n = state.library.results.len();
+    let new_idx = if let Some(idx) = current_idx {
+        if left && idx > 0 {
+            Some(idx - 1)
+        } else if right && idx + 1 < n {
+            Some(idx + 1)
+        } else if up && idx >= cols {
+            Some(idx - cols)
+        } else if down && idx + cols < n {
+            Some(idx + cols)
+        } else {
+            None
+        }
+    } else if left || right || up || down {
+        Some(0)
+    } else {
+        None
+    };
+
+    if let Some(idx) = new_idx {
+        let id = state.library.results[idx].id;
+        let hash = state.library.results[idx].hash.clone();
+        state.library.select_only(id);
+        // Reuse scroll_to_hash so the grid scrolls the new selection into view.
+        state.library.scroll_to_hash = Some(hash);
+    }
+
+    if enter && state.library.selected.len() == 1 {
+        let selected_id = state.library.selected[0];
+        if let (Some(photo), Some(lib)) = (
+            state
+                .library
+                .results
+                .iter()
+                .find(|p| p.id == selected_id)
+                .cloned(),
+            state.library.library.clone(),
+        ) {
+            let rlab_path = lib.rlab_path(&photo.hash);
+            state.library.pending_open_photo =
+                Some((rlab_path, lib.root().to_path_buf(), photo.hash.clone()));
+        }
+    }
+}
+
 // ── Thumbnail grid ────────────────────────────────────────────────────────────
 
 fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
@@ -514,6 +586,8 @@ fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
     let avail_w = ui.available_width();
     let cols = ((avail_w / cell_sz) as usize).max(1);
+
+    keyboard_nav(ui, state, cols);
 
     // Deselect when clicking on the grid background (between cells).
     // Use interact() rather than allocate_rect() so the layout cursor is not
@@ -549,12 +623,20 @@ fn thumb_cell(
     thumb_px: f32,
     padding: f32,
 ) {
-    let selected = state.library.is_selected(photo.id);
     let cell_size = Vec2::splat(thumb_px + padding * 2.0);
 
     let (rect, resp) = ui.allocate_exact_size(cell_size, Sense::click());
 
+    // If this is the photo we just came from in the editor, scroll to it and
+    // select it so the user can immediately see where they were.
+    if state.library.scroll_to_hash.as_deref() == Some(photo.hash.as_str()) {
+        state.library.scroll_to_hash = None;
+        state.library.select_only(photo.id);
+        resp.scroll_to_me(Some(egui::Align::Center));
+    }
+
     // Selection highlight
+    let selected = state.library.is_selected(photo.id);
     if selected {
         ui.painter()
             .rect_filled(rect, 4.0, ui.visuals().selection.bg_fill);

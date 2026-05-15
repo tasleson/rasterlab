@@ -61,6 +61,10 @@ pub struct LibraryState {
     /// `app.rs` can route the open through the unsaved-changes confirmation
     /// dialog. Tuple is `(rlab_path, library_root, photo_hash)`.
     pub pending_open_photo: Option<(PathBuf, PathBuf, String)>,
+
+    /// When set, the grid will scroll to — and select — the photo with this
+    /// hash on the next frame, then clear the field.
+    pub scroll_to_hash: Option<String>,
 }
 
 impl Default for LibraryState {
@@ -87,6 +91,7 @@ impl Default for LibraryState {
             aperture_error: None,
             shutter_error: None,
             pending_open_photo: None,
+            scroll_to_hash: None,
         }
     }
 }
