@@ -163,6 +163,27 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
             }
         }
 
+        // Virtual copies — only shown when there is more than one copy so the
+        // user can control which one gets exported without opening the editor.
+        if let Some(lib) = state.library.library.clone() {
+            let rlab_path = lib.rlab_path(&photo.hash);
+            if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
+                && rlab.copies.len() > 1
+            {
+                ui.separator();
+                ui.strong("Virtual Copies");
+                ui.label("The active copy is used for export.");
+                let active = rlab.active_copy_index;
+                let mut new_active = active;
+                for (idx, copy) in rlab.copies.iter().enumerate() {
+                    ui.radio_value(&mut new_active, idx, &copy.name);
+                }
+                if new_active != active {
+                    state.set_active_copy(&photo.hash, new_active);
+                }
+            }
+        }
+
         // Library path
         let h = &photo.hash;
         let rel_path = format!("files/{}/{}/{}.rlab", &h[0..2], &h[2..4], h);

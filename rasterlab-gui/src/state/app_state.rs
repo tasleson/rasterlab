@@ -1692,6 +1692,46 @@ impl AppState {
             .ok();
     }
 
+    /// Change the active virtual copy for a library photo and regenerate its
+    /// thumbnail in the background.  The new thumbnail is sent back via
+    /// `BgMessage::ThumbLoaded` so the grid updates without reopening the editor.
+    pub fn set_active_copy(&mut self, hash: &str, copy_idx: usize) {
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        // Evict the stale thumbnail immediately so the grid shows a placeholder
+        // while regen is running.
+        self.library.thumb_cache.remove(hash);
+        self.library.thumb_requested.remove(hash);
+
+        let hash = hash.to_owned();
+        let tx = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::Builder::new()
+            .name("rasterlab-copy-select".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let rlab_path = lib.rlab_path(&hash);
+                let result = (|| -> anyhow::Result<Vec<u8>> {
+                    let mut rlab = rasterlab_core::project::RlabFile::read(&rlab_path)?;
+                    rlab.active_copy_index = copy_idx.min(rlab.copies.len().saturating_sub(1));
+                    rlab.write(&rlab_path)?;
+                    lib.regenerate_thumbnail(&hash)?;
+                    Ok(std::fs::read(lib.thumb_path(&hash))?)
+                })();
+                match result {
+                    Ok(bytes) => {
+                        let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BgMessage::Error(format!("set active copy: {e}")));
+                    }
+                }
+                ctx.request_repaint();
+            })
+            .ok();
+    }
+
     /// Request that the thumbnail for `hash` be loaded from disk in the background.
     pub fn request_thumb_load(&mut self, hash: String) {
         if self.library.thumb_requested.contains(&hash) {
