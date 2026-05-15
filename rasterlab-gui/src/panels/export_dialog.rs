@@ -12,12 +12,20 @@ use crate::state::AppState;
 
 // ── Export dialog state ───────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SizeConstraint {
+    /// Cap the longest edge to this many pixels.
+    LongSide(u32),
+    /// Downsample so the total pixel count stays at or below this many megapixels.
+    Megapixels(f32),
+}
+
 #[derive(Debug, Clone)]
 pub struct ExportDialogState {
     pub open: bool,
     pub format: ExportFormat,
     pub jpeg_quality: u8,
-    pub max_side: Option<u32>,
+    pub size_constraint: Option<SizeConstraint>,
     pub dest_dir: PathBuf,
     /// `Some((done, total))` while an export is running, `None` when idle.
     pub progress: Option<(usize, usize)>,
@@ -78,7 +86,7 @@ impl Default for ExportDialogState {
             open: false,
             format: ExportFormat::Jpeg,
             jpeg_quality: 90,
-            max_side: Some(2048),
+            size_constraint: Some(SizeConstraint::LongSide(2048)),
             dest_dir: dirs::picture_dir().unwrap_or_else(|| PathBuf::from(".")),
             progress: None,
             done: false,
@@ -163,18 +171,62 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                     }
 
                     if export.format != ExportFormat::Original {
-                        ui.label("Long side:");
+                        ui.label("Resize:");
                         ui.horizontal(|ui| {
-                            let mut resize = export.max_side.is_some();
+                            let mut resize = export.size_constraint.is_some();
                             if ui.checkbox(&mut resize, "").changed() {
-                                export.max_side = if resize { Some(2048) } else { None };
+                                export.size_constraint = if resize {
+                                    Some(SizeConstraint::LongSide(2048))
+                                } else {
+                                    None
+                                };
                             }
-                            if let Some(ref mut side) = export.max_side {
-                                ui.add(
-                                    egui::DragValue::new(side)
-                                        .range(64u32..=65536)
-                                        .suffix(" px"),
-                                );
+                            if let Some(constraint) = &mut export.size_constraint {
+                                let is_long = matches!(*constraint, SizeConstraint::LongSide(_));
+                                let is_mp = matches!(*constraint, SizeConstraint::Megapixels(_));
+                                let prev_side = match *constraint {
+                                    SizeConstraint::LongSide(v) => v,
+                                    _ => 2048,
+                                };
+                                let prev_mp = match *constraint {
+                                    SizeConstraint::Megapixels(v) => v,
+                                    _ => 16.0,
+                                };
+
+                                if ui.radio(is_long, "Long side").clicked() && !is_long {
+                                    *constraint = SizeConstraint::LongSide(prev_side);
+                                }
+                                if is_long {
+                                    let mut side = prev_side;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut side)
+                                                .range(64u32..=65536)
+                                                .suffix(" px"),
+                                        )
+                                        .changed()
+                                    {
+                                        *constraint = SizeConstraint::LongSide(side);
+                                    }
+                                }
+
+                                if ui.radio(is_mp, "Megapixels").clicked() && !is_mp {
+                                    *constraint = SizeConstraint::Megapixels(16.0);
+                                }
+                                if is_mp {
+                                    let mut mp = prev_mp;
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut mp)
+                                                .range(0.1f32..=200.0)
+                                                .speed(0.1)
+                                                .suffix(" MP"),
+                                        )
+                                        .changed()
+                                    {
+                                        *constraint = SizeConstraint::Megapixels(mp);
+                                    }
+                                }
                             }
                         });
                         ui.end_row();
@@ -272,7 +324,7 @@ fn start_export(state: &mut AppState) {
     let export = &state.tools.export_dialog;
     let format = export.format;
     let quality = export.jpeg_quality;
-    let max_side = export.max_side;
+    let size_constraint = export.size_constraint;
     let dest_dir = export.dest_dir.clone();
     let shared = Arc::clone(&export.shared);
 
@@ -302,7 +354,7 @@ fn start_export(state: &mut AppState) {
                     &registry,
                     format,
                     quality,
-                    max_side,
+                    size_constraint,
                     &photo.hash,
                 ) {
                     eprintln!("export error {}: {e}", photo.hash);
@@ -327,7 +379,7 @@ fn export_one(
     registry: &FormatRegistry,
     format: ExportFormat,
     quality: u8,
-    max_side: Option<u32>,
+    size_constraint: Option<SizeConstraint>,
     hash: &str,
 ) -> anyhow::Result<()> {
     let rlab = RlabFile::read(rlab_path)?;
@@ -365,23 +417,48 @@ fn export_one(
     });
 
     // Resize if requested
-    if let Some(max) = max_side
-        && (image.width > max || image.height > max)
-    {
-        let scale = max as f32 / image.width.max(image.height) as f32;
-        let nw = ((image.width as f32 * scale).round() as u32).max(1);
-        let nh = ((image.height as f32 * scale).round() as u32).max(1);
-        use rasterlab_core::{ops::ResizeOp, traits::operation::Operation};
-        image = ResizeOp::new(nw, nh, rasterlab_core::ops::ResampleMode::Bicubic).apply(image)?;
+    if let Some(constraint) = size_constraint {
+        let (nw, nh) = match constraint {
+            SizeConstraint::LongSide(max) => {
+                if image.width <= max && image.height <= max {
+                    (image.width, image.height)
+                } else {
+                    let scale = max as f32 / image.width.max(image.height) as f32;
+                    (
+                        ((image.width as f32 * scale).round() as u32).max(1),
+                        ((image.height as f32 * scale).round() as u32).max(1),
+                    )
+                }
+            }
+            SizeConstraint::Megapixels(mp) => {
+                let target = (mp * 1_000_000.0) as u64;
+                let current = image.width as u64 * image.height as u64;
+                if current <= target {
+                    (image.width, image.height)
+                } else {
+                    let scale = ((target as f64) / (current as f64)).sqrt() as f32;
+                    (
+                        ((image.width as f32 * scale).round() as u32).max(1),
+                        ((image.height as f32 * scale).round() as u32).max(1),
+                    )
+                }
+            }
+        };
+        if nw != image.width || nh != image.height {
+            use rasterlab_core::{ops::ResizeOp, traits::operation::Operation};
+            image =
+                ResizeOp::new(nw, nh, rasterlab_core::ops::ResampleMode::Bicubic).apply(image)?;
+        }
     }
 
-    // Encode
-    let stem = rlab_path
+    // Encode — derive output name from the original import name, not the hash.
+    let orig_name = original_filename_for(&rlab, rlab_path, hash);
+    let stem = Path::new(&orig_name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(hash);
     let filename = format!("{}.{}", stem, format.ext());
-    let dest = dest_dir.join(&filename);
+    let dest = unique_dest_path(dest_dir, &filename);
     let opts = rasterlab_core::traits::format_handler::EncodeOptions {
         jpeg_quality: quality,
         png_compression: 6,
@@ -434,7 +511,7 @@ fn original_filename_for(rlab: &RlabFile, rlab_path: &Path, hash: &str) -> Strin
 }
 
 /// Avoid clobbering an existing file in the destination directory by appending
-/// ` (2)`, ` (3)`, … before the extension.
+/// `-2`, `-3`, … before the extension.
 fn unique_dest_path(dest_dir: &Path, filename: &str) -> PathBuf {
     let initial = dest_dir.join(filename);
     if !initial.exists() {
@@ -448,9 +525,9 @@ fn unique_dest_path(dest_dir: &Path, filename: &str) -> PathBuf {
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     for n in 2u32..10_000 {
         let candidate = if ext.is_empty() {
-            format!("{stem} ({n})")
+            format!("{stem}-{n}")
         } else {
-            format!("{stem} ({n}).{ext}")
+            format!("{stem}-{n}.{ext}")
         };
         let p = dest_dir.join(candidate);
         if !p.exists() {
