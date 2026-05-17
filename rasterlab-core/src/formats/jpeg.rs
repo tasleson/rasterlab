@@ -24,8 +24,23 @@ impl FormatHandler for JpegHandler {
 
         let rgba = dyn_image.to_rgba8();
         let (w, h) = rgba.dimensions();
-        let mut image = Image::from_rgba8(w, h, rgba.into_raw())?;
-        image.metadata = exif_util::read_exif_from_bytes(data);
+        let mut metadata = exif_util::read_exif_from_bytes(data);
+
+        // Apply EXIF orientation to pixels so downstream consumers always
+        // see an upright image, then normalise the stored value (and the
+        // raw_exif bytes used for metadata-preserving export) so a
+        // re-exported file is not rotated twice by downstream viewers.
+        let (data, w, h) =
+            exif_util::apply_orientation(rgba.into_raw(), w, h, metadata.orientation);
+        if metadata.orientation != 1 {
+            if let Some(ref mut bytes) = metadata.raw_exif {
+                exif_util::normalize_tiff_orientation(bytes);
+            }
+            metadata.orientation = 1;
+        }
+
+        let mut image = Image::from_rgba8(w, h, data)?;
+        image.metadata = metadata;
         Ok(image)
     }
 

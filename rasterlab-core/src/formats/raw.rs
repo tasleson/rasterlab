@@ -102,10 +102,22 @@ fn decode_raw_rawler(path: &Path) -> RasterResult<Image> {
 
     let rgba = dyn_image.to_rgba8();
     let (w, h) = rgba.dimensions();
-    let mut image = Image::from_rgba8(w, h, rgba.into_raw())?;
 
-    // Populate EXIF metadata from the source file.
-    image.metadata = crate::formats::exif_util::read_exif_from_file(path);
+    // rawler 0.7 returns sensor pixels without honouring the camera's
+    // Orientation tag — apply it here so the editor (and any
+    // metadata-preserving JPEG export) shows an upright image.
+    let mut metadata = crate::formats::exif_util::read_exif_from_file(path);
+    let (data, w, h) =
+        crate::formats::exif_util::apply_orientation(rgba.into_raw(), w, h, metadata.orientation);
+    if metadata.orientation != 1 {
+        if let Some(ref mut bytes) = metadata.raw_exif {
+            crate::formats::exif_util::normalize_tiff_orientation(bytes);
+        }
+        metadata.orientation = 1;
+    }
+
+    let mut image = Image::from_rgba8(w, h, data)?;
+    image.metadata = metadata;
     image.metadata.original_path = Some(path.to_path_buf());
 
     Ok(image)

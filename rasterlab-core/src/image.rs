@@ -9,7 +9,7 @@ pub enum PixelFormat {
 }
 
 /// EXIF-derived metadata kept alongside the pixel buffer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ImageMetadata {
     // ── File ──────────────────────────────────────────────────────────────
     /// Original file path (if loaded from disk).
@@ -59,11 +59,48 @@ pub struct ImageMetadata {
     /// ICC profile bytes, if embedded.
     pub icc_profile: Option<Vec<u8>>,
 
+    // ── Orientation ───────────────────────────────────────────────────────
+    /// EXIF Orientation tag (0x0112) value, 1–8.  Default `1` (normal).
+    ///
+    /// Decoders apply this transform to the pixel buffer at load time and
+    /// reset the stored value to `1`, so during normal use this should
+    /// always be `1` post-decode.  Kept as a field (rather than read on
+    /// demand) so an upright reader can verify normalisation in tests.
+    pub orientation: u16,
+
     // ── Raw bytes for metadata-preserving export ──────────────────────────
     /// Original EXIF APP1 segment bytes (JPEG) or raw TIFF EXIF bytes (RAW).
     /// Stored verbatim so they can be re-attached during export without
     /// re-encoding or modifying any metadata.
     pub raw_exif: Option<Vec<u8>>,
+}
+
+impl Default for ImageMetadata {
+    fn default() -> Self {
+        Self {
+            original_path: None,
+            camera_make: None,
+            camera_model: None,
+            lens_model: None,
+            software: None,
+            date_time: None,
+            iso: None,
+            shutter_speed: None,
+            aperture: None,
+            focal_length: None,
+            focal_length_35mm: None,
+            exposure_bias: None,
+            exposure_program: None,
+            metering_mode: None,
+            flash: None,
+            gps_lat: None,
+            gps_lon: None,
+            gps_alt: None,
+            icc_profile: None,
+            orientation: 1,
+            raw_exif: None,
+        }
+    }
 }
 
 /// The central image type used throughout the engine.
