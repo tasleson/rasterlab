@@ -36,6 +36,11 @@ pub fn read_exif_from_bytes(data: &[u8]) -> ImageMetadata {
 // ---------------------------------------------------------------------------
 
 /// Extract EXIF from a TIFF-based RAW file (NEF, CR2, ARW, ORF, DNG, …).
+///
+/// `raw_exif` is populated with a *minimal* TIFF containing only the
+/// metadata IFDs (see [`extract_exif_tiff`]) rather than the whole RAW
+/// file, so it fits inside a JPEG APP1 segment for metadata-preserving
+/// export.
 pub fn read_exif_from_file(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
 
@@ -46,10 +51,76 @@ pub fn read_exif_from_file(path: &Path) -> ImageMetadata {
 
     if let Ok(exif) = exif::Reader::new().read_raw(data.clone()) {
         populate_metadata(&mut meta, &exif);
-        meta.raw_exif = Some(data);
+        meta.raw_exif = extract_exif_tiff(&data);
     }
 
     meta
+}
+
+// ---------------------------------------------------------------------------
+// Public: build a compact EXIF TIFF from a TIFF-based RAW
+// ---------------------------------------------------------------------------
+
+/// Maximum byte length of an extracted EXIF TIFF.
+///
+/// A JPEG APP1 segment's length field is 16-bit, so payload ≤ 65 533 bytes
+/// (and EXIF additionally consumes 6 bytes for the `"Exif\0\0"` prefix
+/// that [`img_parts`] prepends).  Cap conservatively to leave room.
+const MAX_EXIF_TIFF_BYTES: usize = 65_000;
+
+/// Rebuild a compact metadata-only TIFF from a TIFF-based RAW file's
+/// bytes.
+///
+/// Walks the parsed EXIF, keeps only entries belonging to IFD0 (and the
+/// ExifIFD / GPSIFD / InteropIFD sub-IFDs reached through it), and
+/// re-serialises them with [`exif::experimental::Writer`].  Strip /
+/// tile / JPEG-thumbnail offsets are dropped automatically by the
+/// writer; the IFD1 thumbnail chain is skipped here.
+///
+/// If the first pass produces a blob larger than [`MAX_EXIF_TIFF_BYTES`]
+/// — typically because of a multi-tens-of-KB MakerNote — the MakerNote
+/// is dropped and we retry.  Returns `None` if the input cannot be
+/// parsed or the output is still too large.
+pub fn extract_exif_tiff(input: &[u8]) -> Option<Vec<u8>> {
+    let little_endian = matches!(input.first()?, b'I');
+    let exif = exif::Reader::new().read_raw(input.to_vec()).ok()?;
+
+    if let Some(buf) = write_minimal_tiff(&exif, little_endian, false)
+        && buf.len() <= MAX_EXIF_TIFF_BYTES
+    {
+        return Some(buf);
+    }
+    let buf = write_minimal_tiff(&exif, little_endian, true)?;
+    (buf.len() <= MAX_EXIF_TIFF_BYTES).then_some(buf)
+}
+
+fn write_minimal_tiff(
+    exif: &exif::Exif,
+    little_endian: bool,
+    drop_makernote: bool,
+) -> Option<Vec<u8>> {
+    use exif::{In, Tag, Value, experimental::Writer};
+
+    let mut writer = Writer::new();
+    for field in exif.fields() {
+        // Drop the thumbnail IFD — it owns StripOffsets that point into
+        // the source file and would dangle in the extracted blob.
+        if field.ifd_num != In::PRIMARY {
+            continue;
+        }
+        // The Writer cannot serialise Value::Unknown.
+        if matches!(field.value, Value::Unknown(..)) {
+            continue;
+        }
+        if drop_makernote && field.tag == Tag::MakerNote {
+            continue;
+        }
+        writer.push_field(field);
+    }
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    writer.write(&mut buf, little_endian).ok()?;
+    Some(buf.into_inner())
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +263,17 @@ pub fn normalize_tiff_orientation(bytes: &mut [u8]) {
 /// The `image` crate strips all metadata on encode; this function inserts
 /// the original APP1 segment back so EXIF/IPTC/XMP is preserved.
 /// Returns the modified JPEG bytes, or the original buffer on failure.
+///
+/// EXIF blobs that would overflow a JPEG APP1 segment
+/// (> [`MAX_EXIF_TIFF_BYTES`]) are skipped rather than passed to
+/// `img_parts`, which panics on oversized segments.  Callers should
+/// already have shrunk RAW metadata via [`extract_exif_tiff`]; this is
+/// a final safety net.
 pub fn attach_exif_to_jpeg(encoded: Vec<u8>, exif_bytes: &[u8]) -> Vec<u8> {
     use img_parts::{ImageEXIF, jpeg::Jpeg};
+    if exif_bytes.len() > MAX_EXIF_TIFF_BYTES {
+        return encoded;
+    }
     let Ok(mut jpeg) = Jpeg::from_bytes(encoded.clone().into()) else {
         return encoded;
     };
@@ -534,5 +614,108 @@ mod tests {
         // Empty input
         let mut empty: Vec<u8> = Vec::new();
         normalize_tiff_orientation(&mut empty);
+    }
+
+    // -----------------------------------------------------------------
+    // extract_exif_tiff
+    // -----------------------------------------------------------------
+
+    /// Build a little-endian TIFF that resembles a tiny TIFF-based RAW:
+    /// IFD0 carries Make/Model + StripOffsets pointing at a large fake
+    /// "image data" blob whose size dominates the file.  Used to verify
+    /// the extractor drops the bulk-data tags and shrinks the output.
+    fn fake_raw_tiff(image_bytes: usize) -> Vec<u8> {
+        // Layout: header(8) | IFD0 | string pool | image data
+        let make = b"TestCam\0";
+        let model = b"FakeModel\0";
+
+        let ifd_off = 8u32;
+        let entry_count = 4u16; // Make, Model, StripOffsets, StripByteCounts
+        let ifd_size = 2 + entry_count as usize * 12 + 4;
+        let make_off = ifd_off as usize + ifd_size;
+        let model_off = make_off + make.len();
+        let image_off = model_off + model.len();
+
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&0x002Au16.to_le_bytes());
+        b.extend_from_slice(&ifd_off.to_le_bytes());
+
+        b.extend_from_slice(&entry_count.to_le_bytes());
+
+        // Make: ASCII (type=2), count = len, offset → make_off (indirect, > 4 bytes)
+        b.extend_from_slice(&0x010Fu16.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&(make.len() as u32).to_le_bytes());
+        b.extend_from_slice(&(make_off as u32).to_le_bytes());
+
+        // Model: ASCII
+        b.extend_from_slice(&0x0110u16.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&(model.len() as u32).to_le_bytes());
+        b.extend_from_slice(&(model_off as u32).to_le_bytes());
+
+        // StripOffsets: LONG (type=4), count=1, value = image_off (inline)
+        b.extend_from_slice(&0x0111u16.to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(image_off as u32).to_le_bytes());
+
+        // StripByteCounts: LONG, count=1, value = image_bytes
+        b.extend_from_slice(&0x0117u16.to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(image_bytes as u32).to_le_bytes());
+
+        // Next IFD = 0 (no IFD1 thumbnail; keeps the fixture simple).
+        b.extend_from_slice(&0u32.to_le_bytes());
+
+        b.extend_from_slice(make);
+        b.extend_from_slice(model);
+        b.resize(image_off + image_bytes, 0xAB); // fake pixels
+        b
+    }
+
+    #[test]
+    fn extract_drops_bulk_data_and_shrinks_output() {
+        let raw = fake_raw_tiff(2_000_000);
+        let extracted = extract_exif_tiff(&raw).expect("extraction should succeed");
+        assert!(
+            extracted.len() < 200,
+            "extracted blob should be tiny (got {} bytes)",
+            extracted.len(),
+        );
+        // Verify the metadata round-trips: re-parse and check Make/Model survive.
+        let exif = exif::Reader::new()
+            .read_raw(extracted.clone())
+            .expect("extracted blob must parse");
+        let make = exif
+            .get_field(exif::Tag::Make, exif::In::PRIMARY)
+            .expect("Make tag preserved");
+        assert!(make.display_value().to_string().contains("TestCam"));
+    }
+
+    #[test]
+    fn extract_output_fits_in_jpeg_segment() {
+        // Even a huge "RAW" must produce output that fits in an APP1 segment.
+        let raw = fake_raw_tiff(50_000_000);
+        let extracted = extract_exif_tiff(&raw).expect("extraction should succeed");
+        assert!(extracted.len() <= MAX_EXIF_TIFF_BYTES);
+    }
+
+    #[test]
+    fn extract_returns_none_for_garbage() {
+        assert!(extract_exif_tiff(b"not a tiff").is_none());
+        assert!(extract_exif_tiff(&[]).is_none());
+    }
+
+    #[test]
+    fn attach_exif_skips_oversized_blob() {
+        // Construct a minimal valid JPEG: SOI + EOI.  attach_exif_to_jpeg
+        // should refuse to attach an oversized EXIF rather than panic.
+        let jpeg = vec![0xFF, 0xD8, 0xFF, 0xD9];
+        let oversized = vec![0u8; MAX_EXIF_TIFF_BYTES + 1];
+        let out = attach_exif_to_jpeg(jpeg.clone(), &oversized);
+        assert_eq!(out, jpeg, "oversized EXIF should be skipped");
     }
 }
