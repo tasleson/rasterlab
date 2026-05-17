@@ -296,6 +296,9 @@ fn populate_metadata(meta: &mut ImageMetadata, exif: &exif::Exif) {
             Tag::Model => {
                 meta.camera_model = ascii_string(&field.value);
             }
+            Tag::LensMake => {
+                meta.lens_make = ascii_string(&field.value);
+            }
             Tag::LensModel => {
                 meta.lens_model = ascii_string(&field.value);
             }

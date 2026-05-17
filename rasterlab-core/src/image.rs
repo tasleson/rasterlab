@@ -20,6 +20,8 @@ pub struct ImageMetadata {
     pub camera_make: Option<String>,
     /// Camera model (EXIF Model).
     pub camera_model: Option<String>,
+    /// Lens manufacturer (EXIF LensMake, tag 0xa433).
+    pub lens_make: Option<String>,
     /// Lens description (LensModel / LensSpecification).
     pub lens_model: Option<String>,
     /// Software used to create the file (EXIF Software).
@@ -81,6 +83,7 @@ impl Default for ImageMetadata {
             original_path: None,
             camera_make: None,
             camera_model: None,
+            lens_make: None,
             lens_model: None,
             software: None,
             date_time: None,

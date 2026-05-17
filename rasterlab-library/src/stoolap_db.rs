@@ -52,6 +52,7 @@ const SCHEMA_STMTS: &[&str] = &[
         photo_id          INTEGER PRIMARY KEY,
         camera_make       TEXT,
         camera_model      TEXT,
+        lens_make         TEXT,
         lens_model        TEXT,
         iso               INTEGER,
         shutter_sec       REAL,
@@ -165,6 +166,9 @@ impl LibraryDb for StoolapDb {
             "ALTER TABLE photos ADD COLUMN has_edits INTEGER NOT NULL DEFAULT 0",
             (),
         );
+        let _ = self
+            .db
+            .execute("ALTER TABLE exif ADD COLUMN lens_make TEXT", ());
         Ok(())
     }
 
@@ -217,6 +221,7 @@ impl LibraryDb for StoolapDb {
                 Value::integer(photo_id),
                 opt_text(exif.camera_make.as_deref()),
                 opt_text(exif.camera_model.as_deref()),
+                opt_text(exif.lens_make.as_deref()),
                 opt_text(exif.lens_model.as_deref()),
                 opt_int(exif.iso.map(|v| v as i64)),
                 opt_f64(exif.shutter_sec),
@@ -235,11 +240,11 @@ impl LibraryDb for StoolapDb {
             self.db
                 .execute(
                     "INSERT INTO exif
-                 (photo_id, camera_make, camera_model, lens_model, iso,
+                 (photo_id, camera_make, camera_model, lens_make, lens_model, iso,
                   shutter_sec, shutter_display, aperture, focal_length,
                   focal_length_35mm, exposure_bias, exposure_program,
                   metering_mode, flash, gps_lat, gps_lon, gps_alt)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)",
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
                     params,
                 )
                 .context("insert exif")?;

@@ -126,6 +126,7 @@ impl Default for LibraryMeta {
 pub struct LibraryExif {
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
+    pub lens_make: Option<String>,
     pub lens_model: Option<String>,
     /// DateTimeOriginal from EXIF, stored as-is (e.g. `"2025:06:03 14:22:00"`).
     pub capture_date: Option<String>,
@@ -156,6 +157,7 @@ impl LibraryExif {
         Self {
             camera_make: m.camera_make.clone(),
             camera_model: m.camera_model.clone(),
+            lens_make: m.lens_make.clone(),
             lens_model: m.lens_model.clone(),
             capture_date: m.date_time.clone(),
             iso: m.iso,

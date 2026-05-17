@@ -54,6 +54,7 @@ fn metadata_ui(ui: &mut egui::Ui, meta: &rasterlab_core::image::ImageMetadata) {
     // ── Camera ────────────────────────────────────────────────────────────
     let has_camera = meta.camera_make.is_some()
         || meta.camera_model.is_some()
+        || meta.lens_make.is_some()
         || meta.lens_model.is_some()
         || meta.date_time.is_some();
 
@@ -68,7 +69,9 @@ fn metadata_ui(ui: &mut egui::Ui, meta: &rasterlab_core::image::ImageMetadata) {
                 } else if let Some(model) = &meta.camera_model {
                     row(ui, "Camera", model);
                 }
-                if let Some(lens) = &meta.lens_model {
+                if let (Some(make), Some(model)) = (&meta.lens_make, &meta.lens_model) {
+                    row(ui, "Lens", &format!("{make} {model}"));
+                } else if let Some(lens) = &meta.lens_model {
                     row(ui, "Lens", lens);
                 }
                 if let Some(dt) = &meta.date_time {

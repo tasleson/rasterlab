@@ -228,6 +228,11 @@ fn exif_table(ui: &mut egui::Ui, exif: &rasterlab_library::LibraryExif) {
                 ui.label(v);
                 ui.end_row();
             }
+            if let Some(ref v) = exif.lens_make {
+                ui.label("Lens make:");
+                ui.label(v);
+                ui.end_row();
+            }
             if let Some(ref v) = exif.lens_model {
                 ui.label("Lens:");
                 ui.label(v);
