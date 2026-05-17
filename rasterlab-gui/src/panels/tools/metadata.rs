@@ -85,7 +85,8 @@ fn metadata_ui(ui: &mut egui::Ui, meta: &rasterlab_core::image::ImageMetadata) {
     let has_exposure = meta.iso.is_some()
         || meta.shutter_speed.is_some()
         || meta.aperture.is_some()
-        || meta.focal_length.is_some();
+        || meta.focal_length.is_some()
+        || meta.subject_distance.is_some();
 
     if has_exposure {
         ui.label(egui::RichText::new("Exposure").small().strong());
@@ -114,6 +115,9 @@ fn metadata_ui(ui: &mut egui::Ui, meta: &rasterlab_core::image::ImageMetadata) {
                     && ev.abs() > 0.01
                 {
                     row(ui, "Exp. bias", &format!("{:+.2} EV", ev));
+                }
+                if let Some(distance) = meta.subject_distance {
+                    row(ui, "Subject distance", &format!("{distance:.2} m"));
                 }
                 if let Some(ref prog) = meta.exposure_program {
                     row(ui, "Program", prog);

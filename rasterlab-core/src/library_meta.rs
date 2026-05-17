@@ -141,6 +141,8 @@ pub struct LibraryExif {
     pub focal_length: Option<f32>,
     pub focal_length_35mm: Option<f32>,
     pub exposure_bias: Option<f32>,
+    /// Subject distance in metres.
+    pub subject_distance: Option<f32>,
     pub exposure_program: Option<String>,
     pub metering_mode: Option<String>,
     pub flash: Option<bool>,
@@ -167,6 +169,7 @@ impl LibraryExif {
             focal_length: m.focal_length,
             focal_length_35mm: m.focal_length_35mm.map(|v| v as f32),
             exposure_bias: m.exposure_bias,
+            subject_distance: m.subject_distance,
             exposure_program: m.exposure_program.clone(),
             metering_mode: m.metering_mode.clone(),
             // Normalise flash string to bool: present + not "No Flash" → true

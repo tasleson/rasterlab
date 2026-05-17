@@ -42,6 +42,8 @@ pub struct ImageMetadata {
     pub focal_length_35mm: Option<u32>,
     /// Exposure bias in EV (e.g. -0.33).
     pub exposure_bias: Option<f32>,
+    /// Subject distance in metres (EXIF SubjectDistance, tag 0x9206).
+    pub subject_distance: Option<f32>,
     /// Exposure program description.
     pub exposure_program: Option<String>,
     /// Metering mode description.
@@ -93,6 +95,7 @@ impl Default for ImageMetadata {
             focal_length: None,
             focal_length_35mm: None,
             exposure_bias: None,
+            subject_distance: None,
             exposure_program: None,
             metering_mode: None,
             flash: None,

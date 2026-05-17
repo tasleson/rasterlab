@@ -359,6 +359,14 @@ fn populate_metadata(meta: &mut ImageMetadata, exif: &exif::Exif) {
                     meta.exposure_bias = Some(r.num as f32 / denom as f32);
                 }
             }
+            Tag::SubjectDistance => {
+                if let Value::Rational(v) = &field.value
+                    && let Some(r) = v.first()
+                    && r.denom != 0
+                {
+                    meta.subject_distance = Some(r.num as f32 / r.denom as f32);
+                }
+            }
             Tag::ExposureProgram => {
                 meta.exposure_program = Some(field.display_value().to_string());
             }
@@ -483,6 +491,46 @@ mod tests {
 
     fn r_channels(data: &[u8]) -> Vec<u8> {
         data.chunks_exact(4).map(|p| p[0]).collect()
+    }
+
+    fn subject_distance_tiff_le(num: u32, denom: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&0x002Au16.to_le_bytes());
+        b.extend_from_slice(&8u32.to_le_bytes());
+
+        b.extend_from_slice(&1u16.to_le_bytes());
+        // IFD0 ExifIFDPointer -> offset 26.
+        b.extend_from_slice(&0x8769u16.to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&26u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+
+        b.extend_from_slice(&1u16.to_le_bytes());
+        // ExifIFD SubjectDistance (0x9206), RATIONAL, one value at offset 44.
+        b.extend_from_slice(&0x9206u16.to_le_bytes());
+        b.extend_from_slice(&5u16.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&44u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+
+        b.extend_from_slice(&num.to_le_bytes());
+        b.extend_from_slice(&denom.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn read_exif_populates_subject_distance() {
+        let tiff = subject_distance_tiff_le(375, 100);
+        let exif = exif::Reader::new()
+            .read_raw(tiff)
+            .expect("fixture should parse");
+        let mut meta = ImageMetadata::default();
+
+        populate_metadata(&mut meta, &exif);
+
+        assert_eq!(meta.subject_distance, Some(3.75));
     }
 
     #[test]
