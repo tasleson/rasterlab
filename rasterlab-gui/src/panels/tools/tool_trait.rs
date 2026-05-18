@@ -13,6 +13,7 @@ pub struct ToolUiCtx<'a> {
     pub histogram: Option<&'a HistogramData>,
     pub last_path: Option<&'a std::path::Path>,
     pub nr_in_flight: bool,
+    pub deconvolve_in_flight: bool,
     pub source_dims: Option<(u32, u32)>,
     pub rendered_dims: Option<(u32, u32)>,
     pub rendered_scale: f32,

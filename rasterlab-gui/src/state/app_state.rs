@@ -301,6 +301,9 @@ pub struct AppState {
     /// as the active preview or as a committed pipeline step).  Drives the
     /// visibility of the NR Cancel button so the user can abort a slow NLM run.
     nr_in_flight: bool,
+    /// True when the in-flight render includes motion deblur.  Drives the
+    /// Deblur tool's cancel/apply gating while the expensive FFT pipeline runs.
+    deconvolve_in_flight: bool,
     reusable_nr_preview: Option<ReusableNrPreview>,
     pending_nr_preview_key: Option<(usize, usize, u64, NrPreviewSignature)>,
 
@@ -375,6 +378,7 @@ impl AppState {
             render_start: None,
             render_backend: None,
             nr_in_flight: false,
+            deconvolve_in_flight: false,
             reusable_nr_preview: None,
             pending_nr_preview_key: None,
             autosave_session_id: None,
@@ -517,6 +521,7 @@ impl AppState {
                         self.histogram = Some(*hist);
                         self.loading = false;
                         self.nr_in_flight = false;
+                        self.deconvolve_in_flight = false;
                         let reusable_nr_key = self.pending_nr_preview_key.take();
 
                         if let Some(rect) = overlay_rect {
@@ -579,6 +584,7 @@ impl AppState {
                         self.status = format!("Error: {}", e);
                         self.loading = false;
                         self.nr_in_flight = false;
+                        self.deconvolve_in_flight = false;
                         self.render_start = None;
                         self.render_backend = None;
                         self.pending_nr_preview_key = None;
@@ -586,6 +592,7 @@ impl AppState {
                     RenderResult::Cancelled => {
                         self.loading = false;
                         self.nr_in_flight = false;
+                        self.deconvolve_in_flight = false;
                         self.pending_nr_preview_key = None;
                         self.render_start = None;
                         self.render_backend = None;
@@ -892,6 +899,12 @@ impl AppState {
     /// Used by the tools panel to decide whether to show the NR Cancel button.
     pub fn nr_in_flight(&self) -> bool {
         self.nr_in_flight && self.loading
+    }
+
+    /// True while a render that includes motion deblur is running.
+    /// Used by the Deblur tool to show Cancel and prevent duplicate Apply.
+    pub fn deconvolve_in_flight(&self) -> bool {
+        self.deconvolve_in_flight && self.loading
     }
 
     pub fn remove_op(&mut self, index: usize) {
@@ -1438,6 +1451,13 @@ impl AppState {
                 .iter()
                 .flatten()
                 .any(|op| op.name() == "noise_reduction");
+        let deconvolve_in_flight = preview_op
+            .as_deref()
+            .is_some_and(|op| op.name() == "deconvolve")
+            || committed_ops
+                .iter()
+                .flatten()
+                .any(|op| op.name() == "deconvolve");
 
         // Clear any cancel request left over from a previous render.
         core_cancel::reset();
@@ -1470,6 +1490,7 @@ impl AppState {
 
         self.loading = true;
         self.nr_in_flight = nr_in_flight;
+        self.deconvolve_in_flight = deconvolve_in_flight;
         self.render_start = Some(std::time::Instant::now());
         self.render_backend = Some(render_backend);
         self.update_processing_status();

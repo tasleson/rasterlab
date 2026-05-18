@@ -21,6 +21,7 @@ pub enum EditingTool {
     ClarityTexture,
     SplitTone,
     Curves,
+    Deconvolve,
     Vignette,
     Vibrance,
     HueShift,

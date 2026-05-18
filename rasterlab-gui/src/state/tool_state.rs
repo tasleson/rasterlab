@@ -8,14 +8,15 @@ use crate::file_chooser::DialogKind;
 use crate::panels::tools::{
     blur::BlurTool, brightness_contrast::BrightnessContrastTool, bw::BwTool,
     clarity_texture::ClarityTextureTool, color_balance::ColorBalanceTool,
-    color_space::ColorSpaceTool, crop::CropTool, curves::CurvesTool, denoise::DenoiseTool,
-    faux_hdr::FauxHdrTool, focus_stack::FocusStackTool, grain::GrainTool, hdr_merge::HdrMergeTool,
-    heal::HealTool, highlights_shadows::HighlightsShadowsTool, hsl::HslTool,
-    hue_shift::HueShiftTool, levels::LevelsTool, lut::LutTool, noise_reduction::NoiseReductionTool,
-    panorama::PanoramaTool, perspective::PerspectiveTool, resize::ResizeTool, rotate::RotateTool,
-    saturation::SaturationTool, sepia::SepiaTool, shadow_exposure::ShadowExposureTool,
-    sharpen::SharpenTool, split_tone::SplitToneTool, straighten::StraightenTool, tool_trait::Tool,
-    vibrance::VibranceTool, vignette::VignetteTool, white_balance::WhiteBalanceTool,
+    color_space::ColorSpaceTool, crop::CropTool, curves::CurvesTool, deconvolve::DeconvolveTool,
+    denoise::DenoiseTool, faux_hdr::FauxHdrTool, focus_stack::FocusStackTool, grain::GrainTool,
+    hdr_merge::HdrMergeTool, heal::HealTool, highlights_shadows::HighlightsShadowsTool,
+    hsl::HslTool, hue_shift::HueShiftTool, levels::LevelsTool, lut::LutTool,
+    noise_reduction::NoiseReductionTool, panorama::PanoramaTool, perspective::PerspectiveTool,
+    resize::ResizeTool, rotate::RotateTool, saturation::SaturationTool, sepia::SepiaTool,
+    shadow_exposure::ShadowExposureTool, sharpen::SharpenTool, split_tone::SplitToneTool,
+    straighten::StraightenTool, tool_trait::Tool, vibrance::VibranceTool, vignette::VignetteTool,
+    white_balance::WhiteBalanceTool,
 };
 
 /// All tool state: trait-based tools in a Vec, plus masking, export, and dialog fields.
@@ -85,6 +86,7 @@ impl ToolState {
             Box::new(ColorSpaceTool::new()),
             Box::new(CropTool::new()),
             Box::new(CurvesTool::new()),
+            Box::new(DeconvolveTool::new()),
             Box::new(DenoiseTool::new()),
             Box::new(FauxHdrTool::new()),
             Box::new(FocusStackTool::new()),

@@ -13,6 +13,8 @@ serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 blake3       = { workspace = true }
 rayon        = { workspace = true }
+rustfft      = { workspace = true }
+num-complex  = { workspace = true }
 typetag      = { workspace = true }
 image        = { workspace = true }
 libloading   = { workspace = true }

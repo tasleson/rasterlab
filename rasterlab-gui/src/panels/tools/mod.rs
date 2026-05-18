@@ -12,6 +12,7 @@ pub mod color_balance;
 pub mod color_space;
 pub mod crop;
 pub mod curves;
+pub mod deconvolve;
 pub mod denoise;
 pub mod export;
 pub mod faux_hdr;
@@ -172,6 +173,7 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
                 histogram: state.histogram.as_ref(),
                 last_path: state.last_path.as_deref(),
                 nr_in_flight: state.nr_in_flight(),
+                deconvolve_in_flight: state.deconvolve_in_flight(),
                 source_dims: state
                     .pipeline()
                     .map(|p| (p.source().width, p.source().height)),
