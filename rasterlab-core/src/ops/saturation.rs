@@ -1,9 +1,11 @@
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{error::RasterResult, image::Image, traits::operation::Operation};
 
-use super::hsl::{hsl_to_rgb, rgb_to_hsl};
+use super::{
+    for_each_pixel_row_parallel,
+    hsl::{hsl_to_rgb, rgb_to_hsl},
+};
 
 /// Adjust colour saturation via HSL conversion.
 ///
@@ -43,7 +45,7 @@ impl Operation for SaturationOp {
 
         let s_factor = self.saturation;
 
-        image.data.par_chunks_mut(4).for_each(|p| {
+        for_each_pixel_row_parallel(&mut image, |p| {
             let r = p[0] as f32 / 255.0;
             let g = p[1] as f32 / 255.0;
             let b = p[2] as f32 / 255.0;

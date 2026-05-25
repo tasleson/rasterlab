@@ -35,6 +35,8 @@ pub mod vibrance;
 pub mod vignette;
 pub mod white_balance;
 
+use rayon::prelude::*;
+
 pub use blur::BlurOp;
 pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::{BlackAndWhiteOp, BwMode};
@@ -111,6 +113,28 @@ pub(super) fn linear_to_srgb(c: f32) -> f32 {
     } else {
         1.055 * c.powf(1.0 / 2.4) - 0.055
     }
+}
+
+/// Apply a per-pixel RGBA mutation using row-level rayon tasks.
+///
+/// For cheap color transforms, `par_chunks_mut(4)` creates one work item per
+/// pixel and can spend more time in scheduling/dispatch than useful math.
+/// Chunking by row keeps cache-friendly parallelism while leaving a tight
+/// serial inner loop for the compiler to optimize.
+pub(super) fn for_each_pixel_row_parallel<F>(image: &mut crate::image::Image, f: F)
+where
+    F: Fn(&mut [u8]) + Sync + Send,
+{
+    let row_stride = image.row_stride();
+    if row_stride == 0 {
+        return;
+    }
+
+    image.data.par_chunks_mut(row_stride).for_each(|row| {
+        for pixel in row.chunks_exact_mut(4) {
+            f(pixel);
+        }
+    });
 }
 
 /// Bilinear sample from `image` at float coordinates `(sx, sy)`, clamped to border.

@@ -4,11 +4,13 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use rasterlab_core::{
     image::Image,
     ops::{
-        BlackAndWhiteOp, CropOp, HealOp, HealSpot, NoiseReductionOp, NrMethod, RotateOp, SharpenOp,
-        clarity_texture::ClarityTextureOp, histogram::HistogramData, split_tone::SplitToneOp,
+        BlackAndWhiteOp, CropOp, HealOp, HealSpot, NoiseReductionOp, NrMethod, RotateOp, SepiaOp,
+        SharpenOp, WhiteBalanceOp, clarity_texture::ClarityTextureOp, histogram::HistogramData,
+        split_tone::SplitToneOp,
     },
     traits::operation::Operation,
 };
+use rayon::prelude::*;
 
 /// Ensure the rayon global pool is initialised with enough stack space for
 /// histogram fold accumulators (4 × [u64; 256] = 8 KiB) before any benchmark
@@ -27,6 +29,32 @@ fn init_rayon() {
 fn make_image(w: u32, h: u32) -> Image {
     let data: Vec<u8> = (0..(w * h * 4)).map(|i| (i % 256) as u8).collect();
     Image::from_rgba8(w, h, data).unwrap()
+}
+
+fn lut_invert() -> [u8; 256] {
+    let mut lut = [0u8; 256];
+    for (i, entry) in lut.iter_mut().enumerate() {
+        *entry = 255 - i as u8;
+    }
+    lut
+}
+
+fn apply_lut_pixel_tasks(data: &mut [u8], lut: &[u8; 256]) {
+    data.par_chunks_mut(4).for_each(|p| {
+        p[0] = lut[p[0] as usize];
+        p[1] = lut[p[1] as usize];
+        p[2] = lut[p[2] as usize];
+    });
+}
+
+fn apply_lut_row_tasks(data: &mut [u8], width: usize, lut: &[u8; 256]) {
+    data.par_chunks_mut(width * 4).for_each(|row| {
+        for p in row.chunks_exact_mut(4) {
+            p[0] = lut[p[0] as usize];
+            p[1] = lut[p[1] as usize];
+            p[2] = lut[p[2] as usize];
+        }
+    });
 }
 
 fn bench_crop(c: &mut Criterion) {
@@ -231,6 +259,55 @@ fn bench_noise_reduction(c: &mut Criterion) {
     });
 }
 
+fn bench_row_parallel_granularity(c: &mut Criterion) {
+    init_rayon();
+    let img = make_image(4000, 3000);
+    let lut = lut_invert();
+    let mut group = c.benchmark_group("row_parallel_granularity 4000x3000 lut");
+
+    group.bench_function("old_pixel_tasks", |b| {
+        b.iter_batched(
+            || img.data.clone(),
+            |mut data| apply_lut_pixel_tasks(&mut data, &lut),
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.bench_function("new_row_tasks", |b| {
+        b.iter_batched(
+            || img.data.clone(),
+            |mut data| apply_lut_row_tasks(&mut data, img.width as usize, &lut),
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.finish();
+}
+
+fn bench_white_balance(c: &mut Criterion) {
+    init_rayon();
+    let img = make_image(4000, 3000);
+    c.bench_function("white_balance 4000x3000 temp=0.5 tint=0.2", |b| {
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| WhiteBalanceOp::new(0.5, 0.2).apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
+    });
+}
+
+fn bench_sepia(c: &mut Criterion) {
+    init_rayon();
+    let img = make_image(4000, 3000);
+    c.bench_function("sepia 4000x3000 strength=1.0", |b| {
+        b.iter_batched(
+            || img.deep_clone(),
+            |i| SepiaOp::new(1.0).apply(i).unwrap(),
+            BatchSize::LargeInput,
+        )
+    });
+}
+
 criterion_group!(
     benches,
     bench_crop,
@@ -238,11 +315,14 @@ criterion_group!(
     bench_rotate_arbitrary,
     bench_sharpen,
     bench_bw,
+    bench_row_parallel_granularity,
     bench_split_tone,
     bench_clarity_texture,
     bench_histogram,
     bench_image_to_egui,
     bench_heal,
     bench_noise_reduction,
+    bench_white_balance,
+    bench_sepia,
 );
 criterion_main!(benches);

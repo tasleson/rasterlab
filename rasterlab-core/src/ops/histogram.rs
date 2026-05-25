@@ -49,11 +49,14 @@ impl HistogramData {
                     acc.0[r] += 1;
                     acc.1[g] += 1;
                     acc.2[b] += 1;
-                    let l = (0.2126_f32 * pixel[0] as f32
-                        + 0.7152_f32 * pixel[1] as f32
-                        + 0.0722_f32 * pixel[2] as f32)
-                        .round() as usize;
-                    acc.3[l.min(255)] += 1;
+                    // BT.709 integer fixed-point: coefficients scaled to 1024 with
+                    // +512 rounding bias.  Max output: (1024*255+512)>>10 = 255.
+                    let l = ((218u32 * pixel[0] as u32
+                        + 732u32 * pixel[1] as u32
+                        + 74u32 * pixel[2] as u32
+                        + 512)
+                        >> 10) as usize;
+                    acc.3[l] += 1;
                 }
                 acc
             })
@@ -67,11 +70,14 @@ impl HistogramData {
                     acc.0[r] += 1;
                     acc.1[g] += 1;
                     acc.2[b] += 1;
-                    let l = (0.2126_f32 * pixel[0] as f32
-                        + 0.7152_f32 * pixel[1] as f32
-                        + 0.0722_f32 * pixel[2] as f32)
-                        .round() as usize;
-                    acc.3[l.min(255)] += 1;
+                    // BT.709 integer fixed-point: coefficients scaled to 1024 with
+                    // +512 rounding bias.  Max output: (1024*255+512)>>10 = 255.
+                    let l = ((218u32 * pixel[0] as u32
+                        + 732u32 * pixel[1] as u32
+                        + 74u32 * pixel[2] as u32
+                        + 512)
+                        >> 10) as usize;
+                    acc.3[l] += 1;
                 }
                 acc
             }))
@@ -146,5 +152,23 @@ mod tests {
         let src_data = src.data.clone();
         let out = HistogramOp.apply(src).unwrap();
         assert_eq!(out.data, src_data);
+    }
+
+    #[test]
+    fn luma_integer_matches_float_reference() {
+        // Verify integer luma agrees with the float BT.709 formula to within 1 LSB.
+        for r in (0u8..=255).step_by(8) {
+            for g in (0u8..=255).step_by(8) {
+                for b in (0u8..=255).step_by(8) {
+                    let float_l =
+                        (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32).round() as u32;
+                    let int_l = (218 * r as u32 + 732 * g as u32 + 74 * b as u32 + 512) >> 10;
+                    assert!(
+                        float_l.abs_diff(int_l) <= 1,
+                        "luma mismatch at ({r},{g},{b}): float={float_l} int={int_l}"
+                    );
+                }
+            }
+        }
     }
 }

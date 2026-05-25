@@ -1,7 +1,8 @@
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{error::RasterResult, image::Image, traits::operation::Operation};
+
+use super::for_each_pixel_row_parallel;
 
 /// Levels adjustment: remaps the tonal range of an image.
 ///
@@ -65,7 +66,7 @@ impl Operation for LevelsOp {
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
         let lut = self.build_lut();
 
-        image.data.par_chunks_mut(4).for_each(|p| {
+        for_each_pixel_row_parallel(&mut image, |p| {
             p[0] = lut[p[0] as usize];
             p[1] = lut[p[1] as usize];
             p[2] = lut[p[2] as usize];

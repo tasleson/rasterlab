@@ -1,7 +1,8 @@
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{error::RasterResult, image::Image, traits::operation::Operation};
+
+use super::for_each_pixel_row_parallel;
 
 /// Algorithm used to compute the luminance value for each pixel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,7 +87,7 @@ impl Operation for BlackAndWhiteOp {
     }
 
     fn apply(&self, mut image: Image) -> RasterResult<Image> {
-        image.data.par_chunks_mut(4).for_each(|pixel| {
+        for_each_pixel_row_parallel(&mut image, |pixel| {
             let gray = self
                 .mode
                 .to_gray(pixel[0] as f32, pixel[1] as f32, pixel[2] as f32)
