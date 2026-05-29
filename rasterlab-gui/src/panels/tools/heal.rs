@@ -27,7 +27,7 @@ impl Tool for HealTool {
         "heal"
     }
     fn display_name(&self) -> &'static str {
-        "✦  Spot Heal"
+        "✦  Heal"
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
