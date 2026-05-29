@@ -39,6 +39,11 @@ pub struct Library {
     registry: FormatRegistry,
 }
 
+enum DeleteStorageMode {
+    SystemTrash,
+    Permanent,
+}
+
 impl Library {
     /// Open (or create) a library at `path` using the default stoolap backend.
     pub fn open_or_create(path: &Path) -> Result<Self> {
@@ -115,13 +120,34 @@ impl Library {
 
     /// Move the `.rlab` to OS trash and remove the thumbnail + DB row.
     pub fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
+        self.delete_photo_with_mode(photo_id, DeleteStorageMode::SystemTrash)
+    }
+
+    /// Permanently remove the `.rlab`, thumbnail, and DB row.
+    ///
+    /// This is intended for maintenance and headless test environments where
+    /// the platform trash service may be unavailable or blocking.
+    pub fn delete_photo_permanently(&self, photo_id: PhotoId) -> Result<()> {
+        self.delete_photo_with_mode(photo_id, DeleteStorageMode::Permanent)
+    }
+
+    fn delete_photo_with_mode(&self, photo_id: PhotoId, mode: DeleteStorageMode) -> Result<()> {
         // Find the hash so we can remove thumbnail
         let photos = self.db.all_photos(SortOrder::default())?;
         if let Some(row) = photos.iter().find(|r| r.id == photo_id) {
             let rlab = self.rlab_path(&row.hash);
             let thumb = self.thumb_path(&row.hash);
             if rlab.exists() {
-                trash::delete(&rlab).with_context(|| format!("trash {}", rlab.display()))?;
+                match mode {
+                    DeleteStorageMode::SystemTrash => {
+                        trash::delete(&rlab)
+                            .with_context(|| format!("trash {}", rlab.display()))?;
+                    }
+                    DeleteStorageMode::Permanent => {
+                        std::fs::remove_file(&rlab)
+                            .with_context(|| format!("remove {}", rlab.display()))?;
+                    }
+                }
             }
             if thumb.exists() {
                 std::fs::remove_file(&thumb).ok();

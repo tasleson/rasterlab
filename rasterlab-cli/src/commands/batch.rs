@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 use rasterlab_core::{
-    formats::FormatRegistry, pipeline::EditPipeline, traits::format_handler::EncodeOptions,
+    formats::FormatRegistry,
+    pipeline::{EditEntry, EditPipeline, PipelineState},
+    traits::format_handler::EncodeOptions,
 };
 use rayon::prelude::*;
 
@@ -102,10 +104,10 @@ pub fn run(args: BatchArgs) -> Result<()> {
     let registry = FormatRegistry::with_builtins();
 
     // Build the operation list once; each thread deserialises its own copies.
-    let ops_json: Vec<serde_json::Value> = if let Some(pipeline_path) = &args.load_pipeline {
+    let entries_json: Vec<serde_json::Value> = if let Some(pipeline_path) = &args.load_pipeline {
         let json = std::fs::read_to_string(pipeline_path)
             .with_context(|| format!("Cannot read pipeline '{}'", pipeline_path.display()))?;
-        let state: rasterlab_core::pipeline::PipelineState =
+        let state: PipelineState =
             serde_json::from_str(&json).context("Failed to parse pipeline JSON")?;
         // Only include entries up to the saved cursor (respects undo state).
         let active = state.entries[..state.cursor.min(state.entries.len())].to_vec();
@@ -123,9 +125,17 @@ pub fn run(args: BatchArgs) -> Result<()> {
             sharpen: args.sharpen,
         };
         let ops = spec.build()?;
-        ops.iter()
-            .map(|op| serde_json::to_value(op.as_ref()).unwrap())
-            .collect()
+        ops.into_iter()
+            .enumerate()
+            .map(|(idx, op)| {
+                serde_json::to_value(EditEntry {
+                    id: idx as u64 + 1,
+                    enabled: true,
+                    operation: op,
+                })
+                .context("Serialising operation")
+            })
+            .collect::<Result<_>>()?
     };
 
     let options = EncodeOptions {
@@ -143,7 +153,7 @@ pub fn run(args: BatchArgs) -> Result<()> {
                 &args.output,
                 args.output_ext.as_deref(),
                 &registry,
-                &ops_json,
+                &entries_json,
                 &options,
             );
             (input_path.clone(), result)
@@ -178,7 +188,7 @@ fn process_one(
     output_dir: &Path,
     output_ext: Option<&str>,
     registry: &FormatRegistry,
-    ops_json: &[serde_json::Value],
+    entries_json: &[serde_json::Value],
     options: &EncodeOptions,
 ) -> Result<()> {
     let image = registry
@@ -187,12 +197,14 @@ fn process_one(
 
     let mut pipeline = EditPipeline::new(image);
 
-    // Deserialise operations from JSON (avoids re-parsing CLI args per thread)
-    for json_val in ops_json {
-        let entry: rasterlab_core::pipeline::EditEntry =
-            serde_json::from_value(json_val.clone()).context("Deserialising operation")?;
-        pipeline.push_op(entry.operation);
-    }
+    // Deserialise the active edit entries per thread. Loading the full state
+    // preserves entry metadata such as the enabled flag.
+    pipeline
+        .load_state(PipelineState {
+            entries: entries_json.to_vec(),
+            cursor: entries_json.len(),
+        })
+        .context("Deserialising pipeline")?;
 
     let rendered = pipeline.render().context("Render failed")?;
 
@@ -212,4 +224,60 @@ fn process_one(
         .with_context(|| format!("Write failed for '{}'", out_path.display()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rasterlab_core::{image::Image, ops::SepiaOp, traits::operation::Operation};
+
+    fn edit_entry_json(id: u64, enabled: bool, operation: Box<dyn Operation>) -> serde_json::Value {
+        serde_json::to_value(EditEntry {
+            id,
+            enabled,
+            operation,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn flag_pipeline_entries_deserialise_as_edit_entries() {
+        let spec = PipelineSpec {
+            crop: None,
+            rotate: None,
+            bw: Some("luminance".into()),
+            sharpen: Some(1.25),
+        };
+        let entries: Vec<serde_json::Value> = spec
+            .build()
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .map(|(idx, op)| edit_entry_json(idx as u64 + 1, true, op))
+            .collect();
+
+        assert_eq!(entries.len(), 2);
+        for entry_json in entries {
+            let entry: EditEntry = serde_json::from_value(entry_json).unwrap();
+            assert!(entry.enabled);
+        }
+    }
+
+    #[test]
+    fn batch_loaded_pipeline_respects_disabled_entries() {
+        let entries = vec![edit_entry_json(1, false, Box::new(SepiaOp::new(1.0)))];
+        let mut img = Image::new(1, 1);
+        img.set_pixel(0, 0, [255, 0, 0, 255]);
+
+        let mut pipeline = EditPipeline::new(img);
+        pipeline
+            .load_state(PipelineState {
+                cursor: entries.len(),
+                entries,
+            })
+            .unwrap();
+
+        let rendered = pipeline.render().unwrap();
+        assert_eq!(rendered.pixel(0, 0), [255, 0, 0, 255]);
+    }
 }

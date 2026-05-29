@@ -137,7 +137,7 @@ fn folder_import_finds_all_supported_formats() {
 // ── Delete ────────────────────────────────────────────────────────────────────
 
 #[test]
-fn delete_photo_removes_thumb_and_db_row() {
+fn delete_photo_permanently_removes_files_and_db_row() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = open_library(tmp.path());
 
@@ -147,8 +147,12 @@ fn delete_photo_removes_thumb_and_db_row() {
     let thumb = lib.thumb_path(&row.hash);
     let photo_id: PhotoId = row.id;
 
-    lib.delete_photo(photo_id).expect("delete_photo");
+    let rlab = lib.rlab_path(&row.hash);
 
+    lib.delete_photo_permanently(photo_id)
+        .expect("delete_photo_permanently");
+
+    assert!(!rlab.exists(), "rlab should be removed");
     assert!(!thumb.exists(), "thumbnail should be removed");
     assert!(
         lib.all_photos(SortOrder::default()).unwrap().is_empty(),

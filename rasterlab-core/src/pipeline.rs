@@ -525,6 +525,12 @@ impl EditPipeline {
             .into_iter()
             .filter_map(|v| serde_json::from_value(v).ok())
             .collect();
+        self.next_id = entries
+            .iter()
+            .map(|entry| entry.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         self.ops = entries;
         self.cursor = new_cursor.min(self.ops.len());
         self.cache.clear();
@@ -596,6 +602,28 @@ mod tests {
         assert!(p.can_redo());
         p.push_op(sepia_op(0.5));
         assert!(!p.can_redo());
+    }
+
+    #[test]
+    fn load_state_advances_next_id_past_loaded_entries() {
+        let mut p = make_pipeline();
+        p.load_state(PipelineState {
+            entries: vec![
+                serde_json::to_value(EditEntry {
+                    id: 42,
+                    enabled: true,
+                    operation: sepia_op(1.0),
+                })
+                .unwrap(),
+            ],
+            cursor: 1,
+        })
+        .unwrap();
+
+        p.push_op(sepia_op(0.5));
+
+        assert_eq!(p.ops()[0].id, 42);
+        assert_eq!(p.ops()[1].id, 43);
     }
 
     #[test]
