@@ -171,4 +171,47 @@ mod tests {
             }
         }
     }
+
+    /// Histogram's fold path processes pixels in 4096-pixel chunks and a
+    /// trailing remainder.  This regression-guards the remainder logic so any
+    /// future refactor can't silently lose pixels whose count doesn't divide
+    /// the chunk size.  Counts a few odd sizes spanning the boundaries.
+    #[test]
+    fn histogram_counts_all_pixels_for_odd_sizes() {
+        for (w, h) in [(1, 1), (17, 23), (4095, 1), (4096, 1), (4097, 1), (101, 47)] {
+            let mut img = Image::new(w, h);
+            img.data.chunks_mut(4).for_each(|p| {
+                p[0] = 50;
+                p[1] = 100;
+                p[2] = 150;
+                p[3] = 255;
+            });
+            let total = (w as u64) * (h as u64);
+            let hist = HistogramData::compute(&img);
+
+            let red_sum: u64 = hist.red.iter().sum();
+            let green_sum: u64 = hist.green.iter().sum();
+            let blue_sum: u64 = hist.blue.iter().sum();
+            let luma_sum: u64 = hist.luma.iter().sum();
+
+            assert_eq!(red_sum, total, "{w}x{h} red");
+            assert_eq!(green_sum, total, "{w}x{h} green");
+            assert_eq!(blue_sum, total, "{w}x{h} blue");
+            assert_eq!(luma_sum, total, "{w}x{h} luma");
+            assert_eq!(hist.red[50], total, "{w}x{h} red bucket");
+        }
+    }
+
+    /// A zero-pixel image must produce an all-zero histogram rather than
+    /// panicking on the modulo arithmetic in the trailing-remainder path.
+    #[test]
+    fn histogram_on_empty_image_is_all_zero() {
+        let img = Image::new(0, 0);
+        let hist = HistogramData::compute(&img);
+        assert_eq!(hist.red.iter().sum::<u64>(), 0);
+        assert_eq!(hist.green.iter().sum::<u64>(), 0);
+        assert_eq!(hist.blue.iter().sum::<u64>(), 0);
+        assert_eq!(hist.luma.iter().sum::<u64>(), 0);
+        assert_eq!(hist.peak(), 0);
+    }
 }
