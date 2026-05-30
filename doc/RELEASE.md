@@ -40,15 +40,16 @@ runners and publishes them to a GitHub Release.
    ```
 
 4. **Watch the workflow.** Go to the repo's Actions tab on GitHub, or
-   run `gh run watch`. Two build jobs run in parallel
-   (`linux-x86_64`, `macos-aarch64`), then a `release` job uploads the
-   artifacts.
+   run `gh run watch`. Three build jobs run in parallel
+   (`linux-x86_64`, `macos-aarch64`, `windows-x86_64`), then a
+   `release` job uploads the artifacts.
 
 5. **Verify the release.** When the workflow finishes, a new release
    appears under the repo's Releases page with:
 
    - `rasterlab-v0.3.0-linux-x86_64.tar.gz` (+ `.sha256`)
    - `rasterlab-v0.3.0-macos-aarch64.tar.gz` (+ `.sha256`)
+   - `rasterlab-v0.3.0-windows-x86_64.zip` (+ `.sha256`)
 
    Release notes are auto-generated from commits since the previous tag.
 
@@ -83,4 +84,5 @@ runners and publishes them to a GitHub Release.
 - Only first-party actions (`actions/checkout`, `actions/cache`,
   `actions/upload-artifact`, `actions/download-artifact`) plus the
   pre-installed `gh` CLI are used — no third-party dependencies.
-- Windows builds are intentionally disabled.
+- Windows builds are produced via the MSVC target on a `windows-latest`
+  runner and packaged as a `.zip` (the unix jobs use `.tar.gz`).
