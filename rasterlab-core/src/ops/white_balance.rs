@@ -1,7 +1,8 @@
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{error::RasterResult, image::Image, traits::operation::Operation};
+
+use super::for_each_pixel_row_parallel;
 
 /// Adjust white balance via temperature and tint.
 ///
@@ -60,10 +61,19 @@ impl Operation for WhiteBalanceOp {
         let g_scale = 1.0 - tint * 0.15;
         let b_scale = 1.0 - temp * 0.3;
 
-        image.data.par_chunks_mut(4).for_each(|p| {
-            p[0] = ((p[0] as f32 * r_scale).clamp(0.0, 255.0)) as u8;
-            p[1] = ((p[1] as f32 * g_scale).clamp(0.0, 255.0)) as u8;
-            p[2] = ((p[2] as f32 * b_scale).clamp(0.0, 255.0)) as u8;
+        // Precompute per-channel LUTs — 768 bytes total, fits in L1.
+        // Each pixel lookup is a single indexed load instead of f32 mul+clamp+cast.
+        let r_lut: [u8; 256] =
+            std::array::from_fn(|v| (v as f32 * r_scale).clamp(0.0, 255.0) as u8);
+        let g_lut: [u8; 256] =
+            std::array::from_fn(|v| (v as f32 * g_scale).clamp(0.0, 255.0) as u8);
+        let b_lut: [u8; 256] =
+            std::array::from_fn(|v| (v as f32 * b_scale).clamp(0.0, 255.0) as u8);
+
+        for_each_pixel_row_parallel(&mut image, |p| {
+            p[0] = r_lut[p[0] as usize];
+            p[1] = g_lut[p[1] as usize];
+            p[2] = b_lut[p[2] as usize];
             // alpha unchanged
         });
 
@@ -155,5 +165,28 @@ mod tests {
             .apply(src.deep_clone())
             .unwrap();
         out.data.chunks(4).for_each(|p| assert_eq!(p[3], 99));
+    }
+
+    #[test]
+    fn lut_matches_float_computation() {
+        // LUT output must agree with the original f32 computation to within 1 LSB.
+        let op = WhiteBalanceOp::new(0.5, 0.3);
+        let r_scale = 1.0 + 0.5f32 * 0.3;
+        let g_scale = 1.0 - 0.3f32 * 0.15;
+        let b_scale = 1.0 - 0.5f32 * 0.3;
+        for v in 0u8..=255 {
+            let r_float = (v as f32 * r_scale).clamp(0.0, 255.0) as u8;
+            let g_float = (v as f32 * g_scale).clamp(0.0, 255.0) as u8;
+            let b_float = (v as f32 * b_scale).clamp(0.0, 255.0) as u8;
+            let mut img = Image::new(1, 1);
+            img.data[0] = v;
+            img.data[1] = v;
+            img.data[2] = v;
+            img.data[3] = 255;
+            let out = op.apply(img).unwrap();
+            assert!(out.data[0].abs_diff(r_float) <= 1, "R LUT mismatch at {v}");
+            assert!(out.data[1].abs_diff(g_float) <= 1, "G LUT mismatch at {v}");
+            assert!(out.data[2].abs_diff(b_float) <= 1, "B LUT mismatch at {v}");
+        }
     }
 }

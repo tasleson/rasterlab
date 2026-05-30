@@ -77,9 +77,9 @@ impl ToolState {
 
     fn build_tools() -> Vec<Box<dyn Tool>> {
         vec![
+            Box::new(BwTool::new()),
             Box::new(BlurTool::new()),
             Box::new(BrightnessContrastTool::new()),
-            Box::new(BwTool::new()),
             Box::new(ClarityTextureTool::new()),
             Box::new(ColorBalanceTool::new()),
             Box::new(ColorSpaceTool::new()),
@@ -179,6 +179,81 @@ impl ToolState {
             5 => Some((9.0, 16.0)),
             6 => Some((crop.custom_ratio, 1.0)),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Strip the leading icon/emoji prefix from a display name so the
+    /// alphabetical-ordering check compares only the human-readable label.
+    ///
+    /// Display names follow the convention `"<icon>  Name"` — one icon
+    /// codepoint followed by two ASCII spaces. We trim leading non-ASCII
+    /// characters and any whitespace that follows.
+    fn label(display_name: &str) -> &str {
+        let s = display_name.trim_start_matches(|c: char| !c.is_ascii());
+        s.trim_start()
+    }
+
+    /// CLAUDE.md mandates:
+    ///   "All other tools are placed in strict alphabetical order by display
+    ///    name after [Auto Enhance and Looks]."
+    ///
+    /// Verify that the trait-tool registration order in `build_tools` matches
+    /// the case-insensitive alphabetical sort of the display name labels.
+    /// Adding a new tool out of position fails this test immediately.
+    #[test]
+    fn tools_are_in_alphabetical_order_by_display_name() {
+        let tools = ToolState::build_tools();
+        let labels: Vec<String> = tools
+            .iter()
+            .map(|t| label(t.display_name()).to_string())
+            .collect();
+
+        let mut sorted = labels.clone();
+        sorted.sort_by_key(|s| s.to_lowercase());
+
+        assert_eq!(
+            labels, sorted,
+            "Tool order is not strictly alphabetical by display name.\n\
+             Current:  {:?}\n\
+             Expected: {:?}",
+            labels, sorted,
+        );
+    }
+
+    /// Every tool must have a unique `id()` so prefs/state lookups are
+    /// unambiguous; a duplicate id would silently mask one tool's open/closed
+    /// state.
+    #[test]
+    fn tool_ids_are_unique() {
+        let tools = ToolState::build_tools();
+        let mut ids: Vec<&'static str> = tools.iter().map(|t| t.id()).collect();
+        ids.sort();
+        let mut deduped = ids.clone();
+        deduped.dedup();
+        assert_eq!(
+            ids, deduped,
+            "duplicate tool id found in build_tools(): {:?}",
+            ids,
+        );
+    }
+
+    /// Display labels must not be empty after trimming the icon prefix —
+    /// otherwise the tools panel renders an icon with no name.
+    #[test]
+    fn tool_display_labels_are_non_empty() {
+        let tools = ToolState::build_tools();
+        for t in &tools {
+            let l = label(t.display_name());
+            assert!(
+                !l.is_empty(),
+                "tool {:?} has an empty display label after icon stripping",
+                t.id(),
+            );
         }
     }
 }

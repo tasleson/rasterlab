@@ -1,7 +1,8 @@
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{error::RasterResult, image::Image, traits::operation::Operation};
+
+use super::for_each_pixel_row_parallel;
 
 /// Apply a classic sepia-tone effect.
 ///
@@ -46,7 +47,7 @@ impl Operation for SepiaOp {
 
         let s = self.strength;
 
-        image.data.par_chunks_mut(4).for_each(|p| {
+        for_each_pixel_row_parallel(&mut image, |p| {
             let r = p[0] as f32;
             let g = p[1] as f32;
             let b = p[2] as f32;

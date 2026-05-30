@@ -74,7 +74,7 @@ The GUI render thread already sets 32 MiB (`app_state.rs`).
 
 ## Tool ordering
 
-When adding a new tool to the tools panel (`rasterlab-gui/src/panels/tools.rs`):
+When adding a new tool to the tools panel (`rasterlab-gui/src/panels/tools/`):
 
 - **Auto Enhance** stays first.
 - **Looks** stays second.

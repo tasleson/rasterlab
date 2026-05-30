@@ -131,44 +131,93 @@ impl RasterLabApp {
         #[cfg(not(target_arch = "wasm32"))]
         let no_focus = ctx.memory(|m| m.focused().is_none());
 
+        // Consume shortcut keys inside `input_mut`, but defer the handlers
+        // until after the closure returns. Handlers like `state.undo()` end
+        // up calling `ctx.request_repaint_after`, which takes the egui
+        // Context lock; doing that while `input_mut` already holds the write
+        // lock on the same Context deadlocks the main thread (parking_lot
+        // RwLock is non-reentrant).
+        let mut do_undo = false;
+        let mut do_redo = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut do_open = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut do_save = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut do_save_as = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut do_export = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut nav_delta: i32 = 0;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut do_delete = false;
+
         ctx.input_mut(|i| {
             if i.consume_key(Modifiers::CTRL, Key::Z) {
-                self.state.undo();
+                do_undo = true;
             }
             if i.consume_key(Modifiers::CTRL, Key::Y) {
-                self.state.redo();
+                do_redo = true;
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::O) {
-                self.request_open_dialog(ctx);
+                do_open = true;
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::S) {
-                self.save_project_or_prompt(ctx);
+                do_save = true;
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::S) {
-                self.chooser.save_project(ctx);
+                do_save_as = true;
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::E) {
-                self.chooser.export_image(ctx);
+                do_export = true;
             }
 
             // ── Library-editor navigation ────────────────────────────────────
             #[cfg(not(target_arch = "wasm32"))]
             if in_library_editor && no_focus {
                 if i.consume_key(Modifiers::NONE, Key::ArrowLeft) {
-                    self.navigate_library(-1);
+                    nav_delta -= 1;
                 }
                 if i.consume_key(Modifiers::NONE, Key::ArrowRight) {
-                    self.navigate_library(1);
+                    nav_delta += 1;
                 }
                 if i.consume_key(Modifiers::NONE, Key::Delete) {
-                    self.trigger_editor_delete();
+                    do_delete = true;
                 }
             }
         });
+
+        if do_undo {
+            self.state.undo();
+        }
+        if do_redo {
+            self.state.redo();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if do_open {
+                self.request_open_dialog(ctx);
+            }
+            if do_save {
+                self.save_project_or_prompt(ctx);
+            }
+            if do_save_as {
+                self.chooser.save_project(ctx);
+            }
+            if do_export {
+                self.chooser.export_image(ctx);
+            }
+            if nav_delta != 0 {
+                self.navigate_library(nav_delta);
+            }
+            if do_delete {
+                self.trigger_editor_delete();
+            }
+        }
     }
 
     /// Navigate to the adjacent photo in the library results list.

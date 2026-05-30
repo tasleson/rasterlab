@@ -35,6 +35,8 @@ pub mod vibrance;
 pub mod vignette;
 pub mod white_balance;
 
+use rayon::prelude::*;
+
 pub use blur::BlurOp;
 pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::{BlackAndWhiteOp, BwMode};
@@ -71,26 +73,6 @@ pub use vibrance::VibranceOp;
 pub use vignette::VignetteOp;
 pub use white_balance::WhiteBalanceOp;
 
-#[cfg(test)]
-pub(super) mod test_utils {
-    use crate::image::Image;
-
-    pub fn solid(r: u8, g: u8, b: u8) -> Image {
-        let mut img = Image::new(4, 4);
-        img.data.chunks_mut(4).for_each(|p| {
-            p[0] = r;
-            p[1] = g;
-            p[2] = b;
-            p[3] = 255;
-        });
-        img
-    }
-
-    pub fn grey(v: u8) -> Image {
-        solid(v, v, v)
-    }
-}
-
 // ── Shared pixel utilities ────────────────────────────────────────────────────
 
 /// sRGB gamma → linear (exact IEC 61966-2-1 piecewise formula).
@@ -111,6 +93,28 @@ pub(super) fn linear_to_srgb(c: f32) -> f32 {
     } else {
         1.055 * c.powf(1.0 / 2.4) - 0.055
     }
+}
+
+/// Apply a per-pixel RGBA mutation using row-level rayon tasks.
+///
+/// For cheap color transforms, `par_chunks_mut(4)` creates one work item per
+/// pixel and can spend more time in scheduling/dispatch than useful math.
+/// Chunking by row keeps cache-friendly parallelism while leaving a tight
+/// serial inner loop for the compiler to optimize.
+pub(super) fn for_each_pixel_row_parallel<F>(image: &mut crate::image::Image, f: F)
+where
+    F: Fn(&mut [u8]) + Sync + Send,
+{
+    let row_stride = image.row_stride();
+    if row_stride == 0 {
+        return;
+    }
+
+    image.data.par_chunks_mut(row_stride).for_each(|row| {
+        for pixel in row.chunks_exact_mut(4) {
+            f(pixel);
+        }
+    });
 }
 
 /// Bilinear sample from `image` at float coordinates `(sx, sy)`, clamped to border.
@@ -137,4 +141,24 @@ pub(super) fn bilinear_sample(image: &crate::image::Image, sx: f32, sy: f32) -> 
         out[i] = (top + (bot - top) * ty).clamp(0.0, 255.0) as u8;
     }
     out
+}
+
+#[cfg(test)]
+pub(super) mod test_utils {
+    use crate::image::Image;
+
+    pub fn solid(r: u8, g: u8, b: u8) -> Image {
+        let mut img = Image::new(4, 4);
+        img.data.chunks_mut(4).for_each(|p| {
+            p[0] = r;
+            p[1] = g;
+            p[2] = b;
+            p[3] = 255;
+        });
+        img
+    }
+
+    pub fn grey(v: u8) -> Image {
+        solid(v, v, v)
+    }
 }

@@ -505,19 +505,37 @@ impl NoiseReductionOp {
         // Apply NR
         let (mut out_y, mut out_cb, mut out_cr) = match self.method {
             NrMethod::Wavelet => {
+                let luma_strength = self.luma_strength;
+                let color_strength = self.color_strength;
                 let mut y = y_plane.clone();
                 let mut cb = cb_plane.clone();
                 let mut cr = cr_plane.clone();
-                apply_wavelet_nr(&mut y, w, h, self.luma_strength, true);
+
+                // Y, Cb, Cr are independent — process all three in parallel.
+                let ((y_out, cb_out), cr_out) = rayon::join(
+                    || {
+                        rayon::join(
+                            || {
+                                apply_wavelet_nr(&mut y, w, h, luma_strength, true);
+                                y
+                            },
+                            || {
+                                apply_wavelet_nr(&mut cb, w, h, color_strength, false);
+                                cb
+                            },
+                        )
+                    },
+                    || {
+                        apply_wavelet_nr(&mut cr, w, h, color_strength, false);
+                        cr
+                    },
+                );
+
                 if cancel::is_requested() {
                     return Err(RasterError::Cancelled);
                 }
-                apply_wavelet_nr(&mut cb, w, h, self.color_strength, false);
-                if cancel::is_requested() {
-                    return Err(RasterError::Cancelled);
-                }
-                apply_wavelet_nr(&mut cr, w, h, self.color_strength, false);
-                (y, cb, cr)
+
+                (y_out, cb_out, cr_out)
             }
             NrMethod::NonLocalMeans => {
                 let nlm_params = NlmParams {

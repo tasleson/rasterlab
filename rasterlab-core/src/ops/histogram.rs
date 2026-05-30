@@ -49,11 +49,14 @@ impl HistogramData {
                     acc.0[r] += 1;
                     acc.1[g] += 1;
                     acc.2[b] += 1;
-                    let l = (0.2126_f32 * pixel[0] as f32
-                        + 0.7152_f32 * pixel[1] as f32
-                        + 0.0722_f32 * pixel[2] as f32)
-                        .round() as usize;
-                    acc.3[l.min(255)] += 1;
+                    // BT.709 integer fixed-point: coefficients scaled to 1024 with
+                    // +512 rounding bias.  Max output: (1024*255+512)>>10 = 255.
+                    let l = ((218u32 * pixel[0] as u32
+                        + 732u32 * pixel[1] as u32
+                        + 74u32 * pixel[2] as u32
+                        + 512)
+                        >> 10) as usize;
+                    acc.3[l] += 1;
                 }
                 acc
             })
@@ -67,11 +70,14 @@ impl HistogramData {
                     acc.0[r] += 1;
                     acc.1[g] += 1;
                     acc.2[b] += 1;
-                    let l = (0.2126_f32 * pixel[0] as f32
-                        + 0.7152_f32 * pixel[1] as f32
-                        + 0.0722_f32 * pixel[2] as f32)
-                        .round() as usize;
-                    acc.3[l.min(255)] += 1;
+                    // BT.709 integer fixed-point: coefficients scaled to 1024 with
+                    // +512 rounding bias.  Max output: (1024*255+512)>>10 = 255.
+                    let l = ((218u32 * pixel[0] as u32
+                        + 732u32 * pixel[1] as u32
+                        + 74u32 * pixel[2] as u32
+                        + 512)
+                        >> 10) as usize;
+                    acc.3[l] += 1;
                 }
                 acc
             }))
@@ -146,5 +152,66 @@ mod tests {
         let src_data = src.data.clone();
         let out = HistogramOp.apply(src).unwrap();
         assert_eq!(out.data, src_data);
+    }
+
+    #[test]
+    fn luma_integer_matches_float_reference() {
+        // Verify integer luma agrees with the float BT.709 formula to within 1 LSB.
+        for r in (0u8..=255).step_by(8) {
+            for g in (0u8..=255).step_by(8) {
+                for b in (0u8..=255).step_by(8) {
+                    let float_l =
+                        (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32).round() as u32;
+                    let int_l = (218 * r as u32 + 732 * g as u32 + 74 * b as u32 + 512) >> 10;
+                    assert!(
+                        float_l.abs_diff(int_l) <= 1,
+                        "luma mismatch at ({r},{g},{b}): float={float_l} int={int_l}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Histogram's fold path processes pixels in 4096-pixel chunks and a
+    /// trailing remainder.  This regression-guards the remainder logic so any
+    /// future refactor can't silently lose pixels whose count doesn't divide
+    /// the chunk size.  Counts a few odd sizes spanning the boundaries.
+    #[test]
+    fn histogram_counts_all_pixels_for_odd_sizes() {
+        for (w, h) in [(1, 1), (17, 23), (4095, 1), (4096, 1), (4097, 1), (101, 47)] {
+            let mut img = Image::new(w, h);
+            img.data.chunks_mut(4).for_each(|p| {
+                p[0] = 50;
+                p[1] = 100;
+                p[2] = 150;
+                p[3] = 255;
+            });
+            let total = (w as u64) * (h as u64);
+            let hist = HistogramData::compute(&img);
+
+            let red_sum: u64 = hist.red.iter().sum();
+            let green_sum: u64 = hist.green.iter().sum();
+            let blue_sum: u64 = hist.blue.iter().sum();
+            let luma_sum: u64 = hist.luma.iter().sum();
+
+            assert_eq!(red_sum, total, "{w}x{h} red");
+            assert_eq!(green_sum, total, "{w}x{h} green");
+            assert_eq!(blue_sum, total, "{w}x{h} blue");
+            assert_eq!(luma_sum, total, "{w}x{h} luma");
+            assert_eq!(hist.red[50], total, "{w}x{h} red bucket");
+        }
+    }
+
+    /// A zero-pixel image must produce an all-zero histogram rather than
+    /// panicking on the modulo arithmetic in the trailing-remainder path.
+    #[test]
+    fn histogram_on_empty_image_is_all_zero() {
+        let img = Image::new(0, 0);
+        let hist = HistogramData::compute(&img);
+        assert_eq!(hist.red.iter().sum::<u64>(), 0);
+        assert_eq!(hist.green.iter().sum::<u64>(), 0);
+        assert_eq!(hist.blue.iter().sum::<u64>(), 0);
+        assert_eq!(hist.luma.iter().sum::<u64>(), 0);
+        assert_eq!(hist.peak(), 0);
     }
 }
