@@ -85,6 +85,8 @@ It's still not as fast as I would like.  ~~Claude thinks it's fast, but I disagr
 
 ```
 rasterlab-core/       # Image type, ops, pipeline, histogram
+rasterlab-render/     # Background render thread + GPU/CPU op scheduling
+rasterlab-gpu/        # wgpu compute backend for GPU-accelerated ops
 rasterlab-gui/        # egui/eframe frontend
 rasterlab-cli/        # Headless batch processing
 rasterlab-plugin-api/ # Trait definitions for external ops
