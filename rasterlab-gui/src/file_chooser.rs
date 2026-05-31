@@ -14,10 +14,10 @@
 //! is open) and dispatch on the returned `(DialogKind, PathBuf)` pair.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-use egui_file_dialog::{DialogState, FileDialog};
+use egui_file_dialog::{DialogState, FileDialog, Filter};
 use rasterlab_core::formats::raw::RAW_EXTENSIONS;
 
 // ---------------------------------------------------------------------------
@@ -34,6 +34,55 @@ fn all_supported_exts() -> Vec<&'static str> {
     let mut v = vec!["rlab", "jpg", "jpeg", "png"];
     v.extend_from_slice(RAW_EXTENSIONS);
     v
+}
+
+fn extension_matches(path: &Path, extensions: &[&'static str]) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            extensions
+                .iter()
+                .any(|supported| ext.eq_ignore_ascii_case(supported))
+        })
+}
+
+fn case_insensitive_file_filter(extensions: Vec<&'static str>) -> Filter<Path> {
+    Filter::new(move |path: &Path| extension_matches(path, &extensions))
+}
+
+#[cfg(target_os = "linux")]
+fn case_insensitive_glob_extension(ext: &str) -> String {
+    let mut glob = String::with_capacity(ext.len() * 4);
+    for ch in ext.chars() {
+        if ch.is_ascii_alphabetic() {
+            glob.push('[');
+            glob.push(ch.to_ascii_lowercase());
+            glob.push(ch.to_ascii_uppercase());
+            glob.push(']');
+        } else {
+            glob.push(ch);
+        }
+    }
+    glob
+}
+
+#[cfg(target_os = "linux")]
+fn native_filter_exts(exts: &[&'static str]) -> Vec<String> {
+    let mut out = Vec::with_capacity(exts.len() * 2);
+    for ext in exts {
+        out.push((*ext).to_string());
+
+        let glob = case_insensitive_glob_extension(ext);
+        if glob.as_str() != *ext {
+            out.push(glob);
+        }
+    }
+    out
+}
+
+#[cfg(not(target_os = "linux"))]
+fn native_filter_exts(exts: &[&'static str]) -> Vec<String> {
+    exts.iter().map(|ext| (*ext).to_string()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +261,7 @@ impl FileChooser {
                     .title(spec.title)
                     .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO);
                 for (name, exts) in &spec.filters {
-                    dlg = dlg.add_file_filter_extensions(name, exts.clone());
+                    dlg = dlg.add_file_filter(name, case_insensitive_file_filter(exts.clone()));
                 }
                 if let Some(filename) = spec.default_filename {
                     dlg = dlg.default_file_name(filename);
@@ -334,7 +383,8 @@ impl FileChooser {
         std::thread::spawn(move || {
             let mut dlg = rfd::FileDialog::new();
             for (name, exts) in &spec.filters {
-                dlg = dlg.add_filter(*name, exts);
+                let exts = native_filter_exts(exts);
+                dlg = dlg.add_filter(*name, &exts);
             }
             if let Some(start) = &start_dir {
                 dlg = dlg.set_directory(start);
@@ -386,5 +436,29 @@ impl FileChooser {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_matching_ignores_ascii_case() {
+        assert!(extension_matches(Path::new("photo.JPG"), &["jpg"]));
+        assert!(extension_matches(Path::new("photo.PnG"), &["png"]));
+        assert!(extension_matches(Path::new("edit.RLAB"), &["rlab"]));
+        assert!(!extension_matches(Path::new("notes.txt"), &["jpg", "png"]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_linux_filters_include_case_insensitive_globs() {
+        let exts = native_filter_exts(&["jpg", "3fr"]);
+
+        assert!(exts.contains(&"jpg".to_string()));
+        assert!(exts.contains(&"[jJ][pP][gG]".to_string()));
+        assert!(exts.contains(&"3fr".to_string()));
+        assert!(exts.contains(&"3[fF][rR]".to_string()));
     }
 }
