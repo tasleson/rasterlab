@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use rasterlab_core::{
-    formats::FormatRegistry,
+    formats::{FormatRegistry, exif_util::read_exif_from_file},
     library_meta::{FileTimeStamp, LibraryExif, LibraryMeta},
 };
 use uuid::Uuid;
@@ -43,7 +43,7 @@ pub fn import_files(
     let now = unix_now();
     // Session is named by the date the user imports, so imports on the
     // same local day roll into the same session.
-    let session_name = format_date_from_unix(now);
+    let session_name = chrono_lite_date(now);
 
     let existing = db
         .all_sessions()
@@ -88,7 +88,16 @@ pub fn import_files(
             errors: errors.clone(),
         });
 
-        match import_one(library_root, db, registry, path, &session_id, &stack_map) {
+        match import_one(
+            library_root,
+            db,
+            registry,
+            path,
+            &session_id,
+            &stack_map,
+            now,
+            None,
+        ) {
             Ok(None) => {
                 skipped_duplicates += 1;
             }
@@ -121,9 +130,212 @@ pub fn import_files(
     })
 }
 
+// ── Grouped folder import ───────────────────────────────────────────────────
+
+/// Import `paths` (typically the recursive contents of a folder), grouping them
+/// into one [`ImportSession`] per run of same-or-consecutive capture days.
+///
+/// Each group's session is back-dated to the group's earliest capture time and
+/// every photo's `import_date` is back-dated to its own capture time, so that
+/// importing another tool's library reconstructs a believable, years-long
+/// history.  Capture time is taken from EXIF `DateTimeOriginal`, falling back to
+/// the file's modified time and then created time.
+pub fn import_folder_grouped(
+    library_root: &Path,
+    db: &dyn LibraryDb,
+    registry: &FormatRegistry,
+    paths: &[PathBuf],
+    cancelled: Arc<AtomicBool>,
+    source_dir: Option<&Path>,
+    progress_cb: &dyn Fn(ImportProgress),
+) -> Result<Vec<ImportSession>> {
+    let total = paths.len();
+
+    // ── Phase 1: scan capture timestamps ──────────────────────────────────
+    // A cheap EXIF read (no full RAW demosaic) plus a fallback to filesystem
+    // times; sorting by the result lets the consecutive-day clustering run in
+    // a single pass.
+    let mut dated: Vec<(PathBuf, u64)> = Vec::with_capacity(total);
+    for path in paths {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        progress_cb(ImportProgress {
+            total,
+            done: 0,
+            current_file: path.clone(),
+            skipped_duplicates: 0,
+            errors: Vec::new(),
+        });
+        dated.push((path.clone(), capture_timestamp(path)));
+    }
+    dated.sort_by_key(|(_, ts)| *ts);
+
+    // Stack detection runs over the full (sorted) list so RAW+JPEG pairs are
+    // still found regardless of which group each file lands in.
+    let sorted_paths: Vec<PathBuf> = dated.iter().map(|(p, _)| p.clone()).collect();
+    let stack_map = detect_stacks(&sorted_paths);
+
+    // ── Phase 2: cluster into consecutive-day groups ──────────────────────
+    let timestamps: Vec<u64> = dated.iter().map(|(_, ts)| *ts).collect();
+    let groups = cluster_by_day(&timestamps);
+
+    // ── Phase 3: import each group into its own back-dated session ────────
+    let mut sessions: Vec<ImportSession> = Vec::new();
+    let mut done = 0usize;
+    let mut skipped_duplicates = 0usize;
+    let mut errors: Vec<(PathBuf, String)> = Vec::new();
+
+    for group in groups {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        let group_slice = &dated[group];
+        let group_start = group_slice
+            .first()
+            .map(|(_, ts)| *ts)
+            .unwrap_or_else(unix_now);
+        let group_end = group_slice.last().map(|(_, ts)| *ts).unwrap_or(group_start);
+        let session_name = format_session_name(group_start, group_end);
+
+        // Reuse an existing session with the same name so that re-imports, or
+        // multiple source trees that share a shoot date, merge together.
+        let existing = db
+            .all_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|s| s.name == session_name);
+        let (session_id, existing_count, session_started_at) = match existing {
+            Some(s) => (s.id, s.photo_count, s.started_at),
+            None => {
+                let id = Uuid::new_v4().to_string();
+                let source = source_dir.map(|d| d.to_string_lossy().into_owned());
+                db.insert_session(&id, &session_name, group_start, source.as_deref())?;
+                (id, 0, group_start)
+            }
+        };
+
+        let mut group_done = 0usize;
+        for (path, ts) in group_slice {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            progress_cb(ImportProgress {
+                total,
+                done,
+                current_file: path.clone(),
+                skipped_duplicates,
+                errors: errors.clone(),
+            });
+            match import_one(
+                library_root,
+                db,
+                registry,
+                path,
+                &session_id,
+                &stack_map,
+                *ts,
+                Some(*ts),
+            ) {
+                Ok(None) => skipped_duplicates += 1,
+                Ok(Some(_)) => {
+                    group_done += 1;
+                    done += 1;
+                }
+                Err(e) => errors.push((path.clone(), format!("{:#}", e))),
+            }
+        }
+
+        db.update_session_count(&session_id, existing_count + group_done as i64)?;
+        sessions.push(ImportSession {
+            id: session_id,
+            name: session_name,
+            started_at: session_started_at,
+            photo_count: group_done,
+            errors: Vec::new(),
+        });
+    }
+
+    progress_cb(ImportProgress {
+        total,
+        done,
+        current_file: PathBuf::new(),
+        skipped_duplicates,
+        errors: errors.clone(),
+    });
+
+    // Surface any per-file errors on the first session (or a synthetic one if
+    // nothing imported), so the caller can report them.
+    if let Some(first) = sessions.first_mut() {
+        first.errors = errors;
+    } else if !errors.is_empty() {
+        sessions.push(ImportSession {
+            id: String::new(),
+            name: String::new(),
+            started_at: unix_now(),
+            photo_count: 0,
+            errors,
+        });
+    }
+
+    Ok(sessions)
+}
+
+/// Best-available capture time for `path` in Unix seconds: EXIF
+/// `DateTimeOriginal`, then filesystem modified time, then created time.
+fn capture_timestamp(path: &Path) -> u64 {
+    let meta = read_exif_from_file(path);
+    if let Some(dt) = meta.date_time.as_deref()
+        && let Some(ts) = parse_exif_datetime(dt)
+    {
+        return ts;
+    }
+    if let Ok(fs_meta) = std::fs::metadata(path) {
+        if let Ok(t) = fs_meta.modified()
+            && let Ok(d) = t.duration_since(UNIX_EPOCH)
+        {
+            return d.as_secs();
+        }
+        if let Ok(t) = fs_meta.created()
+            && let Ok(d) = t.duration_since(UNIX_EPOCH)
+        {
+            return d.as_secs();
+        }
+    }
+    unix_now()
+}
+
+/// Group sorted timestamps into runs of same-or-consecutive UTC calendar days.
+/// A gap of more than one empty day between successive photos starts a new
+/// group.  Returns index ranges into the input slice.
+fn cluster_by_day(sorted_ts: &[u64]) -> Vec<std::ops::Range<usize>> {
+    let mut groups = Vec::new();
+    if sorted_ts.is_empty() {
+        return groups;
+    }
+    let day = |ts: u64| (ts / 86_400) as i64;
+    let mut start = 0usize;
+    let mut prev_day = day(sorted_ts[0]);
+    for (i, &ts) in sorted_ts.iter().enumerate().skip(1) {
+        let d = day(ts);
+        if d - prev_day > 1 {
+            groups.push(start..i);
+            start = i;
+        }
+        prev_day = d;
+    }
+    groups.push(start..sorted_ts.len());
+    groups
+}
+
 // ── Single-file import ────────────────────────────────────────────────────────
 
 /// Returns `Ok(Some(hash))` on success, `Ok(None)` if duplicate, `Err` on failure.
+///
+/// `import_date` is stored verbatim (callers back-date it for grouped imports),
+/// and `fallback_capture_ts` synthesises an EXIF capture date for files that
+/// carry none, so they still sort coherently by capture time.
+#[allow(clippy::too_many_arguments)]
 fn import_one(
     library_root: &Path,
     db: &dyn LibraryDb,
@@ -131,6 +343,8 @@ fn import_one(
     path: &Path,
     session_id: &str,
     stack_map: &[(usize, usize)], // (primary_idx, secondary_idx) pairs by path index
+    import_date: u64,
+    fallback_capture_ts: Option<u64>,
 ) -> Result<Option<String>> {
     // 1. Read source bytes + capture source-file timestamps.
     //    Stat first so we read the times the file had before we opened it.
@@ -158,7 +372,14 @@ fn import_one(
         .decode_file(path)
         .with_context(|| format!("decode {}", path.display()))?;
     let (width, height) = (image.width, image.height);
-    let exif = LibraryExif::from_image_metadata(&image.metadata);
+    let mut exif = LibraryExif::from_image_metadata(&image.metadata);
+    // Files without an EXIF capture date (PNGs, scans, …) still need a coherent
+    // capture date for sorting; synthesise one from the chosen fallback time.
+    if exif.capture_date.is_none()
+        && let Some(ts) = fallback_capture_ts
+    {
+        exif.capture_date = Some(format_exif_datetime(ts));
+    }
 
     // 6. Generate 512px thumbnail
     let thumb_bytes = generate_thumbnail(&image, 512)?;
@@ -176,7 +397,7 @@ fn import_one(
     let lmta = LibraryMeta {
         original_filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
         import_session_id: session_id.to_owned(),
-        import_date: unix_now(),
+        import_date,
         stack_peer_hash,
         stack_is_primary,
         source_mtime,
@@ -355,50 +576,98 @@ fn stack_peer_for(_path: &Path, _stack_map: &[(usize, usize)], _len: usize) -> O
     None
 }
 
-// ── Session naming ────────────────────────────────────────────────────────────
+// ── Session naming & calendar math ──────────────────────────────────────────
 
-fn format_date_from_unix(ts: u64) -> String {
-    // Simple: just return ISO date from unix seconds
-    let days_since_epoch = ts / 86400;
-    let _ = days_since_epoch; // avoid unused warning
+const MONTH_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
-    chrono_lite_date(ts)
-}
-
+/// Format a Unix timestamp as `"Jun 3 2025"` (UTC), without pulling in chrono.
 fn chrono_lite_date(ts: u64) -> String {
-    // Minimal calendar calculation without adding a chrono dependency
-    // (the GUI already has chrono via other deps, but this crate avoids it)
-    let secs = ts as i64;
-    let days = secs / 86400;
-    // Days since 1970-01-01
-    let mut year = 1970i32;
-    let mut remaining = days;
-    loop {
-        let in_year = if is_leap(year) { 366 } else { 365 };
-        if remaining < in_year {
-            break;
-        }
-        remaining -= in_year;
-        year += 1;
-    }
-    let months = if is_leap(year) {
-        [31i64, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31i64, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let month_names = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let mut month = 0usize;
-    while month < 12 && remaining >= months[month] {
-        remaining -= months[month];
-        month += 1;
-    }
-    format!("{} {} {}", month_names[month], remaining + 1, year)
+    let (year, month, day) = civil_from_days((ts / 86_400) as i64);
+    format!("{} {} {}", MONTH_NAMES[(month - 1) as usize], day, year)
 }
 
-fn is_leap(y: i32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+/// Human-readable session name for a group spanning `[start, end]` (Unix secs).
+/// Single day → `"Jun 3 2025"`; a range collapses the shared year (and month
+/// where possible): `"Jun 3–7 2025"`, `"Jun 30 – Jul 2 2025"`,
+/// `"Dec 31 2024 – Jan 1 2025"`.
+fn format_session_name(start: u64, end: u64) -> String {
+    let start_day = start / 86_400;
+    let end_day = end / 86_400;
+    if start_day == end_day {
+        return chrono_lite_date(start);
+    }
+    let (sy, sm, sd) = civil_from_days(start_day as i64);
+    let (ey, em, ed) = civil_from_days(end_day as i64);
+    let mon = |m: u32| MONTH_NAMES[(m - 1) as usize];
+    if sy == ey && sm == em {
+        format!("{} {}–{} {}", mon(sm), sd, ed, sy)
+    } else if sy == ey {
+        format!("{} {} – {} {} {}", mon(sm), sd, mon(em), ed, sy)
+    } else {
+        format!("{} {} {} – {} {} {}", mon(sm), sd, sy, mon(em), ed, ey)
+    }
+}
+
+/// Parse an EXIF `DateTimeOriginal` (`"YYYY:MM:DD HH:MM:SS"`) to Unix seconds
+/// (interpreted as UTC). Tolerates `-`/`/` date separators and a `T` between
+/// date and time; returns `None` for malformed or out-of-range input.
+fn parse_exif_datetime(s: &str) -> Option<u64> {
+    let (date, time) = s.trim().split_once([' ', 'T'])?;
+    let mut d = date.split([':', '-', '/']);
+    let year: i64 = d.next()?.trim().parse().ok()?;
+    let month: u32 = d.next()?.trim().parse().ok()?;
+    let day: u32 = d.next()?.trim().parse().ok()?;
+    let mut t = time.split([':', '.']);
+    let hour: i64 = t.next()?.trim().parse().ok()?;
+    let min: i64 = t.next()?.trim().parse().ok()?;
+    let sec: i64 = t.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    if year < 1970 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let secs = days_from_civil(year, month, day) * 86_400 + hour * 3_600 + min * 60 + sec;
+    (secs >= 0).then_some(secs as u64)
+}
+
+/// Format Unix seconds as an EXIF-style `"YYYY:MM:DD HH:MM:SS"` (UTC).
+fn format_exif_datetime(ts: u64) -> String {
+    let (y, m, d) = civil_from_days((ts / 86_400) as i64);
+    let rem = (ts % 86_400) as i64;
+    format!(
+        "{:04}:{:02}:{:02} {:02}:{:02}:{:02}",
+        y,
+        m,
+        d,
+        rem / 3_600,
+        (rem % 3_600) / 60,
+        rem % 60
+    )
+}
+
+/// Days since the Unix epoch for a Gregorian Y/M/D (Howard Hinnant's algorithm).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let m = m as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// Inverse of [`days_from_civil`]: Unix day count → (year, month, day).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
 }
 
 fn unix_now() -> u64 {
@@ -406,4 +675,104 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DAY: u64 = 86_400;
+
+    #[test]
+    fn civil_date_round_trips() {
+        // A handful of dates including epoch, leap day, and century boundaries.
+        for &(y, m, d) in &[
+            (1970, 1, 1),
+            (2000, 2, 29),
+            (2020, 9, 13),
+            (2025, 6, 3),
+            (2100, 3, 1),
+        ] {
+            let days = days_from_civil(y, m, d);
+            assert_eq!(civil_from_days(days), (y, m, d), "round-trip {y}-{m}-{d}");
+        }
+    }
+
+    #[test]
+    fn parse_exif_datetime_variants() {
+        // Canonical EXIF colon form at the epoch.
+        assert_eq!(parse_exif_datetime("1970:01:01 00:00:00"), Some(0));
+        // Known instant: 2020-09-13 12:26:40 UTC = 1_600_000_000.
+        assert_eq!(
+            parse_exif_datetime("2020:09:13 12:26:40"),
+            Some(1_600_000_000)
+        );
+        // Tolerates dash separators, a `T`, and fractional seconds.
+        assert_eq!(
+            parse_exif_datetime("2020-09-13T12:26:40.5"),
+            Some(1_600_000_000)
+        );
+    }
+
+    #[test]
+    fn parse_exif_datetime_rejects_garbage() {
+        // The EXIF "unknown" sentinel and malformed strings yield None.
+        assert_eq!(parse_exif_datetime("0000:00:00 00:00:00"), None);
+        assert_eq!(parse_exif_datetime("not a date"), None);
+        assert_eq!(parse_exif_datetime("2020:13:01 00:00:00"), None);
+    }
+
+    #[test]
+    fn format_exif_datetime_round_trips() {
+        let ts = 1_600_000_000;
+        assert_eq!(format_exif_datetime(ts), "2020:09:13 12:26:40");
+        assert_eq!(parse_exif_datetime(&format_exif_datetime(ts)), Some(ts));
+    }
+
+    #[test]
+    fn cluster_by_day_splits_on_gaps() {
+        // Same day, next day, +2 days (consecutive run holds), then a 3-day gap.
+        let base = 1_600_000_000;
+        let ts = [
+            base,
+            base + 3_600,   // same day
+            base + DAY,     // consecutive
+            base + 2 * DAY, // consecutive
+            base + 5 * DAY, // gap > 1 day → new group
+            base + 6 * DAY, // consecutive with previous
+        ];
+        let groups = cluster_by_day(&ts);
+        assert_eq!(groups, vec![0..4, 4..6]);
+    }
+
+    #[test]
+    fn cluster_by_day_edge_cases() {
+        assert!(cluster_by_day(&[]).is_empty());
+        assert_eq!(cluster_by_day(&[42]), vec![0..1]);
+    }
+
+    #[test]
+    fn session_name_single_and_ranges() {
+        let d = |y, m, day| days_from_civil(y, m, day) as u64 * DAY;
+        // Single day.
+        assert_eq!(
+            format_session_name(d(2025, 6, 3), d(2025, 6, 3)),
+            "Jun 3 2025"
+        );
+        // Same month range collapses to "Jun 3–7 2025".
+        assert_eq!(
+            format_session_name(d(2025, 6, 3), d(2025, 6, 7)),
+            "Jun 3–7 2025"
+        );
+        // Cross-month, same year.
+        assert_eq!(
+            format_session_name(d(2025, 6, 30), d(2025, 7, 2)),
+            "Jun 30 – Jul 2 2025"
+        );
+        // Cross-year.
+        assert_eq!(
+            format_session_name(d(2024, 12, 31), d(2025, 1, 1)),
+            "Dec 31 2024 – Jan 1 2025"
+        );
+    }
 }

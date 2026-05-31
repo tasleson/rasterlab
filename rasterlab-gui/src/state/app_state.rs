@@ -1635,27 +1635,48 @@ impl AppState {
             .ok();
     }
 
+    /// Recursively import `folder`, grouping photos into back-dated import
+    /// sessions by capture date (see [`rasterlab_library::Library::import_folder`]).
     pub fn import_folder_into_library(&mut self, folder: std::path::PathBuf) {
-        if self.library.library.is_none() {
+        let Some(lib) = self.library.library.clone() else {
             return;
-        }
-        let registry = rasterlab_core::formats::FormatRegistry::with_builtins();
-        let exts: std::collections::HashSet<String> =
-            registry.supported_extensions().into_iter().collect();
-        let paths: Vec<std::path::PathBuf> = walkdir::WalkDir::new(&folder)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    .map(|x| exts.contains(&x.to_lowercase()))
-                    .unwrap_or(false)
+        };
+        let tx = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::Builder::new()
+            .name("rasterlab-import".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let progress_tx = tx.clone();
+                let result = lib.import_folder(&folder, move |p| {
+                    let _ = progress_tx.send(BgMessage::ImportProgress(p));
+                    ctx.request_repaint();
+                });
+                match result {
+                    Ok(sessions) => {
+                        let total: usize = sessions.iter().map(|s| s.photo_count).sum();
+                        let errors: Vec<_> =
+                            sessions.iter().flat_map(|s| s.errors.clone()).collect();
+                        // Synthesise a summary "session" so the existing
+                        // ImportComplete status line can report the whole run.
+                        let summary = rasterlab_library::ImportSession {
+                            id: String::new(),
+                            name: format!("{} group(s)", sessions.len()),
+                            started_at: 0,
+                            photo_count: total,
+                            errors: Vec::new(),
+                        };
+                        let _ = tx.send(BgMessage::ImportComplete {
+                            errors,
+                            session: summary,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BgMessage::Error(e.to_string()));
+                    }
+                }
             })
-            .map(|e| e.into_path())
-            .collect();
-        self.import_into_library(paths);
+            .ok();
     }
 
     pub fn rebuild_library_index(&mut self) {

@@ -126,6 +126,12 @@ The plugin system exists and has an example. Nobody has written a plugin. The ar
 
 # Changelog
 
+## 2026-05-30
+
+### Features
+
+- **Grouped folder import with back-dated sessions** — importing a folder now walks it recursively and groups the photos into one Import Session per run of same-or-consecutive capture days, with each session (and each photo's import date) back-dated to its capture time. Capture time comes from EXIF `DateTimeOriginal`, falling back to the file's modified/created time. This lets you point RasterLab at another tool's library and reconstruct a believable, years-long history rather than dumping everything into a single "today" session.
+
 # Week 4
 
 ## 2026-04-23 (Week 4 is a wrap, ~80% weekly usage)

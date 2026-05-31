@@ -98,14 +98,25 @@ impl Library {
         )
     }
 
-    /// Recursively import all supported images found under `folder`.
+    /// Recursively import all supported images found under `folder`, grouping
+    /// them into one back-dated import session per run of same-or-consecutive
+    /// capture days.  Returns one [`ImportSession`] per group.
     pub fn import_folder(
         &self,
         folder: &Path,
         progress_cb: impl Fn(ImportProgress) + Send + 'static,
-    ) -> Result<ImportSession> {
+    ) -> Result<Vec<ImportSession>> {
         let paths = collect_image_paths(folder, &self.registry);
-        self.import_files(&paths, progress_cb)
+        let cancelled = Arc::new(AtomicBool::new(false));
+        import::import_folder_grouped(
+            &self.root,
+            self.db.as_ref(),
+            &self.registry,
+            &paths,
+            cancelled,
+            Some(folder),
+            &progress_cb,
+        )
     }
 
     // ── Photos ────────────────────────────────────────────────────────────

@@ -3901,6 +3901,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "filetime",
  "image",
  "rasterlab-core",
  "rayon",

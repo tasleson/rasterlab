@@ -129,9 +129,71 @@ fn folder_import_finds_all_supported_formats() {
     let tmp_lib = tempfile::tempdir().unwrap();
     let lib = open_library(tmp_lib.path());
 
-    let session = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
-    assert_eq!(session.photo_count, 2, "should have imported both images");
+    let sessions = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+    let imported: usize = sessions.iter().map(|s| s.photo_count).sum();
+    assert_eq!(imported, 2, "should have imported both images");
     assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 2);
+}
+
+// ── Grouped folder import ───────────────────────────────────────────────────
+
+/// Write a distinct (so non-deduplicating) tiny PNG and stamp its mtime.
+fn write_png_with_mtime(path: &std::path::Path, tag: u8, mtime_secs: i64) {
+    let img = image::RgbImage::from_pixel(2, 2, image::Rgb([tag, tag, tag]));
+    img.save(path).expect("write png");
+    filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(mtime_secs, 0))
+        .expect("set mtime");
+}
+
+#[test]
+fn folder_import_groups_by_capture_day_and_back_dates() {
+    const DAY: i64 = 86_400;
+    // A fixed past base so grouping is deterministic regardless of "now".
+    const BASE: i64 = 1_600_000_000; // 2020-09-13 UTC
+
+    let tmp_src = tempfile::tempdir().unwrap();
+    // Shoot A: three consecutive days. Shoot B: a single day after a gap.
+    write_png_with_mtime(&tmp_src.path().join("a0.png"), 1, BASE);
+    write_png_with_mtime(&tmp_src.path().join("a1.png"), 2, BASE + DAY);
+    write_png_with_mtime(&tmp_src.path().join("a2.png"), 3, BASE + 2 * DAY);
+    write_png_with_mtime(&tmp_src.path().join("b0.png"), 4, BASE + 5 * DAY);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let sessions = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+    assert_eq!(sessions.len(), 2, "consecutive days group; the gap splits");
+
+    let mut by_start: Vec<_> = sessions
+        .iter()
+        .map(|s| (s.started_at, s.photo_count))
+        .collect();
+    by_start.sort();
+    assert_eq!(
+        by_start[0],
+        (BASE as u64, 3),
+        "shoot A: 3 photos, dated day 0"
+    );
+    assert_eq!(
+        by_start[1],
+        ((BASE + 5 * DAY) as u64, 1),
+        "shoot B: 1 photo, dated day 5"
+    );
+
+    // Per-photo import_date is back-dated to each file's own capture time.
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    assert_eq!(photos.len(), 4);
+    let mut import_dates: Vec<u64> = photos.iter().map(|p| p.import_date).collect();
+    import_dates.sort();
+    assert_eq!(
+        import_dates,
+        vec![
+            BASE as u64,
+            (BASE + DAY) as u64,
+            (BASE + 2 * DAY) as u64,
+            (BASE + 5 * DAY) as u64,
+        ]
+    );
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────
