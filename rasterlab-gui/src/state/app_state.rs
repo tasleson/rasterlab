@@ -673,39 +673,53 @@ impl AppState {
             .name("rasterlab-load".into())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let msg = if is_project {
-                    match RlabFile::read(&path) {
-                        Ok(rlab) => {
-                            let registry = FormatRegistry::with_builtins();
-                            let hint = rlab.meta.source_path.as_deref().map(std::path::Path::new);
-                            match registry.decode_bytes(&rlab.original_bytes, hint) {
-                                Ok(image) => BgMessage::ProjectLoaded {
-                                    path,
-                                    rlab: Box::new(rlab),
-                                    image,
-                                },
-                                Err(e) => BgMessage::Error(e.to_string()),
+                // Decoders are third-party code (e.g. rawler) and not guaranteed
+                // panic-free on malformed input. A panic here would unwind the
+                // thread without ever sending a message, leaving the UI stuck on
+                // "Loading…" forever. Contain it so a bad file becomes an error.
+                let path_label = path.display().to_string();
+                let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if is_project {
+                        match RlabFile::read(&path) {
+                            Ok(rlab) => {
+                                let registry = FormatRegistry::with_builtins();
+                                let hint =
+                                    rlab.meta.source_path.as_deref().map(std::path::Path::new);
+                                match registry.decode_bytes(&rlab.original_bytes, hint) {
+                                    Ok(image) => BgMessage::ProjectLoaded {
+                                        path,
+                                        rlab: Box::new(rlab),
+                                        image,
+                                    },
+                                    Err(e) => BgMessage::Error(e.to_string()),
+                                }
                             }
+                            Err(e) => BgMessage::Error(e.to_string()),
                         }
-                        Err(e) => BgMessage::Error(e.to_string()),
-                    }
-                } else {
-                    // Read the raw bytes for storage in .rlab saves, then decode.
-                    match std::fs::read(&path) {
-                        Ok(original_bytes) => {
-                            let registry = FormatRegistry::with_builtins();
-                            match registry.decode_file(&path) {
-                                Ok(image) => BgMessage::ImageLoaded {
-                                    path,
-                                    image,
-                                    original_bytes,
-                                },
-                                Err(e) => BgMessage::Error(e.to_string()),
+                    } else {
+                        // Read the raw bytes for storage in .rlab saves, then decode.
+                        match std::fs::read(&path) {
+                            Ok(original_bytes) => {
+                                let registry = FormatRegistry::with_builtins();
+                                match registry.decode_file(&path) {
+                                    Ok(image) => BgMessage::ImageLoaded {
+                                        path,
+                                        image,
+                                        original_bytes,
+                                    },
+                                    Err(e) => BgMessage::Error(e.to_string()),
+                                }
                             }
+                            Err(e) => BgMessage::Error(e.to_string()),
                         }
-                        Err(e) => BgMessage::Error(e.to_string()),
                     }
-                };
+                }));
+                let msg = computed.unwrap_or_else(|_| {
+                    BgMessage::Error(format!(
+                        "Failed to load {path_label}: decoder panicked \
+                         (corrupt file or unsupported camera variant)"
+                    ))
+                });
                 let _ = tx.send(msg);
                 ctx.request_repaint();
             })

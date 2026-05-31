@@ -97,8 +97,24 @@ fn decode_raw_rawler(path: &Path) -> RasterResult<Image> {
         .to_lowercase();
 
     let params = RawDecodeParams::default();
-    let dyn_image =
-        raw_to_srgb(path, &params).map_err(|e| RasterError::decode(&ext, format!("{:?}", e)))?;
+
+    // rawler 0.7's per-format decoders are not panic-free: some malformed or
+    // unsupported variants (e.g. certain CR3 files) hit a `capacity overflow`
+    // while sizing internal buffers instead of returning an error. Left
+    // unguarded the panic unwinds the caller's thread — which in the GUI is the
+    // background load thread, leaving the UI stuck on "Loading…" forever.
+    // Contain it here so every caller sees a clean decode error instead.
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        raw_to_srgb(path, &params)
+    }))
+    .map_err(|_| {
+        RasterError::decode(
+            &ext,
+            "RAW decoder panicked — the file is corrupt or this camera variant is unsupported",
+        )
+    })?;
+
+    let dyn_image = decoded.map_err(|e| RasterError::decode(&ext, format!("{:?}", e)))?;
 
     let rgba = dyn_image.to_rgba8();
     let (w, h) = rgba.dimensions();
