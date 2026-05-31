@@ -9,7 +9,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use rasterlab_core::{
-    formats::{FormatRegistry, exif_util::read_exif_from_file},
+    formats::{
+        FormatRegistry,
+        exif_util::{read_exif_from_bytes, read_exif_from_file},
+    },
     library_meta::{FileTimeStamp, LibraryExif, LibraryMeta},
 };
 use uuid::Uuid;
@@ -284,10 +287,7 @@ pub fn import_folder_grouped(
 /// Best-available capture time for `path` in Unix seconds: EXIF
 /// `DateTimeOriginal`, then filesystem modified time, then created time.
 fn capture_timestamp(path: &Path) -> u64 {
-    let meta = read_exif_from_file(path);
-    if let Some(dt) = meta.date_time.as_deref()
-        && let Some(ts) = parse_exif_datetime(dt)
-    {
+    if let Some(ts) = exif_capture_timestamp(path) {
         return ts;
     }
     if let Ok(fs_meta) = std::fs::metadata(path) {
@@ -303,6 +303,24 @@ fn capture_timestamp(path: &Path) -> u64 {
         }
     }
     unix_now()
+}
+
+/// EXIF `DateTimeOriginal` for `path` in Unix seconds, if the file carries one.
+///
+/// JPEGs are parsed through the container reader and TIFF-based RAW files
+/// through the raw reader; the two readers are not interchangeable (the raw
+/// reader cannot find the APP1 segment in a JPEG, and vice versa).  Formats
+/// without EXIF (PNG, scans, …) return `None` and fall back to filesystem times.
+fn exif_capture_timestamp(path: &Path) -> Option<u64> {
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    let meta = if is_jpeg_ext(&ext) {
+        read_exif_from_bytes(&std::fs::read(path).ok()?)
+    } else if is_raw_ext(&ext) {
+        read_exif_from_file(path)
+    } else {
+        return None;
+    };
+    meta.date_time.as_deref().and_then(parse_exif_datetime)
 }
 
 /// Group sorted timestamps into runs of same-or-consecutive UTC calendar days.

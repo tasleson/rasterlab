@@ -196,6 +196,38 @@ fn folder_import_groups_by_capture_day_and_back_dates() {
     );
 }
 
+#[test]
+fn folder_import_groups_jpeg_by_exif_capture_date_not_mtime() {
+    // meta_test.jpg carries EXIF DateTimeOriginal 2024-06-15 10:30:00 UTC.
+    const EXIF_CAPTURE: u64 = 1_718_447_400;
+    // A wildly different mtime (2010-01-01 UTC) on a different calendar day, so
+    // a regression that reads mtime instead of EXIF would back-date the session
+    // to 2010 rather than 2024.
+    const WRONG_MTIME: i64 = 1_262_304_000;
+
+    let tmp_src = tempfile::tempdir().unwrap();
+    let jpeg = tmp_src.path().join("shot.jpg");
+    std::fs::copy(jpeg_path(), &jpeg).unwrap();
+    filetime::set_file_mtime(&jpeg, filetime::FileTime::from_unix_time(WRONG_MTIME, 0)).unwrap();
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let sessions = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].started_at, EXIF_CAPTURE,
+        "session must be back-dated to the JPEG's EXIF capture date, not its mtime"
+    );
+
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    assert_eq!(photos.len(), 1);
+    assert_eq!(
+        photos[0].import_date, EXIF_CAPTURE,
+        "import_date must come from EXIF, not the filesystem mtime"
+    );
+}
+
 // ── Delete ────────────────────────────────────────────────────────────────────
 
 #[test]
