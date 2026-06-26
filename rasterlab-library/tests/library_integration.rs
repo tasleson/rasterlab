@@ -291,6 +291,100 @@ fn delete_photo_permanently_removes_files_and_db_row() {
     );
 }
 
+// ── Protection ──────────────────────────────────────────────────────────────
+
+#[test]
+fn protected_photo_cannot_be_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let rlab = lib.rlab_path(&row.hash);
+
+    lib.set_protected(row.id, true).expect("set_protected true");
+
+    // DB mirrors the flag and the file is locked on disk.
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    assert!(row.protected, "DB row should be protected");
+    assert!(
+        rasterlab_library::fs_lock::is_locked(&rlab),
+        "rlab should be locked on disk"
+    );
+
+    // Both delete modes refuse a protected photo.
+    assert!(
+        lib.delete_photo(row.id).is_err(),
+        "trash delete must be refused"
+    );
+    assert!(
+        lib.delete_photo_permanently(row.id).is_err(),
+        "permanent delete must be refused"
+    );
+    assert!(rlab.exists(), "rlab must still exist");
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+
+    // Unprotect: file is unlocked and deletion is allowed again.
+    lib.set_protected(row.id, false)
+        .expect("set_protected false");
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    assert!(!row.protected);
+    assert!(
+        !rasterlab_library::fs_lock::is_locked(&rlab),
+        "rlab should be unlocked after unprotect"
+    );
+    lib.delete_photo_permanently(row.id)
+        .expect("delete after unprotect");
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+}
+
+#[test]
+fn metadata_edit_works_while_protected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let rlab_path = lib.rlab_path(&row.hash);
+
+    lib.set_protected(row.id, true).unwrap();
+
+    // Editing a protected (locked) file must transparently unlock, write, and
+    // re-lock — protection guards against deletion, not metadata edits.
+    let lmta = rasterlab_library::LibraryMeta {
+        rating: 5,
+        ..Default::default()
+    };
+    lib.update_metadata(row.id, lmta)
+        .expect("update protected metadata");
+
+    let rlab = rasterlab_core::project::RlabFile::read(&rlab_path).unwrap();
+    assert_eq!(rlab.lmta.unwrap().rating, 5);
+    assert!(
+        rasterlab_library::fs_lock::is_locked(&rlab_path),
+        "file should be re-locked after the edit"
+    );
+
+    lib.set_protected(row.id, false).unwrap();
+}
+
+#[test]
+fn protection_survives_rebuild_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    lib.set_protected(row.id, true).unwrap();
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    assert!(
+        row.protected,
+        "protected flag should survive a rebuild (it lives in the LMTA chunk)"
+    );
+
+    lib.set_protected(row.id, false).ok();
+}
+
 // ── Rebuild ───────────────────────────────────────────────────────────────────
 
 #[test]

@@ -1,4 +1,5 @@
 pub mod db_trait;
+pub mod fs_lock;
 pub mod import;
 pub mod library;
 pub mod reconstruct;
