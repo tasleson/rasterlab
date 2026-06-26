@@ -532,41 +532,42 @@ pub fn thumb_path(library_root: &Path, hash: &str) -> PathBuf {
 // ── Stack detection ───────────────────────────────────────────────────────────
 
 /// Pairs of (primary_path_index, secondary_path_index) within this import batch.
+///
+/// Each RAW file is paired with the lowest-indexed JPEG sharing its (lowercased)
+/// file stem.  A single index pass builds a stem → JPEG-indices map so the whole
+/// thing is O(n); the previous nested scan was O(n²) and stalled large imports.
 fn detect_stacks(paths: &[PathBuf]) -> Vec<(usize, usize)> {
+    use std::collections::HashMap;
+
+    let stem_of = |p: &Path| -> String {
+        p.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    };
+    let ext_of = |p: &Path| -> String {
+        p.extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    };
+
+    // Index every JPEG by stem (preserving path order so `first()` is the
+    // lowest-indexed match, matching the old break-on-first behaviour).
+    let mut jpegs_by_stem: HashMap<String, Vec<usize>> = HashMap::new();
+    for (j, q) in paths.iter().enumerate() {
+        if is_jpeg_ext(&ext_of(q)) {
+            jpegs_by_stem.entry(stem_of(q)).or_default().push(j);
+        }
+    }
+
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (i, p) in paths.iter().enumerate() {
-        let stem = p
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_lowercase();
-        let ext = p
-            .extension()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_lowercase();
-        if !is_raw_ext(&ext) {
+        if !is_raw_ext(&ext_of(p)) {
             continue;
         }
-        // Look for a matching JPEG with the same stem
-        for (j, q) in paths.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            let qstem = q
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            let qext = q
-                .extension()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            if qstem == stem && is_jpeg_ext(&qext) {
-                pairs.push((i, j));
-                break;
-            }
+        if let Some(&j) = jpegs_by_stem.get(&stem_of(p)).and_then(|js| js.first()) {
+            pairs.push((i, j));
         }
     }
     pairs
@@ -761,6 +762,32 @@ mod tests {
         let ts = 1_600_000_000;
         assert_eq!(format_exif_datetime(ts), "2020:09:13 12:26:40");
         assert_eq!(parse_exif_datetime(&format_exif_datetime(ts)), Some(ts));
+    }
+
+    #[test]
+    fn detect_stacks_pairs_raw_with_matching_jpeg() {
+        let paths: Vec<PathBuf> = [
+            "/a/IMG_1.NEF",  // 0: RAW, pairs with the JPEG at 1
+            "/a/img_1.jpg",  // 1: JPEG (case-insensitive stem match)
+            "/a/IMG_2.CR2",  // 2: RAW, no JPEG partner
+            "/a/IMG_3.jpg",  // 3: lone JPEG
+            "/a/IMG_4.nef",  // 4: RAW, pairs with the first matching JPEG (5, not 6)
+            "/a/IMG_4.JPG",  // 5
+            "/a/IMG_4.jpeg", // 6
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+
+        let mut pairs = detect_stacks(&paths);
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 1), (4, 5)]);
+    }
+
+    #[test]
+    fn detect_stacks_empty_without_raw() {
+        let paths: Vec<PathBuf> = ["/a/x.jpg", "/a/y.png"].iter().map(PathBuf::from).collect();
+        assert!(detect_stacks(&paths).is_empty());
     }
 
     #[test]
