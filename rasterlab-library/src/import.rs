@@ -403,6 +403,18 @@ fn import_one(
     let source_atime = fs_meta.accessed().ok().map(FileTimeStamp::from_system_time);
     let source_ctime = fs_meta.created().ok().map(FileTimeStamp::from_system_time);
 
+    // Fast resume: if a previously-imported photo has this exact source
+    // fingerprint (path + size + mtime), skip it without reading the bytes.
+    // This is what makes resuming an interrupted bulk import cheap — already-
+    // imported files cost a single indexed lookup instead of a full (often
+    // network) read plus Blake3 hash just to rediscover the duplicate. Falls
+    // through to the read+hash dedup whenever the mtime is unavailable.
+    if let Some(mtime) = source_mtime
+        && db.source_already_imported(&path.to_string_lossy(), fs_meta.len(), mtime.secs)?
+    {
+        return Ok(None);
+    }
+
     let original_bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
 
     // 2. Compute hash
@@ -447,6 +459,7 @@ fn import_one(
     let lmta = LibraryMeta {
         original_filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
         source_path: Some(path.to_string_lossy().into_owned()),
+        source_size: Some(fs_meta.len()),
         import_session_id: session_id.to_owned(),
         import_date,
         stack_peer_hash,

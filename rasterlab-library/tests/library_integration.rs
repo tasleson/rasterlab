@@ -172,6 +172,51 @@ fn folder_reimport_progress_counts_processed_duplicates() {
     assert_eq!(final_import.skipped_duplicates, 2);
 }
 
+/// Resuming an interrupted import must skip already-imported files by their
+/// source fingerprint (path + size + mtime) *without* re-reading and re-hashing
+/// their bytes — that is the whole point of the fast-resume path. We prove the
+/// bytes are not read by overwriting the source file with different content of
+/// the same length and restoring its mtime: a fingerprint-only check still skips
+/// it, whereas a hash-based check would see new bytes and re-import.
+#[test]
+fn folder_reimport_skips_by_fingerprint_without_hashing() {
+    let tmp_src = tempfile::tempdir().unwrap();
+    let src = tmp_src.path().join("a.png");
+    std::fs::copy(png_path(), &src).unwrap();
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let sessions = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+    assert_eq!(sessions.iter().map(|s| s.photo_count).sum::<usize>(), 1);
+
+    // Corrupt the file's *content* while preserving its byte length and mtime,
+    // so only the fingerprint — not the bytes — can match on re-import.
+    let meta = std::fs::metadata(&src).unwrap();
+    let mtime = filetime::FileTime::from_last_modification_time(&meta);
+    std::fs::write(&src, vec![0xABu8; meta.len() as usize]).unwrap();
+    filetime::set_file_mtime(&src, mtime).unwrap();
+
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = progress.clone();
+    let sessions = lib
+        .import_folder(tmp_src.path(), move |p| sink.lock().unwrap().push(p))
+        .unwrap();
+
+    assert_eq!(
+        sessions.iter().map(|s| s.photo_count).sum::<usize>(),
+        0,
+        "fingerprint match must skip the file without hashing its (now different) bytes"
+    );
+    let progress = progress.lock().unwrap();
+    let final_import = progress
+        .iter()
+        .rev()
+        .find(|p| !p.scanning)
+        .expect("final import progress");
+    assert_eq!(final_import.skipped_duplicates, 1);
+}
+
 // ── Grouped folder import ───────────────────────────────────────────────────
 
 /// Write a distinct (so non-deduplicating) tiny PNG and stamp its mtime.
