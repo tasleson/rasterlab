@@ -9,10 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use rasterlab_core::{
-    formats::{
-        FormatRegistry,
-        exif_util::{read_exif_from_bytes, read_exif_from_file},
-    },
+    formats::{FormatRegistry, exif_util::read_capture_date_from_prefix},
     library_meta::{FileTimeStamp, LibraryExif, LibraryMeta},
 };
 use uuid::Uuid;
@@ -305,22 +302,41 @@ fn capture_timestamp(path: &Path) -> u64 {
     unix_now()
 }
 
+/// Bytes read from the head of a file to extract its EXIF capture date.
+///
+/// EXIF sits near the start of both JPEG (APP1) and TIFF-based RAW (IFD0)
+/// containers, so a prefix this size reliably covers the relevant tags while
+/// transferring a tiny fraction of a multi-megabyte original — the difference
+/// between a usable and an unusable folder import over a network filesystem.
+const EXIF_PREFIX_LEN: u64 = 1 << 20; // 1 MiB
+
 /// EXIF `DateTimeOriginal` for `path` in Unix seconds, if the file carries one.
 ///
-/// JPEGs are parsed through the container reader and TIFF-based RAW files
-/// through the raw reader; the two readers are not interchangeable (the raw
-/// reader cannot find the APP1 segment in a JPEG, and vice versa).  Formats
-/// without EXIF (PNG, scans, …) return `None` and fall back to filesystem times.
+/// Only the leading [`EXIF_PREFIX_LEN`] bytes are read (the capture date lives
+/// near the start of both JPEG and TIFF-based RAW files), so this never streams
+/// whole originals across the network during the capture-date scan.  JPEGs and
+/// TIFF-based RAW use different container parsers; formats without EXIF (PNG,
+/// scans, …) — and the rare file whose date sits past the prefix — return
+/// `None` and fall back to filesystem times.
 fn exif_capture_timestamp(path: &Path) -> Option<u64> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
-    let meta = if is_jpeg_ext(&ext) {
-        read_exif_from_bytes(&std::fs::read(path).ok()?)
-    } else if is_raw_ext(&ext) {
-        read_exif_from_file(path)
-    } else {
+    let is_jpeg = is_jpeg_ext(&ext);
+    if !is_jpeg && !is_raw_ext(&ext) {
         return None;
-    };
-    meta.date_time.as_deref().and_then(parse_exif_datetime)
+    }
+    let prefix = read_file_prefix(path, EXIF_PREFIX_LEN)?;
+    let date = read_capture_date_from_prefix(&prefix, is_jpeg)?;
+    parse_exif_datetime(&date)
+}
+
+/// Read up to `max` bytes from the start of `path`.  Over NFS this transfers
+/// only the bytes actually consumed, so a small `max` keeps the read cheap.
+fn read_file_prefix(path: &Path, max: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(max).read_to_end(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// Group sorted timestamps into runs of same-or-consecutive UTC calendar days.
