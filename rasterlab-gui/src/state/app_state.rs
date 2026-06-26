@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf as StdPathBuf,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
@@ -213,6 +213,18 @@ impl From<RenderResult> for BgMessage {
     }
 }
 
+/// Number of worker threads servicing thumbnail loads. Fixed and small so a
+/// large library grid can't spawn thousands of threads at once.
+const THUMB_LOADER_THREADS: usize = 4;
+
+/// A queued thumbnail load: read `thumb_path` (falling back to the embedded
+/// thumbnail in `rlab_path`) and post the bytes back as `BgMessage::ThumbLoaded`.
+struct ThumbLoadRequest {
+    hash: String,
+    thumb_path: StdPathBuf,
+    rlab_path: StdPathBuf,
+}
+
 /// What the split "before/after" view compares against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitMode {
@@ -284,6 +296,10 @@ pub struct AppState {
     // Background thread channel
     bg_tx: mpsc::Sender<BgMessage>,
     bg_rx: mpsc::Receiver<BgMessage>,
+    /// Sender into the bounded thumbnail-loader pool (lazily spawned on first
+    /// request). A fixed worker count prevents a large grid from spawning one
+    /// OS thread per visible photo.
+    thumb_req_tx: Option<mpsc::Sender<ThumbLoadRequest>>,
     // egui context — needed to wake up the UI after background work completes
     ctx: Context,
     gpu: Option<Arc<GpuContext>>,
@@ -368,6 +384,7 @@ impl AppState {
             tools_force_open: None,
             bg_tx,
             bg_rx,
+            thumb_req_tx: None,
             ctx,
             gpu,
             tools,
@@ -605,8 +622,7 @@ impl AppState {
                 }
                 BgMessage::ImportComplete { session, errors } => {
                     self.library.import_progress = None;
-                    self.library.thumb_cache.clear();
-                    self.library.thumb_requested.clear();
+                    self.library.thumbs.clear();
                     self.library.refresh();
                     if errors.is_empty() {
                         self.status = format!(
@@ -631,7 +647,7 @@ impl AppState {
                         let handle =
                             self.ctx
                                 .load_texture(&hash, color_image, egui::TextureOptions::LINEAR);
-                        self.library.thumb_cache.insert(hash, handle);
+                        self.library.thumbs.insert(hash, handle);
                     }
                     self.ctx.request_repaint();
                 }
@@ -1736,8 +1752,7 @@ impl AppState {
         };
         // Evict the stale thumbnail immediately so the grid shows a placeholder
         // while regen is running.
-        self.library.thumb_cache.remove(hash);
-        self.library.thumb_requested.remove(hash);
+        self.library.thumbs.remove(hash);
 
         let hash = hash.to_owned();
         let tx = self.bg_tx.clone();
@@ -1768,34 +1783,73 @@ impl AppState {
     }
 
     /// Request that the thumbnail for `hash` be loaded from disk in the background.
+    ///
+    /// Loads are serviced by a fixed pool of worker threads (see
+    /// [`Self::ensure_thumb_pool`]); the grid may request many thumbnails per
+    /// frame, but the pool bounds how many run at once.
     pub fn request_thumb_load(&mut self, hash: String) {
-        if self.library.thumb_requested.contains(&hash) {
+        if self.library.thumbs.is_requested(&hash) {
             return;
         }
-        self.library.thumb_requested.insert(hash.clone());
         let Some(lib) = &self.library.library else {
             return;
         };
-        let thumb_path = lib.thumb_path(&hash);
-        let rlab_path = lib.rlab_path(&hash);
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
-        std::thread::Builder::new()
-            .name("rasterlab-thumb".into())
-            .stack_size(1024 * 1024)
-            .spawn(move || {
-                // Primary source: separate JPEG in thumbs/.
-                // Fallback: thumbnail embedded in the PREV chunk of the .rlab file.
-                let bytes = std::fs::read(&thumb_path).ok().or_else(|| {
-                    rasterlab_core::project::RlabFile::read(&rlab_path)
-                        .ok()
-                        .and_then(|r| r.thumbnail)
-                });
-                if let Some(bytes) = bytes {
-                    let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
-                    ctx.request_repaint();
-                }
-            })
-            .ok();
+        let req = ThumbLoadRequest {
+            thumb_path: lib.thumb_path(&hash),
+            rlab_path: lib.rlab_path(&hash),
+            hash: hash.clone(),
+        };
+        self.library.thumbs.mark_requested(hash);
+        self.ensure_thumb_pool();
+        if let Some(tx) = &self.thumb_req_tx {
+            let _ = tx.send(req);
+        }
+    }
+
+    /// Lazily spawn the fixed-size thumbnail-loader pool. Workers pull requests
+    /// off a shared queue, read the thumbnail bytes, and post them back as
+    /// `BgMessage::ThumbLoaded`. Idempotent; the pool lives for the app's life.
+    fn ensure_thumb_pool(&mut self) {
+        if self.thumb_req_tx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel::<ThumbLoadRequest>();
+        let rx = Arc::new(Mutex::new(rx));
+        for _ in 0..THUMB_LOADER_THREADS {
+            let rx = Arc::clone(&rx);
+            let bg_tx = self.bg_tx.clone();
+            let ctx = self.ctx.clone();
+            std::thread::Builder::new()
+                .name("rasterlab-thumb".into())
+                .stack_size(1024 * 1024)
+                .spawn(move || {
+                    loop {
+                        // Hold the lock only to dequeue; release before reading.
+                        let req = {
+                            let guard = rx.lock().unwrap();
+                            guard.recv()
+                        };
+                        let Ok(req) = req else {
+                            break; // sender dropped — app shutting down
+                        };
+                        // Primary source: separate JPEG in thumbs/.
+                        // Fallback: thumbnail embedded in the PREV chunk of the .rlab.
+                        let bytes = std::fs::read(&req.thumb_path).ok().or_else(|| {
+                            rasterlab_core::project::RlabFile::read(&req.rlab_path)
+                                .ok()
+                                .and_then(|r| r.thumbnail)
+                        });
+                        if let Some(bytes) = bytes {
+                            let _ = bg_tx.send(BgMessage::ThumbLoaded {
+                                hash: req.hash,
+                                bytes,
+                            });
+                            ctx.request_repaint();
+                        }
+                    }
+                })
+                .ok();
+        }
+        self.thumb_req_tx = Some(tx);
     }
 }

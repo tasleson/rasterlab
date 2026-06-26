@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
 };
@@ -31,10 +31,9 @@ pub struct LibraryState {
     pub thumb_scale: f32,
     pub import_progress: Option<ImportProgress>,
 
-    // Thumbnail cache: hash → egui texture handle
-    pub thumb_cache: HashMap<String, egui::TextureHandle>,
-    /// Hashes for which a bg load has already been requested (to avoid dupes).
-    pub thumb_requested: HashSet<String>,
+    /// Bounded thumbnail texture cache (evicts oldest beyond a fixed cap so a
+    /// large library can't grow GPU/texture memory without limit).
+    pub thumbs: ThumbCache,
 
     // Sidebar state
     pub sessions: Vec<ImportSessionRow>,
@@ -78,8 +77,7 @@ impl Default for LibraryState {
             selected: Vec::new(),
             thumb_scale: 0.5,
             import_progress: None,
-            thumb_cache: HashMap::new(),
-            thumb_requested: HashSet::new(),
+            thumbs: ThumbCache::new(THUMB_CACHE_CAP),
             sessions: Vec::new(),
             collections: Vec::new(),
             last_error: None,
@@ -139,8 +137,7 @@ impl LibraryState {
                 self.aperture_error = None;
                 self.shutter_error = None;
                 self.selected.clear();
-                self.thumb_cache.clear();
-                self.thumb_requested.clear();
+                self.thumbs.clear();
                 self.last_error = None;
                 self.refresh();
             }
@@ -190,10 +187,86 @@ impl LibraryState {
         }
 
         for hash in &hashes {
-            self.thumb_cache.remove(hash);
-            self.thumb_requested.remove(hash);
+            self.thumbs.remove(hash);
         }
         self.selected.clear();
         self.refresh();
+    }
+}
+
+// ── ThumbCache ──────────────────────────────────────────────────────────────
+
+/// Maximum number of thumbnail textures kept resident. Each 512 px thumbnail is
+/// ~1 MiB as an RGBA texture, so this caps thumbnail memory at a few hundred MiB
+/// regardless of library size. With viewport-culled loading the working set is
+/// far smaller; this is the safety ceiling for long scroll sessions.
+const THUMB_CACHE_CAP: usize = 512;
+
+/// Bounded thumbnail cache: hash → texture, plus the set of hashes whose load is
+/// in flight (to dedupe requests). Insertion order is tracked so the oldest
+/// entry is evicted once the cap is exceeded; an evicted hash is also dropped
+/// from the requested set so it can be reloaded when scrolled back into view.
+#[derive(Default)]
+pub struct ThumbCache {
+    textures: HashMap<String, egui::TextureHandle>,
+    requested: HashSet<String>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl ThumbCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            ..Default::default()
+        }
+    }
+
+    pub fn get(&self, hash: &str) -> Option<&egui::TextureHandle> {
+        self.textures.get(hash)
+    }
+
+    /// Number of resident textures (for the loading diagnostic).
+    pub fn cached_len(&self) -> usize {
+        self.textures.len()
+    }
+
+    /// Number of loads requested but not yet resident.
+    pub fn pending_len(&self) -> usize {
+        self.requested.len().saturating_sub(self.textures.len())
+    }
+
+    pub fn is_requested(&self, hash: &str) -> bool {
+        self.requested.contains(hash)
+    }
+
+    pub fn mark_requested(&mut self, hash: String) {
+        self.requested.insert(hash);
+    }
+
+    /// Store a loaded texture, evicting the oldest entry if over capacity.
+    pub fn insert(&mut self, hash: String, handle: egui::TextureHandle) {
+        if self.textures.insert(hash.clone(), handle).is_none() {
+            self.order.push_back(hash);
+        }
+        while self.textures.len() > self.cap {
+            let Some(evict) = self.order.pop_front() else {
+                break;
+            };
+            self.textures.remove(&evict);
+            self.requested.remove(&evict);
+        }
+    }
+
+    pub fn remove(&mut self, hash: &str) {
+        self.textures.remove(hash);
+        self.requested.remove(hash);
+        self.order.retain(|h| h != hash);
+    }
+
+    pub fn clear(&mut self) {
+        self.textures.clear();
+        self.requested.clear();
+        self.order.clear();
     }
 }

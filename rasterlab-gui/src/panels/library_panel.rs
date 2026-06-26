@@ -99,11 +99,11 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
         // Thumbnail load diagnostics — remove once thumbnails confirmed working
         {
-            let cached = state.library.thumb_cache.len();
-            let pending = state.library.thumb_requested.len();
-            if pending > cached {
+            let cached = state.library.thumbs.cached_len();
+            let loading = state.library.thumbs.pending_len();
+            if loading > 0 {
                 ui.separator();
-                ui.label(format!("Loading thumbs… {}/{}", cached, pending));
+                ui.label(format!("Loading thumbs… {}/{}", cached, cached + loading));
             }
         }
     });
@@ -680,7 +680,7 @@ fn thumb_cell(
     // the texture's own aspect so that rotated/cropped results render
     // correctly — the photo.width/height in the DB are the source image
     // dimensions and don't reflect pipeline ops like rotation or crop.
-    if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
+    if let Some(tex) = state.library.thumbs.get(&photo.hash) {
         let tex_size = tex.size_vec2();
         let fit_rect = fit_rect_preserve_aspect(img_rect, tex_size.x as u32, tex_size.y as u32);
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));

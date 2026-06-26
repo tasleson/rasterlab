@@ -29,7 +29,7 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         // Thumbnail preview — scale to fit within a square bound while
         // preserving the texture's own aspect (which reflects rotation/crop
         // ops, whereas photo.width/height are the source dimensions).
-        if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
+        if let Some(tex) = state.library.thumbs.get(&photo.hash) {
             let bound = ui.available_width().min(200.0);
             let tex_size = tex.size_vec2();
             let size = if tex_size.x > 0.0 && tex_size.y > 0.0 {
