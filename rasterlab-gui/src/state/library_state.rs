@@ -64,6 +64,11 @@ pub struct LibraryState {
     /// When set, the grid will scroll to — and select — the photo with this
     /// hash on the next frame, then clear the field.
     pub scroll_to_hash: Option<String>,
+
+    /// Physical-pixel max side the resident thumbnail textures are currently
+    /// built for. Tracked so the grid can detect a scale/DPI change and rebuild
+    /// the cache at the new resolution. Zero until the first grid frame.
+    pub thumb_target_side: u32,
 }
 
 impl Default for LibraryState {
@@ -90,6 +95,7 @@ impl Default for LibraryState {
             shutter_error: None,
             pending_open_photo: None,
             scroll_to_hash: None,
+            thumb_target_side: 0,
         }
     }
 }
@@ -194,13 +200,39 @@ impl LibraryState {
     }
 }
 
+// ── Thumbnail texture sizing ────────────────────────────────────────────────
+
+/// Max side of the JPEG thumbnails written to disk at import time
+/// (`rasterlab_library::thumbnail::generate_thumbnail` is called with 512).
+/// Resident textures are never built larger than this — there is no extra
+/// detail to recover.
+pub const THUMB_SOURCE_SIDE: u32 = 512;
+
+/// Resident texture sizes are snapped to this multiple. Bucketing keeps the
+/// cache homogeneous and stops a slow drag of the size slider from rebuilding
+/// the textures on every one-pixel change.
+const THUMB_SIZE_BUCKET: u32 = 64;
+
+/// Physical-pixel max side a thumbnail texture should be built at for the given
+/// grid scale and display DPI.
+///
+/// The grid draws each cell at `512 * thumb_scale` *points*; multiplying by
+/// `pixels_per_point` gives the on-screen size in device pixels, which is the
+/// most resolution that can actually be shown. The result is snapped to
+/// [`THUMB_SIZE_BUCKET`] and clamped to [`THUMB_SOURCE_SIDE`] so we never
+/// upscale past the on-disk thumbnail.
+pub fn thumb_target_side(thumb_scale: f32, pixels_per_point: f32) -> u32 {
+    let thumb_px = (512.0 * thumb_scale).max(64.0);
+    let raw = (thumb_px * pixels_per_point).round() as u32;
+    let bucketed = ((raw + THUMB_SIZE_BUCKET / 2) / THUMB_SIZE_BUCKET).max(1) * THUMB_SIZE_BUCKET;
+    bucketed.min(THUMB_SOURCE_SIDE)
+}
+
 // ── ThumbCache ──────────────────────────────────────────────────────────────
 
-/// Maximum number of thumbnail textures kept resident. Each 512 px thumbnail is
-/// ~1 MiB as an RGBA texture, so this caps thumbnail memory at a few hundred MiB
-/// regardless of library size. With viewport-culled loading the working set is
-/// far smaller; this is the safety ceiling for long scroll sessions.
-const THUMB_CACHE_CAP: usize = 512;
+/// Initial cap for the resident texture cache, used until the grid sets a
+/// scale-aware cap on its first frame (see [`ThumbCache::set_cap`]).
+const THUMB_CACHE_CAP: usize = 256;
 
 /// Bounded thumbnail cache: hash → texture, plus the set of hashes whose load is
 /// in flight (to dedupe requests). Insertion order is tracked so the oldest
@@ -220,6 +252,14 @@ impl ThumbCache {
             cap: cap.max(1),
             ..Default::default()
         }
+    }
+
+    /// Update the resident-texture cap and immediately evict down to it. Called
+    /// each grid frame with a value derived from the viewport so the cache holds
+    /// roughly the visible thumbnails plus a few screens of scroll margin.
+    pub fn set_cap(&mut self, cap: usize) {
+        self.cap = cap.max(1);
+        self.trim();
     }
 
     pub fn get(&self, hash: &str) -> Option<&egui::TextureHandle> {
@@ -249,6 +289,11 @@ impl ThumbCache {
         if self.textures.insert(hash.clone(), handle).is_none() {
             self.order.push_back(hash);
         }
+        self.trim();
+    }
+
+    /// Evict oldest entries until the resident count is within `cap`.
+    fn trim(&mut self) {
         while self.textures.len() > self.cap {
             let Some(evict) = self.order.pop_front() else {
                 break;
@@ -268,5 +313,36 @@ impl ThumbCache {
         self.textures.clear();
         self.requested.clear();
         self.order.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumb_target_side_buckets_clamps_and_never_upscales() {
+        // (thumb_scale, pixels_per_point) -> expected device-pixel max side.
+        let cases = [
+            // 1× display: target tracks the cell size (512 * scale), bucketed.
+            (0.25, 1.0, 128), // 128 px cell
+            (0.5, 1.0, 256),  // 256 px cell
+            (1.0, 1.0, 512),  // 512 px cell == source
+            // 2× (Retina): default scale already needs the full 512 px source;
+            // larger never upscales past it.
+            (0.25, 2.0, 256),
+            (0.5, 2.0, 512),
+            (1.0, 2.0, 512), // would be 1024 → clamped to source
+            // Fractional DPI snaps to the nearest bucket.
+            (0.5, 1.5, 384), // 256 * 1.5 = 384
+        ];
+        for (scale, ppp, expected) in cases {
+            assert_eq!(
+                thumb_target_side(scale, ppp),
+                expected,
+                "scale={scale} ppp={ppp}"
+            );
+            assert!(thumb_target_side(scale, ppp) <= THUMB_SOURCE_SIDE);
+        }
     }
 }

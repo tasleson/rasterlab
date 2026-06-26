@@ -3,7 +3,18 @@ use rasterlab_library::{
     ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, SearchFilter, SortOrder, ymd_from_unix,
 };
 
+use crate::state::library_state::thumb_target_side;
 use crate::state::{AppState, LibraryView};
+
+/// Scroll-margin multiple for the resident texture cap: keep roughly this many
+/// screens of thumbnails so scrolling in either direction rarely hits a cold
+/// cell. Three screens is generous without pinning much memory.
+const THUMB_CAP_SCREENS: usize = 3;
+/// Floor for the cap so a tiny window still caches a usable working set.
+const THUMB_CAP_MIN: usize = 64;
+/// Ceiling so a very large window at the smallest cell size can't blow up
+/// resident memory.
+const THUMB_CAP_MAX: usize = 512;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -678,7 +689,26 @@ fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
     let cell_sz = thumb_px + padding * 2.0;
 
     let avail_w = ui.available_width();
+    let avail_h = ui.available_height();
     let cols = ((avail_w / cell_sz) as usize).max(1);
+    let row_height = cell_sz + padding;
+
+    // Resident textures are sized to the on-screen cell. When the size slider
+    // (or display DPI) changes the target resolution, the cached textures are
+    // built for the wrong size, so drop them and let the visible ones reload at
+    // the new resolution from the local JPEGs.
+    let target = thumb_target_side(state.library.thumb_scale, ui.ctx().pixels_per_point());
+    if state.library.thumb_target_side != target {
+        state.library.thumb_target_side = target;
+        state.library.thumbs.clear();
+    }
+
+    // Cap the cache to roughly the visible thumbnails plus a few screens of
+    // scroll margin. Derived from the live viewport so it tracks the size
+    // slider — at small cells more thumbnails are visible and the cap grows.
+    let visible_rows = (avail_h / row_height).ceil() as usize + 2;
+    let cap = (visible_rows * cols * THUMB_CAP_SCREENS).clamp(THUMB_CAP_MIN, THUMB_CAP_MAX);
+    state.library.thumbs.set_cap(cap);
 
     keyboard_nav(ui, state, cols);
 
@@ -699,7 +729,6 @@ fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
     // fires tens of thousands of thumbnail loads at once and OOMs the process.
     let photos = state.library.results.clone();
     let num_rows = photos.len().div_ceil(cols);
-    let row_height = cell_sz + padding;
     ScrollArea::vertical().id_salt("lib_grid_scroll").show_rows(
         ui,
         row_height,

@@ -638,8 +638,24 @@ impl AppState {
                     }
                 }
                 BgMessage::ThumbLoaded { hash, bytes } => {
-                    // Upload JPEG bytes as a texture
+                    // Upload JPEG bytes as a texture, downscaled to the size the
+                    // grid actually draws (cell size in device pixels) so a
+                    // 512 px on-disk thumbnail doesn't sit in GPU memory at 4×
+                    // the resolution it's shown at. Never upscales.
                     if let Ok(dyn_img) = img_crate::load_from_memory(&bytes) {
+                        let target = crate::state::library_state::thumb_target_side(
+                            self.library.thumb_scale,
+                            self.ctx.pixels_per_point(),
+                        );
+                        let dyn_img = if dyn_img.width().max(dyn_img.height()) > target {
+                            dyn_img.resize(
+                                target,
+                                target,
+                                img_crate::imageops::FilterType::Triangle,
+                            )
+                        } else {
+                            dyn_img
+                        };
                         let rgba = dyn_img.to_rgba8();
                         let size = [rgba.width() as usize, rgba.height() as usize];
                         let color_image =
