@@ -79,6 +79,17 @@ pub trait LibraryDb: Send + Sync {
 
     fn photo_by_hash(&self, hash: &str) -> anyhow::Result<Option<PhotoRow>>;
 
+    /// True if a photo with this exact source fingerprint — same path, byte
+    /// size, and mtime (whole seconds) — is already in the library. Lets an
+    /// interrupted import resume by skipping already-imported files without
+    /// re-reading and re-hashing their (possibly remote) bytes.
+    fn source_already_imported(
+        &self,
+        source_path: &str,
+        source_size: u64,
+        source_mtime_secs: i64,
+    ) -> anyhow::Result<bool>;
+
     fn update_lmta(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> anyhow::Result<()>;
 
     fn set_has_edits(&self, photo_id: PhotoId, has_edits: bool) -> anyhow::Result<()>;

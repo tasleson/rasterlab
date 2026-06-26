@@ -57,6 +57,12 @@ pub struct LibraryMeta {
     /// Original source-file path at import time.
     #[serde(default)]
     pub source_path: Option<String>,
+    /// Size in bytes of the original source file at import time. Stored
+    /// alongside `source_path`/`source_mtime` to form a cheap fingerprint that
+    /// lets an interrupted import resume without re-reading already-imported
+    /// files (see `import::import_one`).
+    #[serde(default)]
+    pub source_size: Option<u64>,
     /// Modification time of the original source file at import time.
     /// Preserved so that the original bytes can be exported with matching mtime.
     #[serde(default)]
@@ -123,6 +129,7 @@ impl Default for LibraryMeta {
             location_city: None,
             location_country: None,
             source_path: None,
+            source_size: None,
             source_mtime: None,
             source_atime: None,
             source_ctime: None,
