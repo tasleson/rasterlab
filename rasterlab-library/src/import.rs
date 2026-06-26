@@ -619,9 +619,17 @@ fn stack_peer_for(_path: &Path, _stack_map: &[(usize, usize)], _len: usize) -> O
 
 // ── Session naming & calendar math ──────────────────────────────────────────
 
-const MONTH_NAMES: [&str; 12] = [
+/// Month abbreviations (`"Jan"`..`"Dec"`), indexed by `month - 1`.
+pub const MONTH_NAMES: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
+
+/// Convert a Unix timestamp (seconds, UTC) to a `(year, month, day)` triple.
+/// Exposed so UI code can group sessions by year/month without its own calendar
+/// math.
+pub fn ymd_from_unix(ts: u64) -> (i64, u32, u32) {
+    civil_from_days((ts / 86_400) as i64)
+}
 
 /// Format a Unix timestamp as `"Jun 3 2025"` (UTC), without pulling in chrono.
 fn chrono_lite_date(ts: u64) -> String {

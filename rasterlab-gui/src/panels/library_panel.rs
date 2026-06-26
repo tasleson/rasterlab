@@ -1,5 +1,7 @@
 use egui::{ScrollArea, Sense, Vec2};
-use rasterlab_library::{PhotoId, PhotoRow, SearchFilter, SortOrder};
+use rasterlab_library::{
+    ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, SearchFilter, SortOrder, ymd_from_unix,
+};
 
 use crate::state::{AppState, LibraryView};
 
@@ -189,36 +191,15 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             .selectable_label(all_selected, format!("All Photos ({})", total))
             .clicked()
         {
-            state.library.view = LibraryView::AllPhotos;
-            state.library.filter = SearchFilter::default();
-            state.library.iso_exact_text.clear();
-            state.library.aperture_exact_text.clear();
-            state.library.shutter_exact_text.clear();
-            state.library.iso_error = None;
-            state.library.aperture_error = None;
-            state.library.shutter_error = None;
-            state.library.refresh();
+            select_view(state, LibraryView::AllPhotos);
         }
 
-        // Sessions
+        // Sessions — grouped into a collapsible Year › Month › session tree so a
+        // large library doesn't flood the sidebar with a flat list.
         ui.add_space(4.0);
         ui.strong("Import Sessions");
         let sessions = state.library.sessions.clone();
-        for sess in &sessions {
-            let selected = state.library.view == LibraryView::Session(sess.id.clone());
-            let label = format!("{}  ({})", sess.name, sess.photo_count);
-            if ui.selectable_label(selected, label).clicked() {
-                state.library.view = LibraryView::Session(sess.id.clone());
-                state.library.filter = SearchFilter::default();
-                state.library.iso_exact_text.clear();
-                state.library.aperture_exact_text.clear();
-                state.library.shutter_exact_text.clear();
-                state.library.iso_error = None;
-                state.library.aperture_error = None;
-                state.library.shutter_error = None;
-                state.library.refresh();
-            }
-        }
+        sessions_tree_ui(ui, state, &sessions);
 
         // Collections
         ui.add_space(4.0);
@@ -227,15 +208,7 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         for coll in &collections {
             let selected = state.library.view == LibraryView::Collection(coll.id);
             if ui.selectable_label(selected, &coll.name).clicked() {
-                state.library.view = LibraryView::Collection(coll.id);
-                state.library.filter = SearchFilter::default();
-                state.library.iso_exact_text.clear();
-                state.library.aperture_exact_text.clear();
-                state.library.shutter_exact_text.clear();
-                state.library.iso_error = None;
-                state.library.aperture_error = None;
-                state.library.shutter_error = None;
-                state.library.refresh();
+                select_view(state, LibraryView::Collection(coll.id));
             }
         }
 
@@ -418,6 +391,107 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
     });
+}
+
+/// Switch the active library view, resetting all filters and their input/error
+/// state, then reload. Shared by every sidebar entry so the reset stays in sync.
+fn select_view(state: &mut AppState, view: LibraryView) {
+    state.library.view = view;
+    state.library.filter = SearchFilter::default();
+    state.library.iso_exact_text.clear();
+    state.library.aperture_exact_text.clear();
+    state.library.shutter_exact_text.clear();
+    state.library.iso_error = None;
+    state.library.aperture_error = None;
+    state.library.shutter_error = None;
+    state.library.refresh();
+}
+
+// ── Import-session tree ───────────────────────────────────────────────────────
+
+/// One month of sessions within a year. `sessions` holds indices into the flat
+/// session slice, preserving its (descending) order.
+struct MonthNode {
+    month: u32,
+    photo_count: i64,
+    sessions: Vec<usize>,
+}
+
+/// One year of sessions, grouped by month (months in descending order).
+struct YearNode {
+    year: i64,
+    photo_count: i64,
+    months: Vec<MonthNode>,
+}
+
+/// Group sessions (assumed sorted newest-first by `started_at`) into a
+/// year → month tree. Because the input is already ordered, appending on
+/// first-seen keeps years and months in descending order without sorting.
+fn group_sessions(sessions: &[ImportSessionRow]) -> Vec<YearNode> {
+    let mut years: Vec<YearNode> = Vec::new();
+    for (idx, sess) in sessions.iter().enumerate() {
+        let (year, month, _day) = ymd_from_unix(sess.started_at);
+
+        let yn = match years.last_mut() {
+            Some(y) if y.year == year => y,
+            _ => {
+                years.push(YearNode {
+                    year,
+                    photo_count: 0,
+                    months: Vec::new(),
+                });
+                years.last_mut().unwrap()
+            }
+        };
+        yn.photo_count += sess.photo_count;
+
+        let mn = match yn.months.last_mut() {
+            Some(m) if m.month == month => m,
+            _ => {
+                yn.months.push(MonthNode {
+                    month,
+                    photo_count: 0,
+                    sessions: Vec::new(),
+                });
+                yn.months.last_mut().unwrap()
+            }
+        };
+        mn.photo_count += sess.photo_count;
+        mn.sessions.push(idx);
+    }
+    years
+}
+
+fn sessions_tree_ui(ui: &mut egui::Ui, state: &mut AppState, sessions: &[ImportSessionRow]) {
+    if sessions.is_empty() {
+        ui.weak("No imports yet");
+        return;
+    }
+
+    // Years and months start collapsed (that is the whole point — a big library
+    // shouldn't flood the sidebar); egui persists whatever the user expands.
+    for year in group_sessions(sessions) {
+        egui::CollapsingHeader::new(format!("{}  ({})", year.year, year.photo_count))
+            .id_salt(("lib_year", year.year))
+            .show(ui, |ui| {
+                for month in &year.months {
+                    let name = MONTH_NAMES[(month.month - 1) as usize];
+                    egui::CollapsingHeader::new(format!("{}  ({})", name, month.photo_count))
+                        .id_salt(("lib_month", year.year, month.month))
+                        .show(ui, |ui| {
+                            for &si in &month.sessions {
+                                let sess = &sessions[si];
+                                let selected =
+                                    state.library.view == LibraryView::Session(sess.id.clone());
+                                let label = format!("{}  ({})", sess.name, sess.photo_count);
+                                if ui.selectable_label(selected, label).clicked() {
+                                    select_view(state, LibraryView::Session(sess.id.clone()));
+                                }
+                            }
+                        });
+                }
+            });
+    }
 }
 
 // ── Filter input validators ───────────────────────────────────────────────────
@@ -783,4 +857,64 @@ fn fit_rect_preserve_aspect(outer: egui::Rect, w: u32, h: u32) -> egui::Rect {
     };
     let size = egui::vec2(fw, fh);
     egui::Rect::from_center_size(outer.center(), size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sess(id: &str, started_at: u64, photo_count: i64) -> ImportSessionRow {
+        ImportSessionRow {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            started_at,
+            source_dir: None,
+            photo_count,
+        }
+    }
+
+    // UTC-midnight Unix timestamps for known dates (see test comments).
+    const JUN_15_2025: u64 = 1_749_945_600;
+    const JUN_03_2025: u64 = 1_748_908_800;
+    const JAN_10_2025: u64 = 1_736_467_200;
+    const DEC_20_2024: u64 = 1_734_652_800;
+
+    #[test]
+    fn group_sessions_nests_and_sums() {
+        // Newest-first, as `all_sessions` returns. Two June sessions share a
+        // month; January and the prior December are separate buckets.
+        let sessions = [
+            sess("jun15", JUN_15_2025, 3),
+            sess("jun03", JUN_03_2025, 5),
+            sess("jan10", JAN_10_2025, 2),
+            sess("dec20", DEC_20_2024, 7),
+        ];
+
+        let years = group_sessions(&sessions);
+
+        // Years stay in descending order: 2025 then 2024.
+        assert_eq!(years.len(), 2);
+        assert_eq!(years[0].year, 2025);
+        assert_eq!(years[0].photo_count, 3 + 5 + 2);
+        assert_eq!(years[1].year, 2024);
+        assert_eq!(years[1].photo_count, 7);
+
+        // 2025 has June (two sessions) then January, in descending order.
+        let m = &years[0].months;
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].month, 6);
+        assert_eq!(m[0].photo_count, 8);
+        assert_eq!(m[0].sessions.len(), 2);
+        assert_eq!(m[1].month, 1);
+        assert_eq!(m[1].sessions.len(), 1);
+
+        // 2024 has a single December month.
+        assert_eq!(years[1].months.len(), 1);
+        assert_eq!(years[1].months[0].month, 12);
+    }
+
+    #[test]
+    fn group_sessions_empty() {
+        assert!(group_sessions(&[]).is_empty());
+    }
 }

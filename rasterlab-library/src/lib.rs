@@ -9,7 +9,7 @@ pub mod thumbnail;
 pub use db_trait::{
     CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow, SortOrder,
 };
-pub use import::ImportSession;
+pub use import::{ImportSession, MONTH_NAMES, ymd_from_unix};
 pub use library::{ImportProgress, Library};
 pub use rasterlab_core::library_meta::{LibraryExif, LibraryMeta};
 pub use reconstruct::RebuildProgress;
