@@ -74,9 +74,13 @@ fn import_lmta_round_trips() {
     let rlab_path = lib.rlab_path(&row.hash);
     let rlab = rasterlab_core::project::RlabFile::read(&rlab_path).unwrap();
     let lmta = rlab.lmta.expect("LMTA chunk missing");
+    let source_path = jpeg_path().to_string_lossy().into_owned();
 
     // Original filename preserved
     assert_eq!(lmta.original_filename.as_deref(), Some("meta_test.jpg"));
+    // Original source path preserved in both library and project metadata
+    assert_eq!(lmta.source_path.as_deref(), Some(source_path.as_str()));
+    assert_eq!(rlab.meta.source_path.as_deref(), Some(source_path.as_str()));
     // Session ID round-trips
     assert_eq!(lmta.import_session_id, row.import_session);
     // EXIF snapshot present

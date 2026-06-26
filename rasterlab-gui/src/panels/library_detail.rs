@@ -192,6 +192,23 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
             .num_columns(2)
             .spacing([8.0, 2.0])
             .show(ui, |ui| {
+                if let Some(lib) = state.library.library.clone() {
+                    let rlab_path = lib.rlab_path(&photo.hash);
+                    if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
+                        && let Some(source_path) = rlab
+                            .lmta
+                            .as_ref()
+                            .and_then(|lmta| lmta.source_path.as_ref())
+                            .or(rlab.meta.source_path.as_ref())
+                    {
+                        ui.label("Original path:");
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(source_path).monospace())
+                                .truncate(),
+                        );
+                        ui.end_row();
+                    }
+                }
                 ui.label("Library path:");
                 ui.add(egui::Label::new(egui::RichText::new(&rel_path).monospace()).truncate());
                 ui.end_row();

@@ -49,6 +49,9 @@ pub struct LibraryMeta {
     pub location_country: Option<String>,
 
     // ── Source file timestamps ────────────────────────────────────────────
+    /// Original source-file path at import time.
+    #[serde(default)]
+    pub source_path: Option<String>,
     /// Modification time of the original source file at import time.
     /// Preserved so that the original bytes can be exported with matching mtime.
     #[serde(default)]
@@ -113,6 +116,7 @@ impl Default for LibraryMeta {
             creator: None,
             location_city: None,
             location_country: None,
+            source_path: None,
             source_mtime: None,
             source_atime: None,
             source_ctime: None,

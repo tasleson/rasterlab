@@ -446,6 +446,7 @@ fn import_one(
 
     let lmta = LibraryMeta {
         original_filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+        source_path: Some(path.to_string_lossy().into_owned()),
         import_session_id: session_id.to_owned(),
         import_date,
         stack_peer_hash,
@@ -506,7 +507,9 @@ fn write_rlab(
 
     let meta = RlabMeta::new(
         env!("CARGO_PKG_VERSION"),
-        lmta.original_filename.as_deref(),
+        lmta.source_path
+            .as_deref()
+            .or(lmta.original_filename.as_deref()),
         width,
         height,
     );
