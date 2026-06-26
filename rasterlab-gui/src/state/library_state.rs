@@ -42,6 +42,13 @@ pub struct LibraryState {
     /// Error message to show in a status bar or dialog.
     pub last_error: Option<String>,
 
+    /// Per-file `(path, message)` failures from the most recent import. Retained
+    /// after the import finishes so the user can review what went wrong.
+    pub last_import_errors: Vec<(PathBuf, String)>,
+
+    /// When true, show the import-errors detail window.
+    pub show_import_errors: bool,
+
     /// When true, show the "Move to Trash?" confirmation dialog.
     pub confirm_delete: bool,
 
@@ -86,6 +93,8 @@ impl Default for LibraryState {
             sessions: Vec::new(),
             collections: Vec::new(),
             last_error: None,
+            last_import_errors: Vec::new(),
+            show_import_errors: false,
             confirm_delete: false,
             iso_exact_text: String::new(),
             aperture_exact_text: String::new(),

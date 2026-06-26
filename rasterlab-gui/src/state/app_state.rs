@@ -630,12 +630,18 @@ impl AppState {
                             session.photo_count, session.name
                         );
                     } else {
+                        // Dump details to the terminal for quick diagnosis, and
+                        // keep them in state so the UI can show them on demand.
+                        for (path, msg) in &errors {
+                            eprintln!("import error: {}: {msg}", path.display());
+                        }
                         self.status = format!(
                             "Import: {} photos, {} error(s)",
                             session.photo_count,
                             errors.len()
                         );
                     }
+                    self.library.last_import_errors = errors;
                 }
                 BgMessage::ThumbLoaded { hash, bytes } => {
                     // Upload JPEG bytes as a texture, downscaled to the size the

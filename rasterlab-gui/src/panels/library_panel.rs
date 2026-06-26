@@ -27,6 +27,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // Confirmation dialog (modal window)
     confirm_delete_dialog(ui.ctx(), state);
 
+    // Import-errors detail window
+    import_errors_dialog(ui.ctx(), state);
+
     // Toolbar (import button, sort, scale slider)
     toolbar_ui(ui, state);
     ui.separator();
@@ -121,6 +124,23 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
+        // Persistent indicator for the most recent import's failures. Clicking
+        // it opens a window listing each file and its error.
+        let import_errors = state.library.last_import_errors.len();
+        if import_errors > 0 {
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("⚠ {import_errors} import error(s)"))
+                        .color(egui::Color32::RED),
+                )
+                .on_hover_text("Click to see which files failed")
+                .clicked()
+            {
+                state.library.show_import_errors = true;
+            }
+        }
+
         // Thumbnail load diagnostics — remove once thumbnails confirmed working
         {
             let cached = state.library.thumbs.cached_len();
@@ -184,6 +204,42 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.library.confirm_delete = false;
+    }
+}
+
+pub(crate) fn import_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.library.show_import_errors {
+        return;
+    }
+    if state.library.last_import_errors.is_empty() {
+        state.library.show_import_errors = false;
+        return;
+    }
+
+    let n = state.library.last_import_errors.len();
+    let mut open = true;
+    egui::Window::new(format!("Import errors ({n})"))
+        .collapsible(false)
+        .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label("These files could not be imported:");
+            ui.add_space(6.0);
+            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (path, msg) in &state.library.last_import_errors {
+                    ui.label(egui::RichText::new(path.display().to_string()).strong());
+                    ui.colored_label(egui::Color32::RED, msg);
+                    ui.add_space(4.0);
+                }
+            });
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                state.library.show_import_errors = false;
+            }
+        });
+    if !open {
+        state.library.show_import_errors = false;
     }
 }
 
