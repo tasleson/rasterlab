@@ -56,6 +56,21 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         }
 
         ui.separator();
+        // Protection — toggled directly (not via the LMTA rewrite path) so the
+        // on-disk filesystem lock is applied/cleared alongside the flag.
+        let mut protected = photo.protected;
+        if ui
+            .checkbox(&mut protected, "🔒 Protected (cannot be deleted)")
+            .changed()
+            && let Some(lib) = state.library.library.clone()
+        {
+            if let Err(e) = lib.set_protected(id, protected) {
+                state.library.last_error = Some(format!("Protect failed: {e}"));
+            }
+            state.library.refresh();
+        }
+
+        ui.separator();
         ui.strong("EXIF");
 
         // Fetch EXIF from the .rlab file if library is open
@@ -322,6 +337,17 @@ fn multi_photo_ui(ui: &mut egui::Ui, state: &mut AppState, ids: &[PhotoId], coun
         }
         if ui.button("Clear").clicked() {
             apply_batch_flag(state, ids, None);
+        }
+    });
+
+    // Protection (applies the on-disk lock alongside the flag)
+    ui.horizontal(|ui| {
+        ui.label("Protection:");
+        if ui.button("🔒 Protect").clicked() {
+            state.library.set_protected_selected(true);
+        }
+        if ui.button("Unprotect").clicked() {
+            state.library.set_protected_selected(false);
         }
     });
 

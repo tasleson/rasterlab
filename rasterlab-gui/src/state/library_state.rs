@@ -183,29 +183,65 @@ impl LibraryState {
         self.selected.clear();
     }
 
-    /// Move all selected photos to the OS trash and remove them from the library.
+    /// Move all selected photos to the OS trash and remove them from the
+    /// library. Protected photos are skipped so a protected file can never be
+    /// trashed, even if the confirmation dialog is bypassed.
     pub fn delete_selected(&mut self) {
         let Some(lib) = &self.library else { return };
-        // Collect hashes of selected photos so we can evict them from the cache.
-        let hashes: Vec<String> = self
-            .results
-            .iter()
-            .filter(|r| self.selected.contains(&r.id))
-            .map(|r| r.hash.clone())
-            .collect();
 
-        for id in self.selected.clone() {
-            if let Err(e) = lib.delete_photo(id) {
+        // Partition the selection into deletable and protected, capturing the
+        // hashes of the deletable ones so we can evict their thumbnails.
+        let mut deletable: Vec<(PhotoId, String)> = Vec::new();
+        let mut protected = 0usize;
+        for r in &self.results {
+            if self.selected.contains(&r.id) {
+                if r.protected {
+                    protected += 1;
+                } else {
+                    deletable.push((r.id, r.hash.clone()));
+                }
+            }
+        }
+
+        for (id, _) in &deletable {
+            if let Err(e) = lib.delete_photo(*id) {
                 self.last_error = Some(format!("Delete failed: {e}"));
                 return;
             }
         }
 
-        for hash in &hashes {
+        for (_, hash) in &deletable {
             self.thumbs.remove(hash);
+        }
+        if protected > 0 {
+            let noun = if protected == 1 { "photo" } else { "photos" };
+            self.last_error = Some(format!("{protected} protected {noun} were not deleted."));
         }
         self.selected.clear();
         self.refresh();
+    }
+
+    /// Mark (or unmark) all selected photos as protected.
+    pub fn set_protected_selected(&mut self, protected: bool) {
+        let Some(lib) = &self.library else { return };
+        for id in self.selected.clone() {
+            if let Err(e) = lib.set_protected(id, protected) {
+                self.last_error = Some(format!("Protect failed: {e}"));
+                return;
+            }
+        }
+        self.refresh();
+    }
+
+    /// True if every selected photo is currently protected (and there is at
+    /// least one selection). Used to choose the Protect/Unprotect label.
+    pub fn all_selected_protected(&self) -> bool {
+        !self.selected.is_empty()
+            && self
+                .results
+                .iter()
+                .filter(|r| self.selected.contains(&r.id))
+                .all(|r| r.protected)
     }
 }
 

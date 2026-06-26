@@ -191,6 +191,23 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         .open(&mut open)
         .show(ctx, |ui| {
             ui.label("The selected photo(s) will be moved to your system trash.");
+            let protected = state
+                .library
+                .results
+                .iter()
+                .filter(|r| state.library.selected.contains(&r.id) && r.protected)
+                .count();
+            if protected > 0 {
+                let noun = if protected == 1 {
+                    "photo is"
+                } else {
+                    "photos are"
+                };
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 200, 0),
+                    format!("{protected} protected {noun} and will be skipped."),
+                );
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Move to Trash").clicked() {
@@ -865,6 +882,20 @@ fn thumb_cell(
         state.request_thumb_load(photo.hash.clone());
     }
 
+    // Protected lock badge (top-left of the image area)
+    if photo.protected {
+        let pos = egui::pos2(img_rect.min.x + 9.0, img_rect.min.y + 9.0);
+        ui.painter()
+            .circle_filled(pos, 8.0, egui::Color32::from_black_alpha(140));
+        ui.painter().text(
+            pos,
+            egui::Align2::CENTER_CENTER,
+            "🔒",
+            egui::FontId::proportional(11.0),
+            egui::Color32::WHITE,
+        );
+    }
+
     // Rating stars overlay (bottom of cell)
     let rating = 0u8; // would need to join ratings table; show zero for now
     if rating > 0 {
@@ -925,6 +956,19 @@ fn thumb_cell(
             state.library.select_only(id);
         }
         let n = state.library.selected.len();
+
+        // Protect / Unprotect toggle for the whole selection.
+        let all_protected = state.library.all_selected_protected();
+        let protect_label = if all_protected {
+            "Unprotect"
+        } else {
+            "Protect"
+        };
+        if ui.button(protect_label).clicked() {
+            state.library.set_protected_selected(!all_protected);
+            ui.close();
+        }
+
         let label = if n == 1 {
             "Move to Trash".to_owned()
         } else {
