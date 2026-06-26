@@ -29,6 +29,10 @@ pub struct ImportProgress {
     pub current_file: PathBuf,
     pub skipped_duplicates: usize,
     pub errors: Vec<(PathBuf, String)>,
+    /// True during the pre-import capture-date scan (phase 1 of a grouped
+    /// folder import), where `done` counts files scanned rather than imported.
+    /// Lets the UI show "Scanning…" instead of a frozen "Importing… 0/N".
+    pub scanning: bool,
 }
 
 // ── Library ───────────────────────────────────────────────────────────────────

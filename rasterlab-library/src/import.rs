@@ -65,6 +65,7 @@ pub fn import_files(
         current_file: PathBuf::new(),
         skipped_duplicates: 0,
         errors: Vec::new(),
+        scanning: false,
     });
 
     // Detect RAW+JPEG stacks within this batch before importing.
@@ -86,6 +87,7 @@ pub fn import_files(
             current_file: path.clone(),
             skipped_duplicates,
             errors: errors.clone(),
+            scanning: false,
         });
 
         match import_one(
@@ -119,6 +121,7 @@ pub fn import_files(
         current_file: PathBuf::new(),
         skipped_duplicates,
         errors: errors.clone(),
+        scanning: false,
     });
 
     Ok(ImportSession {
@@ -156,16 +159,17 @@ pub fn import_folder_grouped(
     // times; sorting by the result lets the consecutive-day clustering run in
     // a single pass.
     let mut dated: Vec<(PathBuf, u64)> = Vec::with_capacity(total);
-    for path in paths {
+    for (scanned, path) in paths.iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
         progress_cb(ImportProgress {
             total,
-            done: 0,
+            done: scanned,
             current_file: path.clone(),
             skipped_duplicates: 0,
             errors: Vec::new(),
+            scanning: true,
         });
         dated.push((path.clone(), capture_timestamp(path)));
     }
@@ -226,6 +230,7 @@ pub fn import_folder_grouped(
                 current_file: path.clone(),
                 skipped_duplicates,
                 errors: errors.clone(),
+                scanning: false,
             });
             match import_one(
                 library_root,
@@ -262,6 +267,7 @@ pub fn import_folder_grouped(
         current_file: PathBuf::new(),
         skipped_duplicates,
         errors: errors.clone(),
+        scanning: false,
     });
 
     // Surface any per-file errors on the first session (or a synthetic one if

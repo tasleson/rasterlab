@@ -93,7 +93,8 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(ref p) = state.library.import_progress {
             ui.separator();
             ui.spinner();
-            ui.label(format!("Importing… {}/{}", p.done, p.total));
+            let verb = if p.scanning { "Scanning" } else { "Importing" };
+            ui.label(format!("{verb}… {}/{}", p.done, p.total));
         }
 
         // Thumbnail load diagnostics — remove once thumbnails confirmed working
