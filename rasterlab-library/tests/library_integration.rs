@@ -135,6 +135,39 @@ fn folder_import_finds_all_supported_formats() {
     assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 2);
 }
 
+#[test]
+fn folder_reimport_progress_counts_processed_duplicates() {
+    let tmp_src = tempfile::tempdir().unwrap();
+    std::fs::copy(jpeg_path(), tmp_src.path().join("a.jpg")).unwrap();
+    std::fs::copy(png_path(), tmp_src.path().join("b.png")).unwrap();
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let progress_sink = progress.clone();
+    let sessions = lib
+        .import_folder(tmp_src.path(), move |p| {
+            progress_sink.lock().unwrap().push(p);
+        })
+        .unwrap();
+
+    let imported: usize = sessions.iter().map(|s| s.photo_count).sum();
+    assert_eq!(imported, 0, "re-import should only skip duplicates");
+
+    let progress = progress.lock().unwrap();
+    let final_import = progress
+        .iter()
+        .rev()
+        .find(|p| !p.scanning)
+        .expect("final import progress");
+    assert_eq!(final_import.done, 2, "processed count should advance");
+    assert_eq!(final_import.imported, 0);
+    assert_eq!(final_import.skipped_duplicates, 2);
+}
+
 // ── Grouped folder import ───────────────────────────────────────────────────
 
 /// Write a distinct (so non-deduplicating) tiny PNG and stamp its mtime.

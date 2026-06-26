@@ -25,13 +25,17 @@ use crate::{
 #[derive(Debug, Clone, Default)]
 pub struct ImportProgress {
     pub total: usize,
+    /// Files processed in the current phase. During scanning this is files whose
+    /// capture date has been read; during importing this is files attempted.
     pub done: usize,
+    /// New photos actually imported during the import phase.
+    pub imported: usize,
     pub current_file: PathBuf,
     pub skipped_duplicates: usize,
     pub errors: Vec<(PathBuf, String)>,
     /// True during the pre-import capture-date scan (phase 1 of a grouped
-    /// folder import), where `done` counts files scanned rather than imported.
-    /// Lets the UI show "Scanning…" instead of a frozen "Importing… 0/N".
+    /// folder import). Lets the UI show "Scanning…" instead of a frozen
+    /// "Importing…" while capture dates are read.
     pub scanning: bool,
 }
 

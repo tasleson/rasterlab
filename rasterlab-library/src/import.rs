@@ -62,6 +62,7 @@ pub fn import_files(
     progress_cb(ImportProgress {
         total: paths.len(),
         done: 0,
+        imported: 0,
         current_file: PathBuf::new(),
         skipped_duplicates: 0,
         errors: Vec::new(),
@@ -71,7 +72,8 @@ pub fn import_files(
     // Detect RAW+JPEG stacks within this batch before importing.
     let stack_map = detect_stacks(paths);
 
-    let mut done = 0usize;
+    let mut processed = 0usize;
+    let mut imported = 0usize;
     let mut skipped_duplicates = 0usize;
     let mut errors: Vec<(PathBuf, String)> = Vec::new();
     let mut imported_hashes: Vec<(PathBuf, String)> = Vec::new();
@@ -83,7 +85,8 @@ pub fn import_files(
 
         progress_cb(ImportProgress {
             total: paths.len(),
-            done,
+            done: processed,
+            imported,
             current_file: path.clone(),
             skipped_duplicates,
             errors: errors.clone(),
@@ -105,19 +108,21 @@ pub fn import_files(
             }
             Ok(Some(hash)) => {
                 imported_hashes.push((path.clone(), hash));
-                done += 1;
+                imported += 1;
             }
             Err(e) => {
                 errors.push((path.clone(), format!("{:#}", e)));
             }
         }
+        processed += 1;
     }
 
-    db.update_session_count(&session_id, existing_count + done as i64)?;
+    db.update_session_count(&session_id, existing_count + imported as i64)?;
 
     progress_cb(ImportProgress {
         total: paths.len(),
-        done,
+        done: processed,
+        imported,
         current_file: PathBuf::new(),
         skipped_duplicates,
         errors: errors.clone(),
@@ -128,7 +133,7 @@ pub fn import_files(
         id: session_id,
         name: session_name,
         started_at: session_started_at,
-        photo_count: done,
+        photo_count: imported,
         errors,
     })
 }
@@ -163,15 +168,16 @@ pub fn import_folder_grouped(
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
+        dated.push((path.clone(), capture_timestamp(path)));
         progress_cb(ImportProgress {
             total,
-            done: scanned,
+            done: scanned + 1,
+            imported: 0,
             current_file: path.clone(),
             skipped_duplicates: 0,
             errors: Vec::new(),
             scanning: true,
         });
-        dated.push((path.clone(), capture_timestamp(path)));
     }
     dated.sort_by_key(|(_, ts)| *ts);
 
@@ -186,7 +192,8 @@ pub fn import_folder_grouped(
 
     // ── Phase 3: import each group into its own back-dated session ────────
     let mut sessions: Vec<ImportSession> = Vec::new();
-    let mut done = 0usize;
+    let mut processed = 0usize;
+    let mut imported = 0usize;
     let mut skipped_duplicates = 0usize;
     let mut errors: Vec<(PathBuf, String)> = Vec::new();
 
@@ -226,7 +233,8 @@ pub fn import_folder_grouped(
             }
             progress_cb(ImportProgress {
                 total,
-                done,
+                done: processed,
+                imported,
                 current_file: path.clone(),
                 skipped_duplicates,
                 errors: errors.clone(),
@@ -245,10 +253,11 @@ pub fn import_folder_grouped(
                 Ok(None) => skipped_duplicates += 1,
                 Ok(Some(_)) => {
                     group_done += 1;
-                    done += 1;
+                    imported += 1;
                 }
                 Err(e) => errors.push((path.clone(), format!("{:#}", e))),
             }
+            processed += 1;
         }
 
         db.update_session_count(&session_id, existing_count + group_done as i64)?;
@@ -263,7 +272,8 @@ pub fn import_folder_grouped(
 
     progress_cb(ImportProgress {
         total,
-        done,
+        done: processed,
+        imported,
         current_file: PathBuf::new(),
         skipped_duplicates,
         errors: errors.clone(),
