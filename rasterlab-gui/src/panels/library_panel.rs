@@ -619,20 +619,30 @@ fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
         state.library.select_none();
     }
 
-    ScrollArea::vertical()
-        .id_salt("lib_grid_scroll")
-        .show(ui, |ui| {
-            let photos = state.library.results.clone();
-            let rows = photos.chunks(cols);
-            for row in rows {
+    // Render only the rows currently scrolled into view. Iterating every photo
+    // (as a plain `.show()` would) calls `thumb_cell` — and thus
+    // `request_thumb_load` — for the whole result set, which on a large library
+    // fires tens of thousands of thumbnail loads at once and OOMs the process.
+    let photos = state.library.results.clone();
+    let num_rows = photos.len().div_ceil(cols);
+    let row_height = cell_sz + padding;
+    ScrollArea::vertical().id_salt("lib_grid_scroll").show_rows(
+        ui,
+        row_height,
+        num_rows,
+        |ui, row_range| {
+            for row_idx in row_range {
+                let start = row_idx * cols;
+                let end = (start + cols).min(photos.len());
                 ui.horizontal(|ui| {
-                    for photo in row {
+                    for photo in &photos[start..end] {
                         thumb_cell(ui, state, photo, thumb_px, padding);
                     }
                 });
                 ui.add_space(padding);
             }
-        });
+        },
+    );
 }
 
 fn thumb_cell(
