@@ -25,6 +25,8 @@ pub struct PhotoRow {
     pub stack_is_primary: bool,
     /// True if the photo has at least one committed edit (non-empty op stack).
     pub has_edits: bool,
+    /// True if the user has marked the photo as protected (cannot be deleted).
+    pub protected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +82,8 @@ pub trait LibraryDb: Send + Sync {
     fn update_lmta(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> anyhow::Result<()>;
 
     fn set_has_edits(&self, photo_id: PhotoId, has_edits: bool) -> anyhow::Result<()>;
+
+    fn set_protected(&self, photo_id: PhotoId, protected: bool) -> anyhow::Result<()>;
 
     fn update_lmta_batch(&self, updates: &[(PhotoId, LibraryMeta)]) -> anyhow::Result<()>;
 

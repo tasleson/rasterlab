@@ -46,7 +46,8 @@ const SCHEMA_STMTS: &[&str] = &[
         original_filename TEXT,
         stack_id          TEXT,
         stack_is_primary  INTEGER NOT NULL DEFAULT 1,
-        has_edits         INTEGER NOT NULL DEFAULT 0
+        has_edits         INTEGER NOT NULL DEFAULT 0,
+        protected         INTEGER NOT NULL DEFAULT 0
     )",
     "CREATE TABLE IF NOT EXISTS exif (
         photo_id          INTEGER PRIMARY KEY,
@@ -144,12 +145,14 @@ fn row_to_photo(row: &stoolap::api::rows::ResultRow) -> Result<PhotoRow> {
         stack_id: row.get::<Option<String>>(9).context("stack_id")?,
         stack_is_primary: row.get::<i64>(10).context("stack_is_primary")? != 0,
         has_edits: row.get::<i64>(11).unwrap_or(0) != 0,
+        protected: row.get::<i64>(12).unwrap_or(0) != 0,
     })
 }
 
 const PHOTO_SELECT: &str = "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
             p.import_date, p.import_session, p.capture_date,
-            p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits
+            p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits,
+            p.protected
      FROM photos p";
 
 // ── LibraryDb impl ────────────────────────────────────────────────────────────
@@ -169,6 +172,11 @@ impl LibraryDb for StoolapDb {
         let _ = self
             .db
             .execute("ALTER TABLE exif ADD COLUMN lens_make TEXT", ());
+        // Migration: add protected to existing databases (ignore error if present).
+        let _ = self.db.execute(
+            "ALTER TABLE photos ADD COLUMN protected INTEGER NOT NULL DEFAULT 0",
+            (),
+        );
         Ok(())
     }
 
@@ -190,8 +198,8 @@ impl LibraryDb for StoolapDb {
             .query_one(
                 "INSERT INTO photos
              (hash, lib_path, width, height, import_date, import_session,
-              capture_date, original_filename, stack_id, stack_is_primary)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+              capture_date, original_filename, stack_id, stack_is_primary, protected)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              RETURNING id",
                 (
                     hash,
@@ -204,6 +212,7 @@ impl LibraryDb for StoolapDb {
                     lmta.original_filename.as_deref(),
                     stack_id,
                     if lmta.stack_is_primary { 1i64 } else { 0i64 },
+                    if lmta.protected { 1i64 } else { 0i64 },
                 ),
             )
             .context("insert photo")?;
@@ -363,6 +372,14 @@ impl LibraryDb for StoolapDb {
         self.db.execute(
             "UPDATE photos SET has_edits=$1 WHERE id=$2",
             (has_edits as i64, photo_id),
+        )?;
+        Ok(())
+    }
+
+    fn set_protected(&self, photo_id: PhotoId, protected: bool) -> Result<()> {
+        self.db.execute(
+            "UPDATE photos SET protected=$1 WHERE id=$2",
+            (protected as i64, photo_id),
         )?;
         Ok(())
     }
