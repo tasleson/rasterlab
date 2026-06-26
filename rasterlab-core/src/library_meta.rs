@@ -33,6 +33,11 @@ pub struct LibraryMeta {
     pub color_label: Option<String>,
     /// Pick/reject flag: `"pick"` or `"reject"`.
     pub flag: Option<String>,
+    /// `true` if the user has marked this photo as protected. Protected photos
+    /// cannot be deleted from the library and their `.rlab` file is locked on
+    /// the filesystem (best-effort, per-OS) so it cannot go missing.
+    #[serde(default)]
+    pub protected: bool,
     /// Collection names this photo belongs to (denormalised for reconstruction;
     /// rewritten in all affected files when a collection is renamed).
     #[serde(default)]
@@ -110,6 +115,7 @@ impl Default for LibraryMeta {
             rating: 0,
             color_label: None,
             flag: None,
+            protected: false,
             collections: Vec::new(),
             caption: None,
             copyright: None,
@@ -259,5 +265,24 @@ mod tests {
         assert_eq!(back.rating, 3);
         assert_eq!(back.keywords, vec!["travel", "sunset"]);
         assert!(back.stack_is_primary); // default_true
+        assert!(!back.protected); // defaults to false
+    }
+
+    #[test]
+    fn protected_defaults_false_on_old_files() {
+        // A pre-protection .rlab whose LMTA JSON has no `protected` key must
+        // still deserialize, defaulting the flag to false.
+        let json = r#"{"original_filename":null,"import_session_id":"s",
+            "import_date":0,"stack_peer_hash":null,"exif":null}"#;
+        let meta: LibraryMeta = serde_json::from_str(json).unwrap();
+        assert!(!meta.protected);
+
+        let meta = LibraryMeta {
+            protected: true,
+            ..Default::default()
+        };
+        let back: LibraryMeta =
+            serde_json::from_str(&serde_json::to_string(&meta).unwrap()).unwrap();
+        assert!(back.protected);
     }
 }
