@@ -345,9 +345,12 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
         // Text search
         ui.horizontal(|ui| {
-            ui.label("Search:");
+            ui.label("Search:")
+                .on_hover_text("Matches filename, caption, and keywords (case-insensitive)");
             let mut text = state.library.filter.text.clone().unwrap_or_default();
-            if ui.text_edit_singleline(&mut text).changed() {
+            let resp =
+                ui.add(egui::TextEdit::singleline(&mut text).hint_text("name, caption, keyword"));
+            if resp.changed() {
                 state.library.filter.text = if text.is_empty() { None } else { Some(text) };
                 changed = true;
             }
