@@ -618,6 +618,10 @@ impl AppState {
                     self.loading = false;
                 }
                 BgMessage::ImportProgress(p) => {
+                    // Mirror the running error list into `last_import_errors` so the
+                    // "⚠ N import error(s)" button and its detail window work mid-import,
+                    // not only once the whole run completes.
+                    self.library.last_import_errors = p.errors.clone();
                     self.library.import_progress = Some(p);
                 }
                 BgMessage::ImportComplete { session, errors } => {
