@@ -542,7 +542,9 @@ fn write_rlab(
         Some(thumb_bytes.to_vec()),
     );
     rlab.set_lmta(Some(lmta.clone()));
-    rlab.write(path).context("write .rlab")
+    // Write v4 with Reed-Solomon `RECC` parity (~20% overhead) so a later
+    // integrity scrub can repair bitrot in place. See `crate::scrub`.
+    rlab.write_v4(path).context("write .rlab")
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────

@@ -212,7 +212,8 @@ impl Library {
                 lmta.protected = protected;
             }
             rlab.meta = rlab.meta.touch();
-            rlab.write(&rlab_path).context("rewrite lmta for protect")?;
+            rlab.write_v4(&rlab_path)
+                .context("rewrite lmta for protect")?;
             // Apply (or clear) the on-disk lock to match the new state.
             let _ = fs_lock::set_locked(&rlab_path, protected);
         }
@@ -364,7 +365,7 @@ impl Library {
         // Also update PREV chunk in the .rlab
         let mut updated = rlab;
         updated.thumbnail = Some(thumb);
-        fs_lock::with_unlocked(&rlab_path, || updated.write(&rlab_path))?;
+        fs_lock::with_unlocked(&rlab_path, || updated.write_v4(&rlab_path))?;
 
         // Mark the photo as edited in the DB.
         if let Ok(Some(row)) = self.db.photo_by_hash(hash) {
@@ -387,7 +388,7 @@ impl Library {
         let mut rlab = RlabFile::read(&rlab_path)?;
         rlab.set_lmta(Some(lmta.clone()));
         rlab.meta = rlab.meta.touch();
-        fs_lock::with_unlocked(&rlab_path, || rlab.write(&rlab_path)).context("rewrite lmta")
+        fs_lock::with_unlocked(&rlab_path, || rlab.write_v4(&rlab_path)).context("rewrite lmta")
     }
 
     fn add_collection_to_file(&self, photo_id: PhotoId, collection_name: &str) -> Result<()> {
@@ -406,7 +407,7 @@ impl Library {
             lmta.collections.push(collection_name.to_owned());
         }
         rlab.meta = rlab.meta.touch();
-        fs_lock::with_unlocked(&rlab_path, || rlab.write(&rlab_path))?;
+        fs_lock::with_unlocked(&rlab_path, || rlab.write_v4(&rlab_path))?;
         Ok(())
     }
 
@@ -424,7 +425,7 @@ impl Library {
             lmta.collections.retain(|c| c != collection_name);
         }
         rlab.meta = rlab.meta.touch();
-        fs_lock::with_unlocked(&rlab_path, || rlab.write(&rlab_path))?;
+        fs_lock::with_unlocked(&rlab_path, || rlab.write_v4(&rlab_path))?;
         Ok(())
     }
 }
@@ -441,7 +442,9 @@ fn rewrite_collection_name_in_file(rlab_path: &Path, old_name: &str, new_name: &
         }
     }
     rlab.meta = rlab.meta.touch();
-    Ok(fs_lock::with_unlocked(rlab_path, || rlab.write(rlab_path))?)
+    Ok(fs_lock::with_unlocked(rlab_path, || {
+        rlab.write_v4(rlab_path)
+    })?)
 }
 
 fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf> {

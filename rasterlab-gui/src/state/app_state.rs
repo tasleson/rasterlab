@@ -898,7 +898,10 @@ impl AppState {
         };
         let mut rlab = RlabFile::new(meta, original_bytes, copies_saved, active_idx, None);
         rlab.set_lmta(existing_lmta);
-        match rlab.write(&path) {
+        // v4 adds Reed-Solomon parity so the file is repairable by an integrity
+        // scrub; this also avoids downgrading a library photo that was imported
+        // as v4 when its edits are saved back in place.
+        match rlab.write_v4(&path) {
             Ok(()) => {
                 self.project_created_at = Some(created_at);
                 self.project_path = Some(path.clone());
@@ -1791,7 +1794,7 @@ impl AppState {
                 let result = (|| -> anyhow::Result<Vec<u8>> {
                     let mut rlab = rasterlab_core::project::RlabFile::read(&rlab_path)?;
                     rlab.active_copy_index = copy_idx.min(rlab.copies.len().saturating_sub(1));
-                    rlab.write(&rlab_path)?;
+                    rlab.write_v4(&rlab_path)?;
                     lib.regenerate_thumbnail(&hash)?;
                     Ok(std::fs::read(lib.thumb_path(&hash))?)
                 })();
