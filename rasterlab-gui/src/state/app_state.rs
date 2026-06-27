@@ -1,6 +1,10 @@
 use std::{
     path::PathBuf as StdPathBuf,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
@@ -205,6 +209,12 @@ enum BgMessage {
     },
     /// A thumbnail image was loaded from disk; ready to upload to egui.
     ThumbLoaded { hash: String, bytes: Vec<u8> },
+    /// Progress update from a running integrity scrub.
+    ScrubProgress(rasterlab_library::ScrubProgress),
+    /// Scrub finished (completed or cancelled).
+    ScrubComplete {
+        outcome: rasterlab_library::ScrubOutcome,
+    },
 }
 
 impl From<RenderResult> for BgMessage {
@@ -347,6 +357,10 @@ pub struct AppState {
     /// Set when the Editor opens a file that was imported into a library.
     /// `(library_root, hash)` — on save triggers thumb regen + DB sync.
     pub library_context: Option<(StdPathBuf, String)>,
+
+    /// Cancellation flag for a running integrity scrub. `Some` while a scrub is
+    /// in flight (drives the File-menu Start/Stop toggle); cleared on completion.
+    scrub_cancel: Option<Arc<AtomicBool>>,
 }
 
 impl AppState {
@@ -405,6 +419,7 @@ impl AppState {
                 ..Default::default()
             },
             library_context: None,
+            scrub_cancel: None,
         }
     }
 
@@ -676,6 +691,30 @@ impl AppState {
                         self.library.thumbs.insert(hash, handle);
                     }
                     self.ctx.request_repaint();
+                }
+                BgMessage::ScrubProgress(p) => {
+                    // Mirror the running error list so the "⚠ N scrub error(s)"
+                    // button and its detail window work mid-scrub, not only once
+                    // the whole run completes.
+                    self.library.last_scrub_errors = p.errors.clone();
+                    self.library.scrub_progress = Some(p);
+                }
+                BgMessage::ScrubComplete { outcome } => {
+                    self.scrub_cancel = None;
+                    self.library.scrub_progress = None;
+                    let verb = if outcome.cancelled {
+                        "Scrub stopped"
+                    } else {
+                        "Scrub complete"
+                    };
+                    self.status = format!(
+                        "{verb}: {} checked, {} repaired, {} upgraded, {} error(s)",
+                        outcome.checked,
+                        outcome.repaired,
+                        outcome.upgraded,
+                        outcome.errors.len()
+                    );
+                    self.library.last_scrub_errors = outcome.errors;
                 }
             }
         }
@@ -1736,6 +1775,59 @@ impl AppState {
                 }
             })
             .ok();
+    }
+
+    /// True while a background integrity scrub is running.
+    pub fn scrub_running(&self) -> bool {
+        self.scrub_cancel.is_some()
+    }
+
+    /// Spawn a background scrub over every `.rlab` file in the open library.
+    /// No-op if a scrub is already running or no library is open.
+    pub fn start_scrub(&mut self) {
+        if self.scrub_cancel.is_some() {
+            return;
+        }
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.scrub_cancel = Some(cancel.clone());
+        self.library.scrub_progress = Some(rasterlab_library::ScrubProgress::default());
+        self.library.last_scrub_errors.clear();
+        self.status = "Scrubbing library…".into();
+
+        let tx = self.bg_tx.clone();
+        let ctx = self.ctx.clone();
+        std::thread::Builder::new()
+            .name("rasterlab-scrub".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                let progress_tx = tx.clone();
+                let progress_ctx = ctx.clone();
+                let result = lib.scrub(cancel, move |p| {
+                    let _ = progress_tx.send(BgMessage::ScrubProgress(p));
+                    progress_ctx.request_repaint();
+                });
+                match result {
+                    Ok(outcome) => {
+                        let _ = tx.send(BgMessage::ScrubComplete { outcome });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(BgMessage::Error(format!("Scrub failed: {e}")));
+                    }
+                }
+                ctx.request_repaint();
+            })
+            .ok();
+    }
+
+    /// Request that a running scrub stop after the current file.
+    pub fn stop_scrub(&mut self) {
+        if let Some(cancel) = &self.scrub_cancel {
+            cancel.store(true, Ordering::Relaxed);
+            self.status = "Stopping scrub…".into();
+        }
     }
 
     pub fn rebuild_library_index(&mut self) {

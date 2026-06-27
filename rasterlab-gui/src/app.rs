@@ -649,6 +649,30 @@ impl eframe::App for RasterLabApp {
                                 self.state.rebuild_library_index();
                             }
                         });
+                        ui.add_enabled_ui(self.state.library.library.is_some(), |ui| {
+                            let running = self.state.scrub_running();
+                            let label = if running {
+                                "Stop Integrity Scrub"
+                            } else {
+                                "Start Integrity Scrub"
+                            };
+                            if ui
+                                .button(label)
+                                .on_hover_text(
+                                    "Verify every photo's .rlab file and repair correctable \
+                                     errors, backing up damaged originals to the library's \
+                                     'recovered' folder",
+                                )
+                                .clicked()
+                            {
+                                ui.close_kind(egui::UiKind::Menu);
+                                if running {
+                                    self.state.stop_scrub();
+                                } else {
+                                    self.state.start_scrub();
+                                }
+                            }
+                        });
                     }
 
                     #[cfg(not(target_arch = "wasm32"))]

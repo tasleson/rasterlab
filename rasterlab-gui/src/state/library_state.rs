@@ -6,7 +6,7 @@ use std::{
 
 use rasterlab_library::{
     CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, PhotoId, PhotoRow,
-    SearchFilter, SortOrder,
+    ScrubProgress, SearchFilter, SortOrder,
 };
 
 // ── LibraryView ───────────────────────────────────────────────────────────────
@@ -48,6 +48,16 @@ pub struct LibraryState {
 
     /// When true, show the import-errors detail window.
     pub show_import_errors: bool,
+
+    /// Progress of a running integrity scrub, or `None` when idle.
+    pub scrub_progress: Option<ScrubProgress>,
+
+    /// Per-file `(path, message)` uncorrectable failures from the most recent
+    /// scrub. Retained after it finishes so the user can review them.
+    pub last_scrub_errors: Vec<(PathBuf, String)>,
+
+    /// When true, show the scrub-errors detail window.
+    pub show_scrub_errors: bool,
 
     /// When true, show the "Move to Trash?" confirmation dialog.
     pub confirm_delete: bool,
@@ -95,6 +105,9 @@ impl Default for LibraryState {
             last_error: None,
             last_import_errors: Vec::new(),
             show_import_errors: false,
+            scrub_progress: None,
+            last_scrub_errors: Vec::new(),
+            show_scrub_errors: false,
             confirm_delete: false,
             iso_exact_text: String::new(),
             aperture_exact_text: String::new(),

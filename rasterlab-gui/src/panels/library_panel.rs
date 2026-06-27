@@ -30,6 +30,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // Import-errors detail window
     import_errors_dialog(ui.ctx(), state);
 
+    // Scrub-errors detail window
+    scrub_errors_dialog(ui.ctx(), state);
+
     // Toolbar (import button, sort, scale slider)
     toolbar_ui(ui, state);
     ui.separator();
@@ -138,6 +141,40 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 .clicked()
             {
                 state.library.show_import_errors = true;
+            }
+        }
+
+        // Scrub progress
+        if let Some(ref p) = state.library.scrub_progress {
+            ui.separator();
+            ui.spinner();
+            let mut detail = format!("Scrubbing… {}/{}", p.done, p.total);
+            if p.repaired > 0 {
+                detail.push_str(&format!(", {} repaired", p.repaired));
+            }
+            if p.upgraded > 0 {
+                detail.push_str(&format!(", {} upgraded", p.upgraded));
+            }
+            if !p.errors.is_empty() {
+                detail.push_str(&format!(", {} error(s)", p.errors.len()));
+            }
+            ui.label(detail);
+        }
+
+        // Persistent indicator for the most recent scrub's uncorrectable
+        // failures. Clicking it opens a window listing each file and its error.
+        let scrub_errors = state.library.last_scrub_errors.len();
+        if scrub_errors > 0 {
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("⚠ {scrub_errors} scrub error(s)"))
+                        .color(egui::Color32::RED),
+                )
+                .on_hover_text("Click to see which files could not be repaired")
+                .clicked()
+            {
+                state.library.show_scrub_errors = true;
             }
         }
 
@@ -257,6 +294,42 @@ pub(crate) fn import_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.library.show_import_errors = false;
+    }
+}
+
+pub(crate) fn scrub_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.library.show_scrub_errors {
+        return;
+    }
+    if state.library.last_scrub_errors.is_empty() {
+        state.library.show_scrub_errors = false;
+        return;
+    }
+
+    let n = state.library.last_scrub_errors.len();
+    let mut open = true;
+    egui::Window::new(format!("Scrub errors ({n})"))
+        .collapsible(false)
+        .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label("These files are corrupted and could not be repaired:");
+            ui.add_space(6.0);
+            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (path, msg) in &state.library.last_scrub_errors {
+                    ui.label(egui::RichText::new(path.display().to_string()).strong());
+                    ui.colored_label(egui::Color32::RED, msg);
+                    ui.add_space(4.0);
+                }
+            });
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                state.library.show_scrub_errors = false;
+            }
+        });
+    if !open {
+        state.library.show_scrub_errors = false;
     }
 }
 
