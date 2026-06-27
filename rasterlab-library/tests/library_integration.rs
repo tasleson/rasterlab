@@ -546,6 +546,41 @@ fn search_by_text_returns_matching_subset() {
 }
 
 #[test]
+fn search_text_is_case_insensitive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let jpeg_row = photos
+        .iter()
+        .find(|r| r.original_filename.as_deref() == Some("meta_test.jpg"))
+        .expect("jpeg photo");
+
+    let lmta = rasterlab_library::LibraryMeta {
+        keywords: vec!["Vacation".to_owned()],
+        ..Default::default()
+    };
+    lib.update_metadata(jpeg_row.id, lmta).unwrap();
+
+    // A keyword stored as "Vacation" must be found regardless of the
+    // case the user types into the search box.
+    for query in ["vacation", "VACATION", "VaCaTiOn"] {
+        let filter = SearchFilter {
+            text: Some(query.to_owned()),
+            ..Default::default()
+        };
+        let results = lib.search(&filter, SortOrder::default()).unwrap();
+        assert_eq!(results.len(), 1, "search {query:?} should match 'Vacation'");
+        assert_eq!(
+            results[0].original_filename.as_deref(),
+            Some("meta_test.jpg")
+        );
+    }
+}
+
+#[test]
 fn search_by_rating_min_filters_correctly() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = open_library(tmp.path());

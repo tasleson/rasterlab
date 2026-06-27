@@ -500,7 +500,7 @@ impl LibraryDb for StoolapDb {
         if let Some(ref text) = filter.text {
             let pat = format!("%{}%", text);
             push!(
-                "(p.original_filename LIKE {} OR um.caption LIKE {} OR k.keyword LIKE {})",
+                "(p.original_filename ILIKE {} OR um.caption ILIKE {} OR k.keyword ILIKE {})",
                 Value::text(pat.clone()),
                 Value::text(pat.clone()),
                 Value::text(pat)
@@ -533,10 +533,10 @@ impl LibraryDb for StoolapDb {
             push!("e.shutter_sec >= {}", Value::float(min_sec));
         }
         if let Some(ref cam) = filter.camera_model {
-            push!("e.camera_model LIKE {}", Value::text(format!("%{}%", cam)));
+            push!("e.camera_model ILIKE {}", Value::text(format!("%{}%", cam)));
         }
         if let Some(ref lens) = filter.lens_model {
-            push!("e.lens_model LIKE {}", Value::text(format!("%{}%", lens)));
+            push!("e.lens_model ILIKE {}", Value::text(format!("%{}%", lens)));
         }
         if let Some(ref from) = filter.capture_date_from {
             push!("p.capture_date >= {}", Value::text(from.clone()));
