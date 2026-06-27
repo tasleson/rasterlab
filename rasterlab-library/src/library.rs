@@ -128,6 +128,20 @@ impl Library {
         )
     }
 
+    // ── Integrity scrub ───────────────────────────────────────────────────
+
+    /// Walk every `.rlab` file, verify its integrity, and repair correctable
+    /// corruption in place (backing the damaged original up under
+    /// `recovered/`). Clean pre-ECC files are upgraded to v4. `cancel` is
+    /// polled between files so the caller can stop the scrub early.
+    pub fn scrub(
+        &self,
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(crate::ScrubProgress),
+    ) -> Result<crate::ScrubOutcome> {
+        crate::scrub::scrub(&self.root, cancel, &progress_cb)
+    }
+
     // ── Photos ────────────────────────────────────────────────────────────
 
     pub fn all_photos(&self, sort: SortOrder) -> Result<Vec<PhotoRow>> {
