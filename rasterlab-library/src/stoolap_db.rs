@@ -46,7 +46,11 @@ const SCHEMA_STMTS: &[&str] = &[
         original_filename TEXT,
         stack_id          TEXT,
         stack_is_primary  INTEGER NOT NULL DEFAULT 1,
-        has_edits         INTEGER NOT NULL DEFAULT 0
+        has_edits         INTEGER NOT NULL DEFAULT 0,
+        protected         INTEGER NOT NULL DEFAULT 0,
+        source_path       TEXT,
+        source_size       INTEGER,
+        source_mtime      INTEGER
     )",
     "CREATE TABLE IF NOT EXISTS exif (
         photo_id          INTEGER PRIMARY KEY,
@@ -110,6 +114,7 @@ const SCHEMA_STMTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS photos_capture ON photos(capture_date)",
     "CREATE INDEX IF NOT EXISTS photos_import  ON photos(import_date, import_session)",
     "CREATE INDEX IF NOT EXISTS photos_stack   ON photos(stack_id)",
+    "CREATE INDEX IF NOT EXISTS photos_source  ON photos(source_path)",
     "CREATE INDEX IF NOT EXISTS keywords_kw    ON keywords(keyword)",
     "CREATE INDEX IF NOT EXISTS kw_photo       ON keywords(photo_id)",
     "CREATE INDEX IF NOT EXISTS cp_coll        ON collection_photos(collection_id)",
@@ -144,12 +149,14 @@ fn row_to_photo(row: &stoolap::api::rows::ResultRow) -> Result<PhotoRow> {
         stack_id: row.get::<Option<String>>(9).context("stack_id")?,
         stack_is_primary: row.get::<i64>(10).context("stack_is_primary")? != 0,
         has_edits: row.get::<i64>(11).unwrap_or(0) != 0,
+        protected: row.get::<i64>(12).unwrap_or(0) != 0,
     })
 }
 
 const PHOTO_SELECT: &str = "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
             p.import_date, p.import_session, p.capture_date,
-            p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits
+            p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits,
+            p.protected
      FROM photos p";
 
 // ── LibraryDb impl ────────────────────────────────────────────────────────────
@@ -169,6 +176,21 @@ impl LibraryDb for StoolapDb {
         let _ = self
             .db
             .execute("ALTER TABLE exif ADD COLUMN lens_make TEXT", ());
+        // Migration: add protected to existing databases (ignore error if present).
+        let _ = self.db.execute(
+            "ALTER TABLE photos ADD COLUMN protected INTEGER NOT NULL DEFAULT 0",
+            (),
+        );
+        // Migration: source fingerprint columns for fast import resume.
+        let _ = self
+            .db
+            .execute("ALTER TABLE photos ADD COLUMN source_path TEXT", ());
+        let _ = self
+            .db
+            .execute("ALTER TABLE photos ADD COLUMN source_size INTEGER", ());
+        let _ = self
+            .db
+            .execute("ALTER TABLE photos ADD COLUMN source_mtime INTEGER", ());
         Ok(())
     }
 
@@ -185,38 +207,45 @@ impl LibraryDb for StoolapDb {
     ) -> Result<PhotoId> {
         let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
 
+        let opt_text =
+            |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+        let opt_int =
+            |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
+        let opt_f64 =
+            |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
+
+        // 14 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
+        let photo_params: Vec<Value> = vec![
+            Value::text(hash),
+            Value::text(lib_path),
+            Value::integer(width as i64),
+            Value::integer(height as i64),
+            Value::integer(lmta.import_date as i64),
+            Value::text(lmta.import_session_id.as_str()),
+            opt_text(capture_date),
+            opt_text(lmta.original_filename.as_deref()),
+            opt_text(stack_id),
+            Value::integer(if lmta.stack_is_primary { 1 } else { 0 }),
+            Value::integer(if lmta.protected { 1 } else { 0 }),
+            opt_text(lmta.source_path.as_deref()),
+            opt_int(lmta.source_size.map(|s| s as i64)),
+            opt_int(lmta.source_mtime.map(|t| t.secs)),
+        ];
         let photo_id: i64 = self
             .db
             .query_one(
                 "INSERT INTO photos
              (hash, lib_path, width, height, import_date, import_session,
-              capture_date, original_filename, stack_id, stack_is_primary)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+              capture_date, original_filename, stack_id, stack_is_primary, protected,
+              source_path, source_size, source_mtime)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
              RETURNING id",
-                (
-                    hash,
-                    lib_path,
-                    width as i64,
-                    height as i64,
-                    lmta.import_date as i64,
-                    lmta.import_session_id.as_str(),
-                    capture_date,
-                    lmta.original_filename.as_deref(),
-                    stack_id,
-                    if lmta.stack_is_primary { 1i64 } else { 0i64 },
-                ),
+                photo_params,
             )
             .context("insert photo")?;
 
         // EXIF — 17 params exceeds tuple impl limit; use Vec<Value>
         if let Some(exif) = &lmta.exif {
-            let opt_text =
-                |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
-            let opt_int =
-                |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
-            let opt_f64 =
-                |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
-
             let params: Vec<Value> = vec![
                 Value::integer(photo_id),
                 opt_text(exif.camera_make.as_deref()),
@@ -326,6 +355,20 @@ impl LibraryDb for StoolapDb {
         Ok(None)
     }
 
+    fn source_already_imported(
+        &self,
+        source_path: &str,
+        source_size: u64,
+        source_mtime_secs: i64,
+    ) -> Result<bool> {
+        let mut rows = self.db.query(
+            "SELECT 1 FROM photos
+             WHERE source_path = $1 AND source_size = $2 AND source_mtime = $3",
+            (source_path, source_size as i64, source_mtime_secs),
+        )?;
+        Ok(rows.next().is_some())
+    }
+
     fn update_lmta(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> Result<()> {
         self.db.execute(
             "UPDATE ratings SET rating=$1, color_label=$2, flag=$3 WHERE photo_id=$4",
@@ -363,6 +406,14 @@ impl LibraryDb for StoolapDb {
         self.db.execute(
             "UPDATE photos SET has_edits=$1 WHERE id=$2",
             (has_edits as i64, photo_id),
+        )?;
+        Ok(())
+    }
+
+    fn set_protected(&self, photo_id: PhotoId, protected: bool) -> Result<()> {
+        self.db.execute(
+            "UPDATE photos SET protected=$1 WHERE id=$2",
+            (protected as i64, photo_id),
         )?;
         Ok(())
     }
@@ -449,7 +500,7 @@ impl LibraryDb for StoolapDb {
         if let Some(ref text) = filter.text {
             let pat = format!("%{}%", text);
             push!(
-                "(p.original_filename LIKE {} OR um.caption LIKE {} OR k.keyword LIKE {})",
+                "(p.original_filename ILIKE {} OR um.caption ILIKE {} OR k.keyword ILIKE {})",
                 Value::text(pat.clone()),
                 Value::text(pat.clone()),
                 Value::text(pat)
@@ -482,10 +533,10 @@ impl LibraryDb for StoolapDb {
             push!("e.shutter_sec >= {}", Value::float(min_sec));
         }
         if let Some(ref cam) = filter.camera_model {
-            push!("e.camera_model LIKE {}", Value::text(format!("%{}%", cam)));
+            push!("e.camera_model ILIKE {}", Value::text(format!("%{}%", cam)));
         }
         if let Some(ref lens) = filter.lens_model {
-            push!("e.lens_model LIKE {}", Value::text(format!("%{}%", lens)));
+            push!("e.lens_model ILIKE {}", Value::text(format!("%{}%", lens)));
         }
         if let Some(ref from) = filter.capture_date_from {
             push!("p.capture_date >= {}", Value::text(from.clone()));

@@ -9,10 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use rasterlab_core::{
-    formats::{
-        FormatRegistry,
-        exif_util::{read_exif_from_bytes, read_exif_from_file},
-    },
+    formats::{FormatRegistry, exif_util::read_capture_date_from_prefix},
     library_meta::{FileTimeStamp, LibraryExif, LibraryMeta},
 };
 use uuid::Uuid;
@@ -65,15 +62,18 @@ pub fn import_files(
     progress_cb(ImportProgress {
         total: paths.len(),
         done: 0,
+        imported: 0,
         current_file: PathBuf::new(),
         skipped_duplicates: 0,
         errors: Vec::new(),
+        scanning: false,
     });
 
     // Detect RAW+JPEG stacks within this batch before importing.
     let stack_map = detect_stacks(paths);
 
-    let mut done = 0usize;
+    let mut processed = 0usize;
+    let mut imported = 0usize;
     let mut skipped_duplicates = 0usize;
     let mut errors: Vec<(PathBuf, String)> = Vec::new();
     let mut imported_hashes: Vec<(PathBuf, String)> = Vec::new();
@@ -85,10 +85,12 @@ pub fn import_files(
 
         progress_cb(ImportProgress {
             total: paths.len(),
-            done,
+            done: processed,
+            imported,
             current_file: path.clone(),
             skipped_duplicates,
             errors: errors.clone(),
+            scanning: false,
         });
 
         match import_one(
@@ -106,29 +108,32 @@ pub fn import_files(
             }
             Ok(Some(hash)) => {
                 imported_hashes.push((path.clone(), hash));
-                done += 1;
+                imported += 1;
             }
             Err(e) => {
                 errors.push((path.clone(), format!("{:#}", e)));
             }
         }
+        processed += 1;
     }
 
-    db.update_session_count(&session_id, existing_count + done as i64)?;
+    db.update_session_count(&session_id, existing_count + imported as i64)?;
 
     progress_cb(ImportProgress {
         total: paths.len(),
-        done,
+        done: processed,
+        imported,
         current_file: PathBuf::new(),
         skipped_duplicates,
         errors: errors.clone(),
+        scanning: false,
     });
 
     Ok(ImportSession {
         id: session_id,
         name: session_name,
         started_at: session_started_at,
-        photo_count: done,
+        photo_count: imported,
         errors,
     })
 }
@@ -159,18 +164,20 @@ pub fn import_folder_grouped(
     // times; sorting by the result lets the consecutive-day clustering run in
     // a single pass.
     let mut dated: Vec<(PathBuf, u64)> = Vec::with_capacity(total);
-    for path in paths {
+    for (scanned, path) in paths.iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
+        dated.push((path.clone(), capture_timestamp(path)));
         progress_cb(ImportProgress {
             total,
-            done: 0,
+            done: scanned + 1,
+            imported: 0,
             current_file: path.clone(),
             skipped_duplicates: 0,
             errors: Vec::new(),
+            scanning: true,
         });
-        dated.push((path.clone(), capture_timestamp(path)));
     }
     dated.sort_by_key(|(_, ts)| *ts);
 
@@ -185,7 +192,8 @@ pub fn import_folder_grouped(
 
     // ── Phase 3: import each group into its own back-dated session ────────
     let mut sessions: Vec<ImportSession> = Vec::new();
-    let mut done = 0usize;
+    let mut processed = 0usize;
+    let mut imported = 0usize;
     let mut skipped_duplicates = 0usize;
     let mut errors: Vec<(PathBuf, String)> = Vec::new();
 
@@ -225,10 +233,12 @@ pub fn import_folder_grouped(
             }
             progress_cb(ImportProgress {
                 total,
-                done,
+                done: processed,
+                imported,
                 current_file: path.clone(),
                 skipped_duplicates,
                 errors: errors.clone(),
+                scanning: false,
             });
             match import_one(
                 library_root,
@@ -243,10 +253,11 @@ pub fn import_folder_grouped(
                 Ok(None) => skipped_duplicates += 1,
                 Ok(Some(_)) => {
                     group_done += 1;
-                    done += 1;
+                    imported += 1;
                 }
                 Err(e) => errors.push((path.clone(), format!("{:#}", e))),
             }
+            processed += 1;
         }
 
         db.update_session_count(&session_id, existing_count + group_done as i64)?;
@@ -261,10 +272,12 @@ pub fn import_folder_grouped(
 
     progress_cb(ImportProgress {
         total,
-        done,
+        done: processed,
+        imported,
         current_file: PathBuf::new(),
         skipped_duplicates,
         errors: errors.clone(),
+        scanning: false,
     });
 
     // Surface any per-file errors on the first session (or a synthetic one if
@@ -305,22 +318,41 @@ fn capture_timestamp(path: &Path) -> u64 {
     unix_now()
 }
 
+/// Bytes read from the head of a file to extract its EXIF capture date.
+///
+/// EXIF sits near the start of both JPEG (APP1) and TIFF-based RAW (IFD0)
+/// containers, so a prefix this size reliably covers the relevant tags while
+/// transferring a tiny fraction of a multi-megabyte original — the difference
+/// between a usable and an unusable folder import over a network filesystem.
+const EXIF_PREFIX_LEN: u64 = 1 << 20; // 1 MiB
+
 /// EXIF `DateTimeOriginal` for `path` in Unix seconds, if the file carries one.
 ///
-/// JPEGs are parsed through the container reader and TIFF-based RAW files
-/// through the raw reader; the two readers are not interchangeable (the raw
-/// reader cannot find the APP1 segment in a JPEG, and vice versa).  Formats
-/// without EXIF (PNG, scans, …) return `None` and fall back to filesystem times.
+/// Only the leading [`EXIF_PREFIX_LEN`] bytes are read (the capture date lives
+/// near the start of both JPEG and TIFF-based RAW files), so this never streams
+/// whole originals across the network during the capture-date scan.  JPEGs and
+/// TIFF-based RAW use different container parsers; formats without EXIF (PNG,
+/// scans, …) — and the rare file whose date sits past the prefix — return
+/// `None` and fall back to filesystem times.
 fn exif_capture_timestamp(path: &Path) -> Option<u64> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
-    let meta = if is_jpeg_ext(&ext) {
-        read_exif_from_bytes(&std::fs::read(path).ok()?)
-    } else if is_raw_ext(&ext) {
-        read_exif_from_file(path)
-    } else {
+    let is_jpeg = is_jpeg_ext(&ext);
+    if !is_jpeg && !is_raw_ext(&ext) {
         return None;
-    };
-    meta.date_time.as_deref().and_then(parse_exif_datetime)
+    }
+    let prefix = read_file_prefix(path, EXIF_PREFIX_LEN)?;
+    let date = read_capture_date_from_prefix(&prefix, is_jpeg)?;
+    parse_exif_datetime(&date)
+}
+
+/// Read up to `max` bytes from the start of `path`.  Over NFS this transfers
+/// only the bytes actually consumed, so a small `max` keeps the read cheap.
+fn read_file_prefix(path: &Path, max: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(max).read_to_end(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// Group sorted timestamps into runs of same-or-consecutive UTC calendar days.
@@ -371,6 +403,18 @@ fn import_one(
     let source_atime = fs_meta.accessed().ok().map(FileTimeStamp::from_system_time);
     let source_ctime = fs_meta.created().ok().map(FileTimeStamp::from_system_time);
 
+    // Fast resume: if a previously-imported photo has this exact source
+    // fingerprint (path + size + mtime), skip it without reading the bytes.
+    // This is what makes resuming an interrupted bulk import cheap — already-
+    // imported files cost a single indexed lookup instead of a full (often
+    // network) read plus Blake3 hash just to rediscover the duplicate. Falls
+    // through to the read+hash dedup whenever the mtime is unavailable.
+    if let Some(mtime) = source_mtime
+        && db.source_already_imported(&path.to_string_lossy(), fs_meta.len(), mtime.secs)?
+    {
+        return Ok(None);
+    }
+
     let original_bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
 
     // 2. Compute hash
@@ -414,6 +458,8 @@ fn import_one(
 
     let lmta = LibraryMeta {
         original_filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+        source_path: Some(path.to_string_lossy().into_owned()),
+        source_size: Some(fs_meta.len()),
         import_session_id: session_id.to_owned(),
         import_date,
         stack_peer_hash,
@@ -474,7 +520,9 @@ fn write_rlab(
 
     let meta = RlabMeta::new(
         env!("CARGO_PKG_VERSION"),
-        lmta.original_filename.as_deref(),
+        lmta.source_path
+            .as_deref()
+            .or(lmta.original_filename.as_deref()),
         width,
         height,
     );
@@ -494,7 +542,9 @@ fn write_rlab(
         Some(thumb_bytes.to_vec()),
     );
     rlab.set_lmta(Some(lmta.clone()));
-    rlab.write(path).context("write .rlab")
+    // Write v4 with Reed-Solomon `RECC` parity (~20% overhead) so a later
+    // integrity scrub can repair bitrot in place. See `crate::scrub`.
+    rlab.write_v4(path).context("write .rlab")
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
@@ -516,41 +566,42 @@ pub fn thumb_path(library_root: &Path, hash: &str) -> PathBuf {
 // ── Stack detection ───────────────────────────────────────────────────────────
 
 /// Pairs of (primary_path_index, secondary_path_index) within this import batch.
+///
+/// Each RAW file is paired with the lowest-indexed JPEG sharing its (lowercased)
+/// file stem.  A single index pass builds a stem → JPEG-indices map so the whole
+/// thing is O(n); the previous nested scan was O(n²) and stalled large imports.
 fn detect_stacks(paths: &[PathBuf]) -> Vec<(usize, usize)> {
+    use std::collections::HashMap;
+
+    let stem_of = |p: &Path| -> String {
+        p.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    };
+    let ext_of = |p: &Path| -> String {
+        p.extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    };
+
+    // Index every JPEG by stem (preserving path order so `first()` is the
+    // lowest-indexed match, matching the old break-on-first behaviour).
+    let mut jpegs_by_stem: HashMap<String, Vec<usize>> = HashMap::new();
+    for (j, q) in paths.iter().enumerate() {
+        if is_jpeg_ext(&ext_of(q)) {
+            jpegs_by_stem.entry(stem_of(q)).or_default().push(j);
+        }
+    }
+
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for (i, p) in paths.iter().enumerate() {
-        let stem = p
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_lowercase();
-        let ext = p
-            .extension()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_lowercase();
-        if !is_raw_ext(&ext) {
+        if !is_raw_ext(&ext_of(p)) {
             continue;
         }
-        // Look for a matching JPEG with the same stem
-        for (j, q) in paths.iter().enumerate() {
-            if i == j {
-                continue;
-            }
-            let qstem = q
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            let qext = q
-                .extension()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            if qstem == stem && is_jpeg_ext(&qext) {
-                pairs.push((i, j));
-                break;
-            }
+        if let Some(&j) = jpegs_by_stem.get(&stem_of(p)).and_then(|js| js.first()) {
+            pairs.push((i, j));
         }
     }
     pairs
@@ -596,9 +647,17 @@ fn stack_peer_for(_path: &Path, _stack_map: &[(usize, usize)], _len: usize) -> O
 
 // ── Session naming & calendar math ──────────────────────────────────────────
 
-const MONTH_NAMES: [&str; 12] = [
+/// Month abbreviations (`"Jan"`..`"Dec"`), indexed by `month - 1`.
+pub const MONTH_NAMES: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
+
+/// Convert a Unix timestamp (seconds, UTC) to a `(year, month, day)` triple.
+/// Exposed so UI code can group sessions by year/month without its own calendar
+/// math.
+pub fn ymd_from_unix(ts: u64) -> (i64, u32, u32) {
+    civil_from_days((ts / 86_400) as i64)
+}
 
 /// Format a Unix timestamp as `"Jun 3 2025"` (UTC), without pulling in chrono.
 fn chrono_lite_date(ts: u64) -> String {
@@ -745,6 +804,32 @@ mod tests {
         let ts = 1_600_000_000;
         assert_eq!(format_exif_datetime(ts), "2020:09:13 12:26:40");
         assert_eq!(parse_exif_datetime(&format_exif_datetime(ts)), Some(ts));
+    }
+
+    #[test]
+    fn detect_stacks_pairs_raw_with_matching_jpeg() {
+        let paths: Vec<PathBuf> = [
+            "/a/IMG_1.NEF",  // 0: RAW, pairs with the JPEG at 1
+            "/a/img_1.jpg",  // 1: JPEG (case-insensitive stem match)
+            "/a/IMG_2.CR2",  // 2: RAW, no JPEG partner
+            "/a/IMG_3.jpg",  // 3: lone JPEG
+            "/a/IMG_4.nef",  // 4: RAW, pairs with the first matching JPEG (5, not 6)
+            "/a/IMG_4.JPG",  // 5
+            "/a/IMG_4.jpeg", // 6
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+
+        let mut pairs = detect_stacks(&paths);
+        pairs.sort_unstable();
+        assert_eq!(pairs, vec![(0, 1), (4, 5)]);
+    }
+
+    #[test]
+    fn detect_stacks_empty_without_raw() {
+        let paths: Vec<PathBuf> = ["/a/x.jpg", "/a/y.png"].iter().map(PathBuf::from).collect();
+        assert!(detect_stacks(&paths).is_empty());
     }
 
     #[test]

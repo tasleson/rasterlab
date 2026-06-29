@@ -4,7 +4,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rasterlab_core::{
     formats::FormatRegistry, library_meta::LibraryMeta, pipeline::EditPipeline, project::RlabFile,
 };
@@ -13,6 +13,7 @@ use crate::{
     db_trait::{
         CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow, SortOrder,
     },
+    fs_lock,
     import::{self, ImportSession},
     reconstruct::{self, RebuildProgress},
     search::SearchFilter,
@@ -25,10 +26,18 @@ use crate::{
 #[derive(Debug, Clone, Default)]
 pub struct ImportProgress {
     pub total: usize,
+    /// Files processed in the current phase. During scanning this is files whose
+    /// capture date has been read; during importing this is files attempted.
     pub done: usize,
+    /// New photos actually imported during the import phase.
+    pub imported: usize,
     pub current_file: PathBuf,
     pub skipped_duplicates: usize,
     pub errors: Vec<(PathBuf, String)>,
+    /// True during the pre-import capture-date scan (phase 1 of a grouped
+    /// folder import). Lets the UI show "Scanning…" instead of a frozen
+    /// "Importing…" while capture dates are read.
+    pub scanning: bool,
 }
 
 // ── Library ───────────────────────────────────────────────────────────────────
@@ -119,6 +128,20 @@ impl Library {
         )
     }
 
+    // ── Integrity scrub ───────────────────────────────────────────────────
+
+    /// Walk every `.rlab` file, verify its integrity, and repair correctable
+    /// corruption in place (backing the damaged original up under
+    /// `recovered/`). Clean pre-ECC files are upgraded to v4. `cancel` is
+    /// polled between files so the caller can stop the scrub early.
+    pub fn scrub(
+        &self,
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(crate::ScrubProgress),
+    ) -> Result<crate::ScrubOutcome> {
+        crate::scrub::scrub(&self.root, cancel, &progress_cb)
+    }
+
     // ── Photos ────────────────────────────────────────────────────────────
 
     pub fn all_photos(&self, sort: SortOrder) -> Result<Vec<PhotoRow>> {
@@ -146,6 +169,10 @@ impl Library {
         // Find the hash so we can remove thumbnail
         let photos = self.db.all_photos(SortOrder::default())?;
         if let Some(row) = photos.iter().find(|r| r.id == photo_id) {
+            if row.protected {
+                let name = row.original_filename.as_deref().unwrap_or("photo");
+                bail!("\"{name}\" is protected and cannot be deleted");
+            }
             let rlab = self.rlab_path(&row.hash);
             let thumb = self.thumb_path(&row.hash);
             if rlab.exists() {
@@ -179,6 +206,32 @@ impl Library {
             self.update_metadata(*id, lmta.clone())?;
         }
         Ok(())
+    }
+
+    /// Mark a photo protected (or not). A protected photo cannot be deleted via
+    /// [`Library::delete_photo`], and its `.rlab` is locked on the filesystem
+    /// (best-effort, per-OS) so it cannot go missing. The flag is recorded both
+    /// in the DB and in the file's `LMTA` chunk so it survives a rebuild.
+    pub fn set_protected(&self, photo_id: PhotoId, protected: bool) -> Result<()> {
+        let photos = self.db.all_photos(SortOrder::default())?;
+        let Some(row) = photos.iter().find(|r| r.id == photo_id) else {
+            bail!("photo {photo_id} not found");
+        };
+        let rlab_path = self.rlab_path(&row.hash);
+        if rlab_path.exists() {
+            // Ensure the file is writable before rewriting its LMTA chunk.
+            let _ = fs_lock::set_locked(&rlab_path, false);
+            let mut rlab = RlabFile::read(&rlab_path)?;
+            if let Some(ref mut lmta) = rlab.lmta {
+                lmta.protected = protected;
+            }
+            rlab.meta = rlab.meta.touch();
+            rlab.write_v4(&rlab_path)
+                .context("rewrite lmta for protect")?;
+            // Apply (or clear) the on-disk lock to match the new state.
+            let _ = fs_lock::set_locked(&rlab_path, protected);
+        }
+        self.db.set_protected(photo_id, protected)
     }
 
     // ── Sessions ──────────────────────────────────────────────────────────
@@ -326,7 +379,7 @@ impl Library {
         // Also update PREV chunk in the .rlab
         let mut updated = rlab;
         updated.thumbnail = Some(thumb);
-        updated.write(&rlab_path)?;
+        fs_lock::with_unlocked(&rlab_path, || updated.write_v4(&rlab_path))?;
 
         // Mark the photo as edited in the DB.
         if let Ok(Some(row)) = self.db.photo_by_hash(hash) {
@@ -349,7 +402,7 @@ impl Library {
         let mut rlab = RlabFile::read(&rlab_path)?;
         rlab.set_lmta(Some(lmta.clone()));
         rlab.meta = rlab.meta.touch();
-        rlab.write(&rlab_path).context("rewrite lmta")
+        fs_lock::with_unlocked(&rlab_path, || rlab.write_v4(&rlab_path)).context("rewrite lmta")
     }
 
     fn add_collection_to_file(&self, photo_id: PhotoId, collection_name: &str) -> Result<()> {
@@ -368,7 +421,7 @@ impl Library {
             lmta.collections.push(collection_name.to_owned());
         }
         rlab.meta = rlab.meta.touch();
-        rlab.write(&rlab_path)?;
+        fs_lock::with_unlocked(&rlab_path, || rlab.write_v4(&rlab_path))?;
         Ok(())
     }
 
@@ -386,7 +439,7 @@ impl Library {
             lmta.collections.retain(|c| c != collection_name);
         }
         rlab.meta = rlab.meta.touch();
-        rlab.write(&rlab_path)?;
+        fs_lock::with_unlocked(&rlab_path, || rlab.write_v4(&rlab_path))?;
         Ok(())
     }
 }
@@ -403,7 +456,9 @@ fn rewrite_collection_name_in_file(rlab_path: &Path, old_name: &str, new_name: &
         }
     }
     rlab.meta = rlab.meta.touch();
-    Ok(rlab.write(rlab_path)?)
+    Ok(fs_lock::with_unlocked(rlab_path, || {
+        rlab.write_v4(rlab_path)
+    })?)
 }
 
 fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf> {

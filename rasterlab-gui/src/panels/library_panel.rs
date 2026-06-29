@@ -1,7 +1,20 @@
 use egui::{ScrollArea, Sense, Vec2};
-use rasterlab_library::{PhotoId, PhotoRow, SearchFilter, SortOrder};
+use rasterlab_library::{
+    ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, SearchFilter, SortOrder, ymd_from_unix,
+};
 
+use crate::state::library_state::thumb_target_side;
 use crate::state::{AppState, LibraryView};
+
+/// Scroll-margin multiple for the resident texture cap: keep roughly this many
+/// screens of thumbnails so scrolling in either direction rarely hits a cold
+/// cell. Three screens is generous without pinning much memory.
+const THUMB_CAP_SCREENS: usize = 3;
+/// Floor for the cap so a tiny window still caches a usable working set.
+const THUMB_CAP_MIN: usize = 64;
+/// Ceiling so a very large window at the smallest cell size can't blow up
+/// resident memory.
+const THUMB_CAP_MAX: usize = 512;
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -13,6 +26,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
 
     // Confirmation dialog (modal window)
     confirm_delete_dialog(ui.ctx(), state);
+
+    // Import-errors detail window
+    import_errors_dialog(ui.ctx(), state);
+
+    // Scrub-errors detail window
+    scrub_errors_dialog(ui.ctx(), state);
 
     // Toolbar (import button, sort, scale slider)
     toolbar_ui(ui, state);
@@ -93,16 +112,79 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         if let Some(ref p) = state.library.import_progress {
             ui.separator();
             ui.spinner();
-            ui.label(format!("Importing… {}/{}", p.done, p.total));
+            if p.scanning {
+                ui.label(format!("Scanning dates… {}/{}", p.done, p.total));
+            } else {
+                let errors = p.errors.len();
+                let mut detail = format!(
+                    "Importing… {}/{} processed, {} new, {} skipped",
+                    p.done, p.total, p.imported, p.skipped_duplicates
+                );
+                if errors > 0 {
+                    detail.push_str(&format!(", {errors} error(s)"));
+                }
+                ui.label(detail);
+            }
+        }
+
+        // Persistent indicator for the most recent import's failures. Clicking
+        // it opens a window listing each file and its error.
+        let import_errors = state.library.last_import_errors.len();
+        if import_errors > 0 {
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("⚠ {import_errors} import error(s)"))
+                        .color(egui::Color32::RED),
+                )
+                .on_hover_text("Click to see which files failed")
+                .clicked()
+            {
+                state.library.show_import_errors = true;
+            }
+        }
+
+        // Scrub progress
+        if let Some(ref p) = state.library.scrub_progress {
+            ui.separator();
+            ui.spinner();
+            let mut detail = format!("Scrubbing… {}/{}", p.done, p.total);
+            if p.repaired > 0 {
+                detail.push_str(&format!(", {} repaired", p.repaired));
+            }
+            if p.upgraded > 0 {
+                detail.push_str(&format!(", {} upgraded", p.upgraded));
+            }
+            if !p.errors.is_empty() {
+                detail.push_str(&format!(", {} error(s)", p.errors.len()));
+            }
+            ui.label(detail);
+        }
+
+        // Persistent indicator for the most recent scrub's uncorrectable
+        // failures. Clicking it opens a window listing each file and its error.
+        let scrub_errors = state.library.last_scrub_errors.len();
+        if scrub_errors > 0 {
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("⚠ {scrub_errors} scrub error(s)"))
+                        .color(egui::Color32::RED),
+                )
+                .on_hover_text("Click to see which files could not be repaired")
+                .clicked()
+            {
+                state.library.show_scrub_errors = true;
+            }
         }
 
         // Thumbnail load diagnostics — remove once thumbnails confirmed working
         {
-            let cached = state.library.thumb_cache.len();
-            let pending = state.library.thumb_requested.len();
-            if pending > cached {
+            let cached = state.library.thumbs.cached_len();
+            let loading = state.library.thumbs.pending_len();
+            if loading > 0 {
                 ui.separator();
-                ui.label(format!("Loading thumbs… {}/{}", cached, pending));
+                ui.label(format!("Loading thumbs… {}/{}", cached, cached + loading));
             }
         }
     });
@@ -146,6 +228,23 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         .open(&mut open)
         .show(ctx, |ui| {
             ui.label("The selected photo(s) will be moved to your system trash.");
+            let protected = state
+                .library
+                .results
+                .iter()
+                .filter(|r| state.library.selected.contains(&r.id) && r.protected)
+                .count();
+            if protected > 0 {
+                let noun = if protected == 1 {
+                    "photo is"
+                } else {
+                    "photos are"
+                };
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 200, 0),
+                    format!("{protected} protected {noun} and will be skipped."),
+                );
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.button("Move to Trash").clicked() {
@@ -159,6 +258,78 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.library.confirm_delete = false;
+    }
+}
+
+pub(crate) fn import_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.library.show_import_errors {
+        return;
+    }
+    if state.library.last_import_errors.is_empty() {
+        state.library.show_import_errors = false;
+        return;
+    }
+
+    let n = state.library.last_import_errors.len();
+    let mut open = true;
+    egui::Window::new(format!("Import errors ({n})"))
+        .collapsible(false)
+        .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label("These files could not be imported:");
+            ui.add_space(6.0);
+            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (path, msg) in &state.library.last_import_errors {
+                    ui.label(egui::RichText::new(path.display().to_string()).strong());
+                    ui.colored_label(egui::Color32::RED, msg);
+                    ui.add_space(4.0);
+                }
+            });
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                state.library.show_import_errors = false;
+            }
+        });
+    if !open {
+        state.library.show_import_errors = false;
+    }
+}
+
+pub(crate) fn scrub_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.library.show_scrub_errors {
+        return;
+    }
+    if state.library.last_scrub_errors.is_empty() {
+        state.library.show_scrub_errors = false;
+        return;
+    }
+
+    let n = state.library.last_scrub_errors.len();
+    let mut open = true;
+    egui::Window::new(format!("Scrub errors ({n})"))
+        .collapsible(false)
+        .resizable(true)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label("These files are corrupted and could not be repaired:");
+            ui.add_space(6.0);
+            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for (path, msg) in &state.library.last_scrub_errors {
+                    ui.label(egui::RichText::new(path.display().to_string()).strong());
+                    ui.colored_label(egui::Color32::RED, msg);
+                    ui.add_space(4.0);
+                }
+            });
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                state.library.show_scrub_errors = false;
+            }
+        });
+    if !open {
+        state.library.show_scrub_errors = false;
     }
 }
 
@@ -188,36 +359,15 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             .selectable_label(all_selected, format!("All Photos ({})", total))
             .clicked()
         {
-            state.library.view = LibraryView::AllPhotos;
-            state.library.filter = SearchFilter::default();
-            state.library.iso_exact_text.clear();
-            state.library.aperture_exact_text.clear();
-            state.library.shutter_exact_text.clear();
-            state.library.iso_error = None;
-            state.library.aperture_error = None;
-            state.library.shutter_error = None;
-            state.library.refresh();
+            select_view(state, LibraryView::AllPhotos);
         }
 
-        // Sessions
+        // Sessions — grouped into a collapsible Year › Month › session tree so a
+        // large library doesn't flood the sidebar with a flat list.
         ui.add_space(4.0);
         ui.strong("Import Sessions");
         let sessions = state.library.sessions.clone();
-        for sess in &sessions {
-            let selected = state.library.view == LibraryView::Session(sess.id.clone());
-            let label = format!("{}  ({})", sess.name, sess.photo_count);
-            if ui.selectable_label(selected, label).clicked() {
-                state.library.view = LibraryView::Session(sess.id.clone());
-                state.library.filter = SearchFilter::default();
-                state.library.iso_exact_text.clear();
-                state.library.aperture_exact_text.clear();
-                state.library.shutter_exact_text.clear();
-                state.library.iso_error = None;
-                state.library.aperture_error = None;
-                state.library.shutter_error = None;
-                state.library.refresh();
-            }
-        }
+        sessions_tree_ui(ui, state, &sessions);
 
         // Collections
         ui.add_space(4.0);
@@ -226,15 +376,7 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         for coll in &collections {
             let selected = state.library.view == LibraryView::Collection(coll.id);
             if ui.selectable_label(selected, &coll.name).clicked() {
-                state.library.view = LibraryView::Collection(coll.id);
-                state.library.filter = SearchFilter::default();
-                state.library.iso_exact_text.clear();
-                state.library.aperture_exact_text.clear();
-                state.library.shutter_exact_text.clear();
-                state.library.iso_error = None;
-                state.library.aperture_error = None;
-                state.library.shutter_error = None;
-                state.library.refresh();
+                select_view(state, LibraryView::Collection(coll.id));
             }
         }
 
@@ -276,9 +418,12 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
         // Text search
         ui.horizontal(|ui| {
-            ui.label("Search:");
+            ui.label("Search:")
+                .on_hover_text("Matches filename, caption, and keywords (case-insensitive)");
             let mut text = state.library.filter.text.clone().unwrap_or_default();
-            if ui.text_edit_singleline(&mut text).changed() {
+            let resp =
+                ui.add(egui::TextEdit::singleline(&mut text).hint_text("name, caption, keyword"));
+            if resp.changed() {
                 state.library.filter.text = if text.is_empty() { None } else { Some(text) };
                 changed = true;
             }
@@ -417,6 +562,107 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
     });
+}
+
+/// Switch the active library view, resetting all filters and their input/error
+/// state, then reload. Shared by every sidebar entry so the reset stays in sync.
+fn select_view(state: &mut AppState, view: LibraryView) {
+    state.library.view = view;
+    state.library.filter = SearchFilter::default();
+    state.library.iso_exact_text.clear();
+    state.library.aperture_exact_text.clear();
+    state.library.shutter_exact_text.clear();
+    state.library.iso_error = None;
+    state.library.aperture_error = None;
+    state.library.shutter_error = None;
+    state.library.refresh();
+}
+
+// ── Import-session tree ───────────────────────────────────────────────────────
+
+/// One month of sessions within a year. `sessions` holds indices into the flat
+/// session slice, preserving its (descending) order.
+struct MonthNode {
+    month: u32,
+    photo_count: i64,
+    sessions: Vec<usize>,
+}
+
+/// One year of sessions, grouped by month (months in descending order).
+struct YearNode {
+    year: i64,
+    photo_count: i64,
+    months: Vec<MonthNode>,
+}
+
+/// Group sessions (assumed sorted newest-first by `started_at`) into a
+/// year → month tree. Because the input is already ordered, appending on
+/// first-seen keeps years and months in descending order without sorting.
+fn group_sessions(sessions: &[ImportSessionRow]) -> Vec<YearNode> {
+    let mut years: Vec<YearNode> = Vec::new();
+    for (idx, sess) in sessions.iter().enumerate() {
+        let (year, month, _day) = ymd_from_unix(sess.started_at);
+
+        let yn = match years.last_mut() {
+            Some(y) if y.year == year => y,
+            _ => {
+                years.push(YearNode {
+                    year,
+                    photo_count: 0,
+                    months: Vec::new(),
+                });
+                years.last_mut().unwrap()
+            }
+        };
+        yn.photo_count += sess.photo_count;
+
+        let mn = match yn.months.last_mut() {
+            Some(m) if m.month == month => m,
+            _ => {
+                yn.months.push(MonthNode {
+                    month,
+                    photo_count: 0,
+                    sessions: Vec::new(),
+                });
+                yn.months.last_mut().unwrap()
+            }
+        };
+        mn.photo_count += sess.photo_count;
+        mn.sessions.push(idx);
+    }
+    years
+}
+
+fn sessions_tree_ui(ui: &mut egui::Ui, state: &mut AppState, sessions: &[ImportSessionRow]) {
+    if sessions.is_empty() {
+        ui.weak("No imports yet");
+        return;
+    }
+
+    // Years and months start collapsed (that is the whole point — a big library
+    // shouldn't flood the sidebar); egui persists whatever the user expands.
+    for year in group_sessions(sessions) {
+        egui::CollapsingHeader::new(format!("{}  ({})", year.year, year.photo_count))
+            .id_salt(("lib_year", year.year))
+            .show(ui, |ui| {
+                for month in &year.months {
+                    let name = MONTH_NAMES[(month.month - 1) as usize];
+                    egui::CollapsingHeader::new(format!("{}  ({})", name, month.photo_count))
+                        .id_salt(("lib_month", year.year, month.month))
+                        .show(ui, |ui| {
+                            for &si in &month.sessions {
+                                let sess = &sessions[si];
+                                let selected =
+                                    state.library.view == LibraryView::Session(sess.id.clone());
+                                let label = format!("{}  ({})", sess.name, sess.photo_count);
+                                if ui.selectable_label(selected, label).clicked() {
+                                    select_view(state, LibraryView::Session(sess.id.clone()));
+                                }
+                            }
+                        });
+                }
+            });
+    }
 }
 
 // ── Filter input validators ───────────────────────────────────────────────────
@@ -603,7 +849,26 @@ fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
     let cell_sz = thumb_px + padding * 2.0;
 
     let avail_w = ui.available_width();
+    let avail_h = ui.available_height();
     let cols = ((avail_w / cell_sz) as usize).max(1);
+    let row_height = cell_sz + padding;
+
+    // Resident textures are sized to the on-screen cell. When the size slider
+    // (or display DPI) changes the target resolution, the cached textures are
+    // built for the wrong size, so drop them and let the visible ones reload at
+    // the new resolution from the local JPEGs.
+    let target = thumb_target_side(state.library.thumb_scale, ui.ctx().pixels_per_point());
+    if state.library.thumb_target_side != target {
+        state.library.thumb_target_side = target;
+        state.library.thumbs.clear();
+    }
+
+    // Cap the cache to roughly the visible thumbnails plus a few screens of
+    // scroll margin. Derived from the live viewport so it tracks the size
+    // slider — at small cells more thumbnails are visible and the cap grows.
+    let visible_rows = (avail_h / row_height).ceil() as usize + 2;
+    let cap = (visible_rows * cols * THUMB_CAP_SCREENS).clamp(THUMB_CAP_MIN, THUMB_CAP_MAX);
+    state.library.thumbs.set_cap(cap);
 
     keyboard_nav(ui, state, cols);
 
@@ -618,20 +883,29 @@ fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
         state.library.select_none();
     }
 
-    ScrollArea::vertical()
-        .id_salt("lib_grid_scroll")
-        .show(ui, |ui| {
-            let photos = state.library.results.clone();
-            let rows = photos.chunks(cols);
-            for row in rows {
+    // Render only the rows currently scrolled into view. Iterating every photo
+    // (as a plain `.show()` would) calls `thumb_cell` — and thus
+    // `request_thumb_load` — for the whole result set, which on a large library
+    // fires tens of thousands of thumbnail loads at once and OOMs the process.
+    let photos = state.library.results.clone();
+    let num_rows = photos.len().div_ceil(cols);
+    ScrollArea::vertical().id_salt("lib_grid_scroll").show_rows(
+        ui,
+        row_height,
+        num_rows,
+        |ui, row_range| {
+            for row_idx in row_range {
+                let start = row_idx * cols;
+                let end = (start + cols).min(photos.len());
                 ui.horizontal(|ui| {
-                    for photo in row {
+                    for photo in &photos[start..end] {
                         thumb_cell(ui, state, photo, thumb_px, padding);
                     }
                 });
                 ui.add_space(padding);
             }
-        });
+        },
+    );
 }
 
 fn thumb_cell(
@@ -669,7 +943,7 @@ fn thumb_cell(
     // the texture's own aspect so that rotated/cropped results render
     // correctly — the photo.width/height in the DB are the source image
     // dimensions and don't reflect pipeline ops like rotation or crop.
-    if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
+    if let Some(tex) = state.library.thumbs.get(&photo.hash) {
         let tex_size = tex.size_vec2();
         let fit_rect = fit_rect_preserve_aspect(img_rect, tex_size.x as u32, tex_size.y as u32);
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
@@ -682,6 +956,20 @@ fn thumb_cell(
         ui.painter()
             .rect_filled(fit_rect, 2.0, egui::Color32::from_gray(60));
         state.request_thumb_load(photo.hash.clone());
+    }
+
+    // Protected lock badge (top-left of the image area)
+    if photo.protected {
+        let pos = egui::pos2(img_rect.min.x + 9.0, img_rect.min.y + 9.0);
+        ui.painter()
+            .circle_filled(pos, 8.0, egui::Color32::from_black_alpha(140));
+        ui.painter().text(
+            pos,
+            egui::Align2::CENTER_CENTER,
+            "🔒",
+            egui::FontId::proportional(11.0),
+            egui::Color32::WHITE,
+        );
     }
 
     // Rating stars overlay (bottom of cell)
@@ -744,6 +1032,19 @@ fn thumb_cell(
             state.library.select_only(id);
         }
         let n = state.library.selected.len();
+
+        // Protect / Unprotect toggle for the whole selection.
+        let all_protected = state.library.all_selected_protected();
+        let protect_label = if all_protected {
+            "Unprotect"
+        } else {
+            "Protect"
+        };
+        if ui.button(protect_label).clicked() {
+            state.library.set_protected_selected(!all_protected);
+            ui.close();
+        }
+
         let label = if n == 1 {
             "Move to Trash".to_owned()
         } else {
@@ -772,4 +1073,64 @@ fn fit_rect_preserve_aspect(outer: egui::Rect, w: u32, h: u32) -> egui::Rect {
     };
     let size = egui::vec2(fw, fh);
     egui::Rect::from_center_size(outer.center(), size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sess(id: &str, started_at: u64, photo_count: i64) -> ImportSessionRow {
+        ImportSessionRow {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            started_at,
+            source_dir: None,
+            photo_count,
+        }
+    }
+
+    // UTC-midnight Unix timestamps for known dates (see test comments).
+    const JUN_15_2025: u64 = 1_749_945_600;
+    const JUN_03_2025: u64 = 1_748_908_800;
+    const JAN_10_2025: u64 = 1_736_467_200;
+    const DEC_20_2024: u64 = 1_734_652_800;
+
+    #[test]
+    fn group_sessions_nests_and_sums() {
+        // Newest-first, as `all_sessions` returns. Two June sessions share a
+        // month; January and the prior December are separate buckets.
+        let sessions = [
+            sess("jun15", JUN_15_2025, 3),
+            sess("jun03", JUN_03_2025, 5),
+            sess("jan10", JAN_10_2025, 2),
+            sess("dec20", DEC_20_2024, 7),
+        ];
+
+        let years = group_sessions(&sessions);
+
+        // Years stay in descending order: 2025 then 2024.
+        assert_eq!(years.len(), 2);
+        assert_eq!(years[0].year, 2025);
+        assert_eq!(years[0].photo_count, 3 + 5 + 2);
+        assert_eq!(years[1].year, 2024);
+        assert_eq!(years[1].photo_count, 7);
+
+        // 2025 has June (two sessions) then January, in descending order.
+        let m = &years[0].months;
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].month, 6);
+        assert_eq!(m[0].photo_count, 8);
+        assert_eq!(m[0].sessions.len(), 2);
+        assert_eq!(m[1].month, 1);
+        assert_eq!(m[1].sessions.len(), 1);
+
+        // 2024 has a single December month.
+        assert_eq!(years[1].months.len(), 1);
+        assert_eq!(years[1].months[0].month, 12);
+    }
+
+    #[test]
+    fn group_sessions_empty() {
+        assert!(group_sessions(&[]).is_empty());
+    }
 }

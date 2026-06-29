@@ -58,6 +58,37 @@ pub fn read_exif_from_file(path: &Path) -> ImageMetadata {
 }
 
 // ---------------------------------------------------------------------------
+// Public: read just the capture date from a file prefix
+// ---------------------------------------------------------------------------
+
+/// Read only the EXIF capture date (`DateTimeOriginal`, falling back to
+/// `DateTime`) from the leading bytes of a JPEG or TIFF-based RAW file.
+///
+/// Unlike [`read_exif_from_bytes`]/[`read_exif_from_file`] this builds neither
+/// the full [`ImageMetadata`] nor the `raw_exif` re-attachment buffer, and it
+/// operates on a truncated head of the file — EXIF lives near the start of both
+/// container types.  The library's import capture-date scan uses it so it need
+/// not stream entire multi-megabyte originals just to read one timestamp, which
+/// is ruinously slow over a network filesystem.  Returns the raw EXIF datetime
+/// string (`"YYYY:MM:DD HH:MM:SS"`), or `None` if the prefix carries no date
+/// (e.g. it was truncated before the relevant IFD), so callers can fall back to
+/// filesystem timestamps.
+pub fn read_capture_date_from_prefix(prefix: &[u8], is_jpeg: bool) -> Option<String> {
+    let reader = exif::Reader::new();
+    let exif = if is_jpeg {
+        reader
+            .read_from_container(&mut std::io::Cursor::new(prefix))
+            .ok()?
+    } else {
+        reader.read_raw(prefix.to_vec()).ok()?
+    };
+    let field = exif
+        .get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
+        .or_else(|| exif.get_field(exif::Tag::DateTime, exif::In::PRIMARY))?;
+    ascii_string(&field.value)
+}
+
+// ---------------------------------------------------------------------------
 // Public: build a compact EXIF TIFF from a TIFF-based RAW
 // ---------------------------------------------------------------------------
 

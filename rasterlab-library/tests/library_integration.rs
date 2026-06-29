@@ -74,9 +74,13 @@ fn import_lmta_round_trips() {
     let rlab_path = lib.rlab_path(&row.hash);
     let rlab = rasterlab_core::project::RlabFile::read(&rlab_path).unwrap();
     let lmta = rlab.lmta.expect("LMTA chunk missing");
+    let source_path = jpeg_path().to_string_lossy().into_owned();
 
     // Original filename preserved
     assert_eq!(lmta.original_filename.as_deref(), Some("meta_test.jpg"));
+    // Original source path preserved in both library and project metadata
+    assert_eq!(lmta.source_path.as_deref(), Some(source_path.as_str()));
+    assert_eq!(rlab.meta.source_path.as_deref(), Some(source_path.as_str()));
     // Session ID round-trips
     assert_eq!(lmta.import_session_id, row.import_session);
     // EXIF snapshot present
@@ -133,6 +137,84 @@ fn folder_import_finds_all_supported_formats() {
     let imported: usize = sessions.iter().map(|s| s.photo_count).sum();
     assert_eq!(imported, 2, "should have imported both images");
     assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 2);
+}
+
+#[test]
+fn folder_reimport_progress_counts_processed_duplicates() {
+    let tmp_src = tempfile::tempdir().unwrap();
+    std::fs::copy(jpeg_path(), tmp_src.path().join("a.jpg")).unwrap();
+    std::fs::copy(png_path(), tmp_src.path().join("b.png")).unwrap();
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let progress_sink = progress.clone();
+    let sessions = lib
+        .import_folder(tmp_src.path(), move |p| {
+            progress_sink.lock().unwrap().push(p);
+        })
+        .unwrap();
+
+    let imported: usize = sessions.iter().map(|s| s.photo_count).sum();
+    assert_eq!(imported, 0, "re-import should only skip duplicates");
+
+    let progress = progress.lock().unwrap();
+    let final_import = progress
+        .iter()
+        .rev()
+        .find(|p| !p.scanning)
+        .expect("final import progress");
+    assert_eq!(final_import.done, 2, "processed count should advance");
+    assert_eq!(final_import.imported, 0);
+    assert_eq!(final_import.skipped_duplicates, 2);
+}
+
+/// Resuming an interrupted import must skip already-imported files by their
+/// source fingerprint (path + size + mtime) *without* re-reading and re-hashing
+/// their bytes — that is the whole point of the fast-resume path. We prove the
+/// bytes are not read by overwriting the source file with different content of
+/// the same length and restoring its mtime: a fingerprint-only check still skips
+/// it, whereas a hash-based check would see new bytes and re-import.
+#[test]
+fn folder_reimport_skips_by_fingerprint_without_hashing() {
+    let tmp_src = tempfile::tempdir().unwrap();
+    let src = tmp_src.path().join("a.png");
+    std::fs::copy(png_path(), &src).unwrap();
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let sessions = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+    assert_eq!(sessions.iter().map(|s| s.photo_count).sum::<usize>(), 1);
+
+    // Corrupt the file's *content* while preserving its byte length and mtime,
+    // so only the fingerprint — not the bytes — can match on re-import.
+    let meta = std::fs::metadata(&src).unwrap();
+    let mtime = filetime::FileTime::from_last_modification_time(&meta);
+    std::fs::write(&src, vec![0xABu8; meta.len() as usize]).unwrap();
+    filetime::set_file_mtime(&src, mtime).unwrap();
+
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = progress.clone();
+    let sessions = lib
+        .import_folder(tmp_src.path(), move |p| sink.lock().unwrap().push(p))
+        .unwrap();
+
+    assert_eq!(
+        sessions.iter().map(|s| s.photo_count).sum::<usize>(),
+        0,
+        "fingerprint match must skip the file without hashing its (now different) bytes"
+    );
+    let progress = progress.lock().unwrap();
+    let final_import = progress
+        .iter()
+        .rev()
+        .find(|p| !p.scanning)
+        .expect("final import progress");
+    assert_eq!(final_import.skipped_duplicates, 1);
 }
 
 // ── Grouped folder import ───────────────────────────────────────────────────
@@ -254,6 +336,100 @@ fn delete_photo_permanently_removes_files_and_db_row() {
     );
 }
 
+// ── Protection ──────────────────────────────────────────────────────────────
+
+#[test]
+fn protected_photo_cannot_be_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let rlab = lib.rlab_path(&row.hash);
+
+    lib.set_protected(row.id, true).expect("set_protected true");
+
+    // DB mirrors the flag and the file is locked on disk.
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    assert!(row.protected, "DB row should be protected");
+    assert!(
+        rasterlab_library::fs_lock::is_locked(&rlab),
+        "rlab should be locked on disk"
+    );
+
+    // Both delete modes refuse a protected photo.
+    assert!(
+        lib.delete_photo(row.id).is_err(),
+        "trash delete must be refused"
+    );
+    assert!(
+        lib.delete_photo_permanently(row.id).is_err(),
+        "permanent delete must be refused"
+    );
+    assert!(rlab.exists(), "rlab must still exist");
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+
+    // Unprotect: file is unlocked and deletion is allowed again.
+    lib.set_protected(row.id, false)
+        .expect("set_protected false");
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    assert!(!row.protected);
+    assert!(
+        !rasterlab_library::fs_lock::is_locked(&rlab),
+        "rlab should be unlocked after unprotect"
+    );
+    lib.delete_photo_permanently(row.id)
+        .expect("delete after unprotect");
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+}
+
+#[test]
+fn metadata_edit_works_while_protected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let rlab_path = lib.rlab_path(&row.hash);
+
+    lib.set_protected(row.id, true).unwrap();
+
+    // Editing a protected (locked) file must transparently unlock, write, and
+    // re-lock — protection guards against deletion, not metadata edits.
+    let lmta = rasterlab_library::LibraryMeta {
+        rating: 5,
+        ..Default::default()
+    };
+    lib.update_metadata(row.id, lmta)
+        .expect("update protected metadata");
+
+    let rlab = rasterlab_core::project::RlabFile::read(&rlab_path).unwrap();
+    assert_eq!(rlab.lmta.unwrap().rating, 5);
+    assert!(
+        rasterlab_library::fs_lock::is_locked(&rlab_path),
+        "file should be re-locked after the edit"
+    );
+
+    lib.set_protected(row.id, false).unwrap();
+}
+
+#[test]
+fn protection_survives_rebuild_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    lib.set_protected(row.id, true).unwrap();
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    assert!(
+        row.protected,
+        "protected flag should survive a rebuild (it lives in the LMTA chunk)"
+    );
+
+    lib.set_protected(row.id, false).ok();
+}
+
 // ── Rebuild ───────────────────────────────────────────────────────────────────
 
 #[test]
@@ -367,6 +543,41 @@ fn search_by_text_returns_matching_subset() {
         results[0].original_filename.as_deref(),
         Some("meta_test.jpg")
     );
+}
+
+#[test]
+fn search_text_is_case_insensitive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let jpeg_row = photos
+        .iter()
+        .find(|r| r.original_filename.as_deref() == Some("meta_test.jpg"))
+        .expect("jpeg photo");
+
+    let lmta = rasterlab_library::LibraryMeta {
+        keywords: vec!["Vacation".to_owned()],
+        ..Default::default()
+    };
+    lib.update_metadata(jpeg_row.id, lmta).unwrap();
+
+    // A keyword stored as "Vacation" must be found regardless of the
+    // case the user types into the search box.
+    for query in ["vacation", "VACATION", "VaCaTiOn"] {
+        let filter = SearchFilter {
+            text: Some(query.to_owned()),
+            ..Default::default()
+        };
+        let results = lib.search(&filter, SortOrder::default()).unwrap();
+        assert_eq!(results.len(), 1, "search {query:?} should match 'Vacation'");
+        assert_eq!(
+            results[0].original_filename.as_deref(),
+            Some("meta_test.jpg")
+        );
+    }
 }
 
 #[test]

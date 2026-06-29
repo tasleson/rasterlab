@@ -1,12 +1,12 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
 };
 
 use rasterlab_library::{
     CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, PhotoId, PhotoRow,
-    SearchFilter, SortOrder,
+    ScrubProgress, SearchFilter, SortOrder,
 };
 
 // ── LibraryView ───────────────────────────────────────────────────────────────
@@ -31,10 +31,9 @@ pub struct LibraryState {
     pub thumb_scale: f32,
     pub import_progress: Option<ImportProgress>,
 
-    // Thumbnail cache: hash → egui texture handle
-    pub thumb_cache: HashMap<String, egui::TextureHandle>,
-    /// Hashes for which a bg load has already been requested (to avoid dupes).
-    pub thumb_requested: HashSet<String>,
+    /// Bounded thumbnail texture cache (evicts oldest beyond a fixed cap so a
+    /// large library can't grow GPU/texture memory without limit).
+    pub thumbs: ThumbCache,
 
     // Sidebar state
     pub sessions: Vec<ImportSessionRow>,
@@ -42,6 +41,23 @@ pub struct LibraryState {
 
     /// Error message to show in a status bar or dialog.
     pub last_error: Option<String>,
+
+    /// Per-file `(path, message)` failures from the most recent import. Retained
+    /// after the import finishes so the user can review what went wrong.
+    pub last_import_errors: Vec<(PathBuf, String)>,
+
+    /// When true, show the import-errors detail window.
+    pub show_import_errors: bool,
+
+    /// Progress of a running integrity scrub, or `None` when idle.
+    pub scrub_progress: Option<ScrubProgress>,
+
+    /// Per-file `(path, message)` uncorrectable failures from the most recent
+    /// scrub. Retained after it finishes so the user can review them.
+    pub last_scrub_errors: Vec<(PathBuf, String)>,
+
+    /// When true, show the scrub-errors detail window.
+    pub show_scrub_errors: bool,
 
     /// When true, show the "Move to Trash?" confirmation dialog.
     pub confirm_delete: bool,
@@ -65,6 +81,11 @@ pub struct LibraryState {
     /// When set, the grid will scroll to — and select — the photo with this
     /// hash on the next frame, then clear the field.
     pub scroll_to_hash: Option<String>,
+
+    /// Physical-pixel max side the resident thumbnail textures are currently
+    /// built for. Tracked so the grid can detect a scale/DPI change and rebuild
+    /// the cache at the new resolution. Zero until the first grid frame.
+    pub thumb_target_side: u32,
 }
 
 impl Default for LibraryState {
@@ -78,11 +99,15 @@ impl Default for LibraryState {
             selected: Vec::new(),
             thumb_scale: 0.5,
             import_progress: None,
-            thumb_cache: HashMap::new(),
-            thumb_requested: HashSet::new(),
+            thumbs: ThumbCache::new(THUMB_CACHE_CAP),
             sessions: Vec::new(),
             collections: Vec::new(),
             last_error: None,
+            last_import_errors: Vec::new(),
+            show_import_errors: false,
+            scrub_progress: None,
+            last_scrub_errors: Vec::new(),
+            show_scrub_errors: false,
             confirm_delete: false,
             iso_exact_text: String::new(),
             aperture_exact_text: String::new(),
@@ -92,6 +117,7 @@ impl Default for LibraryState {
             shutter_error: None,
             pending_open_photo: None,
             scroll_to_hash: None,
+            thumb_target_side: 0,
         }
     }
 }
@@ -139,8 +165,7 @@ impl LibraryState {
                 self.aperture_error = None;
                 self.shutter_error = None;
                 self.selected.clear();
-                self.thumb_cache.clear();
-                self.thumb_requested.clear();
+                self.thumbs.clear();
                 self.last_error = None;
                 self.refresh();
             }
@@ -171,29 +196,211 @@ impl LibraryState {
         self.selected.clear();
     }
 
-    /// Move all selected photos to the OS trash and remove them from the library.
+    /// Move all selected photos to the OS trash and remove them from the
+    /// library. Protected photos are skipped so a protected file can never be
+    /// trashed, even if the confirmation dialog is bypassed.
     pub fn delete_selected(&mut self) {
         let Some(lib) = &self.library else { return };
-        // Collect hashes of selected photos so we can evict them from the cache.
-        let hashes: Vec<String> = self
-            .results
-            .iter()
-            .filter(|r| self.selected.contains(&r.id))
-            .map(|r| r.hash.clone())
-            .collect();
 
-        for id in self.selected.clone() {
-            if let Err(e) = lib.delete_photo(id) {
+        // Partition the selection into deletable and protected, capturing the
+        // hashes of the deletable ones so we can evict their thumbnails.
+        let mut deletable: Vec<(PhotoId, String)> = Vec::new();
+        let mut protected = 0usize;
+        for r in &self.results {
+            if self.selected.contains(&r.id) {
+                if r.protected {
+                    protected += 1;
+                } else {
+                    deletable.push((r.id, r.hash.clone()));
+                }
+            }
+        }
+
+        for (id, _) in &deletable {
+            if let Err(e) = lib.delete_photo(*id) {
                 self.last_error = Some(format!("Delete failed: {e}"));
                 return;
             }
         }
 
-        for hash in &hashes {
-            self.thumb_cache.remove(hash);
-            self.thumb_requested.remove(hash);
+        for (_, hash) in &deletable {
+            self.thumbs.remove(hash);
+        }
+        if protected > 0 {
+            let noun = if protected == 1 { "photo" } else { "photos" };
+            self.last_error = Some(format!("{protected} protected {noun} were not deleted."));
         }
         self.selected.clear();
         self.refresh();
+    }
+
+    /// Mark (or unmark) all selected photos as protected.
+    pub fn set_protected_selected(&mut self, protected: bool) {
+        let Some(lib) = &self.library else { return };
+        for id in self.selected.clone() {
+            if let Err(e) = lib.set_protected(id, protected) {
+                self.last_error = Some(format!("Protect failed: {e}"));
+                return;
+            }
+        }
+        self.refresh();
+    }
+
+    /// True if every selected photo is currently protected (and there is at
+    /// least one selection). Used to choose the Protect/Unprotect label.
+    pub fn all_selected_protected(&self) -> bool {
+        !self.selected.is_empty()
+            && self
+                .results
+                .iter()
+                .filter(|r| self.selected.contains(&r.id))
+                .all(|r| r.protected)
+    }
+}
+
+// ── Thumbnail texture sizing ────────────────────────────────────────────────
+
+/// Max side of the JPEG thumbnails written to disk at import time
+/// (`rasterlab_library::thumbnail::generate_thumbnail` is called with 512).
+/// Resident textures are never built larger than this — there is no extra
+/// detail to recover.
+pub const THUMB_SOURCE_SIDE: u32 = 512;
+
+/// Resident texture sizes are snapped to this multiple. Bucketing keeps the
+/// cache homogeneous and stops a slow drag of the size slider from rebuilding
+/// the textures on every one-pixel change.
+const THUMB_SIZE_BUCKET: u32 = 64;
+
+/// Physical-pixel max side a thumbnail texture should be built at for the given
+/// grid scale and display DPI.
+///
+/// The grid draws each cell at `512 * thumb_scale` *points*; multiplying by
+/// `pixels_per_point` gives the on-screen size in device pixels, which is the
+/// most resolution that can actually be shown. The result is snapped to
+/// [`THUMB_SIZE_BUCKET`] and clamped to [`THUMB_SOURCE_SIDE`] so we never
+/// upscale past the on-disk thumbnail.
+pub fn thumb_target_side(thumb_scale: f32, pixels_per_point: f32) -> u32 {
+    let thumb_px = (512.0 * thumb_scale).max(64.0);
+    let raw = (thumb_px * pixels_per_point).round() as u32;
+    let bucketed = ((raw + THUMB_SIZE_BUCKET / 2) / THUMB_SIZE_BUCKET).max(1) * THUMB_SIZE_BUCKET;
+    bucketed.min(THUMB_SOURCE_SIDE)
+}
+
+// ── ThumbCache ──────────────────────────────────────────────────────────────
+
+/// Initial cap for the resident texture cache, used until the grid sets a
+/// scale-aware cap on its first frame (see [`ThumbCache::set_cap`]).
+const THUMB_CACHE_CAP: usize = 256;
+
+/// Bounded thumbnail cache: hash → texture, plus the set of hashes whose load is
+/// in flight (to dedupe requests). Insertion order is tracked so the oldest
+/// entry is evicted once the cap is exceeded; an evicted hash is also dropped
+/// from the requested set so it can be reloaded when scrolled back into view.
+#[derive(Default)]
+pub struct ThumbCache {
+    textures: HashMap<String, egui::TextureHandle>,
+    requested: HashSet<String>,
+    order: VecDeque<String>,
+    cap: usize,
+}
+
+impl ThumbCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            ..Default::default()
+        }
+    }
+
+    /// Update the resident-texture cap and immediately evict down to it. Called
+    /// each grid frame with a value derived from the viewport so the cache holds
+    /// roughly the visible thumbnails plus a few screens of scroll margin.
+    pub fn set_cap(&mut self, cap: usize) {
+        self.cap = cap.max(1);
+        self.trim();
+    }
+
+    pub fn get(&self, hash: &str) -> Option<&egui::TextureHandle> {
+        self.textures.get(hash)
+    }
+
+    /// Number of resident textures (for the loading diagnostic).
+    pub fn cached_len(&self) -> usize {
+        self.textures.len()
+    }
+
+    /// Number of loads requested but not yet resident.
+    pub fn pending_len(&self) -> usize {
+        self.requested.len().saturating_sub(self.textures.len())
+    }
+
+    pub fn is_requested(&self, hash: &str) -> bool {
+        self.requested.contains(hash)
+    }
+
+    pub fn mark_requested(&mut self, hash: String) {
+        self.requested.insert(hash);
+    }
+
+    /// Store a loaded texture, evicting the oldest entry if over capacity.
+    pub fn insert(&mut self, hash: String, handle: egui::TextureHandle) {
+        if self.textures.insert(hash.clone(), handle).is_none() {
+            self.order.push_back(hash);
+        }
+        self.trim();
+    }
+
+    /// Evict oldest entries until the resident count is within `cap`.
+    fn trim(&mut self) {
+        while self.textures.len() > self.cap {
+            let Some(evict) = self.order.pop_front() else {
+                break;
+            };
+            self.textures.remove(&evict);
+            self.requested.remove(&evict);
+        }
+    }
+
+    pub fn remove(&mut self, hash: &str) {
+        self.textures.remove(hash);
+        self.requested.remove(hash);
+        self.order.retain(|h| h != hash);
+    }
+
+    pub fn clear(&mut self) {
+        self.textures.clear();
+        self.requested.clear();
+        self.order.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumb_target_side_buckets_clamps_and_never_upscales() {
+        // (thumb_scale, pixels_per_point) -> expected device-pixel max side.
+        let cases = [
+            // 1× display: target tracks the cell size (512 * scale), bucketed.
+            (0.25, 1.0, 128), // 128 px cell
+            (0.5, 1.0, 256),  // 256 px cell
+            (1.0, 1.0, 512),  // 512 px cell == source
+            // 2× (Retina): default scale already needs the full 512 px source;
+            // larger never upscales past it.
+            (0.25, 2.0, 256),
+            (0.5, 2.0, 512),
+            (1.0, 2.0, 512), // would be 1024 → clamped to source
+            // Fractional DPI snaps to the nearest bucket.
+            (0.5, 1.5, 384), // 256 * 1.5 = 384
+        ];
+        for (scale, ppp, expected) in cases {
+            assert_eq!(
+                thumb_target_side(scale, ppp),
+                expected,
+                "scale={scale} ppp={ppp}"
+            );
+            assert!(thumb_target_side(scale, ppp) <= THUMB_SOURCE_SIDE);
+        }
     }
 }

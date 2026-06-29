@@ -29,7 +29,7 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         // Thumbnail preview — scale to fit within a square bound while
         // preserving the texture's own aspect (which reflects rotation/crop
         // ops, whereas photo.width/height are the source dimensions).
-        if let Some(tex) = state.library.thumb_cache.get(&photo.hash) {
+        if let Some(tex) = state.library.thumbs.get(&photo.hash) {
             let bound = ui.available_width().min(200.0);
             let tex_size = tex.size_vec2();
             let size = if tex_size.x > 0.0 && tex_size.y > 0.0 {
@@ -53,6 +53,21 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         ui.label(format!("{}×{}", photo.width, photo.height));
         if let Some(ref date) = photo.capture_date {
             ui.label(format!("Captured: {}", &date[..date.len().min(19)]));
+        }
+
+        ui.separator();
+        // Protection — toggled directly (not via the LMTA rewrite path) so the
+        // on-disk filesystem lock is applied/cleared alongside the flag.
+        let mut protected = photo.protected;
+        if ui
+            .checkbox(&mut protected, "🔒 Protected (cannot be deleted)")
+            .changed()
+            && let Some(lib) = state.library.library.clone()
+        {
+            if let Err(e) = lib.set_protected(id, protected) {
+                state.library.last_error = Some(format!("Protect failed: {e}"));
+            }
+            state.library.refresh();
         }
 
         ui.separator();
@@ -192,6 +207,23 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
             .num_columns(2)
             .spacing([8.0, 2.0])
             .show(ui, |ui| {
+                if let Some(lib) = state.library.library.clone() {
+                    let rlab_path = lib.rlab_path(&photo.hash);
+                    if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
+                        && let Some(source_path) = rlab
+                            .lmta
+                            .as_ref()
+                            .and_then(|lmta| lmta.source_path.as_ref())
+                            .or(rlab.meta.source_path.as_ref())
+                    {
+                        ui.label("Original path:");
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(source_path).monospace())
+                                .truncate(),
+                        );
+                        ui.end_row();
+                    }
+                }
                 ui.label("Library path:");
                 ui.add(egui::Label::new(egui::RichText::new(&rel_path).monospace()).truncate());
                 ui.end_row();
@@ -305,6 +337,17 @@ fn multi_photo_ui(ui: &mut egui::Ui, state: &mut AppState, ids: &[PhotoId], coun
         }
         if ui.button("Clear").clicked() {
             apply_batch_flag(state, ids, None);
+        }
+    });
+
+    // Protection (applies the on-disk lock alongside the flag)
+    ui.horizontal(|ui| {
+        ui.label("Protection:");
+        if ui.button("🔒 Protect").clicked() {
+            state.library.set_protected_selected(true);
+        }
+        if ui.button("Unprotect").clicked() {
+            state.library.set_protected_selected(false);
         }
     });
 
