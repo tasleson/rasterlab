@@ -546,6 +546,45 @@ fn search_by_text_returns_matching_subset() {
 }
 
 #[test]
+fn search_by_text_matches_original_import_filename() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+
+    let filter = SearchFilter {
+        text: Some("meta_test".to_owned()),
+        ..Default::default()
+    };
+    let results = lib.search(&filter, SortOrder::default()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].original_filename.as_deref(),
+        Some("meta_test.jpg")
+    );
+}
+
+#[test]
+fn search_by_text_matches_import_source_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+
+    let filter = SearchFilter {
+        text: Some("test_images".to_owned()),
+        ..Default::default()
+    };
+    let results = lib.search(&filter, SortOrder::default()).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].original_filename.as_deref(),
+        Some("meta_test.jpg")
+    );
+}
+
+#[test]
 fn search_text_is_case_insensitive() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = open_library(tmp.path());

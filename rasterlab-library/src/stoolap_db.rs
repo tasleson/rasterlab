@@ -495,12 +495,29 @@ impl LibraryDb for StoolapDb {
                 params.push($v2);
                 params.push($v3);
             }};
+            ($cond:expr, $v1:expr, $v2:expr, $v3:expr, $v4:expr) => {{
+                let n1 = params.len() + 1;
+                let n2 = n1 + 1;
+                let n3 = n2 + 1;
+                let n4 = n3 + 1;
+                let c = $cond
+                    .replacen("{}", &format!("${}", n1), 1)
+                    .replacen("{}", &format!("${}", n2), 1)
+                    .replacen("{}", &format!("${}", n3), 1)
+                    .replacen("{}", &format!("${}", n4), 1);
+                conditions.push(c);
+                params.push($v1);
+                params.push($v2);
+                params.push($v3);
+                params.push($v4);
+            }};
         }
 
         if let Some(ref text) = filter.text {
             let pat = format!("%{}%", text);
             push!(
-                "(p.original_filename ILIKE {} OR um.caption ILIKE {} OR k.keyword ILIKE {})",
+                "(p.original_filename ILIKE {} OR p.source_path ILIKE {} OR um.caption ILIKE {} OR k.keyword ILIKE {})",
+                Value::text(pat.clone()),
                 Value::text(pat.clone()),
                 Value::text(pat.clone()),
                 Value::text(pat)
