@@ -1242,6 +1242,39 @@ impl AppState {
         self.request_render();
     }
 
+    /// Analyse the current image and push whatever corrections it needs.
+    ///
+    /// Unlike [`Self::push_auto_enhance`], which applies fixed preset values,
+    /// this measures the rendered image (colour cast, tone, chroma,
+    /// sharpness) and derives per-image parameter values in closed form.
+    /// Each correction lands as its own op in the edit stack so it can be
+    /// inspected, tweaked, or undone individually.
+    pub fn push_smart_enhance(&mut self) {
+        let Some(rendered) = self.rendered.clone() else {
+            return;
+        };
+        if self.copies.is_none() {
+            return;
+        }
+
+        let plan = rasterlab_core::analysis::plan_enhancement(&rendered);
+        if plan.is_empty() {
+            self.status = "Smart Enhance: no corrections needed".into();
+            return;
+        }
+        self.status = format!("Smart Enhance: {}", plan.summary());
+
+        self.cancel_all_previews();
+        if let Some(store) = &mut self.copies {
+            let p = store.active_pipeline_mut();
+            for op in plan.into_ops() {
+                p.push_op(op);
+            }
+        }
+        self.mark_dirty();
+        self.request_render();
+    }
+
     pub fn push_auto_enhance(&mut self) {
         if self.copies.is_none() || self.histogram.is_none() {
             return;

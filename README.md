@@ -32,6 +32,7 @@ See change log below for status.
 | Op | What it does |
 |---|---|
 | Auto Enhance | One-click levels stretch + saturation boost + mild sharpen |
+| Smart Enhance | Analyses the image first (colour cast, tone, chroma, sharpness), then applies only the corrections it needs, with per-image values |
 | **Looks** | |
 | Classic B&W | Channel-mixed B&W conversion with brightness lift and vignette |
 | | |

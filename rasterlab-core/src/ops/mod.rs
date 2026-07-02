@@ -1,6 +1,7 @@
 pub mod blur;
 pub mod brightness_contrast;
 pub mod bw;
+pub mod channel_levels;
 pub mod clarity_texture;
 pub mod color_balance;
 pub mod color_space;
@@ -40,6 +41,7 @@ use rayon::prelude::*;
 pub use blur::BlurOp;
 pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::{BlackAndWhiteOp, BwMode};
+pub use channel_levels::{ChannelLevelsOp, ChannelRange};
 pub use clarity_texture::ClarityTextureOp;
 pub use color_balance::ColorBalanceOp;
 pub use color_space::{ColorSpaceConversion, ColorSpaceOp};
