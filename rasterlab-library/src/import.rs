@@ -669,7 +669,7 @@ fn chrono_lite_date(ts: u64) -> String {
 /// Single day → `"Jun 3 2025"`; a range collapses the shared year (and month
 /// where possible): `"Jun 3–7 2025"`, `"Jun 30 – Jul 2 2025"`,
 /// `"Dec 31 2024 – Jan 1 2025"`.
-fn format_session_name(start: u64, end: u64) -> String {
+pub(crate) fn format_session_name(start: u64, end: u64) -> String {
     let start_day = start / 86_400;
     let end_day = end / 86_400;
     if start_day == end_day {
