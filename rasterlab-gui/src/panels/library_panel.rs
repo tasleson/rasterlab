@@ -161,6 +161,14 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             ui.label(detail);
         }
 
+        // Index rebuild progress. Recomputed every frame so the time-left
+        // estimate ticks even between per-file progress messages.
+        if let Some(text) = state.library.rebuild_status_text() {
+            ui.separator();
+            ui.spinner();
+            ui.label(text);
+        }
+
         // Persistent indicator for the most recent scrub's uncorrectable
         // failures. Clicking it opens a window listing each file and its error.
         let scrub_errors = state.library.last_scrub_errors.len();

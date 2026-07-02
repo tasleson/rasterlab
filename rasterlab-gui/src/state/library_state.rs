@@ -6,7 +6,7 @@ use std::{
 
 use rasterlab_library::{
     CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, PhotoId, PhotoRow,
-    ScrubProgress, SearchFilter, SortOrder,
+    RebuildProgress, ScrubProgress, SearchFilter, SortOrder,
 };
 
 // ── LibraryView ───────────────────────────────────────────────────────────────
@@ -51,6 +51,14 @@ pub struct LibraryState {
 
     /// Progress of a running integrity scrub, or `None` when idle.
     pub scrub_progress: Option<ScrubProgress>,
+
+    /// Progress of a running index rebuild, or `None` when idle.
+    pub rebuild_progress: Option<RebuildProgress>,
+
+    /// When the running index rebuild started; used to estimate time left.
+    /// Also serves as the "rebuild in flight" guard, since it is set before
+    /// the first progress message arrives.
+    pub rebuild_started: Option<std::time::Instant>,
 
     /// Per-file `(path, message)` uncorrectable failures from the most recent
     /// scrub. Retained after it finishes so the user can review them.
@@ -106,6 +114,8 @@ impl Default for LibraryState {
             last_import_errors: Vec::new(),
             show_import_errors: false,
             scrub_progress: None,
+            rebuild_progress: None,
+            rebuild_started: None,
             last_scrub_errors: Vec::new(),
             show_scrub_errors: false,
             confirm_delete: false,
@@ -149,6 +159,28 @@ impl LibraryState {
         // Refresh sidebar lists
         self.sessions = lib.all_sessions().unwrap_or_default();
         self.collections = lib.all_collections().unwrap_or_default();
+    }
+
+    /// Human-readable one-liner for a running index rebuild, or `None` when
+    /// idle. Includes files done / total, a time-left estimate once enough
+    /// has elapsed for it to be meaningful, and a running error count.
+    pub fn rebuild_status_text(&self) -> Option<String> {
+        let p = self.rebuild_progress.as_ref()?;
+        let mut s = format!("Rebuilding library index… {}/{}", p.done, p.total);
+        if let Some(started) = self.rebuild_started
+            && p.done > 0
+            && p.done < p.total
+        {
+            let elapsed = started.elapsed().as_secs_f64();
+            if elapsed > 2.0 {
+                let remaining = elapsed / p.done as f64 * (p.total - p.done) as f64;
+                s.push_str(&format!(", about {} left", format_duration(remaining)));
+            }
+        }
+        if !p.errors.is_empty() {
+            s.push_str(&format!(", {} error(s)", p.errors.len()));
+        }
+        Some(s)
     }
 
     pub fn open_library(&mut self, path: PathBuf, thumb_scale: f32) {
@@ -284,6 +316,20 @@ pub fn thumb_target_side(thumb_scale: f32, pixels_per_point: f32) -> u32 {
     let raw = (thumb_px * pixels_per_point).round() as u32;
     let bucketed = ((raw + THUMB_SIZE_BUCKET / 2) / THUMB_SIZE_BUCKET).max(1) * THUMB_SIZE_BUCKET;
     bucketed.min(THUMB_SOURCE_SIDE)
+}
+
+/// Round a duration in seconds to a coarse human-readable estimate
+/// ("45s", "3m 20s", "1h 12m"). Coarse on purpose: it feeds "about … left"
+/// strings where false precision reads worse than none.
+fn format_duration(secs: f64) -> String {
+    let secs = secs.round().max(0.0) as u64;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 // ── ThumbCache ──────────────────────────────────────────────────────────────

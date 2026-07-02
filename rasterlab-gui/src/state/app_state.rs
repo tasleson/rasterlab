@@ -211,6 +211,15 @@ enum BgMessage {
     ThumbLoaded { hash: String, bytes: Vec<u8> },
     /// Progress update from a running integrity scrub.
     ScrubProgress(rasterlab_library::ScrubProgress),
+    /// Progress update from a running index rebuild.
+    RebuildProgress(rasterlab_library::RebuildProgress),
+    /// Index rebuild finished. `fatal` is set if the rebuild aborted early;
+    /// `errors` are per-file failures from a run that otherwise completed.
+    RebuildComplete {
+        total: usize,
+        errors: Vec<(StdPathBuf, String)>,
+        fatal: Option<String>,
+    },
     /// Scrub finished (completed or cancelled).
     ScrubComplete {
         outcome: rasterlab_library::ScrubOutcome,
@@ -698,6 +707,38 @@ impl AppState {
                     // the whole run completes.
                     self.library.last_scrub_errors = p.errors.clone();
                     self.library.scrub_progress = Some(p);
+                }
+                BgMessage::RebuildProgress(p) => {
+                    self.library.rebuild_progress = Some(p);
+                    if let Some(text) = self.library.rebuild_status_text() {
+                        self.status = text;
+                    }
+                }
+                BgMessage::RebuildComplete {
+                    total,
+                    errors,
+                    fatal,
+                } => {
+                    self.library.rebuild_progress = None;
+                    self.library.rebuild_started = None;
+                    self.library.thumbs.clear();
+                    self.library.refresh();
+                    if let Some(e) = fatal {
+                        self.status = format!("Rebuild failed: {e}");
+                    } else if errors.is_empty() {
+                        self.status = format!("Index rebuild complete: {total} photos");
+                    } else {
+                        // Dump details to the terminal for quick diagnosis, the
+                        // same way import failures are reported.
+                        for (path, msg) in &errors {
+                            eprintln!("rebuild error: {}: {msg}", path.display());
+                        }
+                        self.status = format!(
+                            "Index rebuild: {} photos, {} error(s)",
+                            total.saturating_sub(errors.len()),
+                            errors.len()
+                        );
+                    }
                 }
                 BgMessage::ScrubComplete { outcome } => {
                     self.scrub_cancel = None;
@@ -1864,34 +1905,37 @@ impl AppState {
     }
 
     pub fn rebuild_library_index(&mut self) {
+        if self.library.rebuild_started.is_some() {
+            return;
+        }
         let Some(lib) = self.library.library.clone() else {
             return;
         };
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
+        self.library.rebuild_started = Some(std::time::Instant::now());
         self.status = "Rebuilding library index…".into();
         std::thread::Builder::new()
             .name("rasterlab-rebuild".into())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let result = lib.rebuild_index(|_p| {});
-                match result {
-                    Ok(()) => {
-                        let _ = tx.send(BgMessage::ImportComplete {
-                            session: rasterlab_library::ImportSession {
-                                id: String::new(),
-                                name: "Index rebuild".into(),
-                                started_at: 0,
-                                photo_count: 0,
-                                errors: Vec::new(),
-                            },
-                            errors: Vec::new(),
-                        });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(BgMessage::Error(format!("Rebuild failed: {e}")));
-                    }
-                }
+                let progress_tx = tx.clone();
+                let progress_ctx = ctx.clone();
+                // Track the last progress report so the completion message can
+                // carry the final total and per-file errors (rebuild_index only
+                // exposes them through the callback).
+                let last = std::cell::RefCell::new((0usize, Vec::new()));
+                let result = lib.rebuild_index(|p| {
+                    *last.borrow_mut() = (p.total, p.errors.clone());
+                    let _ = progress_tx.send(BgMessage::RebuildProgress(p));
+                    progress_ctx.request_repaint();
+                });
+                let (total, errors) = last.into_inner();
+                let _ = tx.send(BgMessage::RebuildComplete {
+                    total,
+                    errors,
+                    fatal: result.err().map(|e| e.to_string()),
+                });
                 ctx.request_repaint();
             })
             .ok();
