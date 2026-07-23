@@ -3,6 +3,7 @@
 pub mod shared;
 pub mod tool_trait;
 
+pub mod airplane_window;
 pub mod auto_enhance;
 pub mod blur;
 pub mod brightness_contrast;

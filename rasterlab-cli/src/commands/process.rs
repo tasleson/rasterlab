@@ -31,6 +31,10 @@ pub struct ProcessArgs {
     #[arg(long)]
     pub bw: Option<String>,
 
+    /// Correct aircraft-window haze/cast/reflections: default or strength,cast,haze,reflections.
+    #[arg(long, num_args = 0..=1, default_missing_value = "default")]
+    pub airplane_window: Option<String>,
+
     /// Sharpening strength 0.0–10.0  (e.g. --sharpen 1.5)
     #[arg(long)]
     pub sharpen: Option<f32>,
@@ -79,6 +83,7 @@ pub fn run(args: ProcessArgs) -> Result<()> {
             crop: args.crop,
             rotate: args.rotate,
             bw: args.bw,
+            airplane_window: args.airplane_window,
             sharpen: args.sharpen,
         };
         for op in spec.build()? {

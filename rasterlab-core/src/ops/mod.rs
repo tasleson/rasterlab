@@ -1,3 +1,4 @@
+pub mod airplane_window;
 pub mod blur;
 pub mod brightness_contrast;
 pub mod bw;
@@ -38,6 +39,7 @@ pub mod white_balance;
 
 use rayon::prelude::*;
 
+pub use airplane_window::AirplaneWindowCorrectionOp;
 pub use blur::BlurOp;
 pub use brightness_contrast::BrightnessContrastOp;
 pub use bw::{BlackAndWhiteOp, BwMode};

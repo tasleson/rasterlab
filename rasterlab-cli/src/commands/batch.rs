@@ -39,6 +39,10 @@ pub struct BatchArgs {
     #[arg(long)]
     pub bw: Option<String>,
 
+    /// Correct aircraft-window haze/cast/reflections: default or strength,cast,haze,reflections.
+    #[arg(long, num_args = 0..=1, default_missing_value = "default")]
+    pub airplane_window: Option<String>,
+
     /// Sharpen strength 0.0–10.0
     #[arg(long)]
     pub sharpen: Option<f32>,
@@ -122,6 +126,7 @@ pub fn run(args: BatchArgs) -> Result<()> {
             crop: args.crop.clone(),
             rotate: args.rotate.clone(),
             bw: args.bw.clone(),
+            airplane_window: args.airplane_window.clone(),
             sharpen: args.sharpen,
         };
         let ops = spec.build()?;
@@ -247,6 +252,7 @@ mod tests {
             rotate: None,
             bw: Some("luminance".into()),
             sharpen: Some(1.25),
+            airplane_window: None,
         };
         let entries: Vec<serde_json::Value> = spec
             .build()

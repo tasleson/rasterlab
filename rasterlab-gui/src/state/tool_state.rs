@@ -6,13 +6,14 @@ use rasterlab_core::{
 
 use crate::file_chooser::DialogKind;
 use crate::panels::tools::{
-    blur::BlurTool, brightness_contrast::BrightnessContrastTool, bw::BwTool,
-    clarity_texture::ClarityTextureTool, color_balance::ColorBalanceTool,
-    color_space::ColorSpaceTool, crop::CropTool, curves::CurvesTool, denoise::DenoiseTool,
-    faux_hdr::FauxHdrTool, focus_stack::FocusStackTool, grain::GrainTool, hdr_merge::HdrMergeTool,
-    heal::HealTool, highlights_shadows::HighlightsShadowsTool, hsl::HslTool,
-    hue_shift::HueShiftTool, levels::LevelsTool, lut::LutTool, noise_reduction::NoiseReductionTool,
-    panorama::PanoramaTool, perspective::PerspectiveTool, resize::ResizeTool, rotate::RotateTool,
+    airplane_window::AirplaneWindowTool, blur::BlurTool,
+    brightness_contrast::BrightnessContrastTool, bw::BwTool, clarity_texture::ClarityTextureTool,
+    color_balance::ColorBalanceTool, color_space::ColorSpaceTool, crop::CropTool,
+    curves::CurvesTool, denoise::DenoiseTool, faux_hdr::FauxHdrTool, focus_stack::FocusStackTool,
+    grain::GrainTool, hdr_merge::HdrMergeTool, heal::HealTool,
+    highlights_shadows::HighlightsShadowsTool, hsl::HslTool, hue_shift::HueShiftTool,
+    levels::LevelsTool, lut::LutTool, noise_reduction::NoiseReductionTool, panorama::PanoramaTool,
+    perspective::PerspectiveTool, resize::ResizeTool, rotate::RotateTool,
     saturation::SaturationTool, sepia::SepiaTool, shadow_exposure::ShadowExposureTool,
     sharpen::SharpenTool, split_tone::SplitToneTool, straighten::StraightenTool, tool_trait::Tool,
     vibrance::VibranceTool, vignette::VignetteTool, white_balance::WhiteBalanceTool,
@@ -77,6 +78,7 @@ impl ToolState {
 
     fn build_tools() -> Vec<Box<dyn Tool>> {
         vec![
+            Box::new(AirplaneWindowTool::new()),
             Box::new(BwTool::new()),
             Box::new(BlurTool::new()),
             Box::new(BrightnessContrastTool::new()),

@@ -12,6 +12,7 @@ use super::tool_state::ToolState;
 /// as the classifier that decides whether a given op type is editable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditingTool {
+    AirplaneWindow,
     Levels,
     BlackAndWhite,
     BrightnessContrast,
