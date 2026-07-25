@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use rasterlab_core::{
+    analysis::ImageStats,
     image::Image,
     ops::{
         BlackAndWhiteOp, CropOp, HealOp, HealSpot, NoiseReductionOp, NrMethod, RotateOp, SepiaOp,
@@ -167,6 +168,19 @@ fn bench_histogram(c: &mut Criterion) {
     });
 }
 
+fn bench_image_stats(c: &mut Criterion) {
+    init_rayon();
+    // Smart Enhance's measurement pass: full histogram, a shared luma plane
+    // feeding both the Laplacian variance and the regional tile grid, and a
+    // strided chroma sample per tile.  The tile pass must ride along on the
+    // luma plane rather than adding a pixel pass of its own — a regression
+    // here means someone reintroduced a second full traversal.
+    let img = make_image(4000, 3000);
+    c.bench_function("image_stats 4000x3000", |b| {
+        b.iter(|| ImageStats::compute(&img))
+    });
+}
+
 /// Simulates the image_to_egui conversion in the canvas panel.
 /// This is memory-bandwidth-bound; parallelising it makes it slower on
 /// Apple Silicon, so any "optimisation" that touches this code path must
@@ -319,6 +333,7 @@ criterion_group!(
     bench_split_tone,
     bench_clarity_texture,
     bench_histogram,
+    bench_image_stats,
     bench_image_to_egui,
     bench_heal,
     bench_noise_reduction,

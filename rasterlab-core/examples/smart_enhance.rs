@@ -7,10 +7,38 @@
 use std::{env, path::PathBuf, time::Instant};
 
 use rasterlab_core::{
-    analysis::{self, ImageStats},
+    analysis::{self, ImageStats, RegionalStats},
     formats::FormatRegistry,
     traits::format_handler::EncodeOptions,
 };
+
+/// Dark-to-light ramp used for the ASCII tile maps.
+const RAMP: &[u8] = b" .:-=+*#%@";
+
+/// Map a 0–255 value onto [`RAMP`].
+fn ramp_char(v: f32, max: f32) -> char {
+    let t = (v / max).clamp(0.0, 1.0);
+    let i = ((t * (RAMP.len() - 1) as f32).round() as usize).min(RAMP.len() - 1);
+    RAMP[i] as char
+}
+
+/// Print the tile grid as an ASCII map beside the numeric values, so the
+/// shape of the lighting is visible at a glance and the actual measurements
+/// are there to check it against.
+fn print_tile_map(regional: &RegionalStats, label: &str, max: f32, value: impl Fn(usize) -> f32) {
+    let (cols, rows) = (regional.cols() as usize, regional.rows() as usize);
+    println!("\n  {label}  (ramp ' ' = 0 … '@' = {max:.0})");
+    for row in 0..rows {
+        let mut art = String::new();
+        let mut nums = String::new();
+        for col in 0..cols {
+            let v = value(row * cols + col);
+            art.push(ramp_char(v, max));
+            nums.push_str(&format!("{:4.0}", v));
+        }
+        println!("    |{art}|{nums}");
+    }
+}
 
 fn main() {
     // Large rayon fold accumulators need more than the macOS 512 KiB default.
@@ -52,6 +80,59 @@ fn main() {
         "  sharpness score   {:.3}",
         stats.sharpness().unwrap_or(0.0)
     );
+
+    if let Some(regional) = &stats.regional {
+        let tiles = regional.tiles();
+        println!(
+            "\nRegional stats ({} x {} tiles of ~{}x{} px):",
+            regional.cols(),
+            regional.rows(),
+            tiles[0].rect.width,
+            tiles[0].rect.height,
+        );
+        println!(
+            "  tonal spread      {:.1}   (p90−p10 of tile medians; high ⇒ wants local tone)",
+            regional.tonal_spread()
+        );
+        match regional.vertical_skew() {
+            Some(s) => println!(
+                "  vertical skew     {s:+.1}   (top − bottom band; + ⇒ bright sky over dark subject)"
+            ),
+            None => println!("  vertical skew     n/a   (too few tile rows)"),
+        }
+        match regional.uniform_border() {
+            Some(b) => println!(
+                "  uniform border    {} ring(s) at level {:.0} → content {}x{} at ({},{})",
+                b.rings,
+                b.level,
+                b.content_rect.width,
+                b.content_rect.height,
+                b.content_rect.x,
+                b.content_rect.y,
+            ),
+            None => println!("  uniform border    none detected — planner uses the whole frame"),
+        }
+
+        print_tile_map(regional, "tile luma medians", 255.0, |i| {
+            tiles[i].luma_median as f32
+        });
+        let chroma_max = tiles
+            .iter()
+            .map(|t| t.mean_chroma)
+            .fold(1.0f32, f32::max)
+            .max(30.0);
+        print_tile_map(regional, "tile mean chroma", chroma_max, |i| {
+            tiles[i].mean_chroma
+        });
+    }
+
+    if let Some(content) = &stats.content {
+        println!(
+            "\nBorder excluded from the planner histograms: luma median {} → {}",
+            analysis::median(&stats.hist.luma),
+            analysis::median(&content.hist.luma),
+        );
+    }
 
     let t = Instant::now();
     let plan = analysis::plan_from_stats(&image, &stats);
