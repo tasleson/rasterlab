@@ -33,6 +33,19 @@
 //!   earlier stages will apply and asking whether regions remain far from the
 //!   midtone in *both* directions afterwards.
 //!
+//! The two modes also differ on colour, which is the one difference between
+//! them that has nothing to do with the regional grid.  Midtone neutralisation
+//! is a grey-world estimator: it assumes the scene averages neutral, and when
+//! that assumption fails — a sunset, a brick wall, a saturated subject on a
+//! plain background — its "correction" is a visible hue shift away from what
+//! the photographer saw.  Restore is pointed at photographs already known to
+//! have faded, so it neutralises as far as it measures.  Adaptive is pointed at
+//! anything, where a strongly-coloured scene is far likelier than a strong
+//! cast, so it treats the measurement as a proposal and limits it: re-centred
+//! to move colour without moving exposure, damped by whether the two
+//! independent cast estimators agree, and capped in total hue movement.  See
+//! [`limit_neutralisation`] and [`cast_agreement`].
+//!
 //! The saturation and local-tone stages interact, and the interaction is
 //! handled explicitly.  Lifting a shadow makes the colour that was hidden in it
 //! visible, so local tone raises apparent colourfulness by itself; boosting
@@ -351,6 +364,32 @@ const SHARPNESS_GOOD: f64 = 0.030;
 const SHARPNESS_SOFT: f64 = 0.003;
 const SHARPEN_MAX: f32 = 1.2;
 
+// ── Midtone-neutralisation limits (Adaptive only) ─────────────────────────────
+//
+// Stage 1b is a grey-world estimator: it assumes the scene averages neutral.
+// That premise fails on plenty of ordinary photographs — a sunset, a red brick
+// wall, a macro of a flower — and when it fails the "correction" is a visible
+// hue shift away from what the photographer saw.  Adaptive Enhance therefore
+// treats the raw gammas as a *proposal* and applies three limits before
+// accepting it.  Old Photo Restore accepts the proposal as-is: a faded scan
+// really does have a cast, and its results were hand-calibrated against the
+// undamped behaviour.
+
+/// Below this the endpoint estimator has no meaningful opinion — the image is
+/// already balanced end to end — so there is no second estimate to cross-check
+/// against and the medians are taken at face value.  Measured as the RMS of the
+/// log-space cast direction, so it is a ratio, not a level: 0.05 is roughly a
+/// 5% channel imbalance.
+const CAST_AGREEMENT_FLOOR: f32 = 0.05;
+/// Widest ratio between the largest and smallest neutralisation exponent.
+///
+/// The per-channel `clamp(0.65, 1.5)` already bounds this at 2.31, which is
+/// wide enough to swing hue noticeably when both extremes are hit at once.
+/// A real illuminant cast (tungsten, deep shade) needs roughly 2.0, so this
+/// sits just above that: it is a backstop against the pathological case, not
+/// the mechanism for rejecting false casts — that is the agreement test's job.
+const NEUTRALISE_SPREAD_MAX: f32 = 2.1;
+
 // ── Local-tone thresholds ─────────────────────────────────────────────────────
 //
 // The obvious trigger — "this frame has a wide tonal spread" — does not work.
@@ -497,6 +536,12 @@ pub enum PlanMode {
     /// grid makes possible: a confidently-detected scan border is excluded from
     /// the measurements, and a frame no single curve can serve may additionally
     /// get local tone.  This is what **Adaptive Enhance** applies.
+    ///
+    /// It is also the more sceptical of the two about colour.  Restore is
+    /// pointed at photographs already known to have faded, so it neutralises
+    /// midtones as far as it measures; Adaptive is pointed at anything, where a
+    /// strongly-coloured scene is far likelier than a strong cast, so it limits
+    /// the neutralisation — see [`limit_neutralisation`].
     #[default]
     Adaptive,
 }
@@ -504,6 +549,12 @@ pub enum PlanMode {
 impl PlanMode {
     /// Whether this mode consults the tile grid at all.
     fn uses_regional(self) -> bool {
+        matches!(self, PlanMode::Adaptive)
+    }
+
+    /// Whether the raw midtone gammas are treated as a proposal to be limited
+    /// rather than as the answer.
+    fn limits_neutralisation(self) -> bool {
         matches!(self, PlanMode::Adaptive)
     }
 }
@@ -583,12 +634,29 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats, mode: PlanMode) -> Enh
         let stretched = transform_histogram(hist, &range.build_lut());
         *m = (median(&stretched) as f32 / 255.0).clamp(0.02, 0.98);
     }
-    let mid_target = (medians[0] + medians[1] + medians[2]) / 3.0;
-    for (range, m) in ranges.iter_mut().zip(medians) {
-        // Solve m^(1/gamma) = target  →  gamma = ln(m) / ln(target).
+    let mut mid_target = (medians[0] + medians[1] + medians[2]) / 3.0;
+
+    // Solve m^(1/gamma) = target  →  gamma = ln(m) / ln(target).  This is a
+    // proposal: it assumes the divergence it measured is a cast rather than the
+    // colour of the scene.  Restore accepts it; Adaptive tests it first.
+    let mut gammas: [f32; 3] =
+        std::array::from_fn(|i| (medians[i].ln() / mid_target.ln()).clamp(0.65, 1.5));
+    if mode.limits_neutralisation() {
+        gammas = limit_neutralisation(gammas, cast_agreement(&ranges, channels));
+        // The limits stop deliberately short of full neutralisation, so the
+        // channels no longer converge on `mid_target`.  Stage 2 reads that
+        // value as the corrected image's midtone, so hand it where the
+        // channels actually land rather than where the proposal aimed.
+        mid_target = medians
+            .iter()
+            .zip(gammas)
+            .map(|(m, g)| m.powf(1.0 / g))
+            .sum::<f32>()
+            / 3.0;
+    }
+    for (range, gamma) in ranges.iter_mut().zip(gammas) {
         // The dead zone leaves mild, plausibly intentional warmth alone;
         // only clear casts get pulled toward neutral.
-        let gamma = (m.ln() / mid_target.ln()).clamp(0.65, 1.5);
         range.gamma = if (gamma - 1.0).abs() < 0.04 {
             1.0
         } else {
@@ -690,6 +758,117 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats, mode: PlanMode) -> Enh
         saturation,
         sharpen,
     }
+}
+
+/// Where a set of per-channel levels sits relative to neutral, in log space.
+///
+/// Subtracting the mean makes the result a pure *hue* direction: scaling all
+/// three channels by the same factor is a lightness change, not a cast, and
+/// drops out.  Two such directions are therefore directly comparable however
+/// differently the quantities behind them were measured.
+fn cast_direction(levels: [f32; 3]) -> [f32; 3] {
+    let logs = levels.map(|v| v.max(1e-3).ln());
+    let mean = (logs[0] + logs[1] + logs[2]) / 3.0;
+    logs.map(|l| l - mean)
+}
+
+/// Magnitude of a cast direction, as a plain channel ratio.
+fn cast_magnitude(dir: [f32; 3]) -> f32 {
+    ((dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]) / 3.0).sqrt()
+}
+
+/// How much to trust that the midtone divergence stage 1b measured is a cast.
+///
+/// Stages 1a and 1b are independent estimators of the same quantity read off
+/// the same raw histograms: 1a from where each channel's occupied range sits
+/// (the white-patch assumption), 1b from where each channel's median sits (the
+/// grey-world assumption).  A genuine illuminant tints the whole tone scale, so
+/// both see it and agree on its direction.  Scene colour usually does not: a
+/// saturated red subject on a neutral background drives the red endpoint hard
+/// while leaving the medians balanced, and the two estimates diverge.
+///
+/// Returns the cosine of the angle between them, clamped to `0..=1` — full
+/// strength when they agree, nothing when they oppose.
+///
+/// Note what this does *not* catch: shared error.  A frame that is entirely
+/// blue sky has both estimators reading blue-high and agreeing with each other,
+/// and it passes at full strength.  Separating that from a real cast needs a
+/// neutral reference the histograms simply do not contain.
+fn cast_agreement(ranges: &[ChannelRange; 3], channels: [&[u64; 256]; 3]) -> f32 {
+    // Stage 1a's reading: the midpoint of each channel's occupied range.  A
+    // channel whose content sits high is one the stretch will pull down.
+    let endpoints = cast_direction(std::array::from_fn(|i| {
+        (ranges[i].black + ranges[i].white) / 2.0
+    }));
+    // Stage 1b's reading, taken on the raw histograms so the two estimates stay
+    // independent — reusing the post-stretch medians would just be measuring
+    // stage 1a's output and would agree with it by construction.
+    let medians = cast_direction(std::array::from_fn(|i| median(channels[i]) as f32 / 255.0));
+
+    let (a, b) = (cast_magnitude(endpoints), cast_magnitude(medians));
+    if a < CAST_AGREEMENT_FLOOR {
+        // The image is already balanced end to end, so stage 1a has no opinion
+        // to cross-check against and the medians stand on their own.  This is
+        // the faded-dye case: endpoints intact, midtones drifted.
+        return 1.0;
+    }
+    if b < CAST_AGREEMENT_FLOOR {
+        // Stage 1a sees a cast the medians do not — the signature of a
+        // saturated subject driving one endpoint rather than of an illuminant.
+        // Left alone, the stretch skews the medians and stage 1b then "fixes"
+        // its own handiwork, compounding the shift.
+        return 0.0;
+    }
+    let dot = endpoints
+        .iter()
+        .zip(medians)
+        .map(|(x, y)| x * y)
+        .sum::<f32>();
+    (dot / (3.0 * a * b)).clamp(0.0, 1.0)
+}
+
+/// Apply the limits Adaptive Enhance places on the proposed midtone gammas.
+///
+/// Works on the *exponent* each gamma implies (`1/gamma`, what
+/// [`ChannelRange::build_lut`] actually raises the channel to) in log space,
+/// where every limit is simple arithmetic: re-centring is subtracting the mean,
+/// and both softening steps are a scale.
+fn limit_neutralisation(gammas: [f32; 3], confidence: f32) -> [f32; 3] {
+    // Negating turns gamma into its exponent 1/gamma.
+    let mut x = gammas.map(|g| -g.max(0.01).ln());
+
+    // 1. Re-centre so the exponents have geometric mean 1.  Scaling all three
+    //    exponents by a common factor leaves the channels converging on each
+    //    other exactly as before — only the level they converge *at* moves — so
+    //    this costs no neutralisation at all.  What it buys is separation of
+    //    concerns: stage 1b now moves colour and nothing else, and the exposure
+    //    decision is left entirely to the tone stage, whose dead zone was
+    //    calibrated on the assumption that it gets to make that call.
+    let mean = (x[0] + x[1] + x[2]) / 3.0;
+    for v in &mut x {
+        *v -= mean;
+    }
+
+    // 2. Damp by how far the two independent cast estimates agree.
+    for v in &mut x {
+        *v *= confidence;
+    }
+
+    // 3. Cap the total hue movement.  The per-channel `clamp(0.65, 1.5)` bounds
+    //    each exponent on its own, but nothing bounds red and blue travelling
+    //    hard in opposite directions at once — and that opposition is what
+    //    actually reads as a shift.
+    let spread =
+        x.iter().copied().fold(f32::MIN, f32::max) - x.iter().copied().fold(f32::MAX, f32::min);
+    let limit = NEUTRALISE_SPREAD_MAX.ln();
+    if spread > limit {
+        let scale = limit / spread;
+        for v in &mut x {
+            *v *= scale;
+        }
+    }
+
+    x.map(|v| (-v).exp())
 }
 
 /// Decide whether the frame needs local tone, and how much.
@@ -958,7 +1137,14 @@ mod tests {
             },
             Case {
                 // Exercises the midtone-neutralisation gammas, which are the
-                // stage the border fix reroutes.
+                // stage the border fix reroutes.  Its endpoints are essentially
+                // intact — the fade is purely in the dye response — so the
+                // agreement test finds no second opinion to weigh and passes
+                // the gammas through undamped.  They differ from the values
+                // this case pinned before `limit_neutralisation` only by its
+                // re-centring, which moved a small common lightening component
+                // out of stage 1b; `restore_keeps_the_undamped_gammas` pins the
+                // originals on the mode that still produces them.
                 name: "nonlinear cast",
                 image: gradient_image(64, 64, |i| {
                     let v = ((i * 7) % 256) as f32 / 255.0;
@@ -969,9 +1155,9 @@ mod tests {
                     ]
                 }),
                 channel_levels: Some([
-                    [0.019_607_844, 1.0, 0.712_675_33],
+                    [0.019_607_844, 1.0, 0.720_144_75],
                     [0.0, 1.0, 1.0],
-                    [0.0, 1.0, 1.380_544_2],
+                    [0.0, 1.0, 1.395_013_3],
                 ]),
                 tone: None,
                 local_tone: None,
@@ -1317,6 +1503,133 @@ mod tests {
             restore.saturation.map(|s| s.saturation),
             plan_restoration(&backlit).saturation.map(|s| s.saturation),
             "plan_restoration must agree with Restore mode"
+        );
+    }
+
+    /// The exponents `limit_neutralisation` returns must have geometric mean 1,
+    /// so stage 1b moves colour and leaves exposure entirely to stage 2.
+    ///
+    /// Re-centring costs no neutralisation: scaling every exponent by a common
+    /// factor leaves the channels converging on each other exactly as before.
+    /// The second assertion is what pins that — the *ratios* between exponents
+    /// survive re-centring untouched.
+    #[test]
+    fn neutralisation_moves_colour_without_moving_exposure() {
+        let raw = [1.4f32, 1.05, 0.8];
+        let out = limit_neutralisation(raw, 1.0);
+
+        let log_mean = out.iter().map(|g| (1.0f32 / g).ln()).sum::<f32>() / 3.0;
+        assert!(
+            log_mean.abs() < 1e-5,
+            "exponents should have geometric mean 1, got log mean {log_mean}"
+        );
+
+        for (a, b) in [(0, 1), (1, 2), (0, 2)] {
+            // Exponent ratio e_a/e_b, which is gamma_b/gamma_a.
+            let want = raw[b] / raw[a];
+            let got = out[b] / out[a];
+            assert!(
+                (want - got).abs() < 1e-4,
+                "re-centring changed the {a}:{b} exponent ratio, {want} -> {got}"
+            );
+        }
+    }
+
+    /// Confidence scales the correction between full strength and identity.
+    #[test]
+    fn confidence_scales_the_neutralisation() {
+        let raw = [1.4f32, 1.05, 0.8];
+        let full = limit_neutralisation(raw, 1.0);
+        let half = limit_neutralisation(raw, 0.5);
+        let none = limit_neutralisation(raw, 0.0);
+
+        for g in none {
+            assert!((g - 1.0).abs() < 1e-5, "zero confidence must be identity");
+        }
+        for (f, h) in full.iter().zip(half) {
+            assert!(
+                (h.ln()).abs() < (f.ln()).abs(),
+                "half confidence should move less: {f} vs {h}"
+            );
+        }
+    }
+
+    /// The joint cap binds on opposed extremes that the per-channel clamps let
+    /// through: `clamp(0.65, 1.5)` permits a 2.31 spread on its own.
+    #[test]
+    fn joint_spread_cap_bounds_opposed_channels() {
+        let out = limit_neutralisation([1.5, 1.0, 0.65], 1.0);
+        let exponents = out.map(|g| 1.0 / g);
+        let spread = exponents.iter().copied().fold(f32::MIN, f32::max)
+            / exponents.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            spread <= NEUTRALISE_SPREAD_MAX + 1e-4,
+            "exponent spread {spread} exceeds the cap"
+        );
+        // The cap softens; it must not reverse or flatten the correction.
+        assert!(out[0] > 1.0 && out[2] < 1.0, "direction lost: {out:?}");
+    }
+
+    /// A saturated subject on a neutral background is the case the agreement
+    /// test exists for: it drives one endpoint hard while leaving the medians
+    /// balanced, so the stretch skews the midtones and stage 1b would then
+    /// "correct" its own handiwork.  Adaptive must decline; Restore, aimed at
+    /// images already known to be faded, still acts.
+    #[test]
+    fn saturated_subject_does_not_trigger_midtone_neutralisation() {
+        // Neutral mid-grey noise over most of the frame, with a small deep-red
+        // patch that reaches 255 in red alone.
+        let img = xy_image(256, 256, |x, y| {
+            if x >= 200 && y >= 200 {
+                [255, 18, 18]
+            } else {
+                let v = (120 + texture(x, y)).clamp(0, 255) as u8;
+                [v, v, v]
+            }
+        });
+        let stats = ImageStats::compute(&img);
+        assert!(stats.content.is_none(), "test needs no detected border");
+
+        let adaptive = plan_from_stats(&img, &stats, PlanMode::Adaptive);
+        let gammas = adaptive
+            .channel_levels
+            .as_ref()
+            .map_or([1.0; 3], |c| [c.red.gamma, c.green.gamma, c.blue.gamma]);
+        assert_eq!(
+            gammas, [1.0; 3],
+            "a red subject on neutral ground must not be read as a cast"
+        );
+
+        let restore = plan_from_stats(&img, &stats, PlanMode::Restore);
+        let restore_gammas = restore
+            .channel_levels
+            .as_ref()
+            .map_or([1.0; 3], |c| [c.red.gamma, c.green.gamma, c.blue.gamma]);
+        assert_ne!(
+            restore_gammas, [1.0; 3],
+            "test is vacuous unless the undamped planner would have shifted"
+        );
+    }
+
+    /// Restore must still produce the hand-calibrated gammas the "nonlinear
+    /// cast" case pinned before Adaptive learned to limit them.
+    #[test]
+    fn restore_keeps_the_undamped_gammas() {
+        let img = gradient_image(64, 64, |i| {
+            let v = ((i * 7) % 256) as f32 / 255.0;
+            [
+                (v.powf(0.7) * 255.0) as u8,
+                (v * 255.0) as u8,
+                (v.powf(1.4) * 255.0) as u8,
+            ]
+        });
+        let stats = ImageStats::compute(&img);
+        let cl = plan_from_stats(&img, &stats, PlanMode::Restore)
+            .channel_levels
+            .expect("faded dye response needs channel levels");
+        assert_eq!(
+            [cl.red.gamma, cl.green.gamma, cl.blue.gamma],
+            [0.712_675_33, 1.0, 1.380_544_2]
         );
     }
 
