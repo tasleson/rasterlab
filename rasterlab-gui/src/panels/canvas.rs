@@ -1,10 +1,14 @@
 //! Central image viewer with zoom/pan and crop-selection overlay.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 use std::time::Duration;
 
-use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Ui, Vec2};
+use egui::{
+    Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureId, TextureOptions, Ui, Vec2,
+};
 use rasterlab_core::Image;
+use rasterlab_core::ops::resize::reduce_pow2;
 
 use crate::panels::tools::crop::CropTool;
 use crate::panels::tools::heal::HealTool;
@@ -16,9 +20,8 @@ use crate::state::{AppState, SplitMode};
 pub struct CanvasState {
     pub zoom: f32,
     pan_offset: Vec2,
-    texture: Option<TextureHandle>,
-    /// Hash of the last image pointer+length — detects when pixel data changes.
-    last_hash: u64,
+    /// The pipeline output currently on screen.
+    texture: PresentationTexture,
     /// Generation counter from AppState — resets view on a new file open.
     last_generation: u64,
     /// Dimensions of the last rendered image — resets view when they change (crop, rotate 90/270).
@@ -35,17 +38,11 @@ pub struct CanvasState {
     /// Rect at the moment `crop_drag` started (image-space corners).
     crop_drag_start_rect: Rect,
     /// Overlay texture for full-resolution viewport previews.
-    overlay_texture: Option<TextureHandle>,
-    overlay_last_hash: u64,
+    overlay_texture: PresentationTexture,
     /// "Before" texture for split view — source image with geometric ops applied.
-    before_texture: Option<TextureHandle>,
-    before_hash: u64,
-    /// Logical pixel dimensions of the before image (may differ from source after rotate/crop).
-    before_logical_size: (u32, u32),
+    before_texture: PresentationTexture,
     /// "After" texture for vs-previous-step split mode (pipeline through op N).
-    after_step_texture: Option<TextureHandle>,
-    after_step_hash: u64,
-    after_step_logical_size: (u32, u32),
+    after_step_texture: PresentationTexture,
     /// Position of the split divider as a fraction of canvas width (0.0–1.0).
     split_ratio: f32,
     /// True while the user is dragging the split divider.
@@ -70,8 +67,7 @@ impl Default for CanvasState {
         Self {
             zoom: 1.0,
             pan_offset: Vec2::ZERO,
-            texture: None,
-            last_hash: 0,
+            texture: PresentationTexture::default(),
             last_generation: 0,
             last_img_dims: (0, 0),
             last_canvas_size: Vec2::ZERO,
@@ -80,14 +76,9 @@ impl Default for CanvasState {
             crop_drag: None,
             crop_drag_start_ptr: Pos2::ZERO,
             crop_drag_start_rect: Rect::ZERO,
-            overlay_texture: None,
-            overlay_last_hash: 0,
-            before_texture: None,
-            before_hash: 0,
-            before_logical_size: (0, 0),
-            after_step_texture: None,
-            after_step_hash: 0,
-            after_step_logical_size: (0, 0),
+            overlay_texture: PresentationTexture::default(),
+            before_texture: PresentationTexture::default(),
+            after_step_texture: PresentationTexture::default(),
             split_ratio: 0.5,
             split_dragging: false,
             mask_overlay_texture: None,
@@ -201,18 +192,44 @@ impl CanvasState {
         );
         let canvas_rect = Rect::from_min_size(available.min, canvas_size);
 
-        // ── Rebuild GPU texture only when pixel data changes ─────────────────
-        let new_hash = compute_hash(image);
+        // Reset view when a new file is opened OR when dimensions change
+        // (crop, rotate 90°/270°). Sharpen, B&W, rotate 180° etc. preserve zoom/pan.
+        // Ignore dimension changes caused by downsampled preview renders — we
+        // don't want to reset zoom/pan every time a 1/4-scale preview arrives.
+        let pixels_per_point = ui.ctx().pixels_per_point();
         let img_gen = state.image_generation;
-
-        if self.texture.is_none() || new_hash != self.last_hash {
-            self.texture = Some(ui.ctx().load_texture(
-                "canvas_image",
-                image_to_egui(image),
-                TextureOptions::LINEAR,
-            ));
-            self.last_hash = new_hash;
+        let dims_changed = (img_w, img_h) != self.last_img_dims && !state.rendered_is_preview;
+        let canvas_resized =
+            canvas_size != self.last_canvas_size && self.last_canvas_size != Vec2::ZERO;
+        if img_gen != self.last_generation || dims_changed || canvas_resized {
+            self.zoom = fit_zoom(img_w, img_h, canvas_size);
+            self.pan_offset = Vec2::ZERO;
+            self.crop_start = None;
+            self.crop_end = None;
+            if img_gen != self.last_generation {
+                // New file opened — drop the cached before-texture so split
+                // view doesn't show the previous image's pixels.  A fresh
+                // pipeline starts at geometric_gen() == 0, which would
+                // otherwise collide with the previous image's cached hash.
+                self.before_texture.clear();
+                self.after_step_texture.clear();
+            }
+            self.last_generation = img_gen;
+            self.last_img_dims = (img_w, img_h);
         }
+        self.last_canvas_size = canvas_size;
+
+        // ── Build a high-quality presentation texture ─────────────────────
+        // See [`PresentationTexture`]: the canvas uploads the image reduced to
+        // roughly its physical on-screen size rather than at full resolution.
+        let effective_zoom = self.zoom / state.rendered_scale;
+        self.texture.sync(
+            ui.ctx(),
+            "canvas_image",
+            image,
+            ContentId::Shared(Arc::clone(image)),
+            effective_zoom * pixels_per_point,
+        );
 
         // ── Upload split-view textures ────────────────────────────────────────
         // "Before" content depends on split_mode:
@@ -276,47 +293,51 @@ impl CanvasState {
                 match effective_mode {
                     SplitMode::VsOriginal => {
                         // Invalidate after_step texture — it's unused in this mode.
-                        self.after_step_texture = None;
-                        self.after_step_hash = 0;
-                        self.after_step_logical_size = (0, 0);
+                        self.after_step_texture.clear();
                         // Key distinguishes the two modes so switching modes
                         // forces a refresh even if geo_gen happens to match.
-                        let hashed = hash_key(&(0u64, geo_gen));
-                        if self.before_texture.is_none() || hashed != self.before_hash {
+                        let content = ContentId::Generation(hash_key(&(0u64, geo_gen)));
+                        let split_scale = self.zoom * pixels_per_point;
+                        if self.before_texture.is_stale(&content, split_scale) {
                             match pipeline.render_geometric_only() {
-                                Ok(img) => {
-                                    self.before_logical_size = (img.width, img.height);
-                                    self.before_texture = Some(ui.ctx().load_texture(
-                                        "canvas_before",
-                                        image_to_egui(&img),
-                                        TextureOptions::LINEAR,
-                                    ));
-                                    self.before_hash = hashed;
-                                }
+                                Ok(img) => self.before_texture.upload(
+                                    ui.ctx(),
+                                    "canvas_before",
+                                    &img,
+                                    content,
+                                    split_scale,
+                                ),
                                 Err(e) => eprintln!("render_geometric_only failed: {e}"),
                             }
                         }
                     }
                     SplitMode::VsPreviousStep => {
                         let n = anchor_idx.unwrap_or(0);
-                        let before_hashed = hash_key(&(1u64, step_gen, n as u64, 0u64));
-                        let after_hashed =
-                            hash_key(&(1u64, step_gen, n as u64, 1u64, preview_hash));
-                        if self.before_texture.is_none() || before_hashed != self.before_hash {
+                        let before_content =
+                            ContentId::Generation(hash_key(&(1u64, step_gen, n as u64, 0u64)));
+                        let after_content = ContentId::Generation(hash_key(&(
+                            1u64,
+                            step_gen,
+                            n as u64,
+                            1u64,
+                            preview_hash,
+                        )));
+                        let split_scale = self.zoom * pixels_per_point;
+                        if self.before_texture.is_stale(&before_content, split_scale) {
                             match pipeline.render_prefix(n) {
-                                Ok(img) => {
-                                    self.before_logical_size = (img.width, img.height);
-                                    self.before_texture = Some(ui.ctx().load_texture(
-                                        "canvas_before",
-                                        image_to_egui(&img),
-                                        TextureOptions::LINEAR,
-                                    ));
-                                    self.before_hash = before_hashed;
-                                }
+                                Ok(img) => self.before_texture.upload(
+                                    ui.ctx(),
+                                    "canvas_before",
+                                    &img,
+                                    before_content,
+                                    split_scale,
+                                ),
                                 Err(e) => eprintln!("render_prefix({n}) failed: {e}"),
                             }
                         }
-                        if self.after_step_texture.is_none() || after_hashed != self.after_step_hash
+                        if self
+                            .after_step_texture
+                            .is_stale(&after_content, split_scale)
                         {
                             let after_result = match &edit_preview_op {
                                 Some(op) => pipeline.render_prefix(n).and_then(|img| {
@@ -335,15 +356,13 @@ impl CanvasState {
                                 None => pipeline.render_prefix(n + 1),
                             };
                             match after_result {
-                                Ok(img) => {
-                                    self.after_step_logical_size = (img.width, img.height);
-                                    self.after_step_texture = Some(ui.ctx().load_texture(
-                                        "canvas_after_step",
-                                        image_to_egui(&img),
-                                        TextureOptions::LINEAR,
-                                    ));
-                                    self.after_step_hash = after_hashed;
-                                }
+                                Ok(img) => self.after_step_texture.upload(
+                                    ui.ctx(),
+                                    "canvas_after_step",
+                                    &img,
+                                    after_content,
+                                    split_scale,
+                                ),
                                 Err(e) => eprintln!("split-view after render failed: {e}"),
                             }
                         }
@@ -354,35 +373,6 @@ impl CanvasState {
             self.crop_start = None;
             self.crop_end = None;
         }
-
-        // Reset view when a new file is opened OR when dimensions change
-        // (crop, rotate 90°/270°). Sharpen, B&W, rotate 180° etc. preserve zoom/pan.
-        // Ignore dimension changes caused by downsampled preview renders — we
-        // don't want to reset zoom/pan every time a 1/4-scale preview arrives.
-        let dims_changed = (img_w, img_h) != self.last_img_dims && !state.rendered_is_preview;
-        let canvas_resized =
-            canvas_size != self.last_canvas_size && self.last_canvas_size != Vec2::ZERO;
-        if img_gen != self.last_generation || dims_changed || canvas_resized {
-            self.zoom = fit_zoom(img_w, img_h, canvas_size);
-            self.pan_offset = Vec2::ZERO;
-            self.crop_start = None;
-            self.crop_end = None;
-            if img_gen != self.last_generation {
-                // New file opened — drop the cached before-texture so split
-                // view doesn't show the previous image's pixels.  A fresh
-                // pipeline starts at geometric_gen() == 0, which would
-                // otherwise collide with the previous image's cached hash.
-                self.before_texture = None;
-                self.before_hash = 0;
-                self.before_logical_size = (0, 0);
-                self.after_step_texture = None;
-                self.after_step_hash = 0;
-                self.after_step_logical_size = (0, 0);
-            }
-            self.last_generation = img_gen;
-            self.last_img_dims = (img_w, img_h);
-        }
-        self.last_canvas_size = canvas_size;
 
         // ── Publish viewport for preview optimisation ─────────────────────
         {
@@ -401,10 +391,9 @@ impl CanvasState {
         }
 
         // Extract texture ID before any &mut self calls to satisfy the borrow checker.
-        let tex_id = self.texture.as_ref().unwrap().id();
+        let tex_id = self.texture.id().expect("synced above");
         // When the rendered image is a downsampled preview, scale up the zoom
         // so it fills the same screen area as the full-res image would.
-        let effective_zoom = self.zoom / state.rendered_scale;
         let display_size = Vec2::new(img_w as f32 * effective_zoom, img_h as f32 * effective_zoom);
         let image_tl = canvas_rect.min + self.pan_offset;
 
@@ -452,15 +441,11 @@ impl CanvasState {
             // In vs-previous-step mode the "after" side shows the image through
             // the editing op, not the final pipeline output.
             let after_tex_id = match effective_mode {
-                SplitMode::VsPreviousStep => self
-                    .after_step_texture
-                    .as_ref()
-                    .map(|t| t.id())
-                    .unwrap_or(tex_id),
+                SplitMode::VsPreviousStep => self.after_step_texture.id().unwrap_or(tex_id),
                 SplitMode::VsOriginal => tex_id,
             };
             let after_logical_size = match effective_mode {
-                SplitMode::VsPreviousStep => self.after_step_logical_size,
+                SplitMode::VsPreviousStep => self.after_step_texture.source_size,
                 SplitMode::VsOriginal => (0, 0),
             };
             self.draw_split_view(
@@ -557,6 +542,49 @@ impl CanvasState {
 
     // ── Split view rendering ─────────────────────────────────────────────────
 
+    /// Draw the full-resolution viewport preview on top of the rendered image.
+    ///
+    /// `clip` restricts it to the "after" half when split view is active.
+    fn draw_preview_overlay(
+        &mut self,
+        ctx: &egui::Context,
+        painter: &egui::Painter,
+        state: &AppState,
+        image_tl: Pos2,
+        clip: Option<Rect>,
+    ) {
+        let Some(overlay_img) = &state.preview_overlay else {
+            self.overlay_texture.clear();
+            return;
+        };
+        // The overlay is always rendered at full resolution, so it is placed
+        // and scaled by the raw zoom, not the preview-corrected effective zoom.
+        self.overlay_texture.sync(
+            ctx,
+            "canvas_overlay",
+            overlay_img,
+            ContentId::Shared(Arc::clone(overlay_img)),
+            self.zoom * ctx.pixels_per_point(),
+        );
+        let (Some(tex_id), Some([ol_x, ol_y, ol_w, ol_h])) =
+            (self.overlay_texture.id(), state.preview_overlay_rect)
+        else {
+            return;
+        };
+        let ol_tl = image_tl + Vec2::new(ol_x as f32 * self.zoom, ol_y as f32 * self.zoom);
+        let ol_size = Vec2::new(ol_w as f32 * self.zoom, ol_h as f32 * self.zoom);
+        let painter = match clip {
+            Some(rect) => painter.with_clip_rect(rect),
+            None => painter.clone(),
+        };
+        painter.image(
+            tex_id,
+            Rect::from_min_size(ol_tl, ol_size),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_split_view(
         &mut self,
@@ -580,18 +608,18 @@ impl CanvasState {
         let right_clip = Rect::from_min_max(Pos2::new(split_x, canvas_rect.min.y), canvas_rect.max);
 
         // ── Draw before (source + geometric ops, left half) ──────────────────
-        if let Some(before_tex) = &self.before_texture {
+        if let Some(before_tex_id) = self.before_texture.id() {
             // Use the recorded logical size of the geometric image (may differ
             // from source after rotate/flip/crop) — always full-res so no
             // rendered_scale correction is needed.
-            let (bw, bh) = self.before_logical_size;
+            let (bw, bh) = self.before_texture.source_size;
             let before_size = if bw > 0 && bh > 0 {
                 Vec2::new(bw as f32 * self.zoom, bh as f32 * self.zoom)
             } else {
                 display_size
             };
             painter.with_clip_rect(left_clip).image(
-                before_tex.id(),
+                before_tex_id,
                 Rect::from_min_size(image_tl, before_size),
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
@@ -612,34 +640,8 @@ impl CanvasState {
             Color32::WHITE,
         );
 
-        // ── Preview overlay on the after (right) side only ──────────────────
-        if let Some(overlay_img) = &state.preview_overlay {
-            let oh = compute_hash(overlay_img);
-            if self.overlay_texture.is_none() || oh != self.overlay_last_hash {
-                self.overlay_texture = Some(ui.ctx().load_texture(
-                    "canvas_overlay",
-                    image_to_egui(overlay_img),
-                    TextureOptions::LINEAR,
-                ));
-                self.overlay_last_hash = oh;
-            }
-            if let (Some(ol_tex), Some([ol_x, ol_y, ol_w, ol_h])) =
-                (&self.overlay_texture, &state.preview_overlay_rect)
-            {
-                let ol_tl =
-                    image_tl + Vec2::new(*ol_x as f32 * self.zoom, *ol_y as f32 * self.zoom);
-                let ol_size = Vec2::new(*ol_w as f32 * self.zoom, *ol_h as f32 * self.zoom);
-                painter.with_clip_rect(right_clip).image(
-                    ol_tex.id(),
-                    Rect::from_min_size(ol_tl, ol_size),
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            }
-        } else {
-            self.overlay_texture = None;
-            self.overlay_last_hash = 0;
-        }
+        // Preview overlay belongs on the after (right) side only.
+        self.draw_preview_overlay(ui.ctx(), painter, state, image_tl, Some(right_clip));
 
         // ── Divider drag interaction ─────────────────────────────────────────
         // Use raw pointer input rather than resp events — resp drag state can
@@ -768,34 +770,7 @@ impl CanvasState {
             Color32::WHITE,
         );
 
-        // ── Overlay: full-resolution viewport preview ─────────────────────
-        if let Some(overlay_img) = &state.preview_overlay {
-            let new_hash = compute_hash(overlay_img);
-            if self.overlay_texture.is_none() || new_hash != self.overlay_last_hash {
-                self.overlay_texture = Some(ui.ctx().load_texture(
-                    "canvas_overlay",
-                    image_to_egui(overlay_img),
-                    TextureOptions::LINEAR,
-                ));
-                self.overlay_last_hash = new_hash;
-            }
-            if let (Some(ol_tex), Some([ol_x, ol_y, ol_w, ol_h])) =
-                (&self.overlay_texture, &state.preview_overlay_rect)
-            {
-                let ol_tl =
-                    image_tl + Vec2::new(*ol_x as f32 * self.zoom, *ol_y as f32 * self.zoom);
-                let ol_size = Vec2::new(*ol_w as f32 * self.zoom, *ol_h as f32 * self.zoom);
-                painter.image(
-                    ol_tex.id(),
-                    Rect::from_min_size(ol_tl, ol_size),
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-            }
-        } else {
-            self.overlay_texture = None;
-            self.overlay_last_hash = 0;
-        }
+        self.draw_preview_overlay(ui.ctx(), painter, state, image_tl, None);
 
         if state.tools.mask_sel > 0 {
             // ── Mask drag: click-drag on canvas to define the mask ────────────
@@ -1812,52 +1787,150 @@ fn build_mask_preview(state: &crate::state::AppState, w: usize, h: usize) -> Col
 // ---------------------------------------------------------------------------
 
 /// wgpu's hard limit on texture dimensions (D3D12/Metal/Vulkan minimum guarantee).
-const MAX_TEXTURE_DIM: usize = 8192;
+const MAX_TEXTURE_DIM: u32 = 8192;
 
-fn image_to_egui(image: &Image) -> ColorImage {
-    let orig_w = image.width as usize;
-    let orig_h = image.height as usize;
+/// Identity of the pixels held by a [`PresentationTexture`].
+#[derive(Default)]
+enum ContentId {
+    #[default]
+    Empty,
+    /// A render result shared with `AppState`.  Pointer identity is exact, and
+    /// holding the `Arc` stops the allocator recycling the address underneath
+    /// us — so unlike a sampled content hash it can never miss a small edit.
+    Shared(Arc<Image>),
+    /// A canvas-local render, identified by the pipeline generation counters
+    /// that produced it.
+    Generation(u64),
+}
 
-    // Integer downsample factor: smallest value that brings both dimensions
-    // under MAX_TEXTURE_DIM.  For most images factor == 1 (no-op).
-    let factor = orig_w.max(orig_h).div_ceil(MAX_TEXTURE_DIM).max(1);
+impl PartialEq for ContentId {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ContentId::Shared(a), ContentId::Shared(b)) => Arc::ptr_eq(a, b),
+            (ContentId::Generation(a), ContentId::Generation(b)) => a == b,
+            _ => false,
+        }
+    }
+}
 
-    let tex_w = orig_w / factor;
-    let tex_h = orig_h / factor;
+/// A canvas texture held at roughly the image's physical on-screen size.
+///
+/// egui allocates a single mip level per managed texture, so drawing a 24 MP
+/// photo at "Fit" leaves the GPU minifying it with one 2×2 bilinear tap: it
+/// samples a few hundredths of a percent of the source pixels, and fine detail
+/// and local contrast simply vanish. Reducing on the CPU first restores them.
+///
+/// The reduction is quantised to powers of two, which makes it an exact area
+/// average over each destination pixel's footprint — the ideal minification
+/// filter, and far cheaper than a general resample (~4 ms versus ~200 ms for
+/// Lanczos3 on 24 MP). Quantising also means ordinary zooming only rebuilds
+/// when it crosses a power of two, and the ≤2× residual left over is precisely
+/// what the GPU's bilinear tap handles well.
+#[derive(Default)]
+struct PresentationTexture {
+    handle: Option<TextureHandle>,
+    /// Pixels currently uploaded.
+    content: ContentId,
+    /// Power-of-two reduction applied on upload.
+    level: u32,
+    /// Dimensions of the source image, before reduction.  Split view needs
+    /// these to place the image, which rotate/crop can resize.
+    source_size: (u32, u32),
+}
 
-    let pixels: Vec<Color32> = if factor == 1 {
-        // Fast path: sequential, memory-bandwidth-bound.  Parallelising with
-        // rayon adds coordination overhead that outweighs any gain on Apple
-        // Silicon (~14 ms parallel vs ~7 ms serial in benchmarks).
-        image
-            .data
-            .chunks_exact(4)
-            .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
-            .collect()
+impl PresentationTexture {
+    fn id(&self) -> Option<TextureId> {
+        self.handle.as_ref().map(|t| t.id())
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// True when the pixels, or the reduction the current zoom calls for, have
+    /// changed.  Callers that must run an expensive render to produce the
+    /// source image check this first.
+    fn is_stale(&self, content: &ContentId, screen_scale: f32) -> bool {
+        self.handle.is_none()
+            || self.content != *content
+            || presentation_level(self.source_size, screen_scale) != self.level
+    }
+
+    fn upload(
+        &mut self,
+        ctx: &egui::Context,
+        name: &'static str,
+        image: &Image,
+        content: ContentId,
+        screen_scale: f32,
+    ) {
+        let source_size = (image.width, image.height);
+        let level = presentation_level(source_size, screen_scale);
+        self.handle =
+            Some(ctx.load_texture(name, image_to_egui(image, level), TextureOptions::LINEAR));
+        self.content = content;
+        self.level = level;
+        self.source_size = source_size;
+    }
+
+    /// Check-and-upload for sources that are already in hand.
+    fn sync(
+        &mut self,
+        ctx: &egui::Context,
+        name: &'static str,
+        image: &Image,
+        content: ContentId,
+        screen_scale: f32,
+    ) {
+        if self.is_stale(&content, screen_scale) {
+            self.upload(ctx, name, image, content, screen_scale);
+        }
+    }
+}
+
+/// Number of halvings to apply before upload.
+///
+/// `screen_scale` is source pixels per framebuffer pixel: 1.0 means the image
+/// is drawn at its native resolution.  The result keeps the texture between 1×
+/// and 2× the on-screen size, subject to the GPU's dimension limit.
+fn presentation_level(source_size: (u32, u32), screen_scale: f32) -> u32 {
+    let longest = source_size.0.max(source_size.1);
+    if longest == 0 {
+        return 0;
+    }
+    // Reduce at least enough that the upload fits the GPU's texture limit.
+    let for_gpu_limit = longest
+        .div_ceil(MAX_TEXTURE_DIM)
+        .next_power_of_two()
+        .trailing_zeros();
+    // …and enough that the GPU is left with at most a 2× minification.
+    let for_display = if screen_scale.is_finite() && screen_scale > 0.0 && screen_scale < 1.0 {
+        (-screen_scale.log2()) as u32
     } else {
-        // Nearest-neighbour integer downsample to fit within the GPU texture
-        // size limit.  Only triggered for very large sensors (e.g. >8192 px).
-        (0..tex_h)
-            .flat_map(|y| {
-                let src_row = (y * factor) * orig_w;
-                (0..tex_w).map(move |x| {
-                    let src = (src_row + x * factor) * 4;
-                    Color32::from_rgba_unmultiplied(
-                        image.data[src],
-                        image.data[src + 1],
-                        image.data[src + 2],
-                        image.data[src + 3],
-                    )
-                })
-            })
-            .collect()
+        0
+    };
+    // Never reduce past a single pixel.
+    for_gpu_limit.max(for_display).min(longest.ilog2())
+}
+
+fn image_to_egui(image: &Image, level: u32) -> ColorImage {
+    let mut color_image = if level == 0 {
+        ColorImage::from_rgba_unmultiplied(
+            [image.width as usize, image.height as usize],
+            &image.data,
+        )
+    } else {
+        let reduced = reduce_pow2(image, level);
+        ColorImage::from_rgba_unmultiplied(
+            [reduced.width as usize, reduced.height as usize],
+            &reduced.data,
+        )
     };
 
-    ColorImage {
-        size: [tex_w, tex_h],
-        pixels,
-        source_size: egui::Vec2::new(orig_w as f32, orig_h as f32),
-    }
+    // The painter supplies its own rectangle, but retaining the logical source
+    // size also keeps TextureHandle/ColorImage introspection meaningful.
+    color_image.source_size = egui::Vec2::new(image.width as f32, image.height as f32);
+    color_image
 }
 
 fn fit_zoom(img_w: u32, img_h: u32, available: Vec2) -> f32 {
@@ -1872,15 +1945,6 @@ fn hash_key<T: Hash>(t: &T) -> u64 {
     h.finish()
 }
 
-fn compute_hash(image: &Image) -> u64 {
-    let mut h = DefaultHasher::new();
-    image.data.len().hash(&mut h);
-    for byte in image.data.iter().step_by(128) {
-        byte.hash(&mut h);
-    }
-    h.finish()
-}
-
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -1888,6 +1952,7 @@ fn compute_hash(image: &Image) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rasterlab_core::ops::resize::level_size;
 
     #[test]
     fn constrain_aspect_free_passthrough() {
@@ -1927,5 +1992,76 @@ mod tests {
         let constrained = constrain_drag_end(start, end, Some((1.0, 1.0)));
         // With 1:1 ratio, height should equal width = 100
         assert!((constrained.y - 100.0).abs() < 1.0, "y={}", constrained.y);
+    }
+
+    /// A 24 MP photo, fit into a window, must not be uploaded at full size —
+    /// and the level must track the *physical* framebuffer, so the same
+    /// logical view needs one level less on a 2× display.
+    #[test]
+    fn presentation_level_tracks_physical_display_scale() {
+        let photo = (4899, 3266);
+        assert_eq!(presentation_level(photo, 0.20), 2);
+        assert_eq!(presentation_level(photo, 0.40), 1);
+        assert_eq!(presentation_level(photo, 1.0), 0);
+        // Exact powers of two land on the level that maps 1:1 to the screen.
+        assert_eq!(presentation_level(photo, 0.5), 1);
+        assert_eq!(presentation_level(photo, 0.25), 2);
+    }
+
+    /// The reduction must never leave the GPU with more than a 2× minification,
+    /// which is all a single bilinear tap can resolve.
+    #[test]
+    fn presentation_level_leaves_at_most_a_2x_residual() {
+        let photo = (4899, 3266);
+        for step in 1..400 {
+            let scale = step as f32 / 400.0;
+            let (w, _) = level_size(photo.0, photo.1, presentation_level(photo, scale));
+            let residual = photo.0 as f32 * scale / w as f32;
+            assert!(
+                (0.5..=1.0).contains(&residual),
+                "scale={scale} texture_width={w} residual={residual}"
+            );
+        }
+    }
+
+    #[test]
+    fn presentation_level_respects_gpu_dimension_limit() {
+        // Over the limit even at 1:1, so it must reduce regardless of zoom.
+        assert_eq!(presentation_level((10_000, 5_000), 1.0), 1);
+        assert_eq!(level_size(10_000, 5_000, 1), (5_000, 2_500));
+        assert_eq!(presentation_level((8_192, 4_000), 1.0), 0);
+        // A very large panorama needs two levels.
+        assert_eq!(presentation_level((20_000, 4_000), 1.0), 2);
+    }
+
+    /// The whole point of reducing on the CPU: every source pixel contributes,
+    /// so a checkerboard averages to mid-grey instead of collapsing onto
+    /// whichever few texels a bilinear tap happened to land on.
+    #[test]
+    fn presentation_downsample_filters_the_source_footprint() {
+        let mut image = Image::new(8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                let value = if (x + y) % 2 == 0 { 0 } else { 255 };
+                image.set_pixel(x, y, [value, value, value, 255]);
+            }
+        }
+
+        let downsampled = image_to_egui(&image, 3);
+        assert_eq!(downsampled.size, [1, 1]);
+        assert_eq!(downsampled.pixels[0].r(), 128);
+    }
+
+    /// Odd dimensions must still reduce, and the recorded size must match the
+    /// pixels actually produced.
+    #[test]
+    fn presentation_downsample_handles_odd_dimensions() {
+        let image = Image::new(7, 3);
+        for level in 0..4 {
+            let reduced = image_to_egui(&image, level);
+            let (w, h) = level_size(7, 3, level);
+            assert_eq!(reduced.size, [w as usize, h as usize], "level={level}");
+            assert_eq!(reduced.pixels.len(), (w * h) as usize, "level={level}");
+        }
     }
 }
