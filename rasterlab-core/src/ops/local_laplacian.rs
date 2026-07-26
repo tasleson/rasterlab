@@ -128,10 +128,17 @@ const MIN_COARSEST_PX: usize = 2;
 /// of levels for no further benefit.
 const MAX_LEVELS: usize = 14;
 
-/// Luminance below which the colour channels are shifted rather than scaled.
-/// The gain `l_out / l_in` is unusable as `l_in` approaches zero — it explodes
-/// and turns sensor noise in the blacks into confetti.
+/// Luminance at or below which the colour channels are only ever shifted, never
+/// scaled.  The gain `l_out / l_in` is unbounded as `l_in` approaches zero.
 const MIN_GAIN_LUMA: f32 = 1.0 / 255.0;
+
+/// Luminance over which the shadow blend runs from fully additive to fully
+/// multiplicative.  See [`apply_luma_gain`] for why the blend exists.
+///
+/// 0.06 is about 15 levels of 255 — comfortably above the range where an 8-bit
+/// pixel's channel differences are dominated by noise, and low enough that
+/// anything with genuine colour in it is still scaled, preserving hue.
+const SHADOW_BLEND_LUMA: f32 = 0.06;
 
 /// Burt–Adelson 5-tap binomial kernel, the standard pyramid filter.
 const KERNEL: [f32; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
@@ -617,11 +624,24 @@ fn local_laplacian(luma: &Plane, levels: usize, threshold: f32, alpha: f32, beta
     out
 }
 
-/// Scale each pixel's colour by its luminance gain, in place.
+/// Apply the luminance change to each pixel's colour, in place.
 ///
-/// Multiplying preserves the ratios between channels, so hue and relative
-/// saturation survive a large tonal move.  Near black the ratio is meaningless,
-/// so the change is applied additively instead.
+/// Scaling by `new / old` is the natural choice: it preserves the ratios
+/// between channels, so hue and relative saturation survive a large tonal move.
+/// It is only valid where those ratios mean something, though.
+///
+/// In the deep shadows they do not.  A near-black pixel's channel differences
+/// are mostly sensor noise and JPEG ringing, and the gain needed to lift it is
+/// large, so scaling amplifies that noise into vivid colour: an ordinary
+/// `(9, 1, 1)` pixel lifted by a gain of 14 becomes a fully saturated red.  A
+/// real backlit photograph, corrected by the automatic planner, grew exactly
+/// that — scarlet blotches across shadowed rock whose original red excess was
+/// 13 levels out of 255.
+///
+/// So the change is applied additively in the shadows, where adding a constant
+/// preserves the small channel differences instead of multiplying them, and the
+/// two forms are blended smoothly across [`SHADOW_BLEND_LUMA`] so no visible
+/// boundary appears between them.
 fn apply_luma_gain(image: &mut Image, before: &[f32], after: &[f32]) {
     let row_stride = image.row_stride();
     let w = image.width as usize;
@@ -632,16 +652,23 @@ fn apply_luma_gain(image: &mut Image, before: &[f32], after: &[f32]) {
         .zip(after.par_chunks(w))
         .for_each(|((px_row, old_row), new_row)| {
             for ((p, &old), &new) in px_row.chunks_exact_mut(4).zip(old_row).zip(new_row) {
-                if old > MIN_GAIN_LUMA {
-                    let gain = new / old;
-                    for c in p.iter_mut().take(3) {
-                        *c = (*c as f32 * gain).clamp(0.0, 255.0) as u8;
-                    }
-                } else {
-                    let shift = (new - old) * 255.0;
+                let shift = (new - old) * 255.0;
+                if old <= MIN_GAIN_LUMA {
                     for c in p.iter_mut().take(3) {
                         *c = (*c as f32 + shift).clamp(0.0, 255.0) as u8;
                     }
+                    continue;
+                }
+                let gain = new / old;
+                // Smoothstep from fully additive at black to fully
+                // multiplicative once the pixel carries real colour.
+                let u = (old / SHADOW_BLEND_LUMA).clamp(0.0, 1.0);
+                let blend = u * u * (3.0 - 2.0 * u);
+                for c in p.iter_mut().take(3) {
+                    let v = *c as f32;
+                    let scaled = v * gain;
+                    let shifted = v + shift;
+                    *c = (blend * scaled + (1.0 - blend) * shifted).clamp(0.0, 255.0) as u8;
                 }
             }
         });
@@ -892,6 +919,43 @@ mod tests {
                 &p[..3]
             );
         }
+    }
+
+    /// Lifting deep shadows must not manufacture colour.
+    ///
+    /// [`greys_stay_neutral`] cannot catch this: an exact grey has no channel
+    /// imbalance to amplify, so it survives any gain.  Real shadows are not
+    /// exact greys — they carry a level or two of noise between channels — and
+    /// scaling by the large gain a lift requires turns that into vivid colour.
+    /// A `(9, 1, 1)` pixel scaled by 14 becomes a saturated red.
+    #[test]
+    fn lifting_deep_shadows_does_not_manufacture_colour() {
+        // A near-black field with a faint, noisy red bias, as a photograph's
+        // shadows actually look after JPEG compression.
+        let src = image_from(192, 192, |x, y| {
+            let n = noise(x, y) % 5;
+            [8 + n, 2 + n / 2, 2 + n / 2]
+        });
+        let excess_before = {
+            let mut m = 0i32;
+            for p in src.data.chunks_exact(4) {
+                m = m.max(p[0] as i32 - p[1].max(p[2]) as i32);
+            }
+            m
+        };
+
+        let out = LocalLaplacianOp::with_defaults(0.9, 0.0)
+            .apply(src.deep_clone())
+            .unwrap();
+
+        let mut excess_after = 0i32;
+        for p in out.data.chunks_exact(4) {
+            excess_after = excess_after.max(p[0] as i32 - p[1].max(p[2]) as i32);
+        }
+        assert!(
+            excess_after <= excess_before + 12,
+            "shadow lift invented colour: red excess {excess_before} -> {excess_after}"
+        );
     }
 
     #[test]
