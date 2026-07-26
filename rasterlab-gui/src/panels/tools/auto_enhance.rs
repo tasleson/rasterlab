@@ -20,7 +20,8 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, has_image: bool) {
         .on_hover_text(
             "Analyses the image first, then applies only the corrections it \
              needs: colour-cast removal, tone, saturation, and sharpening — \
-             each as its own editable op",
+             each as its own editable op.  Unevenly-lit frames also get local \
+             tone, which costs about a second on a large image",
         )
         .clicked()
     {

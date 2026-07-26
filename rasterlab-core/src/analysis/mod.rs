@@ -19,10 +19,23 @@
 //!
 //! Alongside the global measurements the analysis also builds a grid of
 //! *regional* statistics ([`RegionalStats`]) describing how tone and chroma
-//! vary across the frame.  Those descriptors are what let the planner see
-//! things a whole-frame histogram cannot — most importantly a uniform scan
-//! border, which is excluded from the histograms the planner reads so a
-//! Polaroid frame no longer drags the midtone neutralisation off target.
+//! vary across the frame.  Those descriptors are what let the planner see two
+//! things a whole-frame histogram cannot:
+//!
+//! * A **uniform scan border**, excluded from the histograms the planner reads,
+//!   so a Polaroid frame no longer drags the midtone neutralisation off target.
+//! * A frame so **unevenly lit** that no single curve can serve both ends of
+//!   it, which is the one situation calling for a local tone operator.  The
+//!   planner answers that by pushing the tile medians through the LUTs the
+//!   earlier stages will apply and asking whether regions remain far from the
+//!   midtone in *both* directions afterwards.
+//!
+//! The saturation and local-tone stages interact, and the interaction is
+//! handled explicitly.  Lifting a shadow makes the colour that was hidden in it
+//! visible, so local tone raises apparent colourfulness by itself; boosting
+//! saturation to the usual chroma target on top of that is too much.  The
+//! saturation boost is therefore damped in proportion to the planned local
+//! tone, reducing to the previous behaviour exactly when none is planned.
 
 mod tiles;
 
@@ -32,6 +45,7 @@ pub use tiles::{BorderRegion, Rect, RegionalStats, TileStats};
 
 use crate::image::Image;
 use crate::ops::histogram::HistogramData;
+use crate::ops::local_laplacian::{self, LocalLaplacianOp};
 use crate::ops::{ChannelLevelsOp, ChannelRange, LevelsOp, SaturationOp, SharpenOp};
 use crate::traits::operation::Operation;
 
@@ -334,6 +348,57 @@ const SHARPNESS_GOOD: f64 = 0.030;
 const SHARPNESS_SOFT: f64 = 0.003;
 const SHARPEN_MAX: f32 = 1.2;
 
+// ── Local-tone thresholds ─────────────────────────────────────────────────────
+//
+// The obvious trigger — "this frame has a wide tonal spread" — does not work.
+// Measured across the repository's test images, the p90−p10 spread of tile
+// medians runs from 52 (an evenly-lit scene) to 217 (a deliberately
+// underexposed bracket), with ordinary photographs sitting at 106, 117 and 145.
+// Almost anything with real content scores high, so a spread threshold fires on
+// everything.
+//
+// What actually calls for local tone is narrower: after the best *global*
+// correction this planner can make, the frame still has regions pinned at the
+// bottom of the range and regions pinned at the top.  That is the one situation
+// a single curve cannot fix, because lifting one end pushes the other further
+// out.  So the test is applied to the tile medians *after* pushing them through
+// the planned LUTs, which costs nothing — it is a lookup per tile.
+
+/// Corrected tile median at or below which a region reads as too dark.
+/// Corrected tile median at or above which a region reads as too bright.
+///
+/// These are deliberately *not* clipping thresholds.  Measured across the
+/// repository's test images, the smaller of the two stuck fractions comes out
+/// as (evenly-lit scenes first, then ones that want local tone):
+///
+/// | band     | focus | pano | showcase | airplane | hdr over | hdr mid |
+/// |----------|-------|------|----------|----------|----------|---------|
+/// | 45 / 215 | 0.00  | 0.00 | 0.02     | **0.03** | 0.09     | 0.18    |
+/// | 85 / 175 | 0.03  | 0.00 | 0.10     | **0.31** | 0.18     | 0.27    |
+/// | 100 / 160| 0.12  | 0.00 | 0.11     | 0.43     | 0.18     | 0.35    |
+///
+/// At clipping levels the backlit frame this feature exists for scores 0.03 —
+/// indistinguishable from an evenly-lit scene — because its problem is not
+/// clipping.  Nothing is pinned; the sky simply sits 120 levels above the
+/// foreground and no single curve serves both.  Widening the bands separates it
+/// cleanly.  Widening them further starts catching evenly-lit scenes (`focus`
+/// jumps to 0.12), so 85/175 is the usable window.
+const DARK_LEVEL: u8 = 85;
+const BRIGHT_LEVEL: u8 = 175;
+/// Fraction of tiles that must be far from the midtone at *both* ends before
+/// local tone is worth its cost.  Set just under the evenly-lit scenes above.
+const STUCK_FRACTION_MIN: f32 = 0.08;
+/// Stuck fraction at which the planner reaches its strongest setting.
+const STUCK_FRACTION_FULL: f32 = 0.30;
+/// Strongest local tone the planner will choose unprompted.
+///
+/// Well short of the 1.0 the slider allows, and chosen by looking at results
+/// rather than by argument: on a backlit mountain frame, 0.75 and 0.45 recover
+/// a similar amount of shadow, but the stronger setting mostly buys more
+/// *visible shadow noise and colour* along with it.  An automatic correction
+/// should stop where the returns stop and leave the user room to push further.
+const LOCAL_TONE_MAX: f32 = 0.45;
+
 /// Concrete, per-image correction values produced by [`plan_enhancement`].
 ///
 /// Each field is `None` when the analysis found nothing worth correcting.
@@ -343,6 +408,9 @@ pub struct EnhancementPlan {
     pub channel_levels: Option<ChannelLevelsOp>,
     /// Overall midtone gamma steering median luma toward [`TONE_TARGET`].
     pub tone: Option<LevelsOp>,
+    /// Local tone, planned only when the frame is lit so unevenly that no
+    /// single global curve can serve both ends of it.
+    pub local_tone: Option<LocalLaplacianOp>,
     /// Saturation recovery for faded images.
     pub saturation: Option<SaturationOp>,
     /// Sharpening scaled to the measured softness.
@@ -353,17 +421,25 @@ impl EnhancementPlan {
     pub fn is_empty(&self) -> bool {
         self.channel_levels.is_none()
             && self.tone.is_none()
+            && self.local_tone.is_none()
             && self.saturation.is_none()
             && self.sharpen.is_none()
     }
 
     /// The planned corrections as pipeline ops, in application order.
+    ///
+    /// Local tone sits directly after the global tone: both are luminance
+    /// moves, and the local one should refine the range the global one has
+    /// already set rather than fight it.
     pub fn into_ops(self) -> Vec<Box<dyn Operation>> {
         let mut ops: Vec<Box<dyn Operation>> = Vec::new();
         if let Some(op) = self.channel_levels {
             ops.push(Box::new(op));
         }
         if let Some(op) = self.tone {
+            ops.push(Box::new(op));
+        }
+        if let Some(op) = self.local_tone {
             ops.push(Box::new(op));
         }
         if let Some(op) = self.saturation {
@@ -383,6 +459,9 @@ impl EnhancementPlan {
         }
         if let Some(t) = &self.tone {
             parts.push(format!("tone γ={:.2}", t.midtone));
+        }
+        if let Some(l) = &self.local_tone {
+            parts.push(format!("local tone {:+.2}", l.tone));
         }
         if let Some(s) = &self.saturation {
             parts.push(format!("saturation ×{:.2}", s.saturation));
@@ -413,6 +492,7 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats) -> EnhancementPlan {
     let empty = EnhancementPlan {
         channel_levels: None,
         tone: None,
+        local_tone: None,
         saturation: None,
         sharpen: None,
     };
@@ -488,11 +568,10 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats) -> EnhancementPlan {
     };
     let tone = ((tone_gamma - 1.0).abs() > 0.03).then(|| LevelsOp::new(0.0, 1.0, tone_gamma));
 
-    // ── Stage 3: saturation, measured through the composed LUTs ─────────────
-    // Compose stage-1 and stage-2 LUTs per channel, then sample the actual
-    // post-correction chroma.  Cast removal can cut chroma drastically (a
-    // colour cast makes even grey pixels look chromatic), so measuring the
-    // source image would systematically overestimate remaining saturation.
+    // Compose stage-1 and stage-2 LUTs per channel.  Everything downstream
+    // measures the image as seen through these rather than as loaded: cast
+    // removal can cut chroma drastically (a colour cast makes even grey pixels
+    // look chromatic), so measuring the source would overestimate what is left.
     let tone_lut = tone
         .as_ref()
         .map(|t| t.build_lut())
@@ -504,23 +583,48 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats) -> EnhancementPlan {
             std::array::from_fn(|v| tone_lut[ch[v] as usize])
         })
         .collect();
-    // Sampled over the same region as the histograms: a neutral paper frame
+    // Restricted to the same region as the histograms: a neutral paper frame
     // has zero chroma, so including it would understate the picture's own
     // saturation and over-boost it.
-    let mean_chroma = sampled_mean_chroma(
-        image,
-        stats.content.as_ref().map(|c| c.border.content_rect),
-        &luts[0],
-        &luts[1],
-        &luts[2],
-    );
+    let region = stats.content.as_ref().map(|c| c.border.content_rect);
+
+    // ── Stage 3: local tone, from the tile grid seen through the same LUTs ───
+    // Asks the one question a global curve cannot answer for itself: once
+    // stages 1–2 have done their best, is any of the frame still far from the
+    // midtone at both ends at once?  See the constants above for why the
+    // seemingly obvious "wide tonal range" test is not the right trigger.
+    let local_tone = stats
+        .regional
+        .as_ref()
+        .and_then(|regional| plan_local_tone(regional, &luts));
+
+    // ── Stage 4: saturation, stood down in proportion to local tone ─────────
+    // Mean chroma is measured through the LUTs as before.  What is new is the
+    // damping: lifting a shadow makes the colour that was hiding in it visible,
+    // so local tone raises apparent colourfulness on its own, without any
+    // saturation op at all.  Boosting to the same chroma target on top of that
+    // turned the shadowed rock of a backlit mountain frame vivid red.
+    //
+    // Damping the *boost* rather than the measurement is deliberate.  The
+    // obvious fix — re-measure chroma on a thumbnail with local tone actually
+    // applied — was tried and abandoned: it moved mean chroma only 10.5 -> 11.9
+    // on that frame, nowhere near enough to change the outcome, because the
+    // damage is concentrated in the lifted region while the mean is dominated
+    // by a large neutral sky.  The mean is simply the wrong statistic to catch
+    // this, so the interaction is handled where it is legible instead.
+    //
+    // At `tone == 0` this is exactly the previous behaviour, which is what
+    // keeps the hand-calibrated restoration results intact.
+    let mean_chroma = sampled_mean_chroma(image, region, &luts[0], &luts[1], &luts[2]);
+    let local_strength = local_tone.as_ref().map_or(0.0, |op| op.tone.max(0.0));
     let saturation = mean_chroma
         .filter(|&c| c > 1.0)
         .map(|c| (CHROMA_TARGET / c) as f32)
+        .map(|s| 1.0 + (s.min(1.5) - 1.0) * (1.0 - local_strength))
         .filter(|&s| s > 1.03)
-        .map(|s| SaturationOp::new(s.min(1.5)));
+        .map(SaturationOp::new);
 
-    // ── Stage 4: sharpening scaled to measured softness ──────────────────────
+    // ── Stage 5: sharpening scaled to measured softness ──────────────────────
     let sharpen = stats
         .sharpness()
         .filter(|&s| s < SHARPNESS_GOOD)
@@ -533,9 +637,70 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats) -> EnhancementPlan {
     EnhancementPlan {
         channel_levels,
         tone,
+        local_tone,
         saturation,
         sharpen,
     }
+}
+
+/// Decide whether the frame needs local tone, and how much.
+///
+/// `luts` are the composed per-channel LUTs the earlier stages will apply.
+/// Each tile's median is pushed through them to ask what that region will
+/// actually look like *after* the global correction — a region that is dark now
+/// but will be lifted by the planned gamma is not a problem, and must not be
+/// counted as one.
+///
+/// Local tone is planned only when both ends are occupied afterwards, because
+/// that is exactly the case a single curve cannot resolve: any gamma that
+/// rescues the shadows pushes the highlights further out, and vice versa.  A
+/// frame that is merely dark, or merely bright, is left to the global stages.
+///
+/// Strength follows the *smaller* of the two stuck fractions — the binding
+/// constraint.  A frame with half its tiles crushed but nothing blown does not
+/// need local treatment; a frame with a tenth stuck at each end does.
+fn plan_local_tone(regional: &RegionalStats, luts: &[[u8; 256]]) -> Option<LocalLaplacianOp> {
+    let tiles = regional.tiles();
+    if tiles.is_empty() || luts.len() < 3 {
+        return None;
+    }
+
+    // What a neutral pixel at this level becomes under the planned LUTs.  The
+    // channels can diverge (cast removal is per-channel), so weight them the
+    // same way luma does rather than picking one.
+    let corrected = |v: u8| -> f32 {
+        let i = v as usize;
+        0.2126 * luts[0][i] as f32 + 0.7152 * luts[1][i] as f32 + 0.0722 * luts[2][i] as f32
+    };
+
+    let mut dark = 0usize;
+    let mut bright = 0usize;
+    for tile in tiles {
+        let level = corrected(tile.luma_median);
+        if level <= DARK_LEVEL as f32 {
+            dark += 1;
+        } else if level >= BRIGHT_LEVEL as f32 {
+            bright += 1;
+        }
+    }
+
+    let n = tiles.len() as f32;
+    let stuck = (dark as f32 / n).min(bright as f32 / n);
+    if stuck < STUCK_FRACTION_MIN {
+        return None;
+    }
+
+    let t =
+        ((stuck - STUCK_FRACTION_MIN) / (STUCK_FRACTION_FULL - STUCK_FRACTION_MIN)).clamp(0.0, 1.0);
+    // Round so the planned value reads as a deliberate setting in the edit
+    // stack rather than a float artefact.
+    let tone = ((t * LOCAL_TONE_MAX) * 100.0).round() / 100.0;
+    (tone > 0.05).then(|| {
+        // Detail is left alone: the planner already has a sharpening stage
+        // measured from the actual blur, and stacking the two would double-
+        // count fine contrast.
+        LocalLaplacianOp::new(tone, 0.0, local_laplacian::DEFAULT_THRESHOLD)
+    })
 }
 
 /// Mean chroma (max−min of RGB) of `image` as seen through per-channel LUTs,
@@ -711,6 +876,7 @@ mod tests {
             image: Image,
             channel_levels: Option<[[f32; 3]; 3]>,
             tone: Option<f32>,
+            local_tone: Option<f32>,
             saturation: Option<f32>,
         }
 
@@ -727,6 +893,7 @@ mod tests {
                     [0.078_431_375, 0.270_588_25, 1.0],
                 ]),
                 tone: None,
+                local_tone: None,
                 saturation: Some(1.5),
             },
             Case {
@@ -737,6 +904,7 @@ mod tests {
                 }),
                 channel_levels: None,
                 tone: Some(1.3),
+                local_tone: None,
                 saturation: None,
             },
             Case {
@@ -757,6 +925,7 @@ mod tests {
                     [0.0, 1.0, 1.380_544_2],
                 ]),
                 tone: None,
+                local_tone: None,
                 saturation: Some(1.5),
             },
             Case {
@@ -782,7 +951,9 @@ mod tests {
                     [0.062_745_1, 0.823_529_4, 1.0],
                 ]),
                 tone: None,
-                saturation: Some(1.5),
+                local_tone: Some(0.42),
+                // Damped from 1.5 by the planned local tone: 1 + 0.5*(1-0.42).
+                saturation: Some(1.29),
             },
         ];
 
@@ -811,6 +982,12 @@ mod tests {
                 plan.tone.map(|t| t.midtone),
                 case.tone,
                 "{}: tone drifted",
+                case.name
+            );
+            assert_eq!(
+                plan.local_tone.map(|l| l.tone),
+                case.local_tone,
+                "{}: local tone drifted",
                 case.name
             );
             assert_eq!(
@@ -923,6 +1100,130 @@ mod tests {
             }
             assert!(stats.content.is_none(), "{w}x{h} must not detect a border");
         }
+    }
+
+    /// Build an image from a per-pixel closure of `(x, y)`.
+    fn xy_image(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Image {
+        let mut img = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let [r, g, b] = f(x, y);
+                let o = img.pixel_offset(x, y);
+                img.data[o] = r;
+                img.data[o + 1] = g;
+                img.data[o + 2] = b;
+                img.data[o + 3] = 255;
+            }
+        }
+        img
+    }
+
+    fn texture(x: u32, y: u32) -> i32 {
+        let mut s = x.wrapping_mul(1973) ^ y.wrapping_mul(9277) ^ 0x5bf0_3635;
+        s ^= s >> 13;
+        s = s.wrapping_mul(0x9e37_79b9);
+        ((s >> 24) % 24) as i32 - 12
+    }
+
+    /// The case the whole feature exists for: a frame whose regions disagree
+    /// about exposure gets local tone, and one that is merely contrasty but
+    /// evenly lit does not.
+    #[test]
+    fn local_tone_is_planned_only_for_unevenly_lit_frames() {
+        // Bright top, dark bottom — both bands far from the midtone, which no
+        // single gamma can pull together.
+        let backlit = xy_image(256, 256, |x, y| {
+            let base = if y < 128 { 225 } else { 40 };
+            let v = (base + texture(x, y)).clamp(0, 255) as u8;
+            [v, v, v]
+        });
+        let plan = plan_enhancement(&backlit);
+        let local = plan
+            .local_tone
+            .clone()
+            .expect("a backlit frame must get local tone");
+        assert!(
+            local.tone > 0.3,
+            "backlit frame deserves a substantial correction, got {}",
+            local.tone
+        );
+        assert_eq!(local.detail, 0.0, "the planner must not ask for detail");
+
+        // Local tone must refine the range the global stages set, so it has to
+        // land after them — applying it first would compress a range that is
+        // then stretched again.
+        let names: Vec<&str> = plan.into_ops().iter().map(|op| op.name()).collect();
+        let local_at = names.iter().position(|n| *n == "local_laplacian");
+        assert!(local_at.is_some(), "local tone missing from ops: {names:?}");
+        for earlier in ["channel_levels", "levels"] {
+            if let Some(i) = names.iter().position(|n| *n == earlier) {
+                assert!(i < local_at.unwrap(), "{earlier} must precede local tone");
+            }
+        }
+        if let Some(i) = names.iter().position(|n| *n == "saturation") {
+            assert!(local_at.unwrap() < i, "local tone must precede saturation");
+        }
+
+        // Same overall contrast range, but spread smoothly across the frame so
+        // every region sits near the middle: a global curve handles this.
+        let even = xy_image(256, 256, |x, y| {
+            let v = (110 + texture(x, y)).clamp(0, 255) as u8;
+            [v, v, v]
+        });
+        assert!(
+            plan_enhancement(&even).local_tone.is_none(),
+            "an evenly-lit frame must not get local tone"
+        );
+    }
+
+    /// Planning local tone must stand the saturation boost down, because
+    /// lifting shadows reveals colour on its own.  Left undamped, a backlit
+    /// mountain frame came out with vivid red rock.
+    #[test]
+    fn local_tone_damps_the_saturation_boost() {
+        // Unevenly lit *and* undersaturated, so both stages have something to
+        // do and their interaction is visible.
+        let backlit = xy_image(256, 256, |x, y| {
+            let base = if y < 128 { 225 } else { 40 };
+            let v = (base + texture(x, y)).clamp(0, 255);
+            [(v + 6).min(255) as u8, v as u8, (v - 6).max(0) as u8]
+        });
+        let plan = plan_enhancement(&backlit);
+        let local = plan.local_tone.clone().expect("should plan local tone");
+        let damped = plan.saturation.map(|s| s.saturation);
+
+        // The same frame without the local-tone stage is what the saturation
+        // stage would have asked for on its own.
+        let stats = ImageStats::compute(&backlit);
+        let undamped = plan_from_stats(&backlit, &stats)
+            .saturation
+            .map(|s| s.saturation);
+        assert_eq!(damped, undamped, "planner must be deterministic");
+
+        if let Some(s) = damped {
+            assert!(
+                s < 1.5,
+                "boost should be damped below the cap when local tone is planned, got {s}"
+            );
+            assert!(s >= 1.0, "damping must not invert the boost, got {s}");
+        }
+        assert!(local.tone > 0.0);
+    }
+
+    /// A frame that is uniformly dark needs a *global* lift, not local tone —
+    /// only one end is stuck, so a curve can still fix it.
+    #[test]
+    fn one_sided_exposure_is_left_to_the_global_stages() {
+        let dim = xy_image(256, 256, |x, y| {
+            let v = (35 + texture(x, y)).clamp(0, 255) as u8;
+            [v, v, v]
+        });
+        let plan = plan_enhancement(&dim);
+        assert!(
+            plan.local_tone.is_none(),
+            "uniformly dark frame should be handled globally, got {:?}",
+            plan.local_tone.map(|l| l.tone)
+        );
     }
 
     #[test]
