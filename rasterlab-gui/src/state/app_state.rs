@@ -17,7 +17,9 @@ use crate::{
 
 use egui::Context;
 use rasterlab_core::{
-    Image, cancel as core_cancel,
+    Image,
+    analysis::{ImageStats, PlanMode},
+    cancel as core_cancel,
     formats::FormatRegistry,
     ops::{
         BlackAndWhiteOp, BrightnessContrastOp, HistogramData, LevelsOp, MaskedOp, NoiseReductionOp,
@@ -1290,7 +1292,23 @@ impl AppState {
     /// sharpness) and derives per-image parameter values in closed form.
     /// Each correction lands as its own op in the edit stack so it can be
     /// inspected, tweaked, or undone individually.
-    pub fn push_smart_enhance(&mut self) {
+    ///
+    /// Uses every measurement available, including the regional ones, so an
+    /// unevenly-lit frame may also get local tone.
+    pub fn push_adaptive_enhance(&mut self) {
+        self.push_analysis_plan("Adaptive Enhance", PlanMode::Adaptive);
+    }
+
+    /// Push global-only corrections, tuned for faded prints and scans.
+    ///
+    /// The same analysis as [`Self::push_adaptive_enhance`], but declining the
+    /// regional judgements: no border exclusion, no local tone.  This is the
+    /// behaviour the planner's constants were originally calibrated against.
+    pub fn push_old_photo_restore(&mut self) {
+        self.push_analysis_plan("Old Photo Restore", PlanMode::Restore);
+    }
+
+    fn push_analysis_plan(&mut self, label: &str, mode: PlanMode) {
         let Some(rendered) = self.rendered.clone() else {
             return;
         };
@@ -1298,12 +1316,13 @@ impl AppState {
             return;
         }
 
-        let plan = rasterlab_core::analysis::plan_enhancement(&rendered);
+        let stats = ImageStats::compute(&rendered);
+        let plan = rasterlab_core::analysis::plan_from_stats(&rendered, &stats, mode);
         if plan.is_empty() {
-            self.status = "Smart Enhance: no corrections needed".into();
+            self.status = format!("{label}: no corrections needed");
             return;
         }
-        self.status = format!("Smart Enhance: {}", plan.summary());
+        self.status = format!("{label}: {}", plan.summary());
 
         self.cancel_all_previews();
         if let Some(store) = &mut self.copies {

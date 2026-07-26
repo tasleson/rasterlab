@@ -170,10 +170,10 @@ fn bench_histogram(c: &mut Criterion) {
 
 fn bench_image_stats(c: &mut Criterion) {
     init_rayon();
-    // Smart Enhance's measurement pass: full histogram, a shared luma plane
-    // feeding both the Laplacian variance and the regional tile grid, and a
-    // strided chroma sample per tile.  The tile pass must ride along on the
-    // luma plane rather than adding a pixel pass of its own — a regression
+    // The analysis planner's measurement pass: full histogram, a shared luma
+    // plane feeding both the Laplacian variance and the regional tile grid,
+    // and a strided chroma sample per tile.  The tile pass must ride along on
+    // the luma plane rather than adding a pixel pass of its own — a regression
     // here means someone reintroduced a second full traversal.
     let img = make_image(4000, 3000);
     c.bench_function("image_stats 4000x3000", |b| {

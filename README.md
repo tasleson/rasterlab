@@ -32,7 +32,8 @@ See change log below for status.
 | Op | What it does |
 |---|---|
 | Auto Enhance | One-click levels stretch + saturation boost + mild sharpen |
-| Smart Enhance | Analyses the image first (colour cast, tone, chroma, sharpness), then applies only the corrections it needs, with per-image values |
+| Adaptive Enhance | Analyses the image first (colour cast, tone, chroma, sharpness), then applies only the corrections it needs, with per-image values. Also reads the frame region by region, so a scan border is measured around and an unevenly-lit frame gets local tone |
+| Old Photo Restore | The same analysis measured over the whole frame only, without the regional judgements — tuned for faded prints and scans |
 | **Looks** | |
 | Classic B&W | Channel-mixed B&W conversion with brightness lift and vignette |
 | | |

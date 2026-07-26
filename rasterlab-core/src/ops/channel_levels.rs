@@ -63,7 +63,7 @@ impl ChannelRange {
 /// this op remaps each channel with its own black point, white point, and
 /// gamma.  Stretching each channel to fill its own range neutralises colour
 /// casts (the same principle as Photoshop's "Auto Color"), which makes this
-/// the workhorse of Smart Enhance's cast removal.
+/// the workhorse of the analysis planner's cast removal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelLevelsOp {
     pub red: ChannelRange,

@@ -1,5 +1,5 @@
 /// Applies Local Tone to an image and reports what it did to the regional
-/// measurements — the tonal spread and vertical skew that Smart Enhance's
+/// measurements — the tonal spread and vertical skew that Adaptive Enhance's
 /// analysis uses to recognise an unevenly-lit frame.
 ///
 /// A successful run on a backlit photograph shows both descriptors shrinking:

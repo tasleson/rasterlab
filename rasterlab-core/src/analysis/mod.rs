@@ -1,11 +1,13 @@
 //! Image analysis and automatic enhancement planning.
 //!
-//! This module powers **Smart Enhance**: instead of applying fixed preset
-//! values, it measures the image (histograms, colour cast, chroma, sharpness)
-//! and computes the correction each measurement calls for in closed form.
-//! The result is an [`EnhancementPlan`] of ordinary pipeline ops with
-//! concrete parameter values, so the user sees exactly what was applied and
-//! can tweak or undo each step individually.
+//! This module powers two buttons — **Adaptive Enhance** and **Old Photo
+//! Restore** — which are the same analysis run at two levels of ambition, see
+//! [`PlanMode`].  Instead of applying fixed preset values, it measures the
+//! image (histograms, colour cast, chroma, sharpness) and computes the
+//! correction each measurement calls for in closed form.  The result is an
+//! [`EnhancementPlan`] of ordinary pipeline ops with concrete parameter values,
+//! so the user sees exactly what was applied and can tweak or undo each step
+//! individually.
 //!
 //! The planner works in two measured stages rather than a blind loop:
 //!
@@ -20,7 +22,8 @@
 //! Alongside the global measurements the analysis also builds a grid of
 //! *regional* statistics ([`RegionalStats`]) describing how tone and chroma
 //! vary across the frame.  Those descriptors are what let the planner see two
-//! things a whole-frame histogram cannot:
+//! things a whole-frame histogram cannot — and they are exactly what
+//! [`PlanMode::Restore`] declines to use:
 //!
 //! * A **uniform scan border**, excluded from the histograms the planner reads,
 //!   so a Polaroid frame no longer drags the midtone neutralisation off target.
@@ -114,7 +117,7 @@ pub struct ContentRegion {
     pub hist: HistogramData,
 }
 
-/// Measurements Smart Enhance derives its plan from.
+/// Measurements the planner derives its plan from.
 #[derive(Debug, Clone)]
 pub struct ImageStats {
     /// Per-channel + luma histograms of the whole image.
@@ -477,18 +480,55 @@ impl EnhancementPlan {
     }
 }
 
-/// Analyse `image` and compute the corrections it needs.
+/// Which judgements the planner is allowed to make.
+///
+/// The two modes share every stage; [`PlanMode::Restore`] simply declines to
+/// use the regional measurements.  That is not a simplification for its own
+/// sake — a border-excluded histogram and a local tone op are both *spatial*
+/// decisions, and on the faded prints the restoration constants were
+/// calibrated against, the whole-frame reading is the one that was tuned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanMode {
+    /// Global corrections only, measured over the whole frame: colour-cast
+    /// removal, tone, saturation and sharpening.  This is what the planner has
+    /// always done, and what **Old Photo Restore** applies.
+    Restore,
+    /// Everything [`PlanMode::Restore`] does, plus the judgements the regional
+    /// grid makes possible: a confidently-detected scan border is excluded from
+    /// the measurements, and a frame no single curve can serve may additionally
+    /// get local tone.  This is what **Adaptive Enhance** applies.
+    #[default]
+    Adaptive,
+}
+
+impl PlanMode {
+    /// Whether this mode consults the tile grid at all.
+    fn uses_regional(self) -> bool {
+        matches!(self, PlanMode::Adaptive)
+    }
+}
+
+/// Analyse `image` and compute the corrections it needs, using every
+/// measurement available — the **Adaptive Enhance** behaviour.
 ///
 /// See the module docs for the approach.  The plan is deterministic for a
 /// given image and typically costs two passes over the pixels (statistics +
 /// strided chroma sampling), a few hundred µs of histogram math aside.
 pub fn plan_enhancement(image: &Image) -> EnhancementPlan {
     let stats = ImageStats::compute(image);
-    plan_from_stats(image, &stats)
+    plan_from_stats(image, &stats, PlanMode::Adaptive)
+}
+
+/// Analyse `image` and compute global corrections only — the **Old Photo
+/// Restore** behaviour, and what this planner did before it learned to measure
+/// regions.
+pub fn plan_restoration(image: &Image) -> EnhancementPlan {
+    let stats = ImageStats::compute(image);
+    plan_from_stats(image, &stats, PlanMode::Restore)
 }
 
 /// Planner core, split out so callers that already have stats can reuse them.
-pub fn plan_from_stats(image: &Image, stats: &ImageStats) -> EnhancementPlan {
+pub fn plan_from_stats(image: &Image, stats: &ImageStats, mode: PlanMode) -> EnhancementPlan {
     let empty = EnhancementPlan {
         channel_levels: None,
         tone: None,
@@ -498,10 +538,15 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats) -> EnhancementPlan {
     };
     // Cast and tone are measured over the analysis region: the whole frame
     // normally, the border-excluded picture area when a uniform frame was
-    // confidently detected.  A large white Polaroid margin otherwise piles
-    // tens of percent of the pixels into the top histogram buckets, dragging
-    // the medians up and making midtone neutralisation over-correct.
-    let hist = stats.analysis_hist();
+    // confidently detected and this mode is willing to act on that.  A large
+    // white Polaroid margin otherwise piles tens of percent of the pixels into
+    // the top histogram buckets, dragging the medians up and making midtone
+    // neutralisation over-correct.
+    let hist = if mode.uses_regional() {
+        stats.analysis_hist()
+    } else {
+        &stats.hist
+    };
     let total: u64 = hist.luma.iter().sum();
     if total == 0 {
         return empty;
@@ -586,16 +631,20 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats) -> EnhancementPlan {
     // Restricted to the same region as the histograms: a neutral paper frame
     // has zero chroma, so including it would understate the picture's own
     // saturation and over-boost it.
-    let region = stats.content.as_ref().map(|c| c.border.content_rect);
+    let region = mode
+        .uses_regional()
+        .then(|| stats.content.as_ref().map(|c| c.border.content_rect))
+        .flatten();
 
     // ── Stage 3: local tone, from the tile grid seen through the same LUTs ───
     // Asks the one question a global curve cannot answer for itself: once
     // stages 1–2 have done their best, is any of the frame still far from the
     // midtone at both ends at once?  See the constants above for why the
     // seemingly obvious "wide tonal range" test is not the right trigger.
-    let local_tone = stats
-        .regional
-        .as_ref()
+    let local_tone = mode
+        .uses_regional()
+        .then_some(stats.regional.as_ref())
+        .flatten()
         .and_then(|regional| plan_local_tone(regional, &luts));
 
     // ── Stage 4: saturation, stood down in proportion to local tone ─────────
@@ -964,7 +1013,7 @@ mod tests {
                 "{}: no border should be detected",
                 case.name
             );
-            let plan = plan_from_stats(&case.image, &stats);
+            let plan = plan_from_stats(&case.image, &stats, PlanMode::Adaptive);
 
             match (case.channel_levels, &plan.channel_levels) {
                 (None, got) => assert!(got.is_none(), "{}: unexpected {got:?}", case.name),
@@ -1064,7 +1113,7 @@ mod tests {
                 cropped.data[o + 3] = 255;
             }
         }
-        let framed_plan = plan_from_stats(&framed, &stats);
+        let framed_plan = plan_from_stats(&framed, &stats, PlanMode::Adaptive);
         let cropped_plan = plan_enhancement(&cropped);
         let framed_white = framed_plan.channel_levels.map(|c| c.green.white);
         let cropped_white = cropped_plan.channel_levels.map(|c| c.green.white);
@@ -1195,7 +1244,7 @@ mod tests {
         // The same frame without the local-tone stage is what the saturation
         // stage would have asked for on its own.
         let stats = ImageStats::compute(&backlit);
-        let undamped = plan_from_stats(&backlit, &stats)
+        let undamped = plan_from_stats(&backlit, &stats, PlanMode::Adaptive)
             .saturation
             .map(|s| s.saturation);
         assert_eq!(damped, undamped, "planner must be deterministic");
@@ -1208,6 +1257,67 @@ mod tests {
             assert!(s >= 1.0, "damping must not invert the boost, got {s}");
         }
         assert!(local.tone > 0.0);
+    }
+
+    /// `Restore` must decline every regional judgement.
+    ///
+    /// This is the contract the two-mode split rests on: Old Photo Restore is
+    /// meant to be the planner as it behaved before it could measure regions,
+    /// so on the two images where the modes can disagree — a bordered scan and
+    /// an unevenly-lit frame — it has to produce the older answer.
+    #[test]
+    fn restore_mode_ignores_the_regional_measurements() {
+        // A framed scan: Adaptive measures inside the mount, Restore does not.
+        const W: u32 = 400;
+        const MARGIN: u32 = 60;
+        let framed = xy_image(W, W, |x, y| {
+            if x < MARGIN || y < MARGIN || x >= W - MARGIN || y >= W - MARGIN {
+                [244, 244, 244]
+            } else {
+                let base = 15 + (x + y) * 70 / (W + W);
+                [
+                    (base + 25).min(255) as u8,
+                    base as u8,
+                    base.saturating_sub(8) as u8,
+                ]
+            }
+        });
+        let stats = ImageStats::compute(&framed);
+        assert!(stats.content.is_some(), "test needs a detected border");
+        let adaptive = plan_from_stats(&framed, &stats, PlanMode::Adaptive);
+        let restore = plan_from_stats(&framed, &stats, PlanMode::Restore);
+        assert_ne!(
+            adaptive.channel_levels.map(|c| c.green.white),
+            restore.channel_levels.map(|c| c.green.white),
+            "Restore must read the whole frame, mount included"
+        );
+
+        // A backlit frame: Adaptive reaches for local tone, Restore never does.
+        let backlit = xy_image(256, 256, |x, y| {
+            let base = if y < 128 { 225 } else { 40 };
+            let v = (base + texture(x, y)).clamp(0, 255) as u8;
+            [v, v, v]
+        });
+        let stats = ImageStats::compute(&backlit);
+        assert!(
+            plan_from_stats(&backlit, &stats, PlanMode::Adaptive)
+                .local_tone
+                .is_some(),
+            "test needs a frame that triggers local tone"
+        );
+        let restore = plan_from_stats(&backlit, &stats, PlanMode::Restore);
+        assert!(
+            restore.local_tone.is_none(),
+            "Restore must never plan local tone, got {:?}",
+            restore.local_tone.map(|l| l.tone)
+        );
+        // With no local tone planned there is nothing to damp, so the
+        // saturation boost is whatever it always was.
+        assert_eq!(
+            restore.saturation.map(|s| s.saturation),
+            plan_restoration(&backlit).saturation.map(|s| s.saturation),
+            "plan_restoration must agree with Restore mode"
+        );
     }
 
     /// A frame that is uniformly dark needs a *global* lift, not local tone —

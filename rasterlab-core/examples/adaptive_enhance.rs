@@ -1,13 +1,17 @@
-/// Runs the Smart Enhance analysis + planner on an image, prints the
-/// measured statistics and the resulting plan, applies it, and writes the
-/// corrected image next to the input as `<name>_smart.png`.
+/// Runs the analysis + planner on an image, prints the measured statistics and
+/// both plans it can produce, applies one, and writes the corrected image next
+/// to the input.
+///
+/// Printing both makes the difference between the two modes legible: Adaptive
+/// Enhance uses the regional measurements (border exclusion, local tone), Old
+/// Photo Restore declines them and measures the whole frame.
 ///
 /// Usage:
-///   cargo run --release --example smart_enhance -- <image_path>
+///   cargo run --release --example adaptive_enhance -- <image_path> [--restore]
 use std::{env, path::PathBuf, time::Instant};
 
 use rasterlab_core::{
-    analysis::{self, ImageStats, RegionalStats},
+    analysis::{self, ImageStats, PlanMode, RegionalStats},
     formats::FormatRegistry,
     traits::format_handler::EncodeOptions,
 };
@@ -50,7 +54,7 @@ fn main() {
     let path = PathBuf::from(
         env::args()
             .nth(1)
-            .expect("usage: smart_enhance <image_path>"),
+            .expect("usage: adaptive_enhance <image_path> [--restore]"),
     );
 
     let registry = FormatRegistry::with_builtins();
@@ -134,13 +138,22 @@ fn main() {
         );
     }
 
+    let restore_only = env::args().any(|a| a == "--restore");
+    let chosen = if restore_only {
+        PlanMode::Restore
+    } else {
+        PlanMode::Adaptive
+    };
+
     let t = Instant::now();
-    let plan = analysis::plan_from_stats(&image, &stats);
-    println!(
-        "\nPlan ({:.1} ms): {}",
-        t.elapsed().as_secs_f64() * 1000.0,
-        plan.summary()
-    );
+    let adaptive = analysis::plan_from_stats(&image, &stats, PlanMode::Adaptive);
+    let restore = analysis::plan_from_stats(&image, &stats, PlanMode::Restore);
+    println!("\nPlans ({:.1} ms):", t.elapsed().as_secs_f64() * 1000.0);
+    println!("  Adaptive Enhance   {}", adaptive.summary());
+    println!("  Old Photo Restore  {}", restore.summary());
+
+    let plan = if restore_only { restore } else { adaptive };
+    println!("\nApplying {chosen:?}:");
     for op in plan.clone().into_ops() {
         println!("  {}", op.describe());
     }
@@ -153,8 +166,9 @@ fn main() {
     println!("\nApplied in {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
 
     let out_path = path.with_file_name(format!(
-        "{}_smart.png",
-        path.file_stem().unwrap().to_string_lossy()
+        "{}_{}.png",
+        path.file_stem().unwrap().to_string_lossy(),
+        if restore_only { "restore" } else { "adaptive" }
     ));
     let bytes = registry
         .encode_file(&out, &out_path, &EncodeOptions::default())
