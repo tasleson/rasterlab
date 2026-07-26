@@ -202,7 +202,7 @@ impl CanvasState {
         let canvas_resized =
             canvas_size != self.last_canvas_size && self.last_canvas_size != Vec2::ZERO;
         if img_gen != self.last_generation || dims_changed || canvas_resized {
-            self.zoom = fit_zoom(img_w, img_h, canvas_size);
+            self.zoom = clamp_zoom(fit_zoom(img_w, img_h, canvas_size), pixels_per_point);
             self.pan_offset = Vec2::ZERO;
             self.crop_start = None;
             self.crop_end = None;
@@ -416,7 +416,7 @@ impl CanvasState {
             let zoom_factor = i.zoom_delta();
             if zoom_factor != 1.0 && over {
                 let old_zoom = self.zoom;
-                self.zoom = (self.zoom * zoom_factor).clamp(0.05, 32.0);
+                self.zoom = clamp_zoom(self.zoom * zoom_factor, pixels_per_point);
                 let actual = self.zoom / old_zoom;
                 if let Some(cursor) = i.pointer.hover_pos() {
                     let pivot = cursor - canvas_rect.min;
@@ -519,19 +519,22 @@ impl CanvasState {
         // ── Zoom controls (bottom strip) ─────────────────────────────────────
         ui.horizontal(|ui| {
             if ui.small_button("−").clicked() {
-                self.zoom = (self.zoom * 0.8).max(0.05);
+                self.zoom = clamp_zoom(self.zoom * 0.8, pixels_per_point);
             }
-            ui.label(format!("{:.0}%", self.zoom * 100.0));
+            ui.label(format!(
+                "{:.0}%",
+                physical_zoom(self.zoom, pixels_per_point) * 100.0
+            ));
             if ui.small_button("+").clicked() {
-                self.zoom = (self.zoom * 1.25).min(32.0);
+                self.zoom = clamp_zoom(self.zoom * 1.25, pixels_per_point);
             }
             if ui.small_button("Fit").clicked() {
-                self.zoom = fit_zoom(img_w, img_h, canvas_size);
+                self.zoom = clamp_zoom(fit_zoom(img_w, img_h, canvas_size), pixels_per_point);
                 self.pan_offset = Vec2::ZERO;
             }
             if ui.small_button("1:1").clicked() {
                 let old_zoom = self.zoom;
-                self.zoom = 1.0;
+                self.zoom = one_to_one_zoom(pixels_per_point);
                 // Keep the current view center at the same image location.
                 let center = canvas_size * 0.5;
                 let img_center = (center - self.pan_offset) / old_zoom;
@@ -1933,10 +1936,33 @@ fn image_to_egui(image: &Image, level: u32) -> ColorImage {
     color_image
 }
 
+/// Logical-point scale at which the whole image fits the canvas.  Callers
+/// clamp the result; the floor here only guards against a degenerate canvas.
 fn fit_zoom(img_w: u32, img_h: u32, available: Vec2) -> f32 {
     (available.x / img_w as f32)
         .min(available.y / img_h as f32)
-        .max(0.05)
+        .max(f32::MIN_POSITIVE)
+}
+
+/// Zoom limits, expressed in source pixels per *framebuffer* pixel so that the
+/// usable range is the same on a HiDPI display as on a 1× one.
+const MIN_PHYSICAL_ZOOM: f32 = 0.05;
+const MAX_PHYSICAL_ZOOM: f32 = 32.0;
+
+/// Convert the logical-point canvas scale to source pixels per framebuffer pixel.
+fn physical_zoom(logical_zoom: f32, pixels_per_point: f32) -> f32 {
+    logical_zoom * pixels_per_point
+}
+
+/// Logical-point scale that maps one source pixel to one framebuffer pixel.
+fn one_to_one_zoom(pixels_per_point: f32) -> f32 {
+    1.0 / pixels_per_point.max(f32::MIN_POSITIVE)
+}
+
+/// Hold a logical zoom inside the physical limits for this display.
+fn clamp_zoom(logical_zoom: f32, pixels_per_point: f32) -> f32 {
+    let unit = one_to_one_zoom(pixels_per_point);
+    logical_zoom.clamp(MIN_PHYSICAL_ZOOM * unit, MAX_PHYSICAL_ZOOM * unit)
 }
 
 fn hash_key<T: Hash>(t: &T) -> u64 {
@@ -2020,6 +2046,35 @@ mod tests {
             assert!(
                 (0.5..=1.0).contains(&residual),
                 "scale={scale} texture_width={w} residual={residual}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_to_one_is_one_source_pixel_per_physical_pixel() {
+        for pixels_per_point in [1.0, 1.25, 1.5, 2.0, 3.0] {
+            let logical_zoom = one_to_one_zoom(pixels_per_point);
+            assert!(
+                (physical_zoom(logical_zoom, pixels_per_point) - 1.0).abs() < f32::EPSILON,
+                "pixels_per_point={pixels_per_point}, logical_zoom={logical_zoom}"
+            );
+        }
+    }
+
+    /// Zoom limits are physical, so the reachable range is identical whatever
+    /// the display scale.
+    #[test]
+    fn zoom_clamp_range_is_display_independent() {
+        for pixels_per_point in [1.0, 1.5, 2.0] {
+            let widest = clamp_zoom(0.0001, pixels_per_point);
+            let tightest = clamp_zoom(1e6, pixels_per_point);
+            assert!(
+                (physical_zoom(widest, pixels_per_point) - MIN_PHYSICAL_ZOOM).abs() < 1e-4,
+                "ppp={pixels_per_point}"
+            );
+            assert!(
+                (physical_zoom(tightest, pixels_per_point) - MAX_PHYSICAL_ZOOM).abs() < 1e-3,
+                "ppp={pixels_per_point}"
             );
         }
     }
