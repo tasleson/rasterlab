@@ -58,6 +58,7 @@ See change log below for status.
 | Hue Shift | Global hue rotation in degrees |
 | Levels | Black/mid/white point with LUT-based remapping |
 | Local Adjustments | Linear or radial gradient mask applied to any op |
+| Local Tone | Edge-aware local Laplacian filtering: compresses large-scale contrast (backlit scenes) while preserving or boosting texture |
 | LUT / Color Grading | Apply a .cube 3D LUT with blend strength |
 | Noise Reduction | Wavelet (fast) or Non-Local Means (quality); independent luma/chroma strength |
 | Panorama | Stitch multiple images; Harris corners + normalised-patch matching + RANSAC homography + feather blend |

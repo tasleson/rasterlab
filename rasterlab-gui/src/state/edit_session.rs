@@ -35,6 +35,7 @@ pub enum EditingTool {
     Blur,
     Denoise,
     NoiseReduction,
+    LocalLaplacian,
 }
 
 /// Bookkeeping for an active edit session.
