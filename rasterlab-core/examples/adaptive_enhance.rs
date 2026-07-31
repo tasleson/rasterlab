@@ -152,6 +152,20 @@ fn main() {
     println!("  Adaptive Enhance   {}", adaptive.summary());
     println!("  Old Photo Restore  {}", restore.summary());
 
+    // The tone curve is the one planned op whose parameters are unreadable as a
+    // summary: five control points measured off the corrected histogram.  Print
+    // them in input levels so they can be compared against the tile map above.
+    for (label, plan) in [("Adaptive", &adaptive), ("Restore", &restore)] {
+        if let Some(curve) = &plan.tone {
+            let pts: Vec<String> = curve
+                .points
+                .iter()
+                .map(|[x, y]| format!("{:.0}->{:.0}", x * 255.0, y * 255.0))
+                .collect();
+            println!("  {label} tone curve  {}", pts.join("  "));
+        }
+    }
+
     let plan = if restore_only { restore } else { adaptive };
     println!("\nApplying {chosen:?}:");
     for op in plan.clone().into_ops() {
