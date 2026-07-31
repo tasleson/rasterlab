@@ -15,6 +15,10 @@
 //!    planned colour op is a per-channel LUT, the planner *re-measures* the
 //!    corrected image exactly and cheaply by pushing the histograms through
 //!    the LUTs (`transform_histogram`) — no pixel pass, no approximation.
+//!    The tone stage spends that re-measurement on five percentiles and fits a
+//!    response curve through them, so it can set contrast as well as
+//!    brightness; a single gamma has one degree of freedom and cannot.  See
+//!    [`tone_curve`].
 //! 2. **Saturation** is measured on the actual pixels *after* composing the
 //!    planned LUTs (a strided sampling pass), because colour-cast removal
 //!    changes chroma in ways channel histograms alone cannot capture.
@@ -68,7 +72,7 @@ pub use tiles::{BorderRegion, Rect, RegionalStats, TileStats};
 use crate::image::Image;
 use crate::ops::histogram::HistogramData;
 use crate::ops::local_laplacian::{self, LocalLaplacianOp};
-use crate::ops::{ChannelLevelsOp, ChannelRange, LevelsOp, SaturationOp, SharpenOp};
+use crate::ops::{ChannelLevelsOp, ChannelRange, CurvesOp, SaturationOp, SharpenOp};
 use crate::traits::operation::Operation;
 
 // ── Histogram helpers ─────────────────────────────────────────────────────────
@@ -359,6 +363,87 @@ const CLIP_LO: f64 = 0.005;
 const CLIP_HI: f64 = 0.995;
 /// Midtone the corrected image is steered toward (fraction of full scale).
 const TONE_TARGET: f32 = 0.45;
+/// How far below [`TONE_TARGET`] the median may sit before it is lifted.  Like
+/// a human editor, the tone stage leaves acceptable exposures alone.
+const TONE_DEAD_ZONE: f32 = 0.03;
+/// Median above which the frame reads as clearly bright, and the value it is
+/// pulled back to when it does.  Deliberately not symmetric with
+/// [`TONE_TARGET`]: a bright frame is usually bright on purpose.
+const TONE_BRIGHT_ENTRY: f32 = 0.58;
+const TONE_BRIGHT_TARGET: f32 = 0.52;
+/// Bounds on the median-steering gamma, and so on how far the tone stage will
+/// move the midtone in one step.
+const TONE_GAMMA_MIN: f32 = 0.8;
+const TONE_GAMMA_MAX: f32 = 1.3;
+
+/// Percentiles of the corrected image the tone curve's control points sit on.
+///
+/// The endpoints, the quartiles and the median are the fewest points that can
+/// describe both brightness and contrast, which is the reason to prefer them
+/// over the single gamma they replace.  A gamma has one degree of freedom, so
+/// the only thing it can do with a flat image is brighten or darken it.  Moving
+/// the quartiles independently of the median is what lets the tone stage put
+/// contrast back.
+const TONE_PCTS: [f64; 5] = [0.001, 0.25, 0.5, 0.75, 0.999];
+/// Fraction of the measured endpoint distance the curve actually clips.
+///
+/// The measurement says where the darkest and lightest content sits; going all
+/// the way there means an automatic correction crushes to pure black and pure
+/// white on every image it touches.  Half reads as the right kind of caution —
+/// the endpoints are set by whatever handful of
+/// pixels happens to be extreme, and stage 1a has usually stretched the range
+/// already, so this mostly matters when stage 1a declined to.
+const TONE_ENDPOINT_TEMPER: f32 = 0.5;
+/// Extra backing-off applied to the white point in proportion to the headroom
+/// above it, floored so it never disappears entirely.
+///
+/// A frame with a lot of headroom is usually dim on purpose — a night scene, a
+/// low-key portrait — and stretching it to white is the single most obvious way
+/// an auto-enhance can look wrong.
+const TONE_WHITE_FALLOFF: f32 = 0.8;
+const TONE_WHITE_TEMPER_MIN: f32 = 0.6;
+/// How much of the quartile contrast move to apply at full strength.
+///
+/// Placing the quartiles halfway between the median and the endpoints is
+/// self-limiting — an image whose quartiles already sit there gets an identity
+/// curve — but taken as a target rather than a proposal it asks for a great
+/// deal.  Applied undamped it wants the quartiles of a median-122 frame
+/// at 61 and 188: an interquartile range covering half of full scale, which is
+/// wider than most photographs have any business being.  Half, gated below, in
+/// the same spirit as [`limit_gains`].
+const TONE_CONTRAST: f32 = 0.5;
+/// Furthest a quartile control point may move from where a brightness-only
+/// curve would have put it, as a fraction of full scale.
+const TONE_CONTRAST_MOVE_MAX: f32 = 0.05;
+/// Interquartile range, as a fraction of full scale, at or above which the frame
+/// already has normal contrast and none is added; and the range at or below
+/// which the contrast move runs at [`TONE_CONTRAST`].
+///
+/// This gate is the difference between the halfway construction and something
+/// useful.  On its own it cannot tell a flat image from a contrasty one with a
+/// large uniform area — a sky or a wall narrows the interquartile range without
+/// making the picture flat — and it treats both as wanting more contrast.
+/// Measured over the repository's test images after stage 1:
+///
+/// | image          | IQR  | reading                              |
+/// |----------------|------|--------------------------------------|
+/// | pano scene     | 0.17 | genuinely flat and dark              |
+/// | focus scene    | 0.22 | slightly flat                        |
+/// | showcase       | 0.29 | normal                               |
+/// | airplane       | 0.43 | high dynamic range — local tone's job|
+/// | hdr under      | 0.84 | stretched hard by stage 1a           |
+///
+/// So the band closes just above the normal frame and opens on the flat one.
+/// Note the top two are exactly the frames that get local tone instead, which is
+/// the right division of labour: a curve should not try to fix uneven lighting.
+const TONE_IQR_GOOD: f32 = 0.30;
+const TONE_IQR_FLAT: f32 = 0.12;
+/// Minimum spacing between adjacent control points, in input units.  Anything
+/// closer is dropped: the spline needs strictly increasing x, and a pair of
+/// anchors a fraction of a level apart only makes the tangent solve unstable.
+const TONE_ANCHOR_MIN_GAP: f32 = 1.0 / 255.0;
+/// Levels the curve must move some input by before it is worth an op at all.
+const TONE_CURVE_DEAD_LEVELS: i32 = 2;
 /// Mean chroma (max−min of RGB, 0–255) considered pleasantly saturated.
 /// Calibrated against professionally restored photographs (~30).
 const CHROMA_TARGET: f64 = 30.0;
@@ -476,8 +561,9 @@ const LOCAL_TONE_MAX: f32 = 0.45;
 pub struct EnhancementPlan {
     /// Per-channel stretch + midtone neutralisation (colour-cast removal).
     pub channel_levels: Option<ChannelLevelsOp>,
-    /// Overall midtone gamma steering median luma toward [`TONE_TARGET`].
-    pub tone: Option<LevelsOp>,
+    /// Overall tonal response curve: steers the median toward [`TONE_TARGET`]
+    /// and sets contrast by moving the quartiles.  See [`tone_curve`].
+    pub tone: Option<CurvesOp>,
     /// Local tone, planned only when the frame is lit so unevenly that no
     /// single global curve can serve both ends of it.
     pub local_tone: Option<LocalLaplacianOp>,
@@ -528,7 +614,27 @@ impl EnhancementPlan {
             parts.push("cast removal".to_string());
         }
         if let Some(t) = &self.tone {
-            parts.push(format!("tone γ={:.2}", t.midtone));
+            // Report what the curve does rather than its control points, which
+            // are meaningless without the histogram they were measured from.
+            // Brightness is read at mid-grey; contrast is the gain across the
+            // curve's own interior anchors, which is where its content is —
+            // sampling fixed inputs instead would mostly measure the steep
+            // stretch outside the occupied range.  The endpoint shelves are
+            // excluded by their saturated outputs.
+            let lut = CurvesOp::build_lut(&t.points);
+            let mut s = format!("tone {:+} @mid", lut[128] as i32 - 128);
+            let interior: Vec<&[f32; 2]> = t
+                .points
+                .iter()
+                .filter(|p| p[1] > 0.0 && p[1] < 1.0)
+                .collect();
+            if let (Some(first), Some(last)) = (interior.first(), interior.last()) {
+                let run = last[0] - first[0];
+                if run > f32::EPSILON {
+                    s += &format!(", contrast ×{:.2}", (last[1] - first[1]) / run);
+                }
+            }
+            parts.push(s);
         }
         if let Some(l) = &self.local_tone {
             parts.push(format!("local tone {:+.2}", l.tone));
@@ -679,7 +785,7 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats, mode: PlanMode) -> Enh
         let stretched = transform_histogram(hist, &range.build_lut());
         *m = (median(&stretched) as f32 / 255.0).clamp(0.02, 0.98);
     }
-    let mut mid_target = (medians[0] + medians[1] + medians[2]) / 3.0;
+    let mid_target = (medians[0] + medians[1] + medians[2]) / 3.0;
 
     if mode.limits_neutralisation() {
         // Adaptive models the cast as an illuminant, so it solves for a per
@@ -702,13 +808,6 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats, mode: PlanMode) -> Enh
             let span = (range.white - range.black) / gain;
             *range = ChannelRange::new(range.black, range.black + span, 1.0);
         }
-        // The limits stop short of full neutralisation, and `limit_gains` then
-        // moves the whole set to wherever the highlights survive best, so the
-        // channels do not converge on `mid_target`.  Stage 2 reads that value as
-        // the corrected image's midtone, so hand it where the channels actually
-        // land — including any overall darkening, which stage 2 is then free to
-        // lift back with a curve, an operation that cannot clip.
-        mid_target = medians.iter().zip(gains).map(|(m, g)| m * g).sum::<f32>() / 3.0;
     } else {
         // Restore models the cast as faded dye response, which really is
         // nonlinear, and it is pointed at photographs already known to have
@@ -728,19 +827,32 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats, mode: PlanMode) -> Enh
     let channel_levels = ChannelLevelsOp::new(ranges[0], ranges[1], ranges[2]);
     let channel_levels = (!channel_levels.is_identity()).then_some(channel_levels);
 
-    // ── Stage 2: overall tone (uniform midtone gamma) ────────────────────────
-    // After neutralisation every channel median sits at mid_target, so it
-    // serves as the corrected image's midtone.  A dead zone around the
-    // target keeps acceptable exposures untouched — like a human editor,
-    // only clearly-dark images are lifted and clearly-bright ones tamed.
-    let tone_gamma = if mid_target < TONE_TARGET - 0.03 {
-        (mid_target.ln() / TONE_TARGET.ln()).clamp(0.8, 1.3)
-    } else if mid_target > 0.58 {
-        (mid_target.ln() / 0.52f32.ln()).clamp(0.8, 1.3)
-    } else {
-        1.0
+    // ── Stage 2: overall tone (five-point response curve) ────────────────────
+    // Re-measure the corrected image exactly rather than predicting where it
+    // will land: pushing each channel histogram through its *final* stage-1 LUT
+    // costs no pixel pass and is exact, so the curve is built from the image the
+    // earlier stages actually produced, gain limits and all.
+    //
+    // Averaging the three channels for each percentile is the same
+    // approximation stage 1b already makes for the median.  Luma is a weighted
+    // combination of channels, so a per-channel histogram cannot give it
+    // exactly, and after stage 1 has removed the cast the three are close
+    // enough that the distinction does not reach the control points.
+    let anchors: [f32; 5] = {
+        let corrected: Vec<[u64; 256]> = ranges
+            .iter()
+            .zip(channels)
+            .map(|(r, h)| transform_histogram(h, &r.build_lut()))
+            .collect();
+        std::array::from_fn(|i| {
+            corrected
+                .iter()
+                .map(|h| percentile(h, TONE_PCTS[i]) as f32)
+                .sum::<f32>()
+                / (3.0 * 255.0)
+        })
     };
-    let tone = ((tone_gamma - 1.0).abs() > 0.03).then(|| LevelsOp::new(0.0, 1.0, tone_gamma));
+    let tone = tone_curve(anchors);
 
     // Compose stage-1 and stage-2 LUTs per channel.  Everything downstream
     // measures the image as seen through these rather than as loaded: cast
@@ -748,7 +860,7 @@ pub fn plan_from_stats(image: &Image, stats: &ImageStats, mode: PlanMode) -> Enh
     // look chromatic), so measuring the source would overestimate what is left.
     let tone_lut = tone
         .as_ref()
-        .map(|t| t.build_lut())
+        .map(|t| CurvesOp::build_lut(&t.points))
         .unwrap_or_else(|| std::array::from_fn(|i| i as u8));
     let luts: Vec<[u8; 256]> = ranges
         .iter()
@@ -886,6 +998,147 @@ fn cast_agreement(ranges: &[ChannelRange; 3], channels: [&[u64; 256]; 3]) -> f32
         .map(|(x, y)| x * y)
         .sum::<f32>();
     (dot / (3.0 * a * b)).clamp(0.0, 1.0)
+}
+
+/// Where the tone stage wants the median to land, as a gamma.
+///
+/// `None` means the exposure is acceptable and the median should not move at
+/// all.  Kept as a gamma rather than expressed directly as a target so that the
+/// clamp — and with it the calibration of how far one automatic step may move
+/// the midtone — is the same quantity it has always been.
+fn steer_gamma(median: f32) -> Option<f32> {
+    let target = if median < TONE_TARGET - TONE_DEAD_ZONE {
+        TONE_TARGET
+    } else if median > TONE_BRIGHT_ENTRY {
+        TONE_BRIGHT_TARGET
+    } else {
+        return None;
+    };
+    let gamma = (median.ln() / target.ln()).clamp(TONE_GAMMA_MIN, TONE_GAMMA_MAX);
+    ((gamma - 1.0).abs() > TONE_DEAD_ZONE).then_some(gamma)
+}
+
+/// Build the tone stage's response curve from five percentiles of the corrected
+/// image, ordered as [`TONE_PCTS`].
+///
+/// The curve has three jobs, and separating them is what makes it tunable:
+///
+/// * **Endpoints.**  The measured extremes, tempered — see
+///   [`TONE_ENDPOINT_TEMPER`].  Usually a no-op, because stage 1a has already
+///   stretched the range; this is what catches the frames where it declined to.
+/// * **Median.**  Steered by [`steer_gamma`], and *only* by it.  The median
+///   therefore lands exactly where the gamma this curve replaced would have put
+///   it, so the tone stage's existing calibration carries over untouched and the
+///   contrast below is the only new behaviour.
+/// * **Quartiles.**  Placed halfway between the median and each endpoint, then
+///   gated on the measured interquartile range and capped — see
+///   [`TONE_IQR_GOOD`].  Measured relative to the
+///   brightness-only curve, so a frame that is merely dark does not also get its
+///   contrast rebuilt.
+///
+/// Returns `None` when the result would not move any input by more than
+/// [`TONE_CURVE_DEAD_LEVELS`].
+fn tone_curve(anchors: [f32; 5]) -> Option<CurvesOp> {
+    let [p_black, p_lo, p_med, p_hi, p_white] = anchors;
+
+    let black_in = TONE_ENDPOINT_TEMPER * p_black;
+    let headroom = (1.0 - p_white).max(0.0);
+    let white_in = 1.0
+        - TONE_ENDPOINT_TEMPER
+            * (1.0 - TONE_WHITE_FALLOFF * headroom).clamp(TONE_WHITE_TEMPER_MIN, 1.0)
+            * headroom;
+
+    let med_out = match steer_gamma(p_med) {
+        Some(gamma) => p_med.powf(1.0 / gamma),
+        None => p_med,
+    };
+
+    // The brightness-only reference: the piecewise-linear curve that moves the
+    // median to `med_out` and rescales each half around it without altering the
+    // relative position of anything inside that half.  Damping the quartiles
+    // toward *this* rather than toward the identity is what keeps the contrast
+    // move independent of the exposure move.
+    let lo_ref = if p_med > f32::EPSILON {
+        p_lo * med_out / p_med
+    } else {
+        p_lo
+    };
+    let hi_ref = if p_med < 1.0 - f32::EPSILON {
+        med_out + (p_hi - p_med) * (1.0 - med_out) / (1.0 - p_med)
+    } else {
+        p_hi
+    };
+    // Gate on how flat the frame actually is, then damp and cap what is left.
+    let iqr = p_hi - p_lo;
+    let flatness = ((TONE_IQR_GOOD - iqr) / (TONE_IQR_GOOD - TONE_IQR_FLAT)).clamp(0.0, 1.0);
+    let strength = flatness * TONE_CONTRAST;
+    let toward = |reference: f32, target: f32| {
+        let move_to = reference + (target - reference) * strength;
+        move_to.clamp(
+            reference - TONE_CONTRAST_MOVE_MAX,
+            reference + TONE_CONTRAST_MOVE_MAX,
+        )
+    };
+    let lo_out = toward(lo_ref, 0.5 * med_out);
+    let hi_out = toward(hi_ref, 0.5 * (med_out + 1.0));
+
+    // Assemble.  The endpoints are mandatory: a tone curve whose output stops
+    // short of white is a bug, not a stylistic choice, and an upper quartile
+    // sitting at full scale — which is what stage 1a leaves behind on a frame it
+    // stretched hard — will otherwise crowd the white anchor out and drag the
+    // top of the range down with it.  So the measured anchors are inserted only
+    // where they fit strictly inside the endpoints.
+    // The median anchor carries the exposure correction and the quartiles only
+    // shape contrast around it, so it goes in first and a quartile that cannot
+    // be separated from it is dropped.  Inserting them in positional order
+    // instead loses the brightness move entirely on a spiky histogram, where the
+    // 25th percentile and the median can land in the same bucket — which is what
+    // the hard-clipped exposure brackets do.
+    let mut interior = vec![[p_med, med_out]];
+    if p_lo < p_med - TONE_ANCHOR_MIN_GAP && lo_out < med_out {
+        interior.insert(0, [p_lo, lo_out]);
+    }
+    if p_hi > p_med + TONE_ANCHOR_MIN_GAP && hi_out > med_out {
+        interior.push([p_hi, hi_out]);
+    }
+
+    let white_x = white_in.clamp(0.0, 1.0);
+    let mut points: Vec<[f32; 2]> = vec![[0.0, 0.0]];
+    if black_in > TONE_ANCHOR_MIN_GAP {
+        points.push([black_in, 0.0]);
+    }
+    for [x, y] in interior {
+        if x < white_x - TONE_ANCHOR_MIN_GAP && y < 1.0 {
+            push_anchor(&mut points, x, y);
+        }
+    }
+    push_anchor(&mut points, white_x, 1.0);
+    match points.last_mut() {
+        Some(last) if last[0] >= 1.0 - TONE_ANCHOR_MIN_GAP => *last = [1.0, 1.0],
+        _ => points.push([1.0, 1.0]),
+    }
+
+    let lut = CurvesOp::build_lut(&points);
+    let moved = lut
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v as i32 - i as i32).abs())
+        .max()
+        .unwrap_or(0);
+    (moved > TONE_CURVE_DEAD_LEVELS).then_some(CurvesOp { points })
+}
+
+/// Append a control point, unless it fails to advance on the monotone spline's
+/// terms.  Equal outputs are allowed — that is how an endpoint shelf is
+/// expressed — but a decrease never is.
+fn push_anchor(points: &mut Vec<[f32; 2]>, x: f32, y: f32) {
+    let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+    if let Some(last) = points.last()
+        && (x <= last[0] + TONE_ANCHOR_MIN_GAP || y < last[1])
+    {
+        return;
+    }
+    points.push([x, y]);
 }
 
 /// Apply the limits Adaptive Enhance places on the proposed per-channel gains.
@@ -1139,17 +1392,26 @@ mod tests {
     #[test]
     fn dark_image_gets_brightening_tone() {
         // Full-range but heavily dark-skewed: stretch can't fix the median,
-        // so a brightening midtone gamma is required.
+        // so the curve has to lift it.
         let img = gradient_image(64, 64, |i| {
             let v = if i % 16 == 0 { 255 } else { (i % 50) as u8 };
             [v, v, v]
         });
         let plan = plan_enhancement(&img);
         let t = plan.tone.expect("dark-skewed image needs tone correction");
+        let lut = CurvesOp::build_lut(&t.points);
+        // Every occupied input must come out at least as bright, and the
+        // midtones clearly brighter.  Checking the LUT rather than a control
+        // point keeps this a statement about what the op does.
         assert!(
-            t.midtone > 1.0,
-            "midtone gamma should brighten, got {}",
-            t.midtone
+            lut.iter().enumerate().all(|(i, &v)| v as usize >= i),
+            "the curve must not darken anything: {:?}",
+            t.points
+        );
+        assert!(
+            lut[64] > 64 + 8,
+            "midtones should be clearly lifted, got {} from 64",
+            lut[64]
         );
     }
 
@@ -1186,7 +1448,7 @@ mod tests {
             name: &'static str,
             image: Image,
             channel_levels: Option<[[f32; 3]; 3]>,
-            tone: Option<f32>,
+            tone: Option<&'static [[f32; 2]]>,
             local_tone: Option<f32>,
             saturation: Option<f32>,
         }
@@ -1210,7 +1472,18 @@ mod tests {
                     [0.176_470_6, 0.819_616_26, 1.0],
                     [0.176_470_6, 0.521_423_4, 1.0],
                 ]),
-                tone: Some(1.3),
+                // Endpoint tempering leaves a shelf below 7/255, then the
+                // quartiles are pushed apart: this frame's interquartile range
+                // is narrow enough for the contrast gate to open fully.
+                tone: Some(&[
+                    [0.0, 0.0],
+                    [0.028_104_575, 0.0],
+                    [0.138_562_1, 0.188_510_03],
+                    [0.232_679_74, 0.325_755_1],
+                    [0.375_163_4, 0.488_276_63],
+                    [0.851_740_8, 1.0],
+                    [1.0, 1.0],
+                ]),
                 local_tone: None,
                 saturation: None,
             },
@@ -1221,7 +1494,16 @@ mod tests {
                     [v, v, v]
                 }),
                 channel_levels: None,
-                tone: Some(1.3),
+                // Nothing but lift: the median move alone carries all three
+                // interior anchors, and with the 99.9th percentile already at
+                // full scale there is no white anchor to add.
+                tone: Some(&[
+                    [0.0, 0.0],
+                    [0.050_980_393, 0.086_342_83],
+                    [0.101_960_786, 0.172_685_65],
+                    [0.152_941_18, 0.269_651_11],
+                    [1.0, 1.0],
+                ]),
                 local_tone: None,
                 saturation: None,
             },
@@ -1248,7 +1530,14 @@ mod tests {
                     [0.0, 1.224_922_8, 1.0],
                     [0.0, 0.925_925_9, 1.0],
                 ]),
-                tone: Some(1.127_045_2),
+                tone: Some(&[
+                    [0.0, 0.0],
+                    [0.2, 0.220_673_07],
+                    [0.407_843_14, 0.449_999_96],
+                    [0.624_836_6, 0.651_545_3],
+                    [0.925_162_3, 1.0],
+                    [1.0, 1.0],
+                ]),
                 local_tone: None,
                 // Gentler than the gamma it replaces, so enough of the frame's
                 // own colour survives that no boost is called for at all.
@@ -1276,13 +1565,27 @@ mod tests {
                     [0.141_176_48, 1.002_906_3, 1.0],
                     [0.141_176_48, 0.845_606_4, 1.0],
                 ]),
-                tone: None,
+                // Interior anchors all identity: the median sits inside the
+                // dead zone and the interquartile range is wide enough that the
+                // contrast gate stays shut.  What is left is the endpoint
+                // tempering, which is the whole of this curve's effect.
+                tone: Some(&[
+                    [0.0, 0.0],
+                    [0.008_496_732, 0.0],
+                    [0.260_130_73, 0.260_130_73],
+                    [0.435_294_12, 0.435_294_12],
+                    [0.611_764_7, 0.611_764_7],
+                    [0.955_929_93, 1.0],
+                    [1.0, 1.0],
+                ]),
                 // Still uneven enough to want local tone, but far less than the
                 // 0.42 the old subtractive stretch left behind: holding the
                 // endpoints near luma's costs much less shadow contrast.
                 local_tone: Some(0.11),
-                // Damped from 1.5 by the planned local tone: 1 + 0.5*(1-0.11).
-                saturation: Some(1.444_999_9),
+                // Damped by the planned local tone as before, but no longer off
+                // the 1.5 cap: the tone curve leaves more of the frame's own
+                // chroma intact than the gamma did, so less boost is asked for.
+                saturation: Some(1.395_201_1),
             },
         ];
 
@@ -1308,7 +1611,7 @@ mod tests {
                 (Some(_), None) => panic!("{}: channel levels went missing", case.name),
             }
             assert_eq!(
-                plan.tone.map(|t| t.midtone),
+                plan.tone.as_ref().map(|t| t.points.as_slice()),
                 case.tone,
                 "{}: tone drifted",
                 case.name
@@ -1814,5 +2117,81 @@ mod tests {
         assert!(!ops.is_empty());
         // Cast removal must come first when present.
         assert_eq!(ops[0].name(), "channel_levels");
+    }
+
+    /// Whatever the anchors, the result has to be a well-formed response curve.
+    ///
+    /// Reaching white is the invariant that actually broke: an upper quartile
+    /// sitting at full scale — which is what stage 1a leaves behind on a frame it
+    /// stretched hard — crowded the white anchor out of the list and left a curve
+    /// whose maximum output was 235.
+    #[test]
+    fn tone_curves_are_monotone_and_reach_white() {
+        let shapes: &[(&str, [f32; 5])] = &[
+            ("balanced", [0.0, 0.30, 0.45, 0.62, 1.0]),
+            ("flat midtones", [0.0, 0.40, 0.47, 0.55, 1.0]),
+            ("dark", [0.0, 0.10, 0.20, 0.35, 1.0]),
+            ("bright", [0.0, 0.55, 0.72, 0.88, 1.0]),
+            ("blown to white", [0.0, 0.33, 0.996, 1.0, 1.0]),
+            ("quartiles on the median", [0.0, 0.33, 0.33, 0.33, 1.0]),
+            ("never stretched", [0.12, 0.30, 0.45, 0.60, 0.80]),
+            ("wholly degenerate", [0.5, 0.5, 0.5, 0.5, 0.5]),
+        ];
+
+        for (name, anchors) in shapes {
+            let Some(curve) = tone_curve(*anchors) else {
+                continue; // Declining to act is always a valid answer.
+            };
+            let pts = &curve.points;
+            let lut = CurvesOp::build_lut(pts);
+            assert_eq!(lut[0], 0, "{name}: black must stay black, got {pts:?}");
+            assert_eq!(lut[255], 255, "{name}: must reach white, got {pts:?}");
+            assert!(
+                lut.windows(2).all(|w| w[1] >= w[0]),
+                "{name}: must be monotone, got {pts:?}"
+            );
+            assert!(
+                pts.windows(2).all(|w| w[1][0] > w[0][0]),
+                "{name}: control points must strictly advance, got {pts:?}"
+            );
+        }
+    }
+
+    /// The median anchor carries the exposure correction and the quartiles only
+    /// shape contrast around it, so a quartile landing on top of the median must
+    /// be the one that gives way.  Inserting the anchors in positional order
+    /// instead dropped the median and left the exposure uncorrected.
+    #[test]
+    fn a_colliding_quartile_does_not_displace_the_median() {
+        // 25th percentile and median in the same bucket, well below the target.
+        let curve = tone_curve([0.0, 0.20, 0.20, 0.90, 1.0]).expect("a dark median needs lifting");
+        let lut = CurvesOp::build_lut(&curve.points);
+        assert!(
+            lut[51] > 51 + 8,
+            "the median should have been lifted, got {} from 51: {:?}",
+            lut[51],
+            curve.points
+        );
+    }
+
+    /// The interquartile gate is what stops the halfway construction from
+    /// adding contrast to frames that already have it.
+    #[test]
+    fn contrast_is_added_only_to_flat_frames() {
+        let slope = |anchors: [f32; 5]| {
+            let lut = tone_curve(anchors)
+                .map(|c| CurvesOp::build_lut(&c.points))
+                .unwrap_or_else(|| std::array::from_fn(|i| i as u8));
+            (lut[140] as f32 - lut[115] as f32) / (140.0 - 115.0)
+        };
+
+        // Same median and endpoints; only the quartile spread differs.
+        let flat = slope([0.0, 0.44, 0.50, 0.56, 1.0]);
+        let normal = slope([0.0, 0.34, 0.50, 0.66, 1.0]);
+        assert!(flat > 1.15, "a flat frame should gain contrast, got {flat}");
+        assert!(
+            (normal - 1.0).abs() < 0.05,
+            "a frame with normal contrast should keep it, got {normal}"
+        );
     }
 }
