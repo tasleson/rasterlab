@@ -32,6 +32,7 @@ use rasterlab_core::{
 use rasterlab_gpu::GpuContext;
 use rasterlab_render::{PREVIEW_SCALE, RenderMeta, RenderRequest, RenderResult};
 
+use super::virtual_copies::EditStateSnapshot;
 use super::{EditSession, EditingTool, ToolState, load_op_into_tools};
 
 // ---------------------------------------------------------------------------
@@ -295,8 +296,11 @@ pub struct AppState {
     /// Path of the open `.rlab` project file.  `None` when an image was opened
     /// directly and has not yet been saved as a project.
     pub project_path: Option<std::path::PathBuf>,
-    /// `true` when there are unsaved changes since the last project save.
+    /// `true` when effective edits differ from the last open, save, or export.
     pub is_dirty: bool,
+    /// Effective edit state at the last open/save boundary. Dirty state is
+    /// recomputed against this so undoing or removing every edit becomes clean.
+    clean_edit_state: Option<EditStateSnapshot>,
     /// `created_at` timestamp from the last project load/save, preserved on
     /// in-place re-saves so the original creation date is not lost.
     pub project_created_at: Option<u64>,
@@ -401,6 +405,7 @@ impl AppState {
             original_bytes: None,
             project_path: None,
             is_dirty: false,
+            clean_edit_state: None,
             project_created_at: None,
             image_generation: 0,
             split_view: false,
@@ -453,6 +458,7 @@ impl AppState {
                     self.original_bytes = Some(original_bytes);
                     self.project_path = None;
                     self.is_dirty = false;
+                    self.clean_edit_state = None;
                     self.project_created_at = None;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.rename_pending = None;
@@ -468,6 +474,11 @@ impl AppState {
 
                     if let Some((saved_copies, saved_active)) = self.autosave_restore.take() {
                         let image_arc = Arc::new(image);
+                        let clean_store = VirtualCopyStore::new(
+                            "Copy 1".into(),
+                            EditPipeline::new_virtual_copy(Arc::clone(&image_arc)),
+                        );
+                        self.clean_edit_state = clean_store.edit_state_snapshot().ok();
                         match VirtualCopyStore::load_from_saved(
                             Arc::clone(&image_arc),
                             saved_copies,
@@ -480,10 +491,7 @@ impl AppState {
                             Err(e) => {
                                 self.status =
                                     format!("Warning: could not restore edit stack: {}", e);
-                                self.copies = Some(VirtualCopyStore::new(
-                                    "Copy 1".into(),
-                                    EditPipeline::new_virtual_copy(image_arc),
-                                ));
+                                self.copies = Some(clean_store);
                             }
                         }
                     } else {
@@ -491,6 +499,7 @@ impl AppState {
                             "Copy 1".into(),
                             EditPipeline::new(image),
                         ));
+                        self.capture_clean_edit_state();
                     }
 
                     self.prefs.push_recent(path, None);
@@ -513,6 +522,8 @@ impl AppState {
                     self.original_bytes = Some(rlab.original_bytes.clone());
                     self.project_path = Some(path.clone());
                     self.is_dirty = false;
+                    self.clean_edit_state = None;
+                    self.copies = None;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.rename_pending = None;
                     // Determine the session ID: reuse the one from an autosave
@@ -524,20 +535,44 @@ impl AppState {
                     );
                     self.autosave_pending = false;
                     let display_name = rlab.lmta.as_ref().and_then(|l| l.original_filename.clone());
-                    let restored_autosave = self.autosave_restore.is_some();
-                    let (copies, active_copy) = match self.autosave_restore.take() {
-                        Some((saved_copies, saved_active)) => (saved_copies, saved_active),
-                        None => (rlab.copies, rlab.active_copy_index),
-                    };
-                    match VirtualCopyStore::load_from_saved(Arc::new(image), copies, active_copy) {
-                        Ok(store) => {
-                            self.copies = Some(store);
-                            if restored_autosave {
+                    let source = Arc::new(image);
+                    if let Some((saved_copies, saved_active)) = self.autosave_restore.take() {
+                        // Establish the clean boundary from the deserialised
+                        // project stack. Some operation values (notably f32s)
+                        // normalise during load, so the raw JSON is not always
+                        // byte-for-byte equivalent to its in-memory form.
+                        self.clean_edit_state = VirtualCopyStore::load_from_saved(
+                            Arc::clone(&source),
+                            rlab.copies,
+                            rlab.active_copy_index,
+                        )
+                        .ok()
+                        .and_then(|store| store.edit_state_snapshot().ok());
+                        match VirtualCopyStore::load_from_saved(source, saved_copies, saved_active)
+                        {
+                            Ok(store) => {
+                                self.copies = Some(store);
                                 self.mark_dirty();
                             }
+                            Err(e) => {
+                                self.status =
+                                    format!("Warning: could not restore edit stack: {}", e);
+                            }
                         }
-                        Err(e) => {
-                            self.status = format!("Warning: could not restore edit stack: {}", e);
+                    } else {
+                        match VirtualCopyStore::load_from_saved(
+                            source,
+                            rlab.copies,
+                            rlab.active_copy_index,
+                        ) {
+                            Ok(store) => {
+                                self.copies = Some(store);
+                                self.capture_clean_edit_state();
+                            }
+                            Err(e) => {
+                                self.status =
+                                    format!("Warning: could not restore edit stack: {}", e);
+                            }
                         }
                     }
                     self.prefs.push_recent(path, display_name);
@@ -893,7 +928,7 @@ impl AppState {
                     // Exporting a rendered image counts as preserving the
                     // user's work, so clear the dirty flag — this keeps the
                     // exit confirmation from firing after a successful export.
-                    self.is_dirty = false;
+                    self.capture_clean_edit_state();
                 }
             }
             Err(e) => {
@@ -987,8 +1022,7 @@ impl AppState {
             Ok(()) => {
                 self.project_created_at = Some(created_at);
                 self.project_path = Some(path.clone());
-                self.is_dirty = false;
-                self.autosave_pending = false;
+                self.capture_clean_edit_state();
                 // Clean up the autosave file now that the work is safely saved.
                 if let Some(session_id) = self.autosave_session_id.take() {
                     crate::autosave::delete(session_id);
@@ -1071,10 +1105,36 @@ impl AppState {
         }
     }
 
-    /// Mark the project as having unsaved changes and schedule an autosave.
+    /// Recompute whether the effective edit state differs from the last open or
+    /// save boundary, and schedule an autosave only while changes remain.
     pub(crate) fn mark_dirty(&mut self) {
-        self.is_dirty = true;
-        self.autosave_pending = true;
+        let was_dirty = self.is_dirty;
+        self.is_dirty = match (&self.clean_edit_state, &self.copies) {
+            (Some(clean), Some(store)) => store
+                .edit_state_snapshot()
+                .map_or(true, |current| current != *clean),
+            _ => true,
+        };
+        self.autosave_pending = self.is_dirty;
+
+        // An autosave from an earlier edit must not survive after the user has
+        // returned all copies to their clean state.
+        if was_dirty
+            && !self.is_dirty
+            && let Some(session_id) = self.autosave_session_id
+        {
+            crate::autosave::delete(session_id);
+        }
+    }
+
+    /// Make the current effective edit state the clean comparison boundary.
+    fn capture_clean_edit_state(&mut self) {
+        self.clean_edit_state = self
+            .copies
+            .as_ref()
+            .and_then(|store| store.edit_state_snapshot().ok());
+        self.is_dirty = false;
+        self.autosave_pending = false;
     }
 
     /// Write the autosave file if a change is pending.  Called every frame from

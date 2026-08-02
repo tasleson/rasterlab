@@ -18,6 +18,40 @@ pub struct VirtualCopyStore {
     active: usize,
 }
 
+/// The user-visible edit state used to decide whether a project has changes.
+///
+/// Pipeline entries beyond the undo cursor are deliberately omitted: they are
+/// redo history, not edits that would affect the rendered image. Entry IDs are
+/// also omitted because they are internal bookkeeping rather than user state.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EditStateSnapshot(Vec<(String, Vec<serde_json::Value>)>);
+
+impl EditStateSnapshot {
+    pub(crate) fn from_saved(copies: &[SavedCopy]) -> Self {
+        Self(
+            copies
+                .iter()
+                .map(|copy| {
+                    let entries = copy
+                        .pipeline_state
+                        .entries
+                        .iter()
+                        .take(copy.pipeline_state.cursor)
+                        .cloned()
+                        .map(|mut entry| {
+                            if let Some(object) = entry.as_object_mut() {
+                                object.remove("id");
+                            }
+                            entry
+                        })
+                        .collect();
+                    (copy.name.clone(), entries)
+                })
+                .collect(),
+        )
+    }
+}
+
 impl VirtualCopyStore {
     /// Construct the initial store from the first (and only) pipeline.
     pub fn new(name: String, pipeline: EditPipeline) -> Self {
@@ -117,6 +151,12 @@ impl VirtualCopyStore {
         Ok((copies, self.active))
     }
 
+    /// Capture the effective state of every virtual copy for dirty checking.
+    pub(crate) fn edit_state_snapshot(&self) -> RasterResult<EditStateSnapshot> {
+        let (copies, _) = self.save_states()?;
+        Ok(EditStateSnapshot::from_saved(&copies))
+    }
+
     /// Reconstruct from saved data.  All pipelines share `source` via
     /// `Arc::clone` — zero pixel data is copied.
     pub fn load_from_saved(
@@ -134,5 +174,96 @@ impl VirtualCopyStore {
             .collect::<RasterResult<Vec<_>>>()?;
         let active = active.min(copies.len().saturating_sub(1));
         Ok(Self { copies, active })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rasterlab_core::{Image, ops::SaturationOp};
+
+    use super::*;
+
+    fn empty_store() -> VirtualCopyStore {
+        VirtualCopyStore::new("Copy 1".into(), EditPipeline::new(Image::new(1, 1)))
+    }
+
+    #[test]
+    fn undoing_all_edits_restores_the_clean_snapshot() {
+        let mut store = empty_store();
+        let clean = store.edit_state_snapshot().unwrap();
+
+        store
+            .active_pipeline_mut()
+            .push_op(Box::new(SaturationOp::new(1.2)));
+        assert_ne!(store.edit_state_snapshot().unwrap(), clean);
+
+        assert!(store.active_pipeline_mut().undo());
+        assert_eq!(store.edit_state_snapshot().unwrap(), clean);
+    }
+
+    #[test]
+    fn removing_all_new_edits_restores_the_clean_snapshot() {
+        let mut store = empty_store();
+        let clean = store.edit_state_snapshot().unwrap();
+
+        store
+            .active_pipeline_mut()
+            .push_op(Box::new(SaturationOp::new(1.1)));
+        store
+            .active_pipeline_mut()
+            .push_op(Box::new(SaturationOp::new(1.2)));
+        assert!(store.active_pipeline_mut().remove_op(1));
+        assert!(store.active_pipeline_mut().remove_op(0));
+
+        assert_eq!(store.edit_state_snapshot().unwrap(), clean);
+    }
+
+    #[test]
+    fn loaded_stack_returns_to_clean_after_removing_a_new_edit() {
+        let mut original = empty_store();
+        original
+            .active_pipeline_mut()
+            .push_op(Box::new(SaturationOp::new(1.1)));
+        let (saved, active) = original.save_states().unwrap();
+        let clean = EditStateSnapshot::from_saved(&saved);
+        let mut loaded =
+            VirtualCopyStore::load_from_saved(Arc::new(Image::new(1, 1)), saved, active).unwrap();
+
+        loaded
+            .active_pipeline_mut()
+            .push_op(Box::new(SaturationOp::new(1.2)));
+        assert!(loaded.active_pipeline_mut().remove_op(1));
+
+        assert_eq!(loaded.edit_state_snapshot().unwrap(), clean);
+    }
+
+    #[test]
+    fn real_project_stack_returns_to_clean_after_removing_a_new_edit() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../test_images/showcase.rlab");
+        let project = rasterlab_core::project::RlabFile::read(&path).unwrap();
+        let raw_project_snapshot = EditStateSnapshot::from_saved(&project.copies);
+        let existing_len = project.copies[project.active_copy_index]
+            .pipeline_state
+            .cursor;
+        let mut loaded = VirtualCopyStore::load_from_saved(
+            Arc::new(Image::new(1, 1)),
+            project.copies,
+            project.active_copy_index,
+        )
+        .unwrap();
+        let clean = loaded.edit_state_snapshot().unwrap();
+
+        // This fixture contains f32 values whose JSON representation changes
+        // slightly on deserialisation. The clean boundary must therefore be
+        // captured from `loaded`, not directly from the on-disk JSON.
+        assert_ne!(clean, raw_project_snapshot);
+
+        loaded
+            .active_pipeline_mut()
+            .push_op(Box::new(SaturationOp::new(1.2)));
+        assert!(loaded.active_pipeline_mut().remove_op(existing_len));
+
+        assert_eq!(loaded.edit_state_snapshot().unwrap(), clean);
     }
 }
