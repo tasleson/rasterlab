@@ -21,6 +21,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rasterlab_core::project::SavedCopy;
 use serde::{Deserialize, Serialize};
 
+/// Maximum number of autosave sessions retained on disk and shown in the menu.
+pub const MAX_ENTRIES: usize = 10;
+
 /// Returns the platform-specific autosave directory, or `None` if unavailable.
 pub fn autosave_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("rasterlab").join("autosave"))
@@ -97,13 +100,35 @@ pub fn write(
         return;
     };
     let path = dir.join(format!("{}.json", session_id));
-    let _ = std::fs::write(path, json);
+    if std::fs::write(path, json).is_ok() {
+        prune_old_entries(&dir, session_id);
+    }
 }
 
 /// Delete the autosave file for `session_id` after a successful project save.
 pub fn delete(session_id: u64) {
     let Some(dir) = autosave_dir() else { return };
     let _ = std::fs::remove_file(dir.join(format!("{}.json", session_id)));
+}
+
+/// Delete every autosave except the current editing session, if any.
+pub fn clear_previous(current_session: Option<u64>) {
+    let Some(dir) = autosave_dir() else { return };
+    let Ok(read_dir) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let current_name = current_session.map(|id| format!("{}.json", id));
+
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "json")
+            && current_name
+                .as_deref()
+                .is_none_or(|name| entry.file_name() != name)
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Scan the autosave directory and return all valid entries, newest first.
@@ -128,6 +153,47 @@ pub fn list_entries() -> Vec<AutosaveEntry> {
     // Newest session first.
     result.sort_by_key(|a| std::cmp::Reverse(a.data.started_at));
     result
+}
+
+/// Return prior recovery sessions, newest first, capped to [`MAX_ENTRIES`].
+pub fn list_previous_entries(current_session: Option<u64>) -> Vec<AutosaveEntry> {
+    previous_entries_from(list_entries(), current_session)
+}
+
+fn previous_entries_from(
+    entries: Vec<AutosaveEntry>,
+    current_session: Option<u64>,
+) -> Vec<AutosaveEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| Some(entry.data.started_at) != current_session)
+        .take(MAX_ENTRIES)
+        .collect()
+}
+
+/// Keep the current autosave plus the newest remaining sessions up to the cap.
+fn prune_old_entries(dir: &std::path::Path, current_session: u64) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let current_path = dir.join(format!("{}.json", current_session));
+    let mut previous = read_dir
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path == current_path || path.extension().is_none_or(|ext| ext != "json") {
+                return None;
+            }
+            let content = std::fs::read_to_string(&path).ok()?;
+            let data: AutosaveFile = serde_json::from_str(&content).ok()?;
+            Some((path, data.started_at))
+        })
+        .collect::<Vec<_>>();
+    previous.sort_by_key(|(_, started_at)| std::cmp::Reverse(*started_at));
+
+    for (path, _) in previous.into_iter().skip(MAX_ENTRIES.saturating_sub(1)) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Returns the filename to show in the menu for this entry.
@@ -233,5 +299,24 @@ mod tests {
         let data: AutosaveFile = serde_json::from_str(json).unwrap();
         assert_eq!(data.display_name, None);
         assert_eq!(display_name(&data), "airshow.rlab");
+    }
+
+    #[test]
+    fn previous_entries_exclude_current_and_are_limited() {
+        let entries = (1..=12)
+            .rev()
+            .map(|started_at| {
+                let mut data = autosave("/photos/photo.jpg", None);
+                data.started_at = started_at;
+                AutosaveEntry { data }
+            })
+            .collect();
+
+        let previous = previous_entries_from(entries, Some(11));
+
+        assert_eq!(previous.len(), MAX_ENTRIES);
+        assert!(previous.iter().all(|entry| entry.data.started_at != 11));
+        assert_eq!(previous.first().unwrap().data.started_at, 12);
+        assert_eq!(previous.last().unwrap().data.started_at, 2);
     }
 }

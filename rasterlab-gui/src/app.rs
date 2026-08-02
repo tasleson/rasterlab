@@ -531,11 +531,8 @@ impl eframe::App for RasterLabApp {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         let current_session = self.state.autosave_session_id;
-                        let autosave_entries = crate::autosave::list_entries()
-                            .into_iter()
-                            // Exclude the currently active session — it isn't "previous" work.
-                            .filter(|e| Some(e.data.started_at) != current_session)
-                            .collect::<Vec<_>>();
+                        let autosave_entries =
+                            crate::autosave::list_previous_entries(current_session);
                         let has_autosave_entries = !autosave_entries.is_empty();
                         ui.menu_button("Previously Unsaved Work", |ui| {
                             if !has_autosave_entries {
@@ -568,9 +565,7 @@ impl eframe::App for RasterLabApp {
                                 .clicked()
                             {
                                 ui.close_kind(egui::UiKind::Menu);
-                                for entry in &autosave_entries {
-                                    crate::autosave::delete(entry.data.started_at);
-                                }
+                                crate::autosave::clear_previous(current_session);
                             }
                         });
                     }
