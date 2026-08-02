@@ -22,8 +22,8 @@ use rasterlab_core::{
     cancel as core_cancel,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BrightnessContrastOp, HistogramData, LevelsOp, MaskedOp, NoiseReductionOp,
-        NrMethod, ResizeOp, SaturationOp, SharpenOp, VignetteOp,
+        BlackAndWhiteOp, BrightnessContrastOp, CropOp, HistogramData, LevelsOp, MaskedOp,
+        NoiseReductionOp, NrMethod, ResizeOp, SaturationOp, SharpenOp, SprocketFilmOp, VignetteOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -376,6 +376,61 @@ pub struct AppState {
     /// Cancellation flag for a running integrity scrub. `Some` while a scrub is
     /// in flight (drives the File-menu Start/Stop toggle); cleared on completion.
     scrub_cancel: Option<Arc<AtomicBool>>,
+}
+
+/// Largest centred 2:1 rectangle that fits inside the image.
+fn centered_sprocket_crop(image_width: u32, image_height: u32) -> [u32; 4] {
+    if image_width < 2 || image_height == 0 {
+        return [0, 0, image_width.max(1), image_height.max(1)];
+    }
+    let crop_height = image_height.min(image_width / 2).max(1);
+    let crop_width = crop_height.saturating_mul(2).min(image_width);
+    [
+        (image_width - crop_width) / 2,
+        (image_height - crop_height) / 2,
+        crop_width,
+        crop_height,
+    ]
+}
+
+/// Clamp a user-positioned crop to the current image while preserving an
+/// exact 2:1 pixel ratio. Normal images are at least two pixels wide; the tiny
+/// fallback simply preserves the only available pixel.
+fn clamp_sprocket_crop(crop: [u32; 4], image_width: u32, image_height: u32) -> [u32; 4] {
+    if image_width < 2 || image_height == 0 {
+        return [0, 0, image_width.max(1), image_height.max(1)];
+    }
+    let [x, y, requested_width, requested_height] = crop;
+    let max_height = image_height.min(image_width / 2).max(1);
+    let width_height = (requested_width / 2).max(1);
+    let crop_height = requested_height.max(1).min(width_height).min(max_height);
+    let crop_width = crop_height * 2;
+    let crop_x = x.min(image_width - crop_width);
+    let crop_y = y.min(image_height - crop_height);
+    [crop_x, crop_y, crop_width, crop_height]
+}
+
+#[cfg(test)]
+mod sprocket_crop_tests {
+    use super::{centered_sprocket_crop, clamp_sprocket_crop};
+
+    #[test]
+    fn centers_two_to_one_crop_in_portrait_source() {
+        assert_eq!(centered_sprocket_crop(4000, 3000), [0, 500, 4000, 2000]);
+    }
+
+    #[test]
+    fn centers_two_to_one_crop_in_wide_source() {
+        assert_eq!(centered_sprocket_crop(5000, 2000), [500, 0, 4000, 2000]);
+    }
+
+    #[test]
+    fn positioned_crop_is_clamped_without_losing_ratio() {
+        assert_eq!(
+            clamp_sprocket_crop([3900, 2900, 2000, 1000], 4000, 3000),
+            [2000, 2000, 2000, 1000]
+        );
+    }
 }
 
 impl AppState {
@@ -1355,6 +1410,94 @@ impl AppState {
         self.request_render();
     }
 
+    /// Start an interactive, fixed 2:1 crop for the sprocket panorama look.
+    pub fn begin_sprocket_crop(&mut self) {
+        if self.copies.is_none() || self.editing.is_some() {
+            return;
+        }
+        let Some(rendered) = self.rendered.as_ref() else {
+            return;
+        };
+
+        let scale = self.rendered_scale.max(0.01);
+        let width = (rendered.width as f32 / scale).round().max(1.0) as u32;
+        let height = (rendered.height as f32 / scale).round().max(1.0) as u32;
+        let [x, y, w, h] = centered_sprocket_crop(width, height);
+
+        self.cancel_all_previews();
+        self.tools.mask_sel = 0;
+        if let Some(heal) = self
+            .tools
+            .find_mut::<crate::panels::tools::heal::HealTool>()
+        {
+            heal.active = false;
+        }
+        if let Some(straighten) = self
+            .tools
+            .find_mut::<crate::panels::tools::straighten::StraightenTool>()
+        {
+            straighten.active = false;
+        }
+        if let Some(crop) = self
+            .tools
+            .find_mut::<crate::panels::tools::crop::CropTool>()
+        {
+            crop.x = x;
+            crop.y = y;
+            crop.w = w;
+            crop.h = h;
+        }
+        self.tools.sprocket_crop_active = true;
+        self.status = "Position the 2:1 crop, then apply the sprocket look".into();
+    }
+
+    pub fn cancel_sprocket_crop(&mut self) {
+        self.tools.sprocket_crop_active = false;
+        self.status = "Cancelled 35mm Sprocket Panorama crop".into();
+    }
+
+    /// Recreate a full-width 35 mm negative using the positioned 2:1 crop and
+    /// the selected stock (or a randomized stock when no selection was made).
+    pub fn push_sprocket_panorama(&mut self) {
+        if self.copies.is_none() {
+            return;
+        }
+        let Some(rendered) = self.rendered.as_ref() else {
+            return;
+        };
+
+        // `rendered` may currently be a quarter-scale tool preview. Convert
+        // back to the dimensions seen by the committed pipeline before making
+        // an absolute-pixel crop operation.
+        let scale = self.rendered_scale.max(0.01);
+        let width = (rendered.width as f32 / scale).round().max(1.0) as u32;
+        let height = (rendered.height as f32 / scale).round().max(1.0) as u32;
+        let requested_crop = self
+            .tools
+            .find::<crate::panels::tools::crop::CropTool>()
+            .map_or(centered_sprocket_crop(width, height), |crop| {
+                [crop.x, crop.y, crop.w, crop.h]
+            });
+        let [crop_x, crop_y, crop_w, crop_h] = clamp_sprocket_crop(requested_crop, width, height);
+        let film_op = self.tools.sprocket_film_stock.map_or_else(
+            SprocketFilmOp::randomized,
+            SprocketFilmOp::with_random_markings,
+        );
+        let film_description = film_op.describe();
+
+        self.cancel_all_previews();
+        if let Some(store) = &mut self.copies {
+            let pipeline = store.active_pipeline_mut();
+            if [crop_x, crop_y, crop_w, crop_h] != [0, 0, width, height] {
+                pipeline.push_op(Box::new(CropOp::new(crop_x, crop_y, crop_w, crop_h)));
+            }
+            pipeline.push_op(Box::new(film_op));
+        }
+        self.mark_dirty();
+        self.status = format!("Applied {film_description}");
+        self.request_render();
+    }
+
     /// Analyse the current image and push whatever corrections it needs.
     ///
     /// Unlike [`Self::push_auto_enhance`], which applies fixed preset values,
@@ -1450,6 +1593,7 @@ impl AppState {
             crop.w = w;
             crop.h = h;
         }
+        self.tools.sprocket_crop_active = false;
         if let Some(resize) = self.tools.find_mut::<ResizeTool>() {
             resize.w = w;
             resize.h = h;

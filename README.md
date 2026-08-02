@@ -36,6 +36,7 @@ See change log below for status.
 | Old Photo Restore | The same analysis measured over the whole frame only, without the regional judgements — tuned for faded prints and scans |
 | **Looks** | |
 | Classic B&W | Channel-mixed B&W conversion with brightness lift and vignette |
+| 35mm Sprocket Panorama | Placeable fixed 2:1 crop styled as a borderless full-width 35mm negative, preserving the exposed image around sprocket holes while adding a selectable current film stock and randomized frame markings |
 | | |
 | **——————————————** | **——————————————————————————————————————————** |
 | | |

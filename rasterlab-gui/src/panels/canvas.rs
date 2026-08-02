@@ -30,6 +30,8 @@ pub struct CanvasState {
     last_canvas_size: Vec2,
     crop_start: Option<Pos2>,
     crop_end: Option<Pos2>,
+    /// Tracks entry/exit from the Looks panel's fixed 2:1 crop workflow.
+    sprocket_crop_was_active: bool,
     /// Active drag mode for the crop selection (create, move, or resize a handle).
     crop_drag: Option<CropDragMode>,
     /// Image-space pointer position captured when `crop_drag` started — used to
@@ -73,6 +75,7 @@ impl Default for CanvasState {
             last_canvas_size: Vec2::ZERO,
             crop_start: None,
             crop_end: None,
+            sprocket_crop_was_active: false,
             crop_drag: None,
             crop_drag_start_ptr: Pos2::ZERO,
             crop_drag_start_rect: Rect::ZERO,
@@ -218,6 +221,30 @@ impl CanvasState {
             self.last_img_dims = (img_w, img_h);
         }
         self.last_canvas_size = canvas_size;
+
+        // The sprocket look reuses the regular crop handles, but initializes
+        // them from its own fixed-2:1 workflow instead of requiring a fresh
+        // freehand drag. Reinitialize after a canvas resize, which clears the
+        // transient on-canvas rectangle above.
+        let sprocket_crop_active = state.tools.sprocket_crop_active;
+        if sprocket_crop_active
+            && (!self.sprocket_crop_was_active
+                || self.crop_start.is_none()
+                || self.crop_end.is_none())
+        {
+            if let Some(crop) = state.tools.find::<CropTool>() {
+                self.crop_start = Some(Pos2::new(crop.x as f32, crop.y as f32));
+                self.crop_end = Some(Pos2::new(
+                    crop.x.saturating_add(crop.w) as f32,
+                    crop.y.saturating_add(crop.h) as f32,
+                ));
+            }
+        } else if !sprocket_crop_active && self.sprocket_crop_was_active {
+            self.crop_start = None;
+            self.crop_end = None;
+            self.crop_drag = None;
+        }
+        self.sprocket_crop_was_active = sprocket_crop_active;
 
         // ── Build a high-quality presentation texture ─────────────────────
         // See [`PresentationTexture`]: the canvas uploads the image reduced to
@@ -1212,12 +1239,14 @@ impl CanvasState {
                 self.crop_start = None;
                 self.crop_end = None;
                 self.crop_drag = None;
+                state.tools.sprocket_crop_active = false;
             }
             ui.input(|i| {
                 if i.key_pressed(egui::Key::Escape) {
                     self.crop_start = None;
                     self.crop_end = None;
                     self.crop_drag = None;
+                    state.tools.sprocket_crop_active = false;
                 }
             });
 

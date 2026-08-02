@@ -1,5 +1,5 @@
 use rasterlab_core::{
-    ops::{LinearMask, MaskShape, RadialMask, ResampleMode},
+    ops::{FilmStock, LinearMask, MaskShape, RadialMask, ResampleMode},
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
 };
@@ -23,6 +23,12 @@ use crate::panels::tools::{
 /// All tool state: trait-based tools in a Vec, plus masking, export, and dialog fields.
 pub struct ToolState {
     pub tools: Vec<Box<dyn Tool>>,
+
+    // ── Looks ─────────────────────────────────────────────────────────────
+    /// `None` keeps the original random-stock behaviour.
+    pub sprocket_film_stock: Option<FilmStock>,
+    /// Enables the fixed 2:1 crop overlay used by the sprocket look.
+    pub sprocket_crop_active: bool,
 
     // ── Masking ───────────────────────────────────────────────────────────
     /// 0 = None, 1 = Linear Gradient, 2 = Radial Gradient.
@@ -56,6 +62,8 @@ impl ToolState {
     pub fn new() -> Self {
         Self {
             tools: Self::build_tools(),
+            sprocket_film_stock: None,
+            sprocket_crop_active: false,
             mask_sel: 0,
             mask_lin_cx: 0.5,
             mask_lin_cy: 0.5,
@@ -141,6 +149,7 @@ impl ToolState {
         for tool in &mut self.tools {
             tool.cancel_preview();
         }
+        self.sprocket_crop_active = false;
     }
 
     pub fn current_mask_shape(&self) -> Option<MaskShape> {
@@ -164,6 +173,9 @@ impl ToolState {
     }
 
     pub fn crop_aspect_ratio(&self) -> Option<(f32, f32)> {
+        if self.sprocket_crop_active {
+            return Some((2.0, 1.0));
+        }
         let crop = self.find::<CropTool>()?;
         let flip = crop.portrait;
         match crop.aspect_idx {
@@ -259,5 +271,15 @@ mod tests {
                 t.id(),
             );
         }
+    }
+
+    #[test]
+    fn sprocket_crop_overrides_regular_crop_aspect() {
+        let mut tools = ToolState::new();
+        tools.find_mut::<CropTool>().unwrap().aspect_idx = 0;
+        assert_eq!(tools.crop_aspect_ratio(), None);
+
+        tools.sprocket_crop_active = true;
+        assert_eq!(tools.crop_aspect_ratio(), Some((2.0, 1.0)));
     }
 }
