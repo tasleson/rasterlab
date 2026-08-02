@@ -542,15 +542,7 @@ impl eframe::App for RasterLabApp {
                                 ui.add_enabled(false, egui::Button::new("No previous work"));
                             } else {
                                 for entry in &autosave_entries {
-                                    let name = entry
-                                        .data
-                                        .project_path
-                                        .as_deref()
-                                        .map(std::path::Path::new)
-                                        .map(|p| self.state.prefs.recent_display_name(p))
-                                        .unwrap_or_else(|| {
-                                            crate::autosave::display_name(&entry.data)
-                                        });
+                                    let name = crate::autosave::display_name(&entry.data);
                                     let label = format!(
                                         "{}  —  {}",
                                         name,

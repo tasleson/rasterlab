@@ -1093,10 +1093,20 @@ impl AppState {
         let Ok((copies, active)) = store.save_states() else {
             return;
         };
+        let display_name = self
+            .project_path
+            .as_deref()
+            .map(|path| self.prefs.recent_display_name(path))
+            .or_else(|| {
+                source_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
         crate::autosave::write(
             session_id,
             &source_path,
             self.project_path.as_deref(),
+            display_name.as_deref(),
             &copies,
             active,
         );
