@@ -24,6 +24,10 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RasterLab")
+            // Wayland app_id / X11 WM_CLASS.  Must match the installed
+            // desktop file name (io.github.tasleson.RasterLab.desktop) so
+            // the shell can show the proper name and icon in the switcher.
+            .with_app_id("io.github.tasleson.RasterLab")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([900.0, 600.0])
             .with_icon(icon),

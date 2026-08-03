@@ -2,7 +2,7 @@
 
 use anyhow::{Result, anyhow, bail};
 use rasterlab_core::{
-    ops::{BlackAndWhiteOp, CropOp, RotateOp, SharpenOp},
+    ops::{AirplaneWindowCorrectionOp, BlackAndWhiteOp, CropOp, RotateOp, SharpenOp},
     traits::operation::Operation,
 };
 
@@ -13,9 +13,10 @@ use rasterlab_core::{
 /// (clap preserves argument order for repeated flags in the future; for now
 /// they are applied in a fixed logical sequence).
 pub struct PipelineSpec {
-    pub crop: Option<String>,   // "x,y,w,h"
-    pub rotate: Option<String>, // "90" | "180" | "270" | "<float>"
-    pub bw: Option<String>,     // "luminance" | "average" | "perceptual" | "r,g,b"
+    pub crop: Option<String>,            // "x,y,w,h"
+    pub rotate: Option<String>,          // "90" | "180" | "270" | "<float>"
+    pub bw: Option<String>,              // "luminance" | "average" | "perceptual" | "r,g,b"
+    pub airplane_window: Option<String>, // optional "strength,cast,haze,reflections"
     pub sharpen: Option<f32>,
 }
 
@@ -32,12 +33,40 @@ impl PipelineSpec {
         if let Some(bw_str) = self.bw {
             ops.push(parse_bw(&bw_str)?);
         }
+        if let Some(params) = self.airplane_window {
+            ops.push(parse_airplane_window(&params)?);
+        }
         if let Some(strength) = self.sharpen {
             ops.push(Box::new(SharpenOp::new(strength)));
         }
 
         Ok(ops)
     }
+}
+
+fn parse_airplane_window(s: &str) -> Result<Box<dyn Operation>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+        return Ok(Box::new(AirplaneWindowCorrectionOp::default()));
+    }
+
+    let parts: Vec<f32> = trimmed
+        .split(',')
+        .map(|p| {
+            p.trim()
+                .parse::<f32>()
+                .map_err(|e| anyhow!("Invalid airplane-window value: {e}"))
+        })
+        .collect::<Result<_>>()?;
+    if parts.len() != 4 {
+        bail!(
+            "--airplane-window expects 'default' or 4 comma-separated floats: \
+             strength,cast,haze,reflections"
+        );
+    }
+    Ok(Box::new(AirplaneWindowCorrectionOp::new(
+        parts[0], parts[1], parts[2], parts[3],
+    )))
 }
 
 fn parse_crop(s: &str) -> Result<Box<dyn Operation>> {

@@ -17,11 +17,13 @@ use crate::{
 
 use egui::Context;
 use rasterlab_core::{
-    Image, cancel as core_cancel,
+    Image,
+    analysis::{ImageStats, PlanMode},
+    cancel as core_cancel,
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BrightnessContrastOp, HistogramData, LevelsOp, MaskedOp, NoiseReductionOp,
-        NrMethod, ResizeOp, SaturationOp, SharpenOp, VignetteOp,
+        BlackAndWhiteOp, BrightnessContrastOp, CropOp, HistogramData, LevelsOp, MaskedOp,
+        NoiseReductionOp, NrMethod, ResizeOp, SaturationOp, SharpenOp, SprocketFilmOp, VignetteOp,
     },
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
@@ -30,6 +32,7 @@ use rasterlab_core::{
 use rasterlab_gpu::GpuContext;
 use rasterlab_render::{PREVIEW_SCALE, RenderMeta, RenderRequest, RenderResult};
 
+use super::virtual_copies::EditStateSnapshot;
 use super::{EditSession, EditingTool, ToolState, load_op_into_tools};
 
 // ---------------------------------------------------------------------------
@@ -211,6 +214,15 @@ enum BgMessage {
     ThumbLoaded { hash: String, bytes: Vec<u8> },
     /// Progress update from a running integrity scrub.
     ScrubProgress(rasterlab_library::ScrubProgress),
+    /// Progress update from a running index rebuild.
+    RebuildProgress(rasterlab_library::RebuildProgress),
+    /// Index rebuild finished. `fatal` is set if the rebuild aborted early;
+    /// `errors` are per-file failures from a run that otherwise completed.
+    RebuildComplete {
+        total: usize,
+        errors: Vec<(StdPathBuf, String)>,
+        fatal: Option<String>,
+    },
     /// Scrub finished (completed or cancelled).
     ScrubComplete {
         outcome: rasterlab_library::ScrubOutcome,
@@ -284,8 +296,11 @@ pub struct AppState {
     /// Path of the open `.rlab` project file.  `None` when an image was opened
     /// directly and has not yet been saved as a project.
     pub project_path: Option<std::path::PathBuf>,
-    /// `true` when there are unsaved changes since the last project save.
+    /// `true` when effective edits differ from the last open, save, or export.
     pub is_dirty: bool,
+    /// Effective edit state at the last open/save boundary. Dirty state is
+    /// recomputed against this so undoing or removing every edit becomes clean.
+    clean_edit_state: Option<EditStateSnapshot>,
     /// `created_at` timestamp from the last project load/save, preserved on
     /// in-place re-saves so the original creation date is not lost.
     pub project_created_at: Option<u64>,
@@ -363,6 +378,61 @@ pub struct AppState {
     scrub_cancel: Option<Arc<AtomicBool>>,
 }
 
+/// Largest centred 2:1 rectangle that fits inside the image.
+fn centered_sprocket_crop(image_width: u32, image_height: u32) -> [u32; 4] {
+    if image_width < 2 || image_height == 0 {
+        return [0, 0, image_width.max(1), image_height.max(1)];
+    }
+    let crop_height = image_height.min(image_width / 2).max(1);
+    let crop_width = crop_height.saturating_mul(2).min(image_width);
+    [
+        (image_width - crop_width) / 2,
+        (image_height - crop_height) / 2,
+        crop_width,
+        crop_height,
+    ]
+}
+
+/// Clamp a user-positioned crop to the current image while preserving an
+/// exact 2:1 pixel ratio. Normal images are at least two pixels wide; the tiny
+/// fallback simply preserves the only available pixel.
+fn clamp_sprocket_crop(crop: [u32; 4], image_width: u32, image_height: u32) -> [u32; 4] {
+    if image_width < 2 || image_height == 0 {
+        return [0, 0, image_width.max(1), image_height.max(1)];
+    }
+    let [x, y, requested_width, requested_height] = crop;
+    let max_height = image_height.min(image_width / 2).max(1);
+    let width_height = (requested_width / 2).max(1);
+    let crop_height = requested_height.max(1).min(width_height).min(max_height);
+    let crop_width = crop_height * 2;
+    let crop_x = x.min(image_width - crop_width);
+    let crop_y = y.min(image_height - crop_height);
+    [crop_x, crop_y, crop_width, crop_height]
+}
+
+#[cfg(test)]
+mod sprocket_crop_tests {
+    use super::{centered_sprocket_crop, clamp_sprocket_crop};
+
+    #[test]
+    fn centers_two_to_one_crop_in_portrait_source() {
+        assert_eq!(centered_sprocket_crop(4000, 3000), [0, 500, 4000, 2000]);
+    }
+
+    #[test]
+    fn centers_two_to_one_crop_in_wide_source() {
+        assert_eq!(centered_sprocket_crop(5000, 2000), [500, 0, 4000, 2000]);
+    }
+
+    #[test]
+    fn positioned_crop_is_clamped_without_losing_ratio() {
+        assert_eq!(
+            clamp_sprocket_crop([3900, 2900, 2000, 1000], 4000, 3000),
+            [2000, 2000, 2000, 1000]
+        );
+    }
+}
+
 impl AppState {
     pub fn new(ctx: Context, gpu: Option<Arc<GpuContext>>) -> Self {
         let (bg_tx, bg_rx) = mpsc::channel();
@@ -371,6 +441,7 @@ impl AppState {
         tools.encode_opts.jpeg_quality = prefs.jpeg_quality;
         tools.encode_opts.png_compression = prefs.png_compression;
         tools.encode_opts.preserve_metadata = prefs.preserve_metadata;
+        tools.export_border = prefs.export_border.clone();
         let initial_thumb_scale = prefs.library_thumb_scale;
         Self {
             prefs,
@@ -390,6 +461,7 @@ impl AppState {
             original_bytes: None,
             project_path: None,
             is_dirty: false,
+            clean_edit_state: None,
             project_created_at: None,
             image_generation: 0,
             split_view: false,
@@ -442,6 +514,7 @@ impl AppState {
                     self.original_bytes = Some(original_bytes);
                     self.project_path = None;
                     self.is_dirty = false;
+                    self.clean_edit_state = None;
                     self.project_created_at = None;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.rename_pending = None;
@@ -457,6 +530,11 @@ impl AppState {
 
                     if let Some((saved_copies, saved_active)) = self.autosave_restore.take() {
                         let image_arc = Arc::new(image);
+                        let clean_store = VirtualCopyStore::new(
+                            "Copy 1".into(),
+                            EditPipeline::new_virtual_copy(Arc::clone(&image_arc)),
+                        );
+                        self.clean_edit_state = clean_store.edit_state_snapshot().ok();
                         match VirtualCopyStore::load_from_saved(
                             Arc::clone(&image_arc),
                             saved_copies,
@@ -469,10 +547,7 @@ impl AppState {
                             Err(e) => {
                                 self.status =
                                     format!("Warning: could not restore edit stack: {}", e);
-                                self.copies = Some(VirtualCopyStore::new(
-                                    "Copy 1".into(),
-                                    EditPipeline::new_virtual_copy(image_arc),
-                                ));
+                                self.copies = Some(clean_store);
                             }
                         }
                     } else {
@@ -480,6 +555,7 @@ impl AppState {
                             "Copy 1".into(),
                             EditPipeline::new(image),
                         ));
+                        self.capture_clean_edit_state();
                     }
 
                     self.prefs.push_recent(path, None);
@@ -502,6 +578,8 @@ impl AppState {
                     self.original_bytes = Some(rlab.original_bytes.clone());
                     self.project_path = Some(path.clone());
                     self.is_dirty = false;
+                    self.clean_edit_state = None;
+                    self.copies = None;
                     self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
                     self.rename_pending = None;
                     // Determine the session ID: reuse the one from an autosave
@@ -513,20 +591,44 @@ impl AppState {
                     );
                     self.autosave_pending = false;
                     let display_name = rlab.lmta.as_ref().and_then(|l| l.original_filename.clone());
-                    let restored_autosave = self.autosave_restore.is_some();
-                    let (copies, active_copy) = match self.autosave_restore.take() {
-                        Some((saved_copies, saved_active)) => (saved_copies, saved_active),
-                        None => (rlab.copies, rlab.active_copy_index),
-                    };
-                    match VirtualCopyStore::load_from_saved(Arc::new(image), copies, active_copy) {
-                        Ok(store) => {
-                            self.copies = Some(store);
-                            if restored_autosave {
+                    let source = Arc::new(image);
+                    if let Some((saved_copies, saved_active)) = self.autosave_restore.take() {
+                        // Establish the clean boundary from the deserialised
+                        // project stack. Some operation values (notably f32s)
+                        // normalise during load, so the raw JSON is not always
+                        // byte-for-byte equivalent to its in-memory form.
+                        self.clean_edit_state = VirtualCopyStore::load_from_saved(
+                            Arc::clone(&source),
+                            rlab.copies,
+                            rlab.active_copy_index,
+                        )
+                        .ok()
+                        .and_then(|store| store.edit_state_snapshot().ok());
+                        match VirtualCopyStore::load_from_saved(source, saved_copies, saved_active)
+                        {
+                            Ok(store) => {
+                                self.copies = Some(store);
                                 self.mark_dirty();
                             }
+                            Err(e) => {
+                                self.status =
+                                    format!("Warning: could not restore edit stack: {}", e);
+                            }
                         }
-                        Err(e) => {
-                            self.status = format!("Warning: could not restore edit stack: {}", e);
+                    } else {
+                        match VirtualCopyStore::load_from_saved(
+                            source,
+                            rlab.copies,
+                            rlab.active_copy_index,
+                        ) {
+                            Ok(store) => {
+                                self.copies = Some(store);
+                                self.capture_clean_edit_state();
+                            }
+                            Err(e) => {
+                                self.status =
+                                    format!("Warning: could not restore edit stack: {}", e);
+                            }
                         }
                     }
                     self.prefs.push_recent(path, display_name);
@@ -699,6 +801,38 @@ impl AppState {
                     self.library.last_scrub_errors = p.errors.clone();
                     self.library.scrub_progress = Some(p);
                 }
+                BgMessage::RebuildProgress(p) => {
+                    self.library.rebuild_progress = Some(p);
+                    if let Some(text) = self.library.rebuild_status_text() {
+                        self.status = text;
+                    }
+                }
+                BgMessage::RebuildComplete {
+                    total,
+                    errors,
+                    fatal,
+                } => {
+                    self.library.rebuild_progress = None;
+                    self.library.rebuild_started = None;
+                    self.library.thumbs.clear();
+                    self.library.refresh();
+                    if let Some(e) = fatal {
+                        self.status = format!("Rebuild failed: {e}");
+                    } else if errors.is_empty() {
+                        self.status = format!("Index rebuild complete: {total} photos");
+                    } else {
+                        // Dump details to the terminal for quick diagnosis, the
+                        // same way import failures are reported.
+                        for (path, msg) in &errors {
+                            eprintln!("rebuild error: {}: {msg}", path.display());
+                        }
+                        self.status = format!(
+                            "Index rebuild: {} photos, {} error(s)",
+                            total.saturating_sub(errors.len()),
+                            errors.len()
+                        );
+                    }
+                }
                 BgMessage::ScrubComplete { outcome } => {
                     self.scrub_cancel = None;
                     self.library.scrub_progress = None;
@@ -812,6 +946,10 @@ impl AppState {
             self.status = "Nothing to save — render first".into();
             return;
         };
+        // Captions describe the source exposure. Read them from the immutable
+        // pipeline source rather than trusting every pixel operation to carry
+        // EXIF through its output buffer.
+        let source_metadata = self.image_metadata().cloned().unwrap_or_default();
 
         // Optionally resize before encoding.
         let resized_buf;
@@ -838,9 +976,29 @@ impl AppState {
             rendered.as_ref()
         };
 
+        let bordered_buf;
+        let to_encode = if self.tools.export_border.enabled {
+            match crate::panels::export_border::apply_export_border(
+                to_save,
+                &source_metadata,
+                &self.tools.export_border,
+            ) {
+                Ok(image) => {
+                    bordered_buf = image;
+                    &bordered_buf
+                }
+                Err(e) => {
+                    self.status = format!("Export border failed: {e}");
+                    return;
+                }
+            }
+        } else {
+            to_save
+        };
+
         match self
             .registry
-            .encode_file(to_save, &path, &self.tools.encode_opts)
+            .encode_file(to_encode, &path, &self.tools.encode_opts)
         {
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(&path, &bytes) {
@@ -850,7 +1008,7 @@ impl AppState {
                     // Exporting a rendered image counts as preserving the
                     // user's work, so clear the dirty flag — this keeps the
                     // exit confirmation from firing after a successful export.
-                    self.is_dirty = false;
+                    self.capture_clean_edit_state();
                 }
             }
             Err(e) => {
@@ -944,8 +1102,7 @@ impl AppState {
             Ok(()) => {
                 self.project_created_at = Some(created_at);
                 self.project_path = Some(path.clone());
-                self.is_dirty = false;
-                self.autosave_pending = false;
+                self.capture_clean_edit_state();
                 // Clean up the autosave file now that the work is safely saved.
                 if let Some(session_id) = self.autosave_session_id.take() {
                     crate::autosave::delete(session_id);
@@ -1028,10 +1185,36 @@ impl AppState {
         }
     }
 
-    /// Mark the project as having unsaved changes and schedule an autosave.
+    /// Recompute whether the effective edit state differs from the last open or
+    /// save boundary, and schedule an autosave only while changes remain.
     pub(crate) fn mark_dirty(&mut self) {
-        self.is_dirty = true;
-        self.autosave_pending = true;
+        let was_dirty = self.is_dirty;
+        self.is_dirty = match (&self.clean_edit_state, &self.copies) {
+            (Some(clean), Some(store)) => store
+                .edit_state_snapshot()
+                .map_or(true, |current| current != *clean),
+            _ => true,
+        };
+        self.autosave_pending = self.is_dirty;
+
+        // An autosave from an earlier edit must not survive after the user has
+        // returned all copies to their clean state.
+        if was_dirty
+            && !self.is_dirty
+            && let Some(session_id) = self.autosave_session_id
+        {
+            crate::autosave::delete(session_id);
+        }
+    }
+
+    /// Make the current effective edit state the clean comparison boundary.
+    fn capture_clean_edit_state(&mut self) {
+        self.clean_edit_state = self
+            .copies
+            .as_ref()
+            .and_then(|store| store.edit_state_snapshot().ok());
+        self.is_dirty = false;
+        self.autosave_pending = false;
     }
 
     /// Write the autosave file if a change is pending.  Called every frame from
@@ -1050,10 +1233,20 @@ impl AppState {
         let Ok((copies, active)) = store.save_states() else {
             return;
         };
+        let display_name = self
+            .project_path
+            .as_deref()
+            .map(|path| self.prefs.recent_display_name(path))
+            .or_else(|| {
+                source_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
         crate::autosave::write(
             session_id,
             &source_path,
             self.project_path.as_deref(),
+            display_name.as_deref(),
             &copies,
             active,
         );
@@ -1242,6 +1435,94 @@ impl AppState {
         self.request_render();
     }
 
+    /// Start an interactive, fixed 2:1 crop for the sprocket panorama look.
+    pub fn begin_sprocket_crop(&mut self) {
+        if self.copies.is_none() || self.editing.is_some() {
+            return;
+        }
+        let Some(rendered) = self.rendered.as_ref() else {
+            return;
+        };
+
+        let scale = self.rendered_scale.max(0.01);
+        let width = (rendered.width as f32 / scale).round().max(1.0) as u32;
+        let height = (rendered.height as f32 / scale).round().max(1.0) as u32;
+        let [x, y, w, h] = centered_sprocket_crop(width, height);
+
+        self.cancel_all_previews();
+        self.tools.mask_sel = 0;
+        if let Some(heal) = self
+            .tools
+            .find_mut::<crate::panels::tools::heal::HealTool>()
+        {
+            heal.active = false;
+        }
+        if let Some(straighten) = self
+            .tools
+            .find_mut::<crate::panels::tools::straighten::StraightenTool>()
+        {
+            straighten.active = false;
+        }
+        if let Some(crop) = self
+            .tools
+            .find_mut::<crate::panels::tools::crop::CropTool>()
+        {
+            crop.x = x;
+            crop.y = y;
+            crop.w = w;
+            crop.h = h;
+        }
+        self.tools.sprocket_crop_active = true;
+        self.status = "Position the 2:1 crop, then apply the sprocket look".into();
+    }
+
+    pub fn cancel_sprocket_crop(&mut self) {
+        self.tools.sprocket_crop_active = false;
+        self.status = "Cancelled 35mm Sprocket Panorama crop".into();
+    }
+
+    /// Recreate a full-width 35 mm negative using the positioned 2:1 crop and
+    /// the selected stock (or a randomized stock when no selection was made).
+    pub fn push_sprocket_panorama(&mut self) {
+        if self.copies.is_none() {
+            return;
+        }
+        let Some(rendered) = self.rendered.as_ref() else {
+            return;
+        };
+
+        // `rendered` may currently be a quarter-scale tool preview. Convert
+        // back to the dimensions seen by the committed pipeline before making
+        // an absolute-pixel crop operation.
+        let scale = self.rendered_scale.max(0.01);
+        let width = (rendered.width as f32 / scale).round().max(1.0) as u32;
+        let height = (rendered.height as f32 / scale).round().max(1.0) as u32;
+        let requested_crop = self
+            .tools
+            .find::<crate::panels::tools::crop::CropTool>()
+            .map_or(centered_sprocket_crop(width, height), |crop| {
+                [crop.x, crop.y, crop.w, crop.h]
+            });
+        let [crop_x, crop_y, crop_w, crop_h] = clamp_sprocket_crop(requested_crop, width, height);
+        let film_op = self.tools.sprocket_film_stock.map_or_else(
+            SprocketFilmOp::randomized,
+            SprocketFilmOp::with_random_markings,
+        );
+        let film_description = film_op.describe();
+
+        self.cancel_all_previews();
+        if let Some(store) = &mut self.copies {
+            let pipeline = store.active_pipeline_mut();
+            if [crop_x, crop_y, crop_w, crop_h] != [0, 0, width, height] {
+                pipeline.push_op(Box::new(CropOp::new(crop_x, crop_y, crop_w, crop_h)));
+            }
+            pipeline.push_op(Box::new(film_op));
+        }
+        self.mark_dirty();
+        self.status = format!("Applied {film_description}");
+        self.request_render();
+    }
+
     /// Analyse the current image and push whatever corrections it needs.
     ///
     /// Unlike [`Self::push_auto_enhance`], which applies fixed preset values,
@@ -1249,7 +1530,23 @@ impl AppState {
     /// sharpness) and derives per-image parameter values in closed form.
     /// Each correction lands as its own op in the edit stack so it can be
     /// inspected, tweaked, or undone individually.
-    pub fn push_smart_enhance(&mut self) {
+    ///
+    /// Uses every measurement available, including the regional ones, so an
+    /// unevenly-lit frame may also get local tone.
+    pub fn push_adaptive_enhance(&mut self) {
+        self.push_analysis_plan("Adaptive Enhance", PlanMode::Adaptive);
+    }
+
+    /// Push global-only corrections, tuned for faded prints and scans.
+    ///
+    /// The same analysis as [`Self::push_adaptive_enhance`], but declining the
+    /// regional judgements: no border exclusion, no local tone.  This is the
+    /// behaviour the planner's constants were originally calibrated against.
+    pub fn push_old_photo_restore(&mut self) {
+        self.push_analysis_plan("Old Photo Restore", PlanMode::Restore);
+    }
+
+    fn push_analysis_plan(&mut self, label: &str, mode: PlanMode) {
         let Some(rendered) = self.rendered.clone() else {
             return;
         };
@@ -1257,12 +1554,13 @@ impl AppState {
             return;
         }
 
-        let plan = rasterlab_core::analysis::plan_enhancement(&rendered);
+        let stats = ImageStats::compute(&rendered);
+        let plan = rasterlab_core::analysis::plan_from_stats(&rendered, &stats, mode);
         if plan.is_empty() {
-            self.status = "Smart Enhance: no corrections needed".into();
+            self.status = format!("{label}: no corrections needed");
             return;
         }
-        self.status = format!("Smart Enhance: {}", plan.summary());
+        self.status = format!("{label}: {}", plan.summary());
 
         self.cancel_all_previews();
         if let Some(store) = &mut self.copies {
@@ -1320,6 +1618,7 @@ impl AppState {
             crop.w = w;
             crop.h = h;
         }
+        self.tools.sprocket_crop_active = false;
         if let Some(resize) = self.tools.find_mut::<ResizeTool>() {
             resize.w = w;
             resize.h = h;
@@ -1864,34 +2163,37 @@ impl AppState {
     }
 
     pub fn rebuild_library_index(&mut self) {
+        if self.library.rebuild_started.is_some() {
+            return;
+        }
         let Some(lib) = self.library.library.clone() else {
             return;
         };
         let tx = self.bg_tx.clone();
         let ctx = self.ctx.clone();
+        self.library.rebuild_started = Some(std::time::Instant::now());
         self.status = "Rebuilding library index…".into();
         std::thread::Builder::new()
             .name("rasterlab-rebuild".into())
             .stack_size(32 * 1024 * 1024)
             .spawn(move || {
-                let result = lib.rebuild_index(|_p| {});
-                match result {
-                    Ok(()) => {
-                        let _ = tx.send(BgMessage::ImportComplete {
-                            session: rasterlab_library::ImportSession {
-                                id: String::new(),
-                                name: "Index rebuild".into(),
-                                started_at: 0,
-                                photo_count: 0,
-                                errors: Vec::new(),
-                            },
-                            errors: Vec::new(),
-                        });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(BgMessage::Error(format!("Rebuild failed: {e}")));
-                    }
-                }
+                let progress_tx = tx.clone();
+                let progress_ctx = ctx.clone();
+                // Track the last progress report so the completion message can
+                // carry the final total and per-file errors (rebuild_index only
+                // exposes them through the callback).
+                let last = std::cell::RefCell::new((0usize, Vec::new()));
+                let result = lib.rebuild_index(|p| {
+                    *last.borrow_mut() = (p.total, p.errors.clone());
+                    let _ = progress_tx.send(BgMessage::RebuildProgress(p));
+                    progress_ctx.request_repaint();
+                });
+                let (total, errors) = last.into_inner();
+                let _ = tx.send(BgMessage::RebuildComplete {
+                    total,
+                    errors,
+                    fatal: result.err().map(|e| e.to_string()),
+                });
                 ctx.request_repaint();
             })
             .ok();

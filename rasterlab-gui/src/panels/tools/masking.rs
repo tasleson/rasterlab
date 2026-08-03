@@ -19,7 +19,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, _has_image: bool) {
         .id_salt("masking")
         .default_open(mask_default_open)
         .show(ui, |ui| {
-            if state.editing.is_some() {
+            if state.editing.is_some() || state.tools.sprocket_crop_active {
                 ui.disable();
             }
             egui::Grid::new("mask_type_grid")

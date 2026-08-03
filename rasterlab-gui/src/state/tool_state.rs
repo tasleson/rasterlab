@@ -1,26 +1,34 @@
 use rasterlab_core::{
-    ops::{LinearMask, MaskShape, RadialMask, ResampleMode},
+    ops::{FilmStock, LinearMask, MaskShape, RadialMask, ResampleMode},
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
 };
 
 use crate::file_chooser::DialogKind;
 use crate::panels::tools::{
-    blur::BlurTool, brightness_contrast::BrightnessContrastTool, bw::BwTool,
-    clarity_texture::ClarityTextureTool, color_balance::ColorBalanceTool,
-    color_space::ColorSpaceTool, crop::CropTool, curves::CurvesTool, denoise::DenoiseTool,
-    faux_hdr::FauxHdrTool, focus_stack::FocusStackTool, grain::GrainTool, hdr_merge::HdrMergeTool,
-    heal::HealTool, highlights_shadows::HighlightsShadowsTool, hsl::HslTool,
-    hue_shift::HueShiftTool, levels::LevelsTool, lut::LutTool, noise_reduction::NoiseReductionTool,
-    panorama::PanoramaTool, perspective::PerspectiveTool, resize::ResizeTool, rotate::RotateTool,
-    saturation::SaturationTool, sepia::SepiaTool, shadow_exposure::ShadowExposureTool,
-    sharpen::SharpenTool, split_tone::SplitToneTool, straighten::StraightenTool, tool_trait::Tool,
-    vibrance::VibranceTool, vignette::VignetteTool, white_balance::WhiteBalanceTool,
+    airplane_window::AirplaneWindowTool, blur::BlurTool,
+    brightness_contrast::BrightnessContrastTool, bw::BwTool, clarity_texture::ClarityTextureTool,
+    color_balance::ColorBalanceTool, color_space::ColorSpaceTool, crop::CropTool,
+    curves::CurvesTool, denoise::DenoiseTool, faux_hdr::FauxHdrTool, focus_stack::FocusStackTool,
+    grain::GrainTool, hdr_merge::HdrMergeTool, heal::HealTool,
+    highlights_shadows::HighlightsShadowsTool, hsl::HslTool, hue_shift::HueShiftTool,
+    levels::LevelsTool, local_laplacian::LocalLaplacianTool, lut::LutTool,
+    noise_reduction::NoiseReductionTool, panorama::PanoramaTool, perspective::PerspectiveTool,
+    resize::ResizeTool, rotate::RotateTool, saturation::SaturationTool, sepia::SepiaTool,
+    shadow_exposure::ShadowExposureTool, sharpen::SharpenTool, split_tone::SplitToneTool,
+    straighten::StraightenTool, tool_trait::Tool, vibrance::VibranceTool, vignette::VignetteTool,
+    white_balance::WhiteBalanceTool,
 };
 
 /// All tool state: trait-based tools in a Vec, plus masking, export, and dialog fields.
 pub struct ToolState {
     pub tools: Vec<Box<dyn Tool>>,
+
+    // ── Looks ─────────────────────────────────────────────────────────────
+    /// `None` keeps the original random-stock behaviour.
+    pub sprocket_film_stock: Option<FilmStock>,
+    /// Enables the fixed 2:1 crop overlay used by the sprocket look.
+    pub sprocket_crop_active: bool,
 
     // ── Masking ───────────────────────────────────────────────────────────
     /// 0 = None, 1 = Linear Gradient, 2 = Radial Gradient.
@@ -42,6 +50,7 @@ pub struct ToolState {
     pub export_resize_w: u32,
     pub export_resize_h: u32,
     pub export_resize_mode: ResampleMode,
+    pub export_border: crate::panels::export_border::ExportBorderOptions,
 
     // ── Library batch export dialog ───────────────────────────────────────
     pub export_dialog: crate::panels::export_dialog::ExportDialogState,
@@ -54,6 +63,8 @@ impl ToolState {
     pub fn new() -> Self {
         Self {
             tools: Self::build_tools(),
+            sprocket_film_stock: None,
+            sprocket_crop_active: false,
             mask_sel: 0,
             mask_lin_cx: 0.5,
             mask_lin_cy: 0.5,
@@ -70,6 +81,7 @@ impl ToolState {
             export_resize_w: 0,
             export_resize_h: 0,
             export_resize_mode: ResampleMode::Bicubic,
+            export_border: crate::panels::export_border::ExportBorderOptions::default(),
             export_dialog: crate::panels::export_dialog::ExportDialogState::default(),
             pending_dialog: None,
         }
@@ -77,6 +89,7 @@ impl ToolState {
 
     fn build_tools() -> Vec<Box<dyn Tool>> {
         vec![
+            Box::new(AirplaneWindowTool::new()),
             Box::new(BwTool::new()),
             Box::new(BlurTool::new()),
             Box::new(BrightnessContrastTool::new()),
@@ -95,6 +108,7 @@ impl ToolState {
             Box::new(HslTool::new()),
             Box::new(HueShiftTool::new()),
             Box::new(LevelsTool::new()),
+            Box::new(LocalLaplacianTool::new()),
             Box::new(LutTool::new()),
             Box::new(NoiseReductionTool::new()),
             Box::new(PanoramaTool::new()),
@@ -137,6 +151,7 @@ impl ToolState {
         for tool in &mut self.tools {
             tool.cancel_preview();
         }
+        self.sprocket_crop_active = false;
     }
 
     pub fn current_mask_shape(&self) -> Option<MaskShape> {
@@ -160,6 +175,9 @@ impl ToolState {
     }
 
     pub fn crop_aspect_ratio(&self) -> Option<(f32, f32)> {
+        if self.sprocket_crop_active {
+            return Some((2.0, 1.0));
+        }
         let crop = self.find::<CropTool>()?;
         let flip = crop.portrait;
         match crop.aspect_idx {
@@ -255,5 +273,15 @@ mod tests {
                 t.id(),
             );
         }
+    }
+
+    #[test]
+    fn sprocket_crop_overrides_regular_crop_aspect() {
+        let mut tools = ToolState::new();
+        tools.find_mut::<CropTool>().unwrap().aspect_idx = 0;
+        assert_eq!(tools.crop_aspect_ratio(), None);
+
+        tools.sprocket_crop_active = true;
+        assert_eq!(tools.crop_aspect_ratio(), Some((2.0, 1.0)));
     }
 }

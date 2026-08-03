@@ -74,6 +74,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     for (i, entry) in ops.iter().enumerate() {
         let is_active = i < cursor;
         let desc = entry.operation.describe();
+        let (name, details) = split_description(&desc);
         let is_editing_this = editing.is_some_and(|s| s.op_index == i);
         let editable = entry.operation.as_any().is_some();
 
@@ -109,7 +110,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 row_color
             };
             let prefix = if is_editing_this { "✎ " } else { "" };
-            let text = RichText::new(format!("{}{}.  {}", prefix, i + 1, desc))
+            let text = RichText::new(format!("{}{}.  {}", prefix, i + 1, name))
                 .color(name_color)
                 .monospace();
             ui.label(text);
@@ -167,6 +168,24 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             });
         });
 
+        // Parameter-heavy descriptions used to share the header line and
+        // force the whole side panel to their preferred width. Keep the
+        // operation name compact and let its details wrap within the panel.
+        if let Some(details) = details {
+            ui.horizontal(|ui| {
+                ui.add_space(44.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(details)
+                            .color(row_color.gamma_multiply(0.75))
+                            .monospace()
+                            .small(),
+                    )
+                    .wrap(),
+                );
+            });
+        }
+
         ui.separator();
     }
 
@@ -187,6 +206,18 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 }
 
 // ── Tab bar ──────────────────────────────────────────────────────────────────
+
+/// Split the conventional `Name  details` operation description into the two
+/// lines used by the edit stack. Descriptions without details remain a single
+/// header line, including descriptions supplied by plugins.
+fn split_description(description: &str) -> (&str, Option<&str>) {
+    match description.split_once("  ") {
+        Some((name, details)) if !name.trim().is_empty() && !details.trim().is_empty() => {
+            (name.trim(), Some(details.trim()))
+        }
+        _ => (description, None),
+    }
+}
 
 fn virtual_copy_tabs(ui: &mut Ui, state: &mut AppState) {
     let Some(store) = &state.copies else {
@@ -315,5 +346,23 @@ fn rename_popup(ui: &mut Ui, state: &mut AppState) {
         state.rename_pending = None;
     } else if do_cancel || !open {
         state.rename_pending = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_description;
+
+    #[test]
+    fn splits_operation_name_from_details() {
+        assert_eq!(
+            split_description("Channel Levels  R 0.00/1.00/1.00  G 0.00/1.00/1.00"),
+            ("Channel Levels", Some("R 0.00/1.00/1.00  G 0.00/1.00/1.00"))
+        );
+    }
+
+    #[test]
+    fn leaves_name_only_descriptions_on_one_line() {
+        assert_eq!(split_description("Perspective"), ("Perspective", None));
     }
 }

@@ -36,6 +36,64 @@ impl ResizeOp {
 }
 
 // ---------------------------------------------------------------------------
+// Power-of-two area reduction
+// ---------------------------------------------------------------------------
+
+/// Dimensions of `width` × `height` after `level` halvings, floored at 1×1.
+pub fn level_size(width: u32, height: u32, level: u32) -> (u32, u32) {
+    let step = 1u32 << level.min(31);
+    (width.div_ceil(step).max(1), height.div_ceil(step).max(1))
+}
+
+/// Area-average an image down by `2^level` in a single pass.
+///
+/// Each destination pixel is the mean of the exact block of source pixels it
+/// covers, so no source pixel is skipped and no aliasing is introduced — the
+/// ideal filter for minification, and much cheaper than a general resample
+/// because the block bounds are fixed. Edge blocks are partial when a
+/// dimension is not a multiple of the step.
+///
+/// `level == 0` returns a copy.
+pub fn reduce_pow2(image: &Image, level: u32) -> Image {
+    if level == 0 {
+        return image.deep_clone();
+    }
+
+    let step = 1usize << level.min(31);
+    let (src_w, src_h) = (image.width as usize, image.height as usize);
+    let (dst_w, dst_h) = level_size(image.width, image.height, level);
+    let mut out = Image::new(dst_w, dst_h);
+    let dst_w = dst_w as usize;
+
+    out.data
+        .par_chunks_mut(dst_w * 4)
+        .enumerate()
+        .for_each(|(dst_y, row)| {
+            let y0 = dst_y * step;
+            let y1 = (y0 + step).min(src_h);
+            for (dst_x, out_px) in row.chunks_exact_mut(4).enumerate() {
+                let x0 = dst_x * step;
+                let x1 = (x0 + step).min(src_w);
+                let mut acc = [0u32; 4];
+                for y in y0..y1 {
+                    let start = (y * src_w + x0) * 4;
+                    for src_px in image.data[start..start + (x1 - x0) * 4].chunks_exact(4) {
+                        for (a, s) in acc.iter_mut().zip(src_px) {
+                            *a += u32::from(*s);
+                        }
+                    }
+                }
+                let count = ((y1 - y0) * (x1 - x0)) as u32;
+                for (o, a) in out_px.iter_mut().zip(acc) {
+                    *o = ((a + count / 2) / count) as u8;
+                }
+            }
+        });
+
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Pixel sampling helpers
 // ---------------------------------------------------------------------------
 
@@ -156,6 +214,7 @@ impl Operation for ResizeOp {
         let x_ratio = image.width as f32 / self.width as f32;
         let y_ratio = image.height as f32 / self.height as f32;
         let mode = self.mode;
+        let metadata = image.metadata.clone();
 
         let mut out = Image::new(self.width, self.height);
 
@@ -181,6 +240,8 @@ impl Operation for ResizeOp {
                     row[off + 3] = p[3];
                 }
             });
+
+        out.metadata = metadata;
 
         Ok(out)
     }
@@ -221,6 +282,24 @@ mod tests {
             let out = ResizeOp::new(16, 16, mode).apply(src.deep_clone()).unwrap();
             assert_eq!(out.data, src.data, "identity failed for {:?}", mode);
         }
+    }
+
+    #[test]
+    fn resize_preserves_camera_metadata() {
+        let mut src = solid(100, 150, 200, 16, 16);
+        src.metadata.iso = Some(400);
+        src.metadata.aperture = Some(2.8);
+        src.metadata.focal_length = Some(50.0);
+        src.metadata.shutter_speed = Some("1/250 s".into());
+
+        let out = ResizeOp::new(8, 8, ResampleMode::Bicubic)
+            .apply(src)
+            .unwrap();
+
+        assert_eq!(out.metadata.iso, Some(400));
+        assert_eq!(out.metadata.aperture, Some(2.8));
+        assert_eq!(out.metadata.focal_length, Some(50.0));
+        assert_eq!(out.metadata.shutter_speed.as_deref(), Some("1/250 s"));
     }
 
     #[test]
@@ -273,5 +352,69 @@ mod tests {
         for (a, b) in src_data.chunks(4).zip(down.data.chunks(4)) {
             assert!((a[0] as i16 - b[0] as i16).abs() <= 10);
         }
+    }
+
+    #[test]
+    fn reduce_pow2_dimensions_round_up() {
+        // Odd sizes must not lose their last row/column.
+        let cases = [
+            ((8, 8), 1, (4, 4)),
+            ((8, 8), 3, (1, 1)),
+            ((7, 3), 1, (4, 2)),
+            ((7, 3), 2, (2, 1)),
+            ((4899, 3266), 2, (1225, 817)),
+            // Reducing past a single pixel is floored, not zeroed.
+            ((3, 3), 10, (1, 1)),
+        ];
+        for ((w, h), level, expected) in cases {
+            assert_eq!(level_size(w, h, level), expected, "{w}x{h} @ {level}");
+            let out = reduce_pow2(&solid(1, 2, 3, w, h), level);
+            assert_eq!((out.width, out.height), expected, "{w}x{h} @ {level}");
+            assert_eq!(out.data.len(), (expected.0 * expected.1 * 4) as usize);
+        }
+    }
+
+    #[test]
+    fn reduce_pow2_preserves_uniform_colour() {
+        let src = solid(200, 100, 50, 64, 64);
+        for level in 0..=6 {
+            let out = reduce_pow2(&src, level);
+            for p in out.data.chunks_exact(4) {
+                assert_eq!(p, [200, 100, 50, 255], "level={level}");
+            }
+        }
+    }
+
+    /// Every source pixel must contribute — that is the whole reason the canvas
+    /// reduces on the CPU instead of letting a bilinear tap skip most of them.
+    #[test]
+    fn reduce_pow2_averages_the_whole_footprint() {
+        let mut src = Image::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                let v = if (x + y) % 2 == 0 { 0 } else { 255 };
+                src.set_pixel(x, y, [v, v, v, 255]);
+            }
+        }
+        let out = reduce_pow2(&src, 2);
+        assert_eq!(out.data[0], 128, "checkerboard should average to mid-grey");
+
+        // A partial edge block averages only the pixels it actually covers.
+        let mut edge = Image::new(3, 1);
+        edge.set_pixel(0, 0, [0, 0, 0, 255]);
+        edge.set_pixel(1, 0, [100, 100, 100, 255]);
+        edge.set_pixel(2, 0, [60, 60, 60, 255]);
+        let out = reduce_pow2(&edge, 1);
+        assert_eq!((out.width, out.height), (2, 1));
+        assert_eq!(out.data[0], 50, "first block covers two pixels");
+        assert_eq!(out.data[4], 60, "last block covers only one");
+    }
+
+    #[test]
+    fn reduce_pow2_level_zero_is_identity() {
+        let src = solid(10, 20, 30, 5, 7);
+        let out = reduce_pow2(&src, 0);
+        assert_eq!((out.width, out.height), (5, 7));
+        assert_eq!(out.data, src.data);
     }
 }

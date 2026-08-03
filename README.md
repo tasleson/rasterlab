@@ -22,6 +22,7 @@ See change log below for status.
 - **Parallelized ops** via rayon — crop, rotate, sharpen, levels, and B&W all use parallel pixel/row iteration
 - **Undo/redo** — with cache-aware shortcuts so undo is often instant
 - **Histogram** — per-channel R/G/B + luma, computed in the render thread
+- **Presentation borders on export** — add a black gallery-style frame with custom text and optional focal length, ISO, f-stop, and shutter speed from each image's EXIF data
 - **Arbitrary rotation** — with bilinear interpolation, the slow one
 - **Plugin API** — because why not
 - **Tamper-evident `.rlab` project format** — chunked binary container that stores the original source bytes verbatim alongside every virtual copy's edit stack, pipeline state, metadata, and an optional thumbnail. Every chunk carries a Blake3 hash and the whole file is sealed with a trailing Blake3 hash, so any mutation is detected on open.
@@ -32,9 +33,11 @@ See change log below for status.
 | Op | What it does |
 |---|---|
 | Auto Enhance | One-click levels stretch + saturation boost + mild sharpen |
-| Smart Enhance | Analyses the image first (colour cast, tone, chroma, sharpness), then applies only the corrections it needs, with per-image values |
+| Adaptive Enhance | Analyses the image first (colour cast, tone, chroma, sharpness), then applies only the corrections it needs, with per-image values. Also reads the frame region by region, so a scan border is measured around and an unevenly-lit frame gets local tone |
+| Old Photo Restore | The same analysis measured over the whole frame only, without the regional judgements — tuned for faded prints and scans |
 | **Looks** | |
 | Classic B&W | Channel-mixed B&W conversion with brightness lift and vignette |
+| 35mm Sprocket Panorama | Placeable fixed 2:1 crop styled as a borderless full-width 35mm negative, preserving the exposed image around sprocket holes while adding a selectable current film stock and randomized frame markings |
 | | |
 | **——————————————** | **——————————————————————————————————————————** |
 | | |
@@ -58,6 +61,7 @@ See change log below for status.
 | Hue Shift | Global hue rotation in degrees |
 | Levels | Black/mid/white point with LUT-based remapping |
 | Local Adjustments | Linear or radial gradient mask applied to any op |
+| Local Tone | Edge-aware local Laplacian filtering: compresses large-scale contrast (backlit scenes) while preserving or boosting texture |
 | LUT / Color Grading | Apply a .cube 3D LUT with blend strength |
 | Noise Reduction | Wavelet (fast) or Non-Local Means (quality); independent luma/chroma strength |
 | Panorama | Stitch multiple images; Harris corners + normalised-patch matching + RANSAC homography + feather blend |

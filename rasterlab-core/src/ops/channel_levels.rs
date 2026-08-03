@@ -4,6 +4,11 @@ use crate::{error::RasterResult, image::Image, traits::operation::Operation};
 
 use super::for_each_pixel_row_parallel;
 
+/// Largest white point a channel may be given.  Values above 1.0 attenuate
+/// (see [`ChannelRange::white`]); this bounds that to a 4× reduction, the same
+/// spirit as the gamma clamp.
+const WHITE_MAX: f32 = 4.0;
+
 /// Levels curve for a single channel.
 ///
 /// Same semantics as [`super::LevelsOp`]: values are normalised into
@@ -13,6 +18,13 @@ use super::for_each_pixel_row_parallel;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ChannelRange {
     pub black: f32,
+    /// Input level mapped to full scale.  Unlike [`super::LevelsOp`] this may
+    /// exceed 1.0, which means the channel never reaches full scale — the curve
+    /// *attenuates* by `1 / (white - black)`.  That is the only way to express a
+    /// gain below 1.0 on a channel whose white point is already at 255, which is
+    /// what the analysis planner's cast removal needs: it corrects a cast with a
+    /// per-channel gain, and a cast strong enough to exhaust the highlight
+    /// headroom has to come out of the over-represented channels instead.
     pub white: f32,
     pub gamma: f32,
 }
@@ -21,7 +33,7 @@ impl ChannelRange {
     pub fn new(black: f32, white: f32, gamma: f32) -> Self {
         Self {
             black: black.clamp(0.0, 1.0),
-            white: white.clamp(0.0, 1.0),
+            white: white.clamp(0.0, WHITE_MAX),
             gamma: gamma.clamp(0.01, 10.0),
         }
     }
@@ -63,7 +75,7 @@ impl ChannelRange {
 /// this op remaps each channel with its own black point, white point, and
 /// gamma.  Stretching each channel to fill its own range neutralises colour
 /// casts (the same principle as Photoshop's "Auto Color"), which makes this
-/// the workhorse of Smart Enhance's cast removal.
+/// the workhorse of the analysis planner's cast removal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelLevelsOp {
     pub red: ChannelRange,

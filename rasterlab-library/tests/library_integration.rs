@@ -461,6 +461,40 @@ fn rebuild_index_restores_rows_after_db_delete() {
     assert_eq!(photos.len(), 2, "should have 2 photos after rebuild");
 }
 
+#[test]
+fn rebuild_index_restores_session_counts_and_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let before = lib.all_sessions().unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].photo_count, 2);
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    let after = lib.all_sessions().unwrap();
+    assert_eq!(after.len(), 1, "session row should survive a rebuild");
+    assert_eq!(after[0].id, before[0].id);
+    assert_eq!(
+        after[0].photo_count, 2,
+        "session photo count should be recomputed, not left at 0"
+    );
+    assert_eq!(
+        after[0].name, before[0].name,
+        "date-based session name should be regenerated"
+    );
+    assert_eq!(
+        after[0].started_at, before[0].started_at,
+        "started_at should be rebuilt from the photos' import dates"
+    );
+
+    // The photos are still reachable through the session.
+    let photos = lib.photos_in_session(&after[0].id).unwrap();
+    assert_eq!(photos.len(), 2);
+}
+
 // ── Search (EXIF-based) ───────────────────────────────────────────────────────
 
 #[test]

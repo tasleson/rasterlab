@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=RasterLab
+Comment=Image editing and photo library
+Exec=rasterlab-gui %f
+Icon=io.github.tasleson.RasterLab
+Terminal=false
+Categories=Graphics;Photography;RasterGraphics;
+MimeType=image/jpeg;image/png;image/tiff;
+StartupWMClass=io.github.tasleson.RasterLab
+SingleMainWindow=true

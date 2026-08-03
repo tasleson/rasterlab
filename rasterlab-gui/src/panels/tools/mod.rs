@@ -3,6 +3,7 @@
 pub mod shared;
 pub mod tool_trait;
 
+pub mod airplane_window;
 pub mod auto_enhance;
 pub mod blur;
 pub mod brightness_contrast;
@@ -23,6 +24,7 @@ pub mod highlights_shadows;
 pub mod hsl;
 pub mod hue_shift;
 pub mod levels;
+pub mod local_laplacian;
 pub mod looks;
 pub mod lut;
 pub mod masking;
@@ -101,9 +103,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     }
 
     let has_image = state.pipeline().is_some();
+    let sprocket_crop_active = state.tools.sprocket_crop_active;
 
     // Auto Enhance (always first)
-    auto_enhance::ui(ui, state, has_image);
+    auto_enhance::ui(ui, state, has_image && !sprocket_crop_active);
     ui.separator();
 
     // Looks (always second)
@@ -163,6 +166,9 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
                     ui.disable();
                 }
             } else if editing.is_some() {
+                ui.disable();
+            }
+            if state.tools.sprocket_crop_active {
                 ui.disable();
             }
 

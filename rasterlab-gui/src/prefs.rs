@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::panels::export_border::ExportBorderOptions;
+
 /// User-selectable theme preference, stored in the prefs file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +82,9 @@ pub struct Prefs {
     /// Whether to copy EXIF metadata into exported files.
     #[serde(default = "default_true")]
     pub preserve_metadata: bool,
+    /// Reusable presentation-border caption and camera-detail selections.
+    #[serde(default)]
+    pub export_border: ExportBorderOptions,
 
     // ── Library ──────────────────────────────────────────────────────────────
     /// Most-recently-opened libraries, newest first.  Capped at [`MAX_RECENT`].
@@ -199,5 +204,36 @@ impl Prefs {
         self.recent_libraries.retain(|p| p != &path);
         self.recent_libraries.insert(0, path);
         self.recent_libraries.truncate(MAX_RECENT);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_preferences_default_border_settings() {
+        let prefs: Prefs = serde_yaml::from_str("jpeg_quality: 88\n").unwrap();
+        assert_eq!(prefs.jpeg_quality, 88);
+        assert_eq!(prefs.export_border, ExportBorderOptions::default());
+    }
+
+    #[test]
+    fn border_preset_round_trips_through_yaml() {
+        let prefs = Prefs {
+            export_border: ExportBorderOptions {
+                enabled: true,
+                custom_text: "MING THEIN | MINGTHEIN.COM".into(),
+                show_focal_length: true,
+                show_iso: true,
+                show_aperture: true,
+                show_shutter: true,
+            },
+            ..Default::default()
+        };
+
+        let yaml = serde_yaml::to_string(&prefs).unwrap();
+        let decoded: Prefs = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(decoded.export_border, prefs.export_border);
     }
 }
