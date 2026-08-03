@@ -230,7 +230,7 @@ fn draw_combined_histogram(
     let bx = rect.left() + black * width;
     painter.line_segment(
         [egui::pos2(bx, rect.top()), egui::pos2(bx, rect.bottom())],
-        egui::Stroke::new(1.5, Color32::from_gray(60)),
+        egui::Stroke::new(1.5_f32, Color32::from_gray(60)),
     );
     let tp = egui::pos2(bx, rect.bottom());
     painter.add(egui::Shape::convex_polygon(
@@ -247,7 +247,7 @@ fn draw_combined_histogram(
     let wx = rect.left() + white * width;
     painter.line_segment(
         [egui::pos2(wx, rect.top()), egui::pos2(wx, rect.bottom())],
-        egui::Stroke::new(1.5, Color32::from_gray(220)),
+        egui::Stroke::new(1.5_f32, Color32::from_gray(220)),
     );
     let tp = egui::pos2(wx, rect.bottom());
     painter.add(egui::Shape::convex_polygon(
@@ -265,7 +265,7 @@ fn draw_combined_histogram(
     let mx = rect.left() + mid_frac * width;
     painter.line_segment(
         [egui::pos2(mx, rect.top()), egui::pos2(mx, rect.bottom())],
-        egui::Stroke::new(1.5, Color32::from_rgba_unmultiplied(180, 140, 60, 200)),
+        egui::Stroke::new(1.5_f32, Color32::from_rgba_unmultiplied(180, 140, 60, 200)),
     );
     let tp = egui::pos2(mx, rect.bottom());
     painter.add(egui::Shape::convex_polygon(

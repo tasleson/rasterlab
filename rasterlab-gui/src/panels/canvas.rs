@@ -714,13 +714,16 @@ impl CanvasState {
         let sx = image_tl.x + display_size.x * self.split_ratio;
         let top = Pos2::new(sx, canvas_rect.min.y);
         let bot = Pos2::new(sx, canvas_rect.max.y);
-        painter.line_segment([top, bot], Stroke::new(3.0, Color32::from_black_alpha(80)));
-        painter.line_segment([top, bot], Stroke::new(1.0, Color32::WHITE));
+        painter.line_segment(
+            [top, bot],
+            Stroke::new(3.0_f32, Color32::from_black_alpha(80)),
+        );
+        painter.line_segment([top, bot], Stroke::new(1.0_f32, Color32::WHITE));
 
         // Small circular handle at the vertical midpoint.
         let mid = Pos2::new(sx, canvas_rect.center().y);
         painter.circle_filled(mid, 7.0, Color32::from_black_alpha(100));
-        painter.circle_stroke(mid, 7.0, Stroke::new(1.5, Color32::WHITE));
+        painter.circle_stroke(mid, 7.0, Stroke::new(1.5_f32, Color32::WHITE));
 
         // ── Labels ──────────────────────────────────────────────────────────
         let font = egui::FontId::proportional(11.0);
@@ -872,12 +875,12 @@ impl CanvasState {
                 painter.circle_stroke(
                     ptr,
                     r_screen,
-                    egui::Stroke::new(1.5, Color32::from_white_alpha(200)),
+                    egui::Stroke::new(1.5_f32, Color32::from_white_alpha(200)),
                 );
                 painter.circle_stroke(
                     ptr,
                     r_screen,
-                    egui::Stroke::new(0.5, Color32::from_black_alpha(120)),
+                    egui::Stroke::new(0.5_f32, Color32::from_black_alpha(120)),
                 );
             }
 
@@ -986,7 +989,7 @@ impl CanvasState {
                 painter.arrow(
                     src_screen,
                     dst_screen - src_screen,
-                    egui::Stroke::new(1.0, Color32::from_white_alpha(180)),
+                    egui::Stroke::new(1.0_f32, Color32::from_white_alpha(180)),
                 );
 
                 // Source circle (green)
@@ -994,7 +997,7 @@ impl CanvasState {
                     src_screen,
                     r_screen,
                     egui::Stroke::new(
-                        if hovered_src { 3.0 } else { 1.5 },
+                        if hovered_src { 3.0_f32 } else { 1.5_f32 },
                         Color32::from_rgb(80, 200, 80),
                     ),
                 );
@@ -1005,7 +1008,7 @@ impl CanvasState {
                     dst_screen,
                     r_screen,
                     egui::Stroke::new(
-                        if hovered_dst { 3.0 } else { 1.5 },
+                        if hovered_dst { 3.0_f32 } else { 1.5_f32 },
                         Color32::from_rgb(220, 60, 60),
                     ),
                 );
@@ -1085,11 +1088,11 @@ impl CanvasState {
                 let y = img_rect.min.y + img_rect.height() * t;
                 clipped.line_segment(
                     [Pos2::new(x, img_rect.min.y), Pos2::new(x, img_rect.max.y)],
-                    Stroke::new(0.5, Color32::from_white_alpha(60)),
+                    Stroke::new(0.5_f32, Color32::from_white_alpha(60)),
                 );
                 clipped.line_segment(
                     [Pos2::new(img_rect.min.x, y), Pos2::new(img_rect.max.x, y)],
-                    Stroke::new(0.5, Color32::from_white_alpha(60)),
+                    Stroke::new(0.5_f32, Color32::from_white_alpha(60)),
                 );
             }
 
@@ -1098,13 +1101,16 @@ impl CanvasState {
                 let s0 = image_to_screen(p0, image_tl, self.zoom);
                 let s1 = image_to_screen(p1, image_tl, self.zoom);
                 // Shadow
-                painter.line_segment([s0, s1], Stroke::new(2.5, Color32::from_black_alpha(100)));
+                painter.line_segment(
+                    [s0, s1],
+                    Stroke::new(2.5_f32, Color32::from_black_alpha(100)),
+                );
                 // Main line
-                painter.line_segment([s0, s1], Stroke::new(1.5, Color32::WHITE));
+                painter.line_segment([s0, s1], Stroke::new(1.5_f32, Color32::WHITE));
                 // Endpoints
                 for &ep in &[s0, s1] {
                     painter.circle_filled(ep, 6.0, Color32::from_black_alpha(100));
-                    painter.circle_stroke(ep, 6.0, Stroke::new(1.5, Color32::WHITE));
+                    painter.circle_stroke(ep, 6.0, Stroke::new(1.5_f32, Color32::WHITE));
                 }
                 // Angle label near midpoint
                 let mid = Pos2::new((s0.x + s1.x) / 2.0, (s0.y + s1.y) / 2.0 - 14.0);
@@ -1270,7 +1276,7 @@ impl CanvasState {
         if state.prefs.is_tool_open("perspective") {
             let img_rect = Rect::from_min_size(image_tl, display_size);
             let clipped = painter.with_clip_rect(img_rect);
-            let grid_stroke = Stroke::new(0.5, Color32::from_white_alpha(70));
+            let grid_stroke = Stroke::new(0.5_f32, Color32::from_white_alpha(70));
             let persp = state.tools.find::<PerspectiveTool>().unwrap();
             let cols = persp.grid_cols.max(1) as f32;
             let rows = persp.grid_rows.max(1) as f32;
@@ -1498,7 +1504,7 @@ fn draw_crop_handles(painter: &egui::Painter, rect: Rect) {
         painter.rect_stroke(
             handle,
             1.0,
-            Stroke::new(1.0, Color32::from_black_alpha(200)),
+            Stroke::new(1.0_f32, Color32::from_black_alpha(200)),
             egui::StrokeKind::Middle,
         );
     }
@@ -1581,7 +1587,7 @@ fn draw_marching_ants(painter: &egui::Painter, rect: Rect, time: f32) {
     painter.rect_stroke(
         rect,
         0.0,
-        Stroke::new(2.0, Color32::WHITE),
+        Stroke::new(2.0_f32, Color32::WHITE),
         egui::StrokeKind::Middle,
     );
 
@@ -1596,7 +1602,7 @@ fn draw_marching_ants(painter: &egui::Painter, rect: Rect, time: f32) {
             painter,
             corners[i],
             corners[(i + 1) % 4],
-            Stroke::new(1.0, Color32::BLACK),
+            Stroke::new(1.0_f32, Color32::BLACK),
             DASH,
             GAP,
             offset,
@@ -1695,15 +1701,15 @@ fn draw_linear_mask_handles(
     let a_s = norm_to_screen(a_norm, image_tl, display_size);
     let b_s = norm_to_screen(b_norm, image_tl, display_size);
 
-    let shadow = Stroke::new(3.0, Color32::from_black_alpha(160));
-    let white = Stroke::new(1.5, Color32::WHITE);
+    let shadow = Stroke::new(3.0_f32, Color32::from_black_alpha(160));
+    let white = Stroke::new(1.5_f32, Color32::WHITE);
 
     painter.line_segment([a_s, b_s], shadow);
     painter.line_segment([a_s, b_s], white);
 
     for &pt in &[a_s, center_s, b_s] {
         painter.circle_filled(pt, 6.0, Color32::from_black_alpha(160));
-        painter.circle_stroke(pt, 6.0, Stroke::new(1.5, Color32::WHITE));
+        painter.circle_stroke(pt, 6.0, Stroke::new(1.5_f32, Color32::WHITE));
     }
 }
 
@@ -1728,9 +1734,15 @@ fn draw_radial_mask_handles(
         center_s,
         rx,
         ry,
-        Stroke::new(3.0, Color32::from_black_alpha(160)),
+        Stroke::new(3.0_f32, Color32::from_black_alpha(160)),
     );
-    draw_ellipse_stroke(&painter, center_s, rx, ry, Stroke::new(1.5, Color32::WHITE));
+    draw_ellipse_stroke(
+        &painter,
+        center_s,
+        rx,
+        ry,
+        Stroke::new(1.5_f32, Color32::WHITE),
+    );
 
     // Crosshair at centre.
     let arm = 8.0_f32;
@@ -1739,17 +1751,17 @@ fn draw_radial_mask_handles(
             center_s - Vec2::new(arm, 0.0),
             center_s + Vec2::new(arm, 0.0),
         ],
-        Stroke::new(1.5, Color32::WHITE),
+        Stroke::new(1.5_f32, Color32::WHITE),
     );
     painter.line_segment(
         [
             center_s - Vec2::new(0.0, arm),
             center_s + Vec2::new(0.0, arm),
         ],
-        Stroke::new(1.5, Color32::WHITE),
+        Stroke::new(1.5_f32, Color32::WHITE),
     );
     painter.circle_filled(center_s, 4.0, Color32::from_black_alpha(160));
-    painter.circle_stroke(center_s, 4.0, Stroke::new(1.5, Color32::WHITE));
+    painter.circle_stroke(center_s, 4.0, Stroke::new(1.5_f32, Color32::WHITE));
 }
 
 /// Approximate an ellipse with line segments.

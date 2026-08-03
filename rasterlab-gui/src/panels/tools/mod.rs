@@ -75,7 +75,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     // Edit-session banner
     if let Some(session) = state.editing {
         let frame = egui::Frame::group(ui.style())
-            .stroke(Stroke::new(2.0, Color32::from_rgb(90, 160, 255)))
+            .stroke(Stroke::new(2.0_f32, Color32::from_rgb(90, 160, 255)))
             .fill(Color32::from_rgb(20, 35, 60));
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {

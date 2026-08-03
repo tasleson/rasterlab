@@ -52,11 +52,11 @@ impl Tool for CurvesTool {
             let grid_col = Color32::from_gray(50);
             painter.line_segment(
                 [Pos2::new(gx, rect.min.y), Pos2::new(gx, rect.max.y)],
-                Stroke::new(1.0, grid_col),
+                Stroke::new(1.0_f32, grid_col),
             );
             painter.line_segment(
                 [Pos2::new(rect.min.x, gy), Pos2::new(rect.max.x, gy)],
-                Stroke::new(1.0, grid_col),
+                Stroke::new(1.0_f32, grid_col),
             );
         }
         // Identity diagonal.
@@ -65,7 +65,7 @@ impl Tool for CurvesTool {
                 Pos2::new(rect.min.x, rect.max.y),
                 Pos2::new(rect.max.x, rect.min.y),
             ],
-            Stroke::new(1.0, Color32::from_gray(60)),
+            Stroke::new(1.0_f32, Color32::from_gray(60)),
         );
 
         // Build and draw the curve.
@@ -77,7 +77,7 @@ impl Tool for CurvesTool {
                 let cy = rect.max.y - (y_val as f32 / 255.0) * h;
                 let pos = Pos2::new(cx, cy);
                 if let Some(p) = prev {
-                    painter.line_segment([p, pos], Stroke::new(1.5, Color32::WHITE));
+                    painter.line_segment([p, pos], Stroke::new(1.5_f32, Color32::WHITE));
                 }
                 prev = Some(pos);
             }
@@ -94,7 +94,11 @@ impl Tool for CurvesTool {
                 Color32::WHITE
             };
             painter.circle_filled(Pos2::new(sx, sy), PT_R, col);
-            painter.circle_stroke(Pos2::new(sx, sy), PT_R, Stroke::new(1.0, Color32::BLACK));
+            painter.circle_stroke(
+                Pos2::new(sx, sy),
+                PT_R,
+                Stroke::new(1.0_f32, Color32::BLACK),
+            );
         }
 
         // Interaction.

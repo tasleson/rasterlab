@@ -770,7 +770,10 @@ fn validation_popup(
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
                 .fill(egui::Color32::from_rgb(48, 18, 18))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 80, 80)))
+                .stroke(egui::Stroke::new(
+                    1.0_f32,
+                    egui::Color32::from_rgb(200, 80, 80),
+                ))
                 .show(ui, |ui| {
                     ui.colored_label(egui::Color32::from_rgb(255, 170, 170), format!("⚠ {msg}"));
                 });
