@@ -105,6 +105,12 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, _has_image: bool) {
                         ui.end_row();
                     });
             }
+
+            ui.separator();
+            if crate::panels::export_border::options_ui(ui, &mut state.tools.export_border) {
+                state.prefs.export_border = state.tools.export_border.clone();
+                state.prefs.save();
+            }
         });
     if resp.header_response.clicked() {
         state

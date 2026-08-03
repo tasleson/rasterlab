@@ -50,6 +50,7 @@ pub struct ToolState {
     pub export_resize_w: u32,
     pub export_resize_h: u32,
     pub export_resize_mode: ResampleMode,
+    pub export_border: crate::panels::export_border::ExportBorderOptions,
 
     // ── Library batch export dialog ───────────────────────────────────────
     pub export_dialog: crate::panels::export_dialog::ExportDialogState,
@@ -80,6 +81,7 @@ impl ToolState {
             export_resize_w: 0,
             export_resize_h: 0,
             export_resize_mode: ResampleMode::Bicubic,
+            export_border: crate::panels::export_border::ExportBorderOptions::default(),
             export_dialog: crate::panels::export_dialog::ExportDialogState::default(),
             pending_dialog: None,
         }

@@ -214,6 +214,7 @@ impl Operation for ResizeOp {
         let x_ratio = image.width as f32 / self.width as f32;
         let y_ratio = image.height as f32 / self.height as f32;
         let mode = self.mode;
+        let metadata = image.metadata.clone();
 
         let mut out = Image::new(self.width, self.height);
 
@@ -239,6 +240,8 @@ impl Operation for ResizeOp {
                     row[off + 3] = p[3];
                 }
             });
+
+        out.metadata = metadata;
 
         Ok(out)
     }
@@ -279,6 +282,24 @@ mod tests {
             let out = ResizeOp::new(16, 16, mode).apply(src.deep_clone()).unwrap();
             assert_eq!(out.data, src.data, "identity failed for {:?}", mode);
         }
+    }
+
+    #[test]
+    fn resize_preserves_camera_metadata() {
+        let mut src = solid(100, 150, 200, 16, 16);
+        src.metadata.iso = Some(400);
+        src.metadata.aperture = Some(2.8);
+        src.metadata.focal_length = Some(50.0);
+        src.metadata.shutter_speed = Some("1/250 s".into());
+
+        let out = ResizeOp::new(8, 8, ResampleMode::Bicubic)
+            .apply(src)
+            .unwrap();
+
+        assert_eq!(out.metadata.iso, Some(400));
+        assert_eq!(out.metadata.aperture, Some(2.8));
+        assert_eq!(out.metadata.focal_length, Some(50.0));
+        assert_eq!(out.metadata.shutter_speed.as_deref(), Some("1/250 s"));
     }
 
     #[test]

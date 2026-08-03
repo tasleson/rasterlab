@@ -8,6 +8,7 @@ use rasterlab_core::{
     project::RlabFile,
 };
 
+use crate::panels::export_border::ExportBorderOptions;
 use crate::state::AppState;
 
 // ── Export dialog state ───────────────────────────────────────────────────────
@@ -67,6 +68,14 @@ pub enum ExportFormat {
     /// Verbatim copy of the original imported bytes, with filesystem
     /// timestamps restored to their values at import time.
     Original,
+}
+
+#[derive(Debug, Clone)]
+struct ExportSettings {
+    format: ExportFormat,
+    jpeg_quality: u8,
+    size_constraint: Option<SizeConstraint>,
+    border: ExportBorderOptions,
 }
 
 impl ExportFormat {
@@ -134,6 +143,7 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
     let mut do_export = false;
     let mut do_close = false;
     let mut browse_requested = false;
+    let mut border_changed = false;
 
     egui::Window::new(format!("Export {} Photos", selected_count))
         .collapsible(false)
@@ -141,7 +151,9 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .open(&mut open)
         .show(ctx, |ui| {
-            let export = &mut state.tools.export_dialog;
+            let tools = &mut state.tools;
+            let export = &mut tools.export_dialog;
+            let border = &mut tools.export_border;
 
             egui::Grid::new("export_grid")
                 .num_columns(2)
@@ -255,6 +267,11 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                     }
                 });
 
+            if export.format != ExportFormat::Original {
+                ui.separator();
+                border_changed |= crate::panels::export_border::options_ui(ui, border);
+            }
+
             ui.add_space(8.0);
 
             if let Some((done, total)) = export.progress {
@@ -295,6 +312,11 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
             });
         });
 
+    if border_changed {
+        state.prefs.export_border = state.tools.export_border.clone();
+        state.prefs.save();
+    }
+
     if do_export {
         start_export(state);
     }
@@ -322,10 +344,13 @@ fn start_export(state: &mut AppState) {
         .collect();
 
     let export = &state.tools.export_dialog;
-    let format = export.format;
-    let quality = export.jpeg_quality;
-    let size_constraint = export.size_constraint;
     let dest_dir = export.dest_dir.clone();
+    let settings = ExportSettings {
+        format: export.format,
+        jpeg_quality: export.jpeg_quality,
+        size_constraint: export.size_constraint,
+        border: state.tools.export_border.clone(),
+    };
     let shared = Arc::clone(&export.shared);
 
     let total = photos.len();
@@ -348,15 +373,8 @@ fn start_export(state: &mut AppState) {
             let registry = FormatRegistry::with_builtins();
             for photo in &photos {
                 let rlab_path = lib.rlab_path(&photo.hash);
-                if let Err(e) = export_one(
-                    &rlab_path,
-                    &dest_dir,
-                    &registry,
-                    format,
-                    quality,
-                    size_constraint,
-                    &photo.hash,
-                ) {
+                if let Err(e) = export_one(&rlab_path, &dest_dir, &registry, &settings, &photo.hash)
+                {
                     eprintln!("export error {}: {e}", photo.hash);
                     if let Ok(mut s) = shared.lock() {
                         s.errors.push(format!("{}: {e}", photo.hash));
@@ -377,20 +395,21 @@ fn export_one(
     rlab_path: &std::path::Path,
     dest_dir: &std::path::Path,
     registry: &FormatRegistry,
-    format: ExportFormat,
-    quality: u8,
-    size_constraint: Option<SizeConstraint>,
+    settings: &ExportSettings,
     hash: &str,
 ) -> anyhow::Result<()> {
     let rlab = RlabFile::read(rlab_path)?;
 
     // ── Original export: write the verbatim ORIG bytes and restore mtime/atime. ──
-    if format == ExportFormat::Original {
+    if settings.format == ExportFormat::Original {
         return export_original(rlab_path, dest_dir, &rlab, hash);
     }
 
     let hint = rlab.meta.source_path.as_deref().map(std::path::Path::new);
     let source = registry.decode_bytes(&rlab.original_bytes, hint)?;
+    // Exposure captions always describe the original capture, independent of
+    // which operations the active virtual copy applies.
+    let source_metadata = source.metadata.clone();
 
     // Apply active virtual copy pipeline
     use rasterlab_core::pipeline::EditPipeline;
@@ -417,7 +436,7 @@ fn export_one(
     });
 
     // Resize if requested
-    if let Some(constraint) = size_constraint {
+    if let Some(constraint) = settings.size_constraint {
         let (nw, nh) = match constraint {
             SizeConstraint::LongSide(max) => {
                 if image.width <= max && image.height <= max {
@@ -451,16 +470,24 @@ fn export_one(
         }
     }
 
+    if settings.border.enabled {
+        image = crate::panels::export_border::apply_export_border(
+            &image,
+            &source_metadata,
+            &settings.border,
+        )?;
+    }
+
     // Encode — derive output name from the original import name, not the hash.
     let orig_name = original_filename_for(&rlab, rlab_path, hash);
     let stem = Path::new(&orig_name)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(hash);
-    let filename = format!("{}.{}", stem, format.ext());
+    let filename = format!("{}.{}", stem, settings.format.ext());
     let dest = unique_dest_path(dest_dir, &filename);
     let opts = rasterlab_core::traits::format_handler::EncodeOptions {
-        jpeg_quality: quality,
+        jpeg_quality: settings.jpeg_quality,
         png_compression: 6,
         preserve_metadata: false,
     };

@@ -441,6 +441,7 @@ impl AppState {
         tools.encode_opts.jpeg_quality = prefs.jpeg_quality;
         tools.encode_opts.png_compression = prefs.png_compression;
         tools.encode_opts.preserve_metadata = prefs.preserve_metadata;
+        tools.export_border = prefs.export_border.clone();
         let initial_thumb_scale = prefs.library_thumb_scale;
         Self {
             prefs,
@@ -945,6 +946,10 @@ impl AppState {
             self.status = "Nothing to save — render first".into();
             return;
         };
+        // Captions describe the source exposure. Read them from the immutable
+        // pipeline source rather than trusting every pixel operation to carry
+        // EXIF through its output buffer.
+        let source_metadata = self.image_metadata().cloned().unwrap_or_default();
 
         // Optionally resize before encoding.
         let resized_buf;
@@ -971,9 +976,29 @@ impl AppState {
             rendered.as_ref()
         };
 
+        let bordered_buf;
+        let to_encode = if self.tools.export_border.enabled {
+            match crate::panels::export_border::apply_export_border(
+                to_save,
+                &source_metadata,
+                &self.tools.export_border,
+            ) {
+                Ok(image) => {
+                    bordered_buf = image;
+                    &bordered_buf
+                }
+                Err(e) => {
+                    self.status = format!("Export border failed: {e}");
+                    return;
+                }
+            }
+        } else {
+            to_save
+        };
+
         match self
             .registry
-            .encode_file(to_save, &path, &self.tools.encode_opts)
+            .encode_file(to_encode, &path, &self.tools.encode_opts)
         {
             Ok(bytes) => {
                 if let Err(e) = std::fs::write(&path, &bytes) {

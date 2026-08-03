@@ -3877,11 +3877,13 @@ dependencies = [
 name = "rasterlab-gui"
 version = "0.3.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "dirs 5.0.1",
  "eframe",
  "egui",
  "egui-file-dialog",
+ "epaint_default_fonts",
  "filetime",
  "image",
  "rasterlab-core",

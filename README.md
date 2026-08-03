@@ -22,6 +22,7 @@ See change log below for status.
 - **Parallelized ops** via rayon — crop, rotate, sharpen, levels, and B&W all use parallel pixel/row iteration
 - **Undo/redo** — with cache-aware shortcuts so undo is often instant
 - **Histogram** — per-channel R/G/B + luma, computed in the render thread
+- **Presentation borders on export** — add a black gallery-style frame with custom text and optional focal length, ISO, f-stop, and shutter speed from each image's EXIF data
 - **Arbitrary rotation** — with bilinear interpolation, the slow one
 - **Plugin API** — because why not
 - **Tamper-evident `.rlab` project format** — chunked binary container that stores the original source bytes verbatim alongside every virtual copy's edit stack, pipeline state, metadata, and an optional thumbnail. Every chunk carries a Blake3 hash and the whole file is sealed with a trailing Blake3 hash, so any mutation is detected on open.
