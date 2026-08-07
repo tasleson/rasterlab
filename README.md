@@ -1,404 +1,230 @@
-<img width="1408" height="768" alt="vibe_this" src="https://github.com/user-attachments/assets/bcf3af6b-4982-4dad-b460-99cca597660a" />
+<img width="1408" height="768" alt="RasterLab editor" src="https://github.com/user-attachments/assets/bcf3af6b-4982-4dad-b460-99cca597660a" />
 
 # RasterLab
 
-RasterLab began as a one-month AI-assisted development experiment, but development has continued beyond that original scope. See the [README from the one-month milestone](docs/README-2026-04-23.md) for the project as it stood on April 23, 2026.
+RasterLab is a cross-platform, non-destructive photo editor and photo library written in Rust. It can open JPEG, PNG, and many camera RAW formats; build an editable operation stack; manage virtual copies; and export rendered JPEG or PNG files without changing the imported source image.
 
-> *How good of an image editor can you build with $20 worth of Claude Code Pro subscription?[2]*
+RasterLab began as a one-month AI-assisted development experiment and has continued beyond that original scope. The [one-month milestone README](docs/README-2026-04-23.md) preserves the project description as it stood on April 23, 2026. Current changes are tracked through releases rather than in this README.
 
-We're here to find out!  ~This is still a work in progress!~  **This is a wrap, 1 month & $20US**.
+> [!WARNING]
+> RasterLab is experimental, pre-release software. Keep independent backups of important images and libraries. The recovery features described below reduce several corruption and accident risks, but they are not a replacement for a tested backup.
 
-**Note:  This is alpha software at best, treat it as such"**
+## Highlights
 
-## What is this?
+- Non-destructive, ordered edit stacks with editable operations, per-operation enable/disable controls, undo/redo, and virtual copies.
+- Background rendering with intermediate-result caching and generation checks that discard stale render results.
+- Quarter-scale live previews for interactive tools, followed by full-resolution rendering.
+- CPU parallelism through Rayon and optional `wgpu` acceleration for supported operations, with CPU execution for the rest.
+- Per-channel RGB and luma histograms, before/after split view, interactive crop, heal, and straighten overlays.
+- JPEG, PNG, and broad camera RAW input; JPEG and PNG rendered export; EXIF preservation or removal on export.
+- Export resizing and presentation borders with custom text and optional EXIF-derived camera settings.
+- A managed photo library with thumbnails, collections, import sessions, search/filtering, metadata editing, duplicate detection, and batch export.
+- A C-ABI plugin API and an example plugin.
 
-RasterLab is a non-destructive RAW image editor written in Rust, built almost entirely by Claude Code as an experiment in AI-assisted software development. It has a real-time preview pipeline, intermediate result caching, parallelized image processing, undo/redo, a histogram panel, and support for JPEG, PNG, and a broad range of camera RAW formats (Nikon NEF/NRW, Canon CR2/CR3, Sony ARW, Fujifilm RAF, Panasonic RW2, Olympus ORF, Pentax PEF, Adobe DNG, and more).
+## Current limitations
 
-See change log below for status.
+- **Adaptive Enhance needs more work.** It is an experimental analysis-driven tool whose correction choices and regional adjustments still need tuning. Treat its output as a starting point and inspect the individual operations it adds to the edit stack.
+- Camera RAW support depends on `rawler`; support can vary by camera model and file variant even when the extension is recognized.
+- Non-Local Means noise reduction and some geometric or multi-image operations can be slow on large inputs.
+- The plugin interface exists and an example plugin is included, but the third-party plugin ecosystem is not established.
 
-## Features
+## Supported files
 
-- **Non-destructive editing pipeline** — operations stack on top of the original, nothing is ever overwritten
-- **Intermediate result caching** — changing the last op in a 10-op stack doesn't re-run the first 9
-- **Downsampled live preview** — slider feedback renders at 25% resolution (~16× faster) while a full-res render queues behind it
-- **Parallelized ops** via rayon — crop, rotate, sharpen, levels, and B&W all use parallel pixel/row iteration
-- **Undo/redo** — with cache-aware shortcuts so undo is often instant
-- **Histogram** — per-channel R/G/B + luma, computed in the render thread
-- **Presentation borders on export** — add a black gallery-style frame with custom text and optional focal length, ISO, f-stop, and shutter speed from each image's EXIF data
-- **Arbitrary rotation** — with bilinear interpolation, the slow one
-- **Plugin API** — because why not
-- **Tamper-evident `.rlab` project format** — chunked binary container that stores the original source bytes verbatim alongside every virtual copy's edit stack, pipeline state, metadata, and an optional thumbnail. Every chunk carries a Blake3 hash and the whole file is sealed with a trailing Blake3 hash, so any mutation is detected on open.
-- **Bitrot recovery on `.rlab`** — a Reed–Solomon parity chunk (`RECC`) protects the project's content chunks, with a Blake3 hash per shard so damage is pinpointed to a shard rather than a whole chunk. The parity ratio adapts to file size (~10% for small projects, ~20% for large ones) and is written twice, so corruption inside the parity region is itself survivable. `verify_and_repair` reconstructs anything within that budget (`cargo run --example rlab_verify`), including bytes truncated from either end: v5 files anchor one parity copy at each end of the content, so a cut from one direction leaves the other copy intact, and the parity finds itself by signature scan rather than by walking the chunk chain a corrupt length field could break. Sectors the drive can no longer read are isolated and read around rather than aborting the load, so a latent sector error — the most common disk fault, and one that surfaces as an I/O error rather than as bad bytes — costs only the shards it landed in. Saves are read back and compared before they are reported as successful: the digests are computed in memory, so a write path that corrupts in transit would otherwise produce a self-consistent, wrong file that nothing could detect until much later.
+| Purpose | Formats |
+|---|---|
+| Open/import | JPEG, PNG, and camera RAW |
+| Recognized RAW extensions | `3fr`, `arw`, `cr2`, `cr3`, `dng`, `erf`, `iiq`, `nef`, `nrw`, `orf`, `pef`, `raf`, `raw`, `rw2`, `sr2`, `srf`, `srw` |
+| Rendered export | JPEG and PNG |
+| Native project | `.rlab` |
+| Library export | Rendered JPEG/PNG or the verbatim imported original |
+
+RAW files are decoded to an editable sRGB image. RasterLab retains the original file bytes in a saved `.rlab` project or managed library item; it does not write changes back into a RAW file.
 
 ## Supported operations
 
-| Op | What it does |
-|---|---|
-| Auto Enhance | One-click levels stretch + saturation boost + mild sharpen |
-| Adaptive Enhance | Analyses the image first (colour cast, tone, chroma, sharpness), then applies only the corrections it needs, with per-image values. Also reads the frame region by region, so a scan border is measured around and an unevenly-lit frame gets local tone |
-| Old Photo Restore | The same analysis measured over the whole frame only, without the regional judgements — tuned for faded prints and scans |
-| **Looks** | |
-| Classic B&W | Channel-mixed B&W conversion with brightness lift and vignette |
-| 35mm Sprocket Panorama | Placeable fixed 2:1 crop styled as a borderless full-width 35mm negative, preserving the exposed image around sprocket holes while adding a selectable current film stock and randomized frame markings |
-| | |
-| **——————————————** | **——————————————————————————————————————————** |
-| | |
-| Black & White | Luminance, average, perceptual, or channel mixer with presets |
-| Blur | Gaussian blur with configurable radius |
-| Brightness / Contrast | Linear brightness and contrast adjustment |
-| Clarity / Texture | Local contrast at midtone (clarity) and fine-detail (texture) spatial scales |
-| Color Balance | Cyan↔Red, Magenta↔Green, Yellow↔Blue per shadows/midtones/highlights |
-| Color Space | sRGB ↔ Display P3 conversion |
-| Crop | Axis-aligned crop with aspect-ratio presets (3:2, 4:3, 1:1, 16:9, 9:16, custom) |
-| Curves | Interactive curve editor with draggable control points |
-| Denoise | Bilateral filter noise reduction |
-| Faux HDR | Exposure fusion from ±1 stop virtual brackets |
-| Flip | Horizontal or vertical mirror |
-| Focus Stack | Fuse multiple frames at different focus distances into one all-in-focus image (Sum-Modified-Laplacian focus measure) |
-| Grain | Film grain with configurable strength and size |
-| HDR Merge | Fuse 2+ bracketed exposures into a single image with extended dynamic range; auto exposure estimation, Debevec-style radiance merge, Reinhard tone map |
-| Heal | Content-aware spot heal / clone stamp; auto-detects source patch |
-| Highlights / Shadows | Independent highlight and shadow recovery |
-| HSL Panel | Per-hue-band hue, saturation, and luminance (8 bands: Reds … Magentas) |
-| Hue Shift | Global hue rotation in degrees |
-| Levels | Black/mid/white point with LUT-based remapping |
-| Local Adjustments | Linear or radial gradient mask applied to any op |
-| Local Tone | Edge-aware local Laplacian filtering: compresses large-scale contrast (backlit scenes) while preserving or boosting texture |
-| LUT / Color Grading | Apply a .cube 3D LUT with blend strength |
-| Noise Reduction | Wavelet (fast) or Non-Local Means (quality); independent luma/chroma strength |
-| Panorama | Stitch multiple images; Harris corners + normalised-patch matching + RANSAC homography + feather blend |
-| Perspective | Four-corner keystone/perspective correction |
-| Resize | Nearest-neighbour, bilinear, or bicubic resampling |
-| Rotate / Straighten | 90°/180°/270° lossless; arbitrary angle with bilinear interp; horizon-line straighten with auto-crop |
-| Saturation | Global saturation multiplier |
-| Sepia | Sepia tone with adjustable strength |
-| Shadow Exposure | Lift or crush shadows with an EV-stops gain in linear light, highlights untouched |
-| Sharpen | Unsharp mask convolution |
-| Split Tone | Shadow / highlight tinting with independent hue, saturation, and balance |
-| Vibrance | Saturation boost that protects already-saturated colours |
-| Vignette | Radial darkening with strength, radius, and feather controls |
-| White Balance | Temperature and tint sliders |
+### One-click actions and looks
 
-## Building
+| Action | What it does | Status |
+|---|---|---|
+| Auto Enhance | Applies a histogram-based levels stretch, a small saturation boost, and mild sharpening as separate editable operations. | Available |
+| Adaptive Enhance | Analyzes color cast, tone, chroma, sharpness, borders, and regional lighting, then adds the corrections it selects as editable operations. | **Experimental; needs more work** |
+| Old Photo Restore | Uses the global analysis path, without Adaptive Enhance's regional decisions, to propose color, tone, saturation, and sharpness corrections for faded prints and scans. | Available |
+| Classic B&W | Applies a channel-mixed monochrome conversion, a brightness/contrast adjustment, and a vignette. | Available |
+| 35mm Sprocket Panorama | Applies a positionable 2:1 crop and a 35 mm film-frame treatment with selectable film stock and randomized markings. | Available |
+
+### Editing tools
+
+The table follows the tool order in the GUI.
+
+| Tool | What it does |
+|---|---|
+| Airplane Window | Reduces aircraft-window color cast, haze, and reflections with an overall strength control. |
+| Black & White | Converts with luminance, average, perceptual, or channel-mixer modes and presets. |
+| Blur | Applies a Gaussian blur with a configurable radius. |
+| Brightness / Contrast | Adjusts linear brightness and contrast. |
+| Clarity / Texture | Adjusts local contrast at midtone and fine-detail spatial scales. |
+| Color Balance | Shifts cyan/red, magenta/green, and yellow/blue independently in shadows, midtones, and highlights. |
+| Color Space | Converts pixel values between sRGB and Display P3. |
+| Crop | Crops interactively or by coordinates, with free, 3:2, 4:3, 1:1, 16:9, 9:16, and custom aspect ratios. |
+| Curves | Applies an interactive tone curve with draggable control points. |
+| Denoise | Applies a bilateral filter with configurable strength and radius. |
+| Faux HDR | Builds virtual ±1 EV brackets from one image and exposure-fuses them. |
+| Focus Stack | Fuses multiple focus-bracketed images using a Sum-Modified-Laplacian focus measure. |
+| Grain | Adds configurable film grain. |
+| HDR Merge | Merges two or more bracketed exposures using exposure estimation, radiance merging, and Reinhard tone mapping. |
+| Heal | Performs spot healing with an automatically selected source patch or a clone source. |
+| Highlights / Shadows | Adjusts highlight and shadow regions independently. |
+| HSL Panel | Adjusts hue, saturation, and luminance in eight color bands. |
+| Hue Shift | Rotates hue globally. |
+| Levels | Sets black, mid, and white points with LUT-based remapping. |
+| Local Tone | Uses edge-aware local Laplacian filtering to compress large-scale contrast while retaining or boosting texture. |
+| LUT / Color Grading | Applies a `.cube` 3D LUT with adjustable blend strength. |
+| Noise Reduction | Provides wavelet and Non-Local Means methods with separate luminance, color, and detail controls. |
+| Panorama | Stitches multiple images using feature matching, RANSAC homography estimation, and feather blending. |
+| Perspective | Applies four-corner keystone and perspective correction. |
+| Resize | Resamples with nearest-neighbor, bilinear, or bicubic interpolation. |
+| Rotate | Rotates by right angles or an arbitrary angle, optionally crops the result, and provides horizontal/vertical flip controls. |
+| Saturation | Applies a global saturation multiplier. |
+| Sepia | Adds a sepia tone with adjustable strength. |
+| Shadow Exposure | Changes shadow exposure in EV while leaving highlights substantially untouched. |
+| Sharpen | Applies unsharp-mask sharpening. |
+| Split Tone | Tints shadows and highlights with independent hue/saturation and a balance control. |
+| Straighten | Rotates by a numeric angle or draggable horizon line, with optional crop-to-rectangle. |
+| Vibrance | Boosts lower-saturation colors while protecting colors that are already saturated. |
+| Vignette | Applies radial darkening with strength, radius, and feather controls. |
+| White Balance | Adjusts temperature and tint. |
+
+A linear or radial gradient mask can wrap the next applied operation. Multi-image tools such as Focus Stack, HDR Merge, and Panorama prompt for additional source files and add their result to the same non-destructive pipeline.
+
+## Protecting images and projects
+
+RasterLab uses several independent mechanisms because no single checksum, undo stack, or filesystem flag covers every way work can be lost.
+
+### Non-destructive editing and recovery from user mistakes
+
+- Editing operations are stored as parameters in a pipeline; the source pixels are not overwritten.
+- A `.rlab` file embeds the original source-file bytes verbatim, plus every virtual copy's pipeline and undo cursor. Library export can write those original bytes back out with the original filename and recorded timestamps.
+- Undo/redo, operation enable/disable controls, editable stack entries, and virtual copies make edits reversible without duplicating the source image.
+- Pipeline state is autosaved after changes. Previous unsaved sessions can be restored from **File > Previously Unsaved Work**.
+- Opening another file or library photo while edits are unsaved requires confirmation.
+- Library deletion requires confirmation and moves files to the operating system's trash rather than permanently deleting them.
+- A library photo can be marked **Protected**. RasterLab then excludes it from deletion and applies a best-effort read-only/immutable filesystem lock. The OS-level lock is an extra accident barrier, not a security boundary.
+
+### Detecting corruption in `.rlab` files
+
+New editor projects and library items are written as `.rlab` format v5. The format is a chunked container holding project metadata, the verbatim original, virtual-copy edit stacks, an optional preview, and optional library metadata.
+
+- Every chunk has a BLAKE3 digest, so damage can be associated with a specific chunk.
+- A trailing BLAKE3 digest covers the complete container, including chunk framing and parity data.
+- The recovery data stores a BLAKE3 digest for each data shard. This lets repair identify the damaged shards instead of discarding an entire large chunk because one byte changed.
+- These hashes detect accidental changes. They are not a signature or authentication mechanism: someone deliberately modifying a file can recompute unkeyed hashes.
+
+### Repairing bit rot and unreadable sectors
+
+Each v5 file contains Reed–Solomon recovery data in two `RECC` chunks, one before and one after the protected content.
+
+- Files that fit in 4 KiB data shards target roughly 10% parity, with a minimum of one parity shard. Larger files use larger shards and target roughly 20% parity. The parity set is stored twice so damage to one recovery copy does not necessarily remove the ability to repair the content.
+- The two copies bracket the content. If bytes are truncated from either end, the surviving copy records the protected length and alignment needed to treat the missing part as erased shards.
+- Recovery locates `RECC` candidates by scanning for their signatures and validating them, rather than trusting the ordinary chunk chain. A damaged chunk-length field therefore cannot by itself hide all recovery data.
+- A degraded reader retries failed bulk reads in 4 KiB blocks, zero-fills only unreadable regions, and passes those regions to Reed–Solomon as erasures. One unreadable disk sector need not make the whole project unreadable.
+- Repair succeeds only while the number of damaged data shards is within the parity-shard budget. The percentage is an approximate shard budget, not a guarantee that the same percentage of arbitrary byte damage can always be recovered.
+
+### Verifying saves and scrubbing a library
+
+- A v5 save is flushed with `fsync`, read back, and compared byte-for-byte with the in-memory file before RasterLab reports success. Cache-bypass/eviction requests are advisory on platforms that support them, so the exact storage layer exercised by the read-back is OS-dependent.
+- **File > Start Integrity Scrub** verifies every `.rlab` in the open library. It leaves clean v5 files alone, upgrades clean v3/v4 files to v5, and repairs correctable damage.
+- Before a scrub replaces a damaged file, it copies the damaged original into the library's `recovered/` tree. The repaired temporary file is then renamed over the live file on the same filesystem.
+- Library files are addressed by the BLAKE3 hash of their embedded original bytes. A scrub also compares that identity with the file's name and directory, detecting a valid but misplaced or misdirected file that internal checksums alone would accept.
+- The Stoolap database is an index, not the only copy of library metadata. Ratings, flags, labels, captions, keywords, collections, EXIF snapshots, and edit state are embedded in `.rlab` files, allowing **File > Rebuild Library Index** to reconstruct the catalog.
+
+To verify an individual project from the source tree:
+
+```sh
+cargo run --release -p rasterlab-core --example rlab_verify -- photo.rlab
+```
+
+Write recovery to a separate file so the damaged input remains available:
+
+```sh
+cargo run --release -p rasterlab-core --example rlab_verify -- \
+  --repair-to repaired.rlab photo.rlab
+```
+
+### What these mechanisms do not protect against
+
+- Loss of the device, deletion of the whole library, ransomware, fire, theft, or corruption beyond the parity budget.
+- Damage to standalone source images or exported JPEG/PNG files that have not been saved inside `.rlab`.
+- A stale but internally valid older version replacing a newer project.
+- Failures that are never checked: library scrubbing is user-initiated, not a continuous background service.
+
+Keep at least one independent backup on another device or service, and periodically test that it can be restored.
+
+## Photo library
+
+The managed library imports each photo into a content-addressed v5 `.rlab` file under `files/ab/cd/<blake3>.rlab`. A Stoolap database indexes the embedded information for fast browsing and search.
+
+Current library features include:
+
+- File or recursive folder import, duplicate detection, RAW+JPEG pairing, and 512 px thumbnails.
+- Import-session grouping; folder imports use capture dates, with filesystem timestamps as fallback, to rebuild a useful historical timeline.
+- Collections, ratings, pick/reject flags, color labels, captions, keywords, and batch metadata edits.
+- Filtering by text, rating, flag, color label, camera, lens, capture date, aperture, shutter speed, ISO, and edited state.
+- Sorting by import date, capture date, rating, or filename.
+- Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals.
+- Index rebuilding, integrity scrubbing, protected-photo deletion guards, and recoverable move-to-trash behavior.
+
+## Building and running
+
+RasterLab uses Rust 2024 edition, so use Rust 1.85 or newer. Platform packages required by `eframe`, `wgpu`, and native file dialogs may also be needed.
 
 ```sh
 cargo build --release
 cargo run --release -p rasterlab-gui
 ```
 
-It's still not as fast as I would like.  ~~Claude thinks it's fast, but I disagree.~~ It's much faster, but would like it just a little bit more :-)
+An image path may be passed to the GUI:
+
+```sh
+cargo run --release -p rasterlab-gui -- photo.nef
+```
+
+Run the test suite with:
+
+```sh
+cargo test --workspace
+```
+
+## Command-line interface
+
+The `rasterlab` CLI provides single-image processing, parallel directory batches, metadata/histogram inspection, and JSON pipeline save/load. Its direct operation flags currently cover crop, rotate, black and white, Airplane Window correction, and sharpen; loading a saved pipeline can apply a broader serialized edit stack.
+
+```sh
+# Show all commands and options
+cargo run --release -p rasterlab-cli -- --help
+
+# Process one image
+cargo run --release -p rasterlab-cli -- process photo.nef \
+  -o output.jpg --rotate 90 --sharpen 0.8
+
+# Inspect metadata and histograms
+cargo run --release -p rasterlab-cli -- info photo.jpg
+```
 
 ## Architecture
 
-```
-rasterlab-core/       # Image type, ops, pipeline, histogram
-rasterlab-render/     # Background render thread + GPU/CPU op scheduling
-rasterlab-gpu/        # wgpu compute backend for GPU-accelerated ops
-rasterlab-gui/        # egui/eframe frontend
-rasterlab-cli/        # Headless batch processing
-rasterlab-plugin-api/ # Trait definitions for external ops
-plugins/              # Example plugin
-```
-
-The GUI render path is fully async: mutations serialize op parameters to JSON, a background thread deserializes and applies them, results come back via mpsc. The main thread never blocks on pixel work.
-
-```
-rasterlab-library/    # Photo library (DAM): import, EXIF indexing, collections, search
+```text
+rasterlab-core/       Image type, formats, operations, pipeline, .rlab format
+rasterlab-render/     Background rendering, preview scheduling, GPU/CPU routing
+rasterlab-gpu/        wgpu compute kernels for supported operations
+rasterlab-gui/        egui/eframe desktop application
+rasterlab-library/    Managed library, Stoolap index, import/export, integrity scrub
+rasterlab-cli/        Headless single-image, batch, and inspection commands
+rasterlab-plugin-api/ Stable C-ABI types for external operations
+plugins/              Example plugin
 ```
 
-The library stores every imported image as a `.rlab` v3 file in a hash-based balanced directory tree (`files/ab/cd/<blake3hash>.rlab`). A stoolap SQL database indexes EXIF metadata for fast search, but is entirely reconstructable from the on-disk `.rlab` files. All user metadata (ratings, keywords, collections, captions) is embedded in an LMTA chunk inside each `.rlab` so the library survives database loss.
+The render path serializes operation parameters for background execution. Intermediate images are cached by pipeline step, and generation counters prevent an older render from replacing a newer request. Supported adjacent operations may remain on the GPU as a batch; unsupported operations fall back to the CPU pipeline.
 
-## How the experiment is going
-
-**Things Claude got right immediately:**
-- The overall architecture (non-destructive pipeline, background render thread, Arc-based image sharing)
-- Rayon parallelism patterns for each op
-- The step cache design and generation counter for stale-write prevention
-
-**Things that required a few rounds:**
-- Performance improvements, mouse wheel scroll is still painfully jumpy
-- Merge conflict resolution after a parallel branch tried a simpler cache approach
-
-**Things Claude was confidently wrong about:**
-- The initial estimate that the step cache would make levels-slider dragging fast even without the downsampled preview. It would have, eventually. But 800ms per render is 800ms per render.
-
-**Things that cost more tokens than expected:**
-- Explaining why `Arc<Image>` can be passed to a function expecting `&Image` via Deref coercion (twice)
-
-## Status
-
-Works. Suspiciously well for what we've done so far.  I'm interested in seeing what we end up with.
-
-The plugin system exists and has an example. Nobody has written a plugin. The arbitrary rotation is slow on large images because bilinear interpolation has terrible cache locality and nobody has fixed it.
-
-# Changelog
-
-## 2026-05-30
-
-### Features
-
-- **Grouped folder import with back-dated sessions** — importing a folder now walks it recursively and groups the photos into one Import Session per run of same-or-consecutive capture days, with each session (and each photo's import date) back-dated to its capture time. Capture time comes from EXIF `DateTimeOriginal`, falling back to the file's modified/created time. This lets you point RasterLab at another tool's library and reconstruct a believable, years-long history rather than dumping everything into a single "today" session.
-
-# Week 4
-
-## 2026-04-23 (Week 4 is a wrap, ~80% weekly usage)
-
-### Features
-
-- **Export Original library bytes** — `File > Export Selection…` can now export the untouched original bytes of a library photo (RAW/JPEG/PNG as imported) with the source-file mtime preserved on disk, alongside the existing rendered JPEG/PNG export modes.
-- **Adaptive RECC parity in `.rlab`** — the Reed–Solomon error-correcting chunk now adapts its parity ratio to file size and writes duplicate parity for small files so an entire corrupted stripe can still be recovered; verified by round-trip integration tests.
-
-## 2026-04-21
-
-### Features
-
-- **Same-day import sessions** — photos imported on the same calendar day now roll into a single Import Session row instead of creating a new session per import batch.
-- **Original filename in Open Recent** — File → Open Recent shows the source filename for `.rlab` library files, not the opaque hash path.
-- **Unsaved-edit guard when opening from Library** — double-clicking a library photo now prompts to discard pending edits before loading, matching the guard used by `File > Open`.
-
-### Bug fixes
-
-- Window title now shows the last-saved filename after Save As.
-- Parse shutter-speed strings with a trailing ` s` unit (rawler/exif variant).
-- Preserve aspect ratio when rendering library thumbnails and the detail-panel preview.
-- Regenerating a library thumbnail now re-applies the saved edit pipeline and uses the original source-path hint so RAW thumbnails match the edited output.
-- Reset the rotation tool when loading a new image so stale angle state doesn't carry over.
-- Clear the canvas on file open so the previous image no longer flashes while the new one decodes.
-
-## 2026-04-20
-
-### Features
-
-- **Editable crop selection** — the crop rectangle now has drag handles on each edge and corner, and the interior can be grabbed to move the whole selection; no more re-drawing from scratch to nudge a crop.
-
-### Bug fixes
-
-- Split before/after view now applies the live preview op to the "after" side while editing, so the divider reflects the in-progress adjustment instead of the last committed state.
-
-## 2026-04-19
-
-### Features
-
-- **Extended library sidebar filters** — added shutter speed, aperture, ISO, and an "edited only" toggle to the live filter set; filters are validated and applied consistently across All Photos, Import Sessions, and Collections views.
-- **Truncated library path in detail panel** — the metadata panel shows a shortened, readable path for library files instead of the full hashed on-disk location.
-
-## 2026-04-18
-
-### Features
-
-- **Persist export settings** — last-used JPEG/PNG format, quality, and resize options are saved to prefs and restored on next launch; open-file dialog also remembers the last filter selection
-- **Photo Library (DAM)** — import photos into a managed library with EXIF indexing, ratings, keywords, collections, and search
-  - Files stored as `.rlab` v3 in a hash-based balanced directory tree (`files/ab/cd/<hash>.rlab`)
-  - Stoolap SQL database backend behind a `LibraryDb` trait (swappable for tests or future backends)
-  - Library is fully reconstructable from disk if the database is lost (`File > Rebuild Library Index`)
-  - All user metadata (ratings, keywords, collections, captions, flags) embedded in `.rlab` LMTA chunk
-  - RAW+JPEG pairs auto-detected at import time and linked by `stack_id` in the database
-  - Duplicate detection via BLAKE3 hash — silent skip with count in import summary
-  - 512px JPEG thumbnails generated on import; regenerated automatically when a photo is edited and saved
-- **Library UI** — `[Editor] [Library]` mode toggle in the menu bar
-  - Thumbnail grid with configurable scale slider (64–512px)
-  - Sidebar: All Photos / Import Sessions / Collections navigation
-  - Live filters: rating, flag, text search, camera model
-  - Detail panel: EXIF table, editable rating/flag/color label/caption/keywords
-  - Batch metadata edit when multiple photos selected
-  - Double-click a photo to open it in the Editor; saving propagates thumbnail back to the library
-  - `File > Import Photos` (select files or folder), `File > Export Selection…` (JPEG/PNG with optional resize)
-  - Last-used library auto-reopens on startup
-
-## 2026-04-17
-
-### Features
-
-- **Active tool highlight** — the currently-open tool in the edit stack is expanded and its header rendered in bold so the active edit is always visually obvious
-
-## 2026-04-15
-
-### Features
-
-- **HDR Merge** — fuse 2+ bracketed exposures into a single image with extended dynamic range; auto exposure estimation, Debevec-style radiance merge, Reinhard tone map
-
-# Week 3
-
-## 2026-04-13 (Week 3 is a wrap, we used 72% of our total available usage[1])
-
-### Features
-
-- **UI scaling** — add UI Scale option to Preferences menu
-- **Mouse pan** — add right-mouse button as an alternative pan gesture
-- **Panorama Stitching** - load multiple images and stich them together as one
-- **Focus stacking** - load multiple images to improve focus
-- **More RAW** - allow the reading of all supported RAW file types by rawler crate
-- **EXIF** - display, preserve, and optionally strip on export
-- **Edit stack edits** - edit entries on the edit stack instead of deleting and creating a new edit
-- **Split view option** - before/after using the before as the original file or anywhere in between
-- **Shadow only exposure control** - Allows you to selectively control the exposure of shadows
-
-### Tools Panel
-- Added a expand all, collapse all ability
-
-### Bug fixes
-
-- Center the file dialog, instead of having it in the bottom left corner of screen
-- Allow undo to restore an edit from the edit stack that was deleted
-- Only send title viewport command when title changes (reduces idle CPU load)
-- Stop continuous render loop when straighten tool is idle
-- Make rotate work like other tools, apply/reset/cancel
-- Fix button glyphs
-- Make histograms more usable after editing
-
-
-# Week 2
-
-## 2026-04-04 (Week 2 is a wrap, we used 98% of our weekly usage)
-
-### Features
-
-- **Unsaved-changes protection** — opening a new file now prompts to discard unsaved changes. Pipeline state is autosaved after every edit so a crash or forced close never loses work; confirmation dialogs guard all destructive open actions.
-- **Preview, cancel, and reset on all parameter tools** — every slider-based tool now has a consistent preview/cancel/reset workflow. Live 1/4-scale preview while adjusting; Cancel restores the previous state; Reset returns to defaults.
-- **Cancel in-flight noise reduction** — long-running NR renders can now be cancelled mid-flight without waiting for completion.
-- **Recently opened files** — File menu now lists recently opened images for quick re-access.
-- **Build metadata in About dialog** — Help → About RasterLab now shows the exact build version and metadata.
-
-### Tools Panel
-
-- Reordered to enforce Auto Enhance first, Looks second, all others strictly alphabetical.
-
-### Bug Fixes
-
-- Edit stack panel now uses theme-aware colors; virtual-copy rename dialog anchors to its tab instead of the window.
-- 1:1 zoom now centers on the current view center instead of jumping to the top-left corner.
-- Cleared stale cached before-texture when opening a new image, preventing ghost pixels from the previous file bleeding through.
-- Scaled crop coordinates correctly for the downsampled preview path, fixing misaligned crops at reduced resolution.
-- Linux: capped wgpu `max_color_attachments` and used adapter limits to prevent `LimitsExceeded` panics on some drivers.
-
-### Refactoring, don't repeast yourself aka. DRY
-
-- Extracted `ToolState` from `AppState` to reduce coupling and improve testability.
-- Consolidated HSL helpers, extracted `get_pixel`, and unified sample closures (DRY pass).
-- I should also try to target the test code, lots of duplicates there
-
-
-## 2026-04-02 (55% of our weekly usage)
-
-### Virtual Copies
-
-- **Virtual copies** — create any number of independent edit stacks for the same source image. Each copy has its own op list, undo/redo history, and name. The Edit Stack panel now shows a tab bar — click a tab to switch, `+` to add an empty copy, right-click for duplicate/rename/delete. All copies share the decoded source image in memory with zero pixel duplication. The `.rlab` format (now v2) saves every copy and restores the active one on open; v1 files load transparently as a single copy named "Copy 1".
-
-### New Tools
-
-- **Spot Heal / Clone Stamp** — Photoshop-style content-aware heal. Click to place a repair spot; RasterLab auto-detects the best source patch. Hover highlight shows which spot is selected. Multiple spots are committed as a single pipeline op.
-- **High-quality Noise Reduction** — two algorithms selectable per image: Wavelet (fast Haar soft-thresholding, ~250 ms on 20 MP) and Non-Local Means (patch-based, highest quality). Independent luminance and chrominance strength controls; edge-preserving detail mask blends the result back toward real scene edges without protecting noise-induced false gradients.
-- **Clarity / Texture** — local contrast enhancement at two spatial scales (clarity = midtone contrast, texture = fine surface detail). Live 1/4-scale preview while adjusting.
-- **Local Adjustments** — non-destructive masks: linear gradient and radial gradient. Any tool op can be wrapped in a mask so adjustments apply only to part of the frame.
-- **Straighten** — draw a horizon line on the canvas to set the rotation angle. Read-only angle display updates live as you drag; auto-crop option removes exposed corners after rotation.
-- **Crop aspect ratio presets** — 3:2, 4:3, 1:1, 16:9, 9:16 and a custom ratio picker alongside the existing free-crop mode.
-- **Classic B&W look** — one-click preset applying a channel-mixed B&W conversion, a subtle brightness/contrast lift, and a vignette.
-
-### Canvas
-
-- **Split before/after view** — draggable vertical divider shows the source (with geometric ops only) on the left and the fully edited result on the right. Correctly tracks rotation, flip, and crop so both sides share the same framing.
-- **Large-image safety** — canvas textures are downsampled when the image exceeds the wgpu 8192 px per-side limit, preventing GPU upload failures on very high-resolution files.
-
-### Performance
-
-- **Vertical blur** — replaced the transpose-based pass with parallel column strips; measurably faster on large images.
-
-### Infrastructure
-
-- **egui / eframe 0.29 → 0.34** — framework upgrade; native file dialog integrated via egui-file-dialog with a fallback to the built-in chooser when the native dialog is unavailable.
-
-### Bug Fixes
-
-- Noise reduction: detail-preservation mask was computed from the noisy input, causing it to classify noise as "detail" and blend it back — making NR imperceptible at default settings. Mask now computed from the denoised output.
-- Spot heal: spot selection hit-testing and hover highlight were broken; both fixed.
-
----
-
-# Week 1
-
-## 2026-03-30 (Week 1 is a wrap, we used 82% of our usage)
-
-### Usage
-- I didn't allocate enough dedicated time to leverage Claude effectively, so some resources went unused.
-
-### Perf focus
-
-- There's a performance-focused branch pending merge that needs cleanup. We've reduced latency from ~800ms to ~50ms for computing and displaying user-requested edits. Half the improvement came from hardware-specific optimizations; the rest from bug fixes, particularly in histogram generation. The goal is ≤42ms to achieve virtually real-time feel.
-
-
-## 2026-03-27 (46% of our first week usage)
-
-### New Tools
-
-- **Split Tone** — tint shadows and highlights with independent hue and saturation controls. A balance slider shifts the crossover point between the two zones. Defaults to cool blue shadows / warm gold highlights — the classic darkroom look.
-
-### Tools Panel
-
-- **Sharpen** — added live 1/4-scale preview while dragging the strength slider, with a Cancel button to discard. Slider replaces the old drag-value widget for consistency with other preview tools.
-- **Resize** — added MP preset dropdown that shows standard megapixel targets (1 MP – 24 MP) filtered to only those smaller than the current source image. Each entry shows the computed pixel dimensions for the image's aspect ratio. Selecting a preset populates the Width and Height fields; manual editing and lock-aspect still work as before.
-- **LUT / Color Grading** — fixed the Load .cube file dialog hanging the event loop; now runs on a background thread like all other file dialogs.
-
-### Canvas / Preview Performance
-
-- **Viewport-restricted previews** — when zoomed in, preview renders now process only the pixels visible on screen rather than the entire image. The render thread receives the visible image region each frame and restricts work accordingly.
-- **Overlay-based full-resolution preview** — when the pipeline is fully cached (the common slider-drag case), the preview op is applied at full resolution to just the visible viewport and drawn as an overlay on top of the base image. Sharp at any zoom level; base image is never replaced so the canvas never goes blank.
-- **Stable zoom/pan during previews** — the canvas no longer resets zoom and pan position when a downsampled preview image arrives. Scale compensation ensures the preview fills the same screen area as the full-res image.
-
-## 2026-03-26 (40% of our first week usage)
-
-### Native File Format (.rlab)
-  - **New .rlab binary format** — chunked layout with per-chunk and file-level Blake3 integrity hashes. Stores the
-  original source image verbatim, the full edit stack, metadata (timestamps, source path, dimensions, app version), and
-  an optional thumbnail.
-  - **Save / Save As (Ctrl+S / Ctrl+⇧S)** — saves and reopens the full editing session including undo history. Title bar
-  shows filename and a ● dirty indicator when there are unsaved changes.
-  - **Export… (Ctrl+E)** — renamed from the old Save; writes the rendered result as JPEG or PNG.
-  - **Open dialog now lists .rlab** files alongside images.
-
-### CLI Improvements
-
-  - **Export Edit Stack as JSON (File menu)** — writes the current pipeline as a JSON file compatible with the CLI's `--load-pipeline` argument.
-  - **rasterlab batch** --load-pipeline — batch processing can now load a pipeline JSON exported from the GUI and apply it
-  to an entire directory in parallel.
-
-### Tools Panel
-
-  - **Sepia tool** — added live 1/4-scale preview on slider change, plus Cancel and Reset buttons, matching all other
-  preview-capable tools.
-  - **Alphabetical ordering** — all tool sections are now sorted A–Z with Auto Enhance pinned at the top.
-  - **Tool panel state persistence** — open/close state of each tool section is saved to a YAML prefs file and restored on next launch (default: all collapsed).
-
-### Canvas
-  - **Ctrl+scroll to zoom** — scroll wheel alone no longer hijacks the canvas; hold Ctrl to zoom, pivoting around the cursor.
-  - **Magnifier cursor** — cursor changes to a magnifying glass when Ctrl is held over the canvas.
-
-### Bug Fixes, I'm sure there is many more :-)
-  - Removed duplicate Save As… entry from the File menu.
-  - Resolved 3 pre-existing test failures.
-
-## 2026-03-25 (19% of our first week usage)
-
-- **Levels tool** — black/mid/white point sliders with live preview; changes are non-destructive and can be committed to the pipeline or discarded
-- **Render timing** — status bar now shows how long the last render took in milliseconds
-- **Intermediate result caching** — the pipeline caches the rendered image after each committed op; changing op N no longer re-runs ops 0 through N-1, and undo/redo are often instant
-- **Downsampled live preview** — while a levels slider is being dragged, ops run on a 25% resolution image (~16× fewer pixels) for immediate feedback; a full-res render queues automatically once the preview is displayed
-- **CLI file argument** — the GUI now accepts a file path on the command line so you can open an image directly without using the file dialog
-- **Crop fix** — corrected crop start/end coordinate handling when panning
-
-## 2026-03-24 (14% of our first week usage)
-
-- **Initial release** — non-destructive editing pipeline, background render thread, undo/redo, histogram panel, crop, rotate (90°/180°/270° + arbitrary angle with bilinear interpolation), sharpen, and black & white conversion
-- **Zoom & pan** — canvas supports scroll-to-zoom and drag-to-pan; fit-to-view behavior fixed to work as expected
-- **Smoother zoom** — zoom now centers on the cursor position rather than the canvas origin
-- **Stability** — fixed a segfault on startup
-- **Plugin API** — trait definitions and an example plugin for extending the op set
-
-## Screen shot
-<img width="1405" height="933" alt="Screenshot 2026-03-26 at 12 19 59 AM" src="https://github.com/user-attachments/assets/1650d897-232c-44de-80c5-64ee0450a135" />
-
-
-***[1]** The way Anthropic does the blocks of usage for a day, and then week etc. is annoying.  I understand why they do it, but it benefits them, not the paying customer*
-***[2]** I wasn't diligent enough to get the full $20 worth, but that's Anthropic's loss as it diminishes what this could have been*
 ## License
 
 MIT OR Apache-2.0
