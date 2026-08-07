@@ -79,6 +79,7 @@ use crate::{
     error::{RasterError, RasterResult},
     library_meta::LibraryMeta,
     pipeline::PipelineState,
+    verified_write::write_verified,
 };
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -301,7 +302,7 @@ impl RlabFile {
     pub fn write_v5(&self, path: &Path) -> RasterResult<()> {
         let mut content: Vec<u8> = Vec::new();
         self.write_content_chunks(&mut content)?;
-        std::fs::write(path, assemble_v5(&content)?)?;
+        write_verified(path, &assemble_v5(&content)?)?;
         Ok(())
     }
 

@@ -27,6 +27,11 @@ rawler       = { workspace = true, optional = true }
 kamadak-exif = { workspace = true }
 img-parts    = { workspace = true }
 
+# posix_fadvise / F_NOCACHE, so a write read-back reaches the device
+# rather than being answered from the page cache.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [features]
 default = ["raw"]
 raw     = ["dep:rawler"]

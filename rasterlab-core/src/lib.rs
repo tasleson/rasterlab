@@ -44,6 +44,7 @@ pub mod plugin_loader;
 pub mod project;
 pub mod render_cache;
 pub mod traits;
+pub mod verified_write;
 
 // Convenience re-exports
 pub use error::{RasterError, RasterResult};

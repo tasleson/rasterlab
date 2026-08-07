@@ -74,6 +74,9 @@ img-parts       = "0.3"       # JPEG/PNG segment manipulation for metadata-prese
 # Plugin dynamic loading
 libloading      = "0.8"
 
+# Cache hints for read-back verification (unix only)
+libc            = "0.2"
+
 # CLI
 clap            = { version = "4", features = ["derive"] }
 
