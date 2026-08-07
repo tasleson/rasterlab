@@ -26,7 +26,7 @@ See change log below for status.
 - **Arbitrary rotation** — with bilinear interpolation, the slow one
 - **Plugin API** — because why not
 - **Tamper-evident `.rlab` project format** — chunked binary container that stores the original source bytes verbatim alongside every virtual copy's edit stack, pipeline state, metadata, and an optional thumbnail. Every chunk carries a Blake3 hash and the whole file is sealed with a trailing Blake3 hash, so any mutation is detected on open.
-- **Bitrot recovery on `.rlab`** — a Reed–Solomon parity chunk (`RECC`) protects all preceding bytes at ~10% overhead; parity is written twice (adaptive ratio, with duplicate parity for small files) so corruption inside the parity region is itself survivable. `verify_and_repair` reconstructs damaged chunks in place as long as the total damage stays under the parity budget (`cargo run --example rlab_verify`).
+- **Bitrot recovery on `.rlab`** — a Reed–Solomon parity chunk (`RECC`) protects the project's content chunks, with a Blake3 hash per shard so damage is pinpointed to a shard rather than a whole chunk. The parity ratio adapts to file size (~10% for small projects, ~20% for large ones) and is written twice, so corruption inside the parity region is itself survivable. `verify_and_repair` reconstructs anything within that budget (`cargo run --example rlab_verify`), including bytes truncated from either end: v5 files anchor one parity copy at each end of the content, so a cut from one direction leaves the other copy intact, and the parity finds itself by signature scan rather than by walking the chunk chain a corrupt length field could break.
 
 ## Supported operations
 

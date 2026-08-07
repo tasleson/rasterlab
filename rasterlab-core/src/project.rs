@@ -31,12 +31,39 @@
 //!
 //! Version 1 files have an `EDIT` chunk; version 2+ files use `VCPS` instead.
 //! `LMTA` is written by the library importer and absent in editor-only files.
-//! `RECC` (v4) holds RS parity over all preceding bytes; ~10% overhead; up to 5%
-//! corruption in any position can be recovered via [`verify_and_repair`].
-//! Two identical `RECC` chunks are written back-to-back so the parity itself is
-//! redundant — bitrot landing inside the parity region is survivable as long as
-//! one copy remains intact. Readers use the first copy whose Blake3 validates.
 //! Unknown chunks are skipped on read, enabling forward compatibility.
+//!
+//! ## `RECC` parity placement
+//!
+//! `RECC` holds Reed-Solomon parity over a contiguous *protected region*, plus a
+//! Blake3 hash of every data shard so damage can be pinpointed to a shard rather
+//! than to a whole chunk.  Two identical copies are written; where they sit is
+//! the difference between v4 and v5:
+//!
+//! ```text
+//! v4:  MAGIC VER │ META ORIG VCPS PREV LMTA │ RECC RECC │ hash
+//!      └──────── protected ────────────────┘
+//!
+//! v5:  MAGIC VER │ RECC │ META ORIG VCPS PREV LMTA │ RECC │ hash
+//!                        └──────── protected ─────┘
+//! ```
+//!
+//! v4 puts both copies at the tail, so truncation deep enough to reach the first
+//! copy has already taken the second with it and recovery becomes impossible.
+//! v5 anchors one copy at each end: truncation from either direction leaves the
+//! opposite copy intact, and since the parity records `protected_len`, the
+//! surviving copy's offset pins the region's alignment exactly.  Bytes missing
+//! from either end then reduce to erased shards, recoverable within the parity
+//! budget like any other damage.
+//!
+//! v5's protected region excludes the 10-byte file header, which sits ahead of
+//! the leading `RECC` copy.  Nothing is lost: the header is two constants, which
+//! [`verify_and_repair`] re-emits.
+//!
+//! [`verify_and_repair`] locates `RECC` by scanning for the tag signature and
+//! validating candidates against the parity plan and Blake3 — never by walking
+//! the chunk chain, since a corrupt length field would otherwise sever access to
+//! the very parity that could have repaired it.
 
 use std::{
     io::Read,
@@ -61,8 +88,29 @@ const MAGIC: &[u8; 8] = b"RLAB\x00\x01\r\n";
 /// Format version written by [`RlabFile::write`] (v3, no ECC).
 pub const FORMAT_VERSION: u16 = 3;
 
-/// Format version written by [`RlabFile::write_v4`] (v4, with RECC ECC chunk).
+/// Format version written by [`RlabFile::write_v4`] (v4, both `RECC` copies at
+/// the tail).  Still read, no longer written by new code — see
+/// [`RlabFile::write_v5`].
 pub const FORMAT_VERSION_V4: u16 = 4;
+
+/// Format version written by [`RlabFile::write_v5`] (v5, one `RECC` copy at each
+/// end of the protected region).
+pub const FORMAT_VERSION_V5: u16 = 5;
+
+/// `MAGIC` + `u16` format version.
+const FILE_HEADER_LEN: usize = MAGIC.len() + 2;
+
+/// Chunk tag (4) + `u64` length (8), preceding every chunk's data.
+const CHUNK_HEADER_LEN: usize = 12;
+
+/// Width of a Blake3 digest as stored in the file.
+const HASH_LEN: usize = 32;
+
+/// Fixed prefix of a `RECC` payload: shard size, shard counts, protected length.
+const RECC_HEADER_LEN: usize = 20;
+
+/// GF(2^8) Reed-Solomon cannot address more than this many shards in total.
+const GF8_MAX_SHARDS: usize = 255;
 
 const TAG_META: &[u8; 4] = b"META";
 const TAG_ORIG: &[u8; 4] = b"ORIG";
@@ -172,6 +220,10 @@ pub struct RlabFile {
 /// Result returned by [`verify_and_repair`].
 #[derive(Debug)]
 pub struct VerifyReport {
+    /// Format version from the file header, or `None` if the magic bytes did
+    /// not match.  Only meaningful when the file is otherwise clean — on a
+    /// damaged file the header itself may be part of the damage.
+    pub format_version: Option<u16>,
     /// Whether the whole-file Blake3 hash matched.
     pub file_hash_ok: bool,
     /// Tags of chunks whose per-chunk hash failed (e.g. `["ORIG"]`).
@@ -232,12 +284,31 @@ impl RlabFile {
         Ok(())
     }
 
+    /// Serialise and write the project to `path` as format v5: content chunks
+    /// bracketed by a `RECC` parity copy at each end.
+    ///
+    /// Prefer this over [`write_v4`](Self::write_v4) for all new files.  Both
+    /// carry the same parity budget (~10 % of the protected region for small
+    /// files, ~20 % for large ones, stored twice), but v5's split placement
+    /// keeps one copy reachable when the other end of the file is truncated.
+    ///
+    /// The resulting file can be verified and repaired with [`verify_and_repair`].
+    pub fn write_v5(&self, path: &Path) -> RasterResult<()> {
+        let mut content: Vec<u8> = Vec::new();
+        self.write_content_chunks(&mut content)?;
+        std::fs::write(path, assemble_v5(&content)?)?;
+        Ok(())
+    }
+
     /// Serialise and write the project to `path` as format v4 with `RECC`
     /// Reed-Solomon parity chunks (~10% parity × [`RECC_COPIES`] ≈ 20% overhead).
     ///
     /// The parity chunk is written [`RECC_COPIES`] times so that bitrot landing
     /// inside the parity region itself is survivable — losing any one copy
     /// still leaves a valid parity set.
+    ///
+    /// Retained so the v4 layout stays exercised by tests; new files should use
+    /// [`write_v5`](Self::write_v5), which survives truncation from either end.
     ///
     /// The resulting file can be verified and repaired with [`verify_and_repair`].
     pub fn write_v4(&self, path: &Path) -> RasterResult<()> {
@@ -299,15 +370,21 @@ impl RlabFile {
     /// - Any required chunk hash does not match.
     /// - A required chunk (`META`, `ORIG`, `EDIT`) is missing.
     /// - The magic bytes do not match.
-    /// - The format version is newer than [`FORMAT_VERSION_V4`].
+    /// - The format version is newer than [`FORMAT_VERSION_V5`].
     pub fn read(path: &Path) -> RasterResult<Self> {
-        let data = std::fs::read(path)?;
+        Self::read_bytes(&std::fs::read(path)?)
+    }
 
+    /// Read and fully verify a `.rlab` project from an in-memory image.
+    ///
+    /// Same contract as [`read`](Self::read); used by the repair path to prove a
+    /// reconstruction actually parses before it is committed to disk.
+    pub fn read_bytes(data: &[u8]) -> RasterResult<Self> {
         // ── File-level hash ───────────────────────────────────────────────
-        if data.len() < MAGIC.len() + 2 + 32 {
+        if data.len() < FILE_HEADER_LEN + HASH_LEN {
             return Err(RasterError::decode("rlab", "file too short"));
         }
-        let (payload, file_hash_stored) = data.split_at(data.len() - 32);
+        let (payload, file_hash_stored) = data.split_at(data.len() - HASH_LEN);
         let file_hash_computed = blake3::hash(payload);
         if file_hash_computed.as_bytes() != file_hash_stored {
             return Err(RasterError::decode(
@@ -332,12 +409,12 @@ impl RlabFile {
         let mut ver = [0u8; 2];
         cur.read_exact(&mut ver)?;
         let format_version = u16::from_le_bytes(ver);
-        if format_version > FORMAT_VERSION_V4 {
+        if format_version > FORMAT_VERSION_V5 {
             return Err(RasterError::decode(
                 "rlab",
                 format!(
                     "unsupported format version {format_version} \
-                     (this build supports up to {FORMAT_VERSION_V4})"
+                     (this build supports up to {FORMAT_VERSION_V5})"
                 ),
             ));
         }
@@ -459,22 +536,37 @@ impl RlabFile {
 /// Verify the integrity of a `.rlab` file and optionally repair it.
 ///
 /// Pass `repair_to = Some(path)` to write a repaired copy when corruption is
-/// detected and a valid `RECC` chunk is present.  Repair succeeds as long as
-/// the number of damaged shards does not exceed the parity shard count (~10%
-/// of the file).
+/// detected and a usable `RECC` chunk is present.  Repair succeeds as long as
+/// the number of damaged shards does not exceed the parity shard count (~10 %
+/// of the protected region for small files, ~20 % for large ones).
+///
+/// Damage need not be in-place: bytes missing from either end of the file are
+/// treated as erased shards and reconstructed on the same budget, because the
+/// surviving `RECC` copy's offset and its recorded `protected_len` between them
+/// pin where the protected region began.
+///
+/// Repaired output is always written in the v5 layout, whatever the input was.
 ///
 /// If the file is clean, no output file is written even when `repair_to` is
 /// `Some`.
 pub fn verify_and_repair(path: &Path, repair_to: Option<&Path>) -> RasterResult<VerifyReport> {
     let data = std::fs::read(path)?;
-    if data.len() < MAGIC.len() + 2 + 32 {
+    if data.len() < FILE_HEADER_LEN + HASH_LEN {
         return Err(RasterError::decode("rlab", "file too short"));
     }
 
-    let (payload, file_hash_bytes) = data.split_at(data.len() - 32);
+    let (payload, file_hash_bytes) = data.split_at(data.len() - HASH_LEN);
     let file_hash_ok = blake3::hash(payload).as_bytes() == file_hash_bytes;
 
-    let scan = scan_chunks(payload)?;
+    // Chunk-chain walk, used only for the human-facing report. It gives up at
+    // the first unparseable length field, which is exactly why repair does not
+    // depend on it.
+    let scan = scan_chunks(payload);
+
+    // Parity lookup is independent of the chain: scan the whole file (including
+    // the trailing hash region, which on a truncated file is really chunk data)
+    // for RECC signatures.
+    let recc_copies = find_recc_copies(&data);
 
     let mut damaged_chunks: Vec<String> = scan
         .chunks
@@ -490,33 +582,42 @@ pub fn verify_and_repair(path: &Path, repair_to: Option<&Path>) -> RasterResult<
         damaged_chunks.push("RECC".into());
     }
 
+    let recc_present = scan.recc_present || !recc_copies.is_empty();
+
+    let format_version = read_format_version(&data);
+
     if file_hash_ok && damaged_chunks.is_empty() {
         return Ok(VerifyReport {
+            format_version,
             file_hash_ok: true,
             damaged_chunks: vec![],
-            recc_present: scan.recc_present,
+            recc_present,
             repaired: false,
         });
     }
 
-    let repaired = if let (Some(repair_path), Some(recc_data)) = (repair_to, &scan.recc_data) {
-        attempt_repair(
-            payload,
-            recc_data,
-            &scan.chunks,
-            scan.recc_start,
-            repair_path,
-        )?
-    } else {
-        false
+    let repaired = match repair_to {
+        Some(repair_path) => attempt_repair(&data, &recc_copies, repair_path)?,
+        None => false,
     };
 
     Ok(VerifyReport {
+        format_version,
         file_hash_ok,
         damaged_chunks,
-        recc_present: scan.recc_present,
+        recc_present,
         repaired,
     })
+}
+
+/// Read the format version straight from the file header, without parsing.
+fn read_format_version(data: &[u8]) -> Option<u16> {
+    if !data.starts_with(MAGIC) || data.len() < FILE_HEADER_LEN {
+        return None;
+    }
+    Some(u16::from_le_bytes(
+        data[MAGIC.len()..FILE_HEADER_LEN].try_into().unwrap(),
+    ))
 }
 
 // ── Internal scan helpers ─────────────────────────────────────────────────────
@@ -528,58 +629,43 @@ struct ChunkInfo {
 
 struct ScanResult {
     chunks: Vec<ChunkInfo>,
-    /// True if at least one `RECC` tag was found (regardless of hash validity).
+    /// True if at least one `RECC` tag was reached by the chain walk.
     recc_present: bool,
-    /// First `RECC` copy whose chunk Blake3 validated, or `None` if every
-    /// copy's hash failed (or no `RECC` chunks exist).
-    recc_data: Option<Vec<u8>>,
-    /// Byte offset of the *first* `RECC` tag within `payload`. Bounds the
-    /// protected region (everything before this offset is covered by RS
-    /// parity). Equals `payload.len()` when no `RECC` chunk is present.
-    recc_start: usize,
-    /// True if any `RECC` copy failed its per-chunk hash — triggers a
-    /// heal-on-repair even when the protected region is otherwise intact.
+    /// True if any `RECC` copy the walk reached failed its per-chunk hash —
+    /// triggers a heal-on-repair even when the protected region is intact.
     any_recc_damaged: bool,
 }
 
-fn scan_chunks(payload: &[u8]) -> RasterResult<ScanResult> {
-    let header_size = MAGIC.len() + 2;
-    let mut pos = header_size;
+/// Walk the chunk chain from the header, recording each chunk's tag and whether
+/// its Blake3 matched.  Best-effort: stops at the first chunk whose declared
+/// length runs past the end of `payload`.
+fn scan_chunks(payload: &[u8]) -> ScanResult {
+    let mut pos = FILE_HEADER_LEN;
     let mut chunks = Vec::new();
     let mut recc_present = false;
-    let mut recc_data = None;
-    let mut recc_start = payload.len();
     let mut any_recc_damaged = false;
 
-    while pos + 4 + 8 <= payload.len() {
+    while pos + CHUNK_HEADER_LEN <= payload.len() {
         let tag: [u8; 4] = payload[pos..pos + 4].try_into().unwrap();
         let len = u64::from_le_bytes(payload[pos + 4..pos + 12].try_into().unwrap()) as usize;
-        let data_start = pos + 12;
-        let data_end = data_start + len;
-        let hash_end = data_end + 32;
-
+        let data_start = pos + CHUNK_HEADER_LEN;
+        let Some(hash_end) = data_start
+            .checked_add(len)
+            .and_then(|e| e.checked_add(HASH_LEN))
+        else {
+            break;
+        };
         if hash_end > payload.len() {
             break;
         }
+        let data_end = hash_end - HASH_LEN;
 
-        let chunk_data = &payload[data_start..data_end];
-        let stored_hash = &payload[data_end..hash_end];
-        let hash_ok = blake3::hash(chunk_data).as_bytes() == stored_hash;
+        let hash_ok =
+            blake3::hash(&payload[data_start..data_end]).as_bytes() == &payload[data_end..hash_end];
 
         if &tag == TAG_RECC {
-            // Keep the *first* RECC offset (bounds the protected region) and
-            // the *first* valid payload (all copies are identical by design).
-            if !recc_present {
-                recc_start = pos;
-            }
             recc_present = true;
-            if hash_ok {
-                if recc_data.is_none() {
-                    recc_data = Some(chunk_data.to_vec());
-                }
-            } else {
-                any_recc_damaged = true;
-            }
+            any_recc_damaged |= !hash_ok;
         } else {
             chunks.push(ChunkInfo { tag, hash_ok });
         }
@@ -587,118 +673,276 @@ fn scan_chunks(payload: &[u8]) -> RasterResult<ScanResult> {
         pos = hash_end;
     }
 
-    Ok(ScanResult {
+    ScanResult {
         chunks,
         recc_present,
-        recc_data,
-        recc_start,
         any_recc_damaged,
+    }
+}
+
+// ── Parity location ───────────────────────────────────────────────────────────
+
+/// The shard geometry recorded in a `RECC` payload header.
+#[derive(Clone, Copy)]
+struct ReccPlan {
+    shard_size: usize,
+    data_shards: usize,
+    parity_shards: usize,
+    protected_len: usize,
+}
+
+/// A `RECC` chunk found by signature scan and validated end to end.
+struct ReccCopy {
+    /// Byte offset of the `RECC` tag within the file as it exists on disk.
+    offset: usize,
+    /// On-disk size of the whole chunk: tag + length + payload + hash.
+    chunk_len: usize,
+    payload: Vec<u8>,
+    plan: ReccPlan,
+}
+
+/// Parse and sanity-check a `RECC` payload header.
+///
+/// Every field is cross-checked against the others so a `RECC` byte sequence
+/// occurring by chance inside `ORIG` image data is rejected before its Blake3 is
+/// computed.
+fn parse_recc_plan(payload: &[u8]) -> Option<ReccPlan> {
+    if payload.len() < RECC_HEADER_LEN {
+        return None;
+    }
+    let shard_size = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+    let data_shards = u32::from_le_bytes(payload[4..8].try_into().unwrap()) as usize;
+    let parity_shards = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
+    let protected_len = u64::from_le_bytes(payload[12..20].try_into().unwrap()) as usize;
+
+    if shard_size == 0
+        || !shard_size.is_multiple_of(RECC_MIN_SHARD_SIZE)
+        || data_shards == 0
+        || parity_shards == 0
+        || data_shards + parity_shards > GF8_MAX_SHARDS
+        || protected_len == 0
+    {
+        return None;
+    }
+
+    // The payload length is fully determined by the geometry, as is the shard
+    // count by the protected length — both must agree exactly.
+    let expected_len = RECC_HEADER_LEN
+        .checked_add(data_shards.checked_mul(HASH_LEN)?)?
+        .checked_add(parity_shards.checked_mul(shard_size)?)?;
+    if payload.len() != expected_len || protected_len.div_ceil(shard_size) != data_shards {
+        return None;
+    }
+
+    Some(ReccPlan {
+        shard_size,
+        data_shards,
+        parity_shards,
+        protected_len,
     })
+}
+
+/// Find every intact `RECC` chunk in `data` by scanning for the tag signature.
+///
+/// Deliberately independent of the chunk chain: a corrupt length field anywhere
+/// ahead of the parity must not hide the parity that would repair it.
+fn find_recc_copies(data: &[u8]) -> Vec<ReccCopy> {
+    let mut out = Vec::new();
+    if data.len() < CHUNK_HEADER_LEN {
+        return out;
+    }
+
+    for offset in 0..=data.len() - CHUNK_HEADER_LEN {
+        if &data[offset..offset + 4] != TAG_RECC {
+            continue;
+        }
+        let len = u64::from_le_bytes(
+            data[offset + 4..offset + CHUNK_HEADER_LEN]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let data_start = offset + CHUNK_HEADER_LEN;
+        let Some(hash_end) = data_start
+            .checked_add(len)
+            .and_then(|e| e.checked_add(HASH_LEN))
+        else {
+            continue;
+        };
+        if hash_end > data.len() {
+            continue;
+        }
+        let data_end = hash_end - HASH_LEN;
+        let payload = &data[data_start..data_end];
+
+        let Some(plan) = parse_recc_plan(payload) else {
+            continue;
+        };
+        if blake3::hash(payload).as_bytes() != &data[data_end..hash_end] {
+            continue;
+        }
+
+        out.push(ReccCopy {
+            offset,
+            chunk_len: hash_end - offset,
+            payload: payload.to_vec(),
+            plan,
+        });
+    }
+    out
+}
+
+/// Offsets at which the protected region could begin, given a copy found at a
+/// known offset.
+///
+/// A copy does not record which layout it belongs to, so all three placements
+/// are tried.  Values may be negative, meaning that many leading bytes are
+/// missing from the file.  A wrong guess is not a correctness hazard: it
+/// misaligns every shard, so essentially all shard hashes fail and the candidate
+/// is rejected long before Reed-Solomon runs.
+fn candidate_starts(copy: &ReccCopy) -> [i64; 3] {
+    let offset = copy.offset as i64;
+    let chunk_len = copy.chunk_len as i64;
+    let protected_len = copy.plan.protected_len as i64;
+    [
+        offset + chunk_len,                 // v5 leading copy
+        offset - protected_len,             // v5 trailing copy, or v4 first copy
+        offset - protected_len - chunk_len, // v4 second copy
+    ]
 }
 
 // ── Repair ────────────────────────────────────────────────────────────────────
 
-/// Attempt to reconstruct damaged chunks using RS parity from the RECC chunk.
+/// Rebuild the protected region assuming it begins at `start` in `data`.
 ///
-/// Returns `true` and writes the repaired file if reconstruction succeeds.
-fn attempt_repair(
-    payload: &[u8],
-    recc_payload: &[u8],
-    _chunks: &[ChunkInfo],
-    recc_start: usize,
-    repair_to: &Path,
-) -> RasterResult<bool> {
-    if recc_payload.len() < 20 {
-        return Ok(false);
-    }
+/// `start` is signed: a negative value means the file lost that many leading
+/// bytes, and the shards covering them are simply erased.  Bytes falling outside
+/// the file in either direction are zero-filled, which makes truncation
+/// indistinguishable from in-place corruption as far as the erasure decoder is
+/// concerned.
+///
+/// Returns `None` if erasures exceed the parity budget — the same signal used to
+/// reject a wrong `start` hypothesis.
+fn rebuild_protected(data: &[u8], copy: &ReccCopy, start: i64) -> Option<Vec<u8>> {
+    let ReccPlan {
+        shard_size,
+        data_shards,
+        parity_shards,
+        protected_len,
+    } = copy.plan;
 
-    let shard_size = u32::from_le_bytes(recc_payload[0..4].try_into().unwrap()) as usize;
-    let data_shards = u32::from_le_bytes(recc_payload[4..8].try_into().unwrap()) as usize;
-    let parity_shards = u32::from_le_bytes(recc_payload[8..12].try_into().unwrap()) as usize;
-    let protected_len = u64::from_le_bytes(recc_payload[12..20].try_into().unwrap()) as usize;
+    let hashes_end = RECC_HEADER_LEN + data_shards * HASH_LEN;
+    let shard_hashes = &copy.payload[RECC_HEADER_LEN..hashes_end];
+    let parity_data = &copy.payload[hashes_end..];
 
-    // RECC payload layout: 20-byte fixed header + data_shards*32 shard hashes + parity data.
-    let hashes_size = data_shards * 32;
-    let parity_size = parity_shards * shard_size;
-    if shard_size == 0
-        || data_shards == 0
-        || parity_shards == 0
-        || recc_payload.len() < 20 + hashes_size + parity_size
-        || recc_start < protected_len
-    {
-        return Ok(false);
-    }
+    let mut shards: Vec<Option<Vec<u8>>> = Vec::with_capacity(data_shards + parity_shards);
+    let mut erasures = 0usize;
 
-    let shard_hashes = &recc_payload[20..20 + hashes_size];
-    let parity_data = &recc_payload[20 + hashes_size..20 + hashes_size + parity_size];
-    let protected = &payload[..recc_start];
-
-    // Build shard vec: data shards (zero-padded at tail) + parity shards from RECC.
-    let mut shards: Vec<Option<Vec<u8>>> = (0..data_shards)
-        .map(|i| {
-            let start = i * shard_size;
-            let end = ((i + 1) * shard_size).min(protected.len());
-            let mut s = vec![0u8; shard_size];
-            if start < protected.len() {
-                s[..end - start].copy_from_slice(&protected[start..end]);
-            }
-            Some(s)
-        })
-        .collect();
-
-    for i in 0..parity_shards {
-        let start = i * shard_size;
-        shards.push(Some(parity_data[start..start + shard_size].to_vec()));
-    }
-
-    // Mark erased: data shards whose per-shard Blake3 doesn't match the stored hash.
-    // This precisely identifies which 4 KiB blocks are corrupted, not just which chunk.
     for i in 0..data_shards {
-        let stored = &shard_hashes[i * 32..(i + 1) * 32];
-        let computed = blake3::hash(shards[i].as_ref().unwrap());
-        if computed.as_bytes() != stored {
-            shards[i] = None;
+        let mut shard = vec![0u8; shard_size];
+
+        // Byte range this shard covers within the protected region. The tail
+        // shard stops at protected_len; the encoder zero-padded the remainder,
+        // so leaving it zero here reproduces what was hashed.
+        let region_begin = i * shard_size;
+        let region_end = ((i + 1) * shard_size).min(protected_len);
+        if region_begin < region_end {
+            // Project onto the file and keep only what actually exists.
+            let file_begin = start + region_begin as i64;
+            let file_end = start + region_end as i64;
+            let lo = file_begin.max(0);
+            let hi = file_end.min(data.len() as i64);
+            if lo < hi {
+                let dst = (lo - file_begin) as usize;
+                let n = (hi - lo) as usize;
+                shard[dst..dst + n].copy_from_slice(&data[lo as usize..hi as usize]);
+            }
+        }
+
+        if blake3::hash(&shard).as_bytes() == &shard_hashes[i * HASH_LEN..(i + 1) * HASH_LEN] {
+            shards.push(Some(shard));
+        } else {
+            shards.push(None);
+            erasures += 1;
+            if erasures > parity_shards {
+                return None;
+            }
         }
     }
 
-    let erasures: usize = shards
-        .iter()
-        .take(data_shards + parity_shards)
-        .filter(|s| s.is_none())
-        .count();
-    if erasures > parity_shards {
-        return Ok(false);
+    for i in 0..parity_shards {
+        shards.push(Some(
+            parity_data[i * shard_size..(i + 1) * shard_size].to_vec(),
+        ));
     }
 
-    let rs = ReedSolomon::new(data_shards, parity_shards)
-        .map_err(|e| RasterError::decode("recc", e.to_string()))?;
+    let rs = ReedSolomon::new(data_shards, parity_shards).ok()?;
+    rs.reconstruct_data(&mut shards).ok()?;
 
-    rs.reconstruct_data(&mut shards)
-        .map_err(|e| RasterError::decode("recc", format!("reconstruction failed: {e}")))?;
-
-    // Reassemble the protected region from reconstructed data shards.
-    let mut reconstructed = Vec::with_capacity(protected_len);
-    for s in shards.iter().take(data_shards) {
-        reconstructed.extend_from_slice(s.as_ref().unwrap());
+    let mut protected = Vec::with_capacity(protected_len);
+    for shard in shards.iter().take(data_shards) {
+        protected.extend_from_slice(shard.as_ref()?);
     }
-    reconstructed.truncate(protected_len);
+    protected.truncate(protected_len);
+    Some(protected)
+}
 
-    // Re-emit RECC_COPIES fresh chunks from the known-good parity payload.
-    // This also heals any damaged copy without needing to know which one was
-    // bad, and auto-upgrades older single-copy v4 files to the redundant form.
-    for _ in 0..RECC_COPIES {
-        write_chunk(&mut reconstructed, TAG_RECC, recc_payload);
+/// Attempt to reconstruct the file from any surviving `RECC` copy.
+///
+/// Returns `true` and writes a fresh v5 file if reconstruction succeeds. The
+/// output is validated by a full parse before it is committed, so a repair that
+/// somehow produced nonsense is reported as a failure rather than written.
+fn attempt_repair(data: &[u8], copies: &[ReccCopy], repair_to: &Path) -> RasterResult<bool> {
+    for copy in copies {
+        for start in candidate_starts(copy) {
+            let Some(protected) = rebuild_protected(data, copy, start) else {
+                continue;
+            };
+
+            // v4 protects the file header along with the content chunks; v5
+            // protects the content alone. The magic tells the two apart.
+            let content = match protected.strip_prefix(MAGIC.as_slice()) {
+                Some(rest) => &rest[2..],
+                None => &protected[..],
+            };
+
+            // Parity is recomputed rather than reused: a v4 payload describes a
+            // protected region that included the header, so it would not
+            // describe the v5 file being written here.
+            let rebuilt = assemble_v5(content)?;
+            if RlabFile::read_bytes(&rebuilt).is_err() {
+                continue;
+            }
+
+            std::fs::write(repair_to, &rebuilt)?;
+            return Ok(true);
+        }
     }
-
-    // New file-level hash over the repaired content.
-    let new_hash = blake3::hash(&reconstructed);
-    reconstructed.extend_from_slice(new_hash.as_bytes());
-
-    std::fs::write(repair_to, &reconstructed)?;
-    Ok(true)
+    Ok(false)
 }
 
 // ── RECC encoding helpers ─────────────────────────────────────────────────────
+
+/// Lay out a complete v5 file around already-serialised `content` chunks.
+///
+/// ```text
+/// MAGIC │ VER │ RECC │ content │ RECC │ file hash
+/// ```
+fn assemble_v5(content: &[u8]) -> RasterResult<Vec<u8>> {
+    let recc_payload = build_recc_payload(content)?;
+    let recc_chunk_len = CHUNK_HEADER_LEN + recc_payload.len() + HASH_LEN;
+
+    let mut buf =
+        Vec::with_capacity(FILE_HEADER_LEN + content.len() + 2 * recc_chunk_len + HASH_LEN);
+    buf.extend_from_slice(MAGIC);
+    buf.extend_from_slice(&FORMAT_VERSION_V5.to_le_bytes());
+    write_chunk(&mut buf, TAG_RECC, &recc_payload);
+    buf.extend_from_slice(content);
+    write_chunk(&mut buf, TAG_RECC, &recc_payload);
+
+    let file_hash = blake3::hash(&buf);
+    buf.extend_from_slice(file_hash.as_bytes());
+    Ok(buf)
+}
 
 /// Build the binary payload stored inside the `RECC` chunk.
 ///
