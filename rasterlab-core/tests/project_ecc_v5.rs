@@ -6,10 +6,16 @@
 //! any truncation from the front.  Every case below is one of those, plus the
 //! v4 files that must keep working.
 
+// Bad-sector maps are genuinely one-element lists of ranges, not a mistaken
+// `vec![a..b]` that meant `(a..b).collect()`.
+#![allow(clippy::single_range_in_vec_init)]
+
 use rasterlab_core::{
+    degraded_read::DegradedRead,
     pipeline::PipelineState,
     project::{
         FORMAT_VERSION_V4, FORMAT_VERSION_V5, RlabFile, RlabMeta, SavedCopy, verify_and_repair,
+        verify_and_repair_degraded,
     },
 };
 use tempfile::NamedTempFile;
@@ -341,4 +347,105 @@ fn v4_end_truncation_through_second_copy_repairs() {
     let mut damaged = bytes.clone();
     damaged.truncate(recc[1]);
     assert!(repair(&damaged).is_some());
+}
+
+// ── Unreadable media ──────────────────────────────────────────────────────────
+//
+// A latent sector error surfaces as an EIO, not as corrupt bytes, and is the
+// most common disk fault by a wide margin. The degraded reader turns the lost
+// sectors into zeros plus a range list; from there they are ordinary erasures.
+
+/// Build the `DegradedRead` a failing drive would produce: `ranges` zeroed and
+/// reported, everything else verbatim.
+fn with_bad_sectors(bytes: &[u8], ranges: &[std::ops::Range<usize>]) -> DegradedRead {
+    let mut data = bytes.to_vec();
+    for r in ranges {
+        data[r.clone()].fill(0);
+    }
+    DegradedRead {
+        data,
+        unreadable: ranges.to_vec(),
+    }
+}
+
+fn repair_degraded(read: &DegradedRead) -> Option<RlabFile> {
+    let out = NamedTempFile::new().unwrap();
+    let report = verify_and_repair_degraded(read, Some(out.path())).ok()?;
+    assert_eq!(report.unreadable_bytes, read.unreadable_bytes());
+    if !report.repaired {
+        return None;
+    }
+    let file = RlabFile::read(out.path()).expect("repaired file must parse");
+    assert!(
+        file.original_bytes.len() == ORIG_LEN
+            && file.original_bytes.iter().all(|&b| b == ORIG_FILL),
+        "ORIG payload was not restored byte-exact"
+    );
+    Some(file)
+}
+
+#[test]
+fn unreadable_sectors_are_reconstructed_from_parity() {
+    let bytes = write_v5_bytes();
+    let l = layout(&bytes);
+
+    // Scattered dead sectors across the content, well inside the budget.
+    let ranges: Vec<_> = (0..5)
+        .map(|i| {
+            let at = l.protected_start + (i * 7 + 2) * l.shard_size + 512;
+            at..at + 4096
+        })
+        .collect();
+
+    let read = with_bad_sectors(&bytes, &ranges);
+    assert!(repair_degraded(&read).is_some());
+}
+
+#[test]
+fn unreadable_sectors_inside_a_parity_copy_survive() {
+    let bytes = write_v5_bytes();
+    let l = layout(&bytes);
+
+    // The leading copy is unreadable; the trailing one carries the repair.
+    let read = with_bad_sectors(&bytes, &[l.recc_a..l.recc_a + 3 * 4096]);
+    assert!(repair_degraded(&read).is_some());
+}
+
+#[test]
+fn unreadable_sectors_beyond_the_budget_still_fail() {
+    let bytes = write_v5_bytes();
+    let l = layout(&bytes);
+
+    let ranges: Vec<_> = (0..=l.parity_shards)
+        .map(|i| {
+            let at = l.protected_start + i * l.shard_size;
+            at..at + 4096
+        })
+        .collect();
+
+    let read = with_bad_sectors(&bytes, &ranges);
+    assert!(repair_degraded(&read).is_none());
+}
+
+/// When the bytes the reader substituted for a dead sector happen to match what
+/// was there, nothing fails a hash — but the media is still failing, so the file
+/// must be rewritten to relocate it rather than reported as clean.
+#[test]
+fn verifying_content_is_still_rewritten_when_sectors_were_unreadable() {
+    let read = DegradedRead {
+        data: write_v5_bytes(),
+        unreadable: vec![0..4096],
+    };
+
+    let out = NamedTempFile::new().unwrap();
+    let report = verify_and_repair_degraded(&read, Some(out.path())).unwrap();
+
+    assert!(report.file_hash_ok, "content itself is intact");
+    assert!(report.damaged_chunks.is_empty());
+    assert_eq!(report.unreadable_bytes, 4096);
+    assert!(
+        report.repaired,
+        "a file on failing media must be rewritten even when its bytes verify"
+    );
+    RlabFile::read(out.path()).expect("rewritten file must parse");
 }

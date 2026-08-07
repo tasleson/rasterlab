@@ -33,6 +33,7 @@
 
 pub mod analysis;
 pub mod cancel;
+pub mod degraded_read;
 pub mod error;
 pub mod formats;
 pub mod image;

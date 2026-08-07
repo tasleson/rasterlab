@@ -75,6 +75,7 @@ use reed_solomon_erasure::galois_8::ReedSolomon;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    degraded_read::{DegradedRead, read_degraded_file},
     error::{RasterError, RasterResult},
     library_meta::LibraryMeta,
     pipeline::PipelineState,
@@ -224,6 +225,10 @@ pub struct VerifyReport {
     /// not match.  Only meaningful when the file is otherwise clean — on a
     /// damaged file the header itself may be part of the damage.
     pub format_version: Option<u16>,
+    /// Bytes the media refused to return, zero-filled before verification.
+    /// Non-zero means the file is on failing storage: even if the content
+    /// verifies, it should be rewritten to relocate it off the bad sectors.
+    pub unreadable_bytes: usize,
     /// Whether the whole-file Blake3 hash matched.
     pub file_hash_ok: bool,
     /// Tags of chunks whose per-chunk hash failed (e.g. `["ORIG"]`).
@@ -547,10 +552,25 @@ impl RlabFile {
 ///
 /// Repaired output is always written in the v5 layout, whatever the input was.
 ///
+/// Sectors the media cannot return are zero-filled rather than aborting the
+/// read (see [`crate::degraded_read`]), so a latent sector error costs the
+/// shards it landed in and nothing more.
+///
 /// If the file is clean, no output file is written even when `repair_to` is
 /// `Some`.
 pub fn verify_and_repair(path: &Path, repair_to: Option<&Path>) -> RasterResult<VerifyReport> {
-    let data = std::fs::read(path)?;
+    verify_and_repair_degraded(&read_degraded_file(path)?, repair_to)
+}
+
+/// [`verify_and_repair`] over an already-read image.
+///
+/// Split out so callers that have paid for the read can reuse it, and so the
+/// unreadable-media path is testable without a failing disk.
+pub fn verify_and_repair_degraded(
+    read: &DegradedRead,
+    repair_to: Option<&Path>,
+) -> RasterResult<VerifyReport> {
+    let data = &read.data;
     if data.len() < FILE_HEADER_LEN + HASH_LEN {
         return Err(RasterError::decode("rlab", "file too short"));
     }
@@ -566,7 +586,7 @@ pub fn verify_and_repair(path: &Path, repair_to: Option<&Path>) -> RasterResult<
     // Parity lookup is independent of the chain: scan the whole file (including
     // the trailing hash region, which on a truncated file is really chunk data)
     // for RECC signatures.
-    let recc_copies = find_recc_copies(&data);
+    let recc_copies = find_recc_copies(data);
 
     let mut damaged_chunks: Vec<String> = scan
         .chunks
@@ -584,11 +604,16 @@ pub fn verify_and_repair(path: &Path, repair_to: Option<&Path>) -> RasterResult<
 
     let recc_present = scan.recc_present || !recc_copies.is_empty();
 
-    let format_version = read_format_version(&data);
+    let format_version = read_format_version(data);
+    let unreadable_bytes = read.unreadable_bytes();
 
-    if file_hash_ok && damaged_chunks.is_empty() {
+    // Unreadable sectors count as damage even when the content still verifies —
+    // which happens when the lost bytes were zero anyway. The bytes are fine;
+    // the media is not, and rewriting is what moves the file off it.
+    if file_hash_ok && damaged_chunks.is_empty() && read.is_intact() {
         return Ok(VerifyReport {
             format_version,
+            unreadable_bytes,
             file_hash_ok: true,
             damaged_chunks: vec![],
             recc_present,
@@ -597,12 +622,13 @@ pub fn verify_and_repair(path: &Path, repair_to: Option<&Path>) -> RasterResult<
     }
 
     let repaired = match repair_to {
-        Some(repair_path) => attempt_repair(&data, &recc_copies, repair_path)?,
+        Some(repair_path) => attempt_repair(data, &recc_copies, repair_path)?,
         None => false,
     };
 
     Ok(VerifyReport {
         format_version,
+        unreadable_bytes,
         file_hash_ok,
         damaged_chunks,
         recc_present,

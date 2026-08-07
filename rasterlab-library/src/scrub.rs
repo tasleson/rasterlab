@@ -11,6 +11,9 @@
 //! * **Correctable corruption** — the damaged original is copied to
 //!   `library_root/recovered/` (mirroring its `ab/cd/{hash}.rlab` layout) and
 //!   the file is repaired from its `RECC` parity and re-saved in place.
+//! * **Unreadable sectors** — the file is read past the bad regions, which are
+//!   zero-filled and then reconstructed from parity like any other damage, so a
+//!   latent sector error costs only the shards it landed in.
 //! * **Uncorrectable corruption** — reported as a per-file error (also written
 //!   to stderr) for the caller to surface in a dialog.
 //!
@@ -26,7 +29,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rasterlab_core::project::{FORMAT_VERSION_V5, RlabFile, verify_and_repair};
+use rasterlab_core::{
+    degraded_read::read_degraded_file,
+    project::{FORMAT_VERSION_V5, RlabFile, verify_and_repair},
+};
 use walkdir::WalkDir;
 
 /// Extension used for the temporary file a repair/upgrade is staged into before
@@ -142,7 +148,12 @@ fn scrub_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scru
     let report = verify_and_repair(path, Some(&tmp))
         .with_context(|| format!("verify {}", path.display()))?;
 
-    let clean = report.file_hash_ok && report.damaged_chunks.is_empty();
+    // Unreadable sectors disqualify a file from "clean" even when its content
+    // still verifies, which happens when the lost bytes were zero anyway. The
+    // repair path rewrites it, and that rewrite is what moves it off the bad
+    // sectors — leaving it in place would just defer the loss.
+    let clean =
+        report.file_hash_ok && report.damaged_chunks.is_empty() && report.unreadable_bytes == 0;
 
     if clean {
         // A clean file produces no output, so `tmp` does not exist here.
@@ -179,7 +190,17 @@ fn scrub_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scru
         } else {
             "uncorrectable (no ECC parity present)"
         };
-        anyhow::bail!("{cause}: {what}")
+        // Unreadable sectors point at failing hardware rather than bit rot, so
+        // say so — the user's next step is the drive, not the file.
+        let media = if report.unreadable_bytes > 0 {
+            format!(
+                "; {} bytes unreadable — check drive health",
+                report.unreadable_bytes
+            )
+        } else {
+            String::new()
+        };
+        anyhow::bail!("{cause}: {what}{media}")
     }
 }
 
@@ -194,6 +215,11 @@ fn upgrade_to_v5(path: &Path, tmp: &Path) -> Result<()> {
 /// Copy the (corrupted) original to `recovered/`, preserving its relative
 /// `ab/cd/{hash}.rlab` layout. A timestamp suffix avoids clobbering a backup
 /// from an earlier scrub of the same file.
+///
+/// Uses the degraded reader rather than `std::fs::copy`: the file being backed
+/// up may have unreadable sectors — that is one of the reasons it is being
+/// repaired — and a plain copy would fail on the first `EIO`, taking the repair
+/// down with it. Unreadable regions appear in the backup as zeros.
 fn backup_to_recovered(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<()> {
     let rel = path.strip_prefix(files_dir).unwrap_or(path);
     let mut dest = recovered_dir.join(rel);
@@ -206,7 +232,8 @@ fn backup_to_recovered(files_dir: &Path, recovered_dir: &Path, path: &Path) -> R
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    std::fs::copy(path, &dest)
+    let degraded = read_degraded_file(path).with_context(|| format!("read {}", path.display()))?;
+    std::fs::write(&dest, &degraded.data)
         .with_context(|| format!("back up corrupted file to {}", dest.display()))?;
     Ok(())
 }
