@@ -410,29 +410,6 @@ fn clamp_sprocket_crop(crop: [u32; 4], image_width: u32, image_height: u32) -> [
     [crop_x, crop_y, crop_width, crop_height]
 }
 
-#[cfg(test)]
-mod sprocket_crop_tests {
-    use super::{centered_sprocket_crop, clamp_sprocket_crop};
-
-    #[test]
-    fn centers_two_to_one_crop_in_portrait_source() {
-        assert_eq!(centered_sprocket_crop(4000, 3000), [0, 500, 4000, 2000]);
-    }
-
-    #[test]
-    fn centers_two_to_one_crop_in_wide_source() {
-        assert_eq!(centered_sprocket_crop(5000, 2000), [500, 0, 4000, 2000]);
-    }
-
-    #[test]
-    fn positioned_crop_is_clamped_without_losing_ratio() {
-        assert_eq!(
-            clamp_sprocket_crop([3900, 2900, 2000, 1000], 4000, 3000),
-            [2000, 2000, 2000, 1000]
-        );
-    }
-}
-
 impl AppState {
     pub fn new(ctx: Context, gpu: Option<Arc<GpuContext>>) -> Self {
         let (bg_tx, bg_rx) = mpsc::channel();
@@ -2307,5 +2284,28 @@ impl AppState {
                 .ok();
         }
         self.thumb_req_tx = Some(tx);
+    }
+}
+
+#[cfg(test)]
+mod sprocket_crop_tests {
+    use super::{centered_sprocket_crop, clamp_sprocket_crop};
+
+    #[test]
+    fn centers_two_to_one_crop_in_portrait_source() {
+        assert_eq!(centered_sprocket_crop(4000, 3000), [0, 500, 4000, 2000]);
+    }
+
+    #[test]
+    fn centers_two_to_one_crop_in_wide_source() {
+        assert_eq!(centered_sprocket_crop(5000, 2000), [500, 0, 4000, 2000]);
+    }
+
+    #[test]
+    fn positioned_crop_is_clamped_without_losing_ratio() {
+        assert_eq!(
+            clamp_sprocket_crop([3900, 2900, 2000, 1000], 4000, 3000),
+            [2000, 2000, 2000, 1000]
+        );
     }
 }
