@@ -17,6 +17,12 @@
 //! * **Uncorrectable corruption** — reported as a per-file error (also written
 //!   to stderr) for the caller to surface in a dialog.
 //!
+//! Every file that survives the above is then checked against its own name: the
+//! library is content-addressed, so the path and the embedded original are two
+//! independent records of which photo this is. See [`check_identity`] — that
+//! disagreement is the one class of damage the parity is blind to, because
+//! nothing inside the file is wrong.
+//!
 //! The walk honours a shared cancellation flag so the GUI can stop it.
 
 use std::{
@@ -31,13 +37,16 @@ use std::{
 use anyhow::{Context, Result};
 use rasterlab_core::{
     degraded_read::read_degraded_file,
-    project::{FORMAT_VERSION_V5, RlabFile, verify_and_repair},
+    project::{FORMAT_VERSION_V5, RlabFile, read_original_hash, verify_and_repair},
 };
 use walkdir::WalkDir;
 
 /// Extension used for the temporary file a repair/upgrade is staged into before
 /// being atomically renamed over the original.
 const TMP_EXT: &str = "rlab.scrub-tmp";
+
+/// Length of a Blake3 digest in hex, which is what names a library file.
+const HASH_HEX_LEN: usize = 64;
 
 /// Live progress for a running scrub, delivered through the progress callback.
 #[derive(Debug, Clone, Default)]
@@ -141,6 +150,16 @@ pub fn scrub(
 }
 
 fn scrub_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<ScrubAction> {
+    let action = repair_one(files_dir, recovered_dir, path)?;
+    // Runs on the settled file so the hash checked is the one that will be
+    // kept. A file that was repaired and then fails this is still reported as
+    // an error: the bytes were recovered, but they are not the bytes this path
+    // is supposed to hold.
+    check_identity(files_dir, path)?;
+    Ok(action)
+}
+
+fn repair_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<ScrubAction> {
     let tmp = path.with_extension(TMP_EXT);
     // Drop any stale temp left by an interrupted earlier run.
     let _ = std::fs::remove_file(&tmp);
@@ -202,6 +221,56 @@ fn scrub_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scru
         };
         anyhow::bail!("{cause}: {what}{media}")
     }
+}
+
+/// Confirm a file is the photo its name claims it is.
+///
+/// Library files are content-addressed: the name and directory come from the
+/// Blake3 of the embedded original, so the path and the `ORIG` chunk are two
+/// independent records of the same fact. A disagreement is an *identity
+/// discrepancy* in the sense of Bairavasundaram et al. (FAST 2008) — content
+/// that is intact, self-consistent, and in the wrong place. A misdirected
+/// write, a cross-linked directory entry, a file restored under the wrong
+/// name. No amount of parity inside the file can see it, because nothing
+/// inside the file is wrong.
+///
+/// Note this does *not* detect a stale file: `ORIG` never changes for a given
+/// photo, so an older version of the same project still hashes to the same
+/// name. Catching that needs a record kept outside the file.
+///
+/// Files whose name is not a hash are skipped — there is nothing to check them
+/// against.
+fn check_identity(files_dir: &Path, path: &Path) -> Result<()> {
+    let Some(named_hash) = path.file_stem().and_then(|s| s.to_str()) else {
+        return Ok(());
+    };
+    if named_hash.len() != HASH_HEX_LEN || !named_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+
+    // Placement is derived from the same hash, so a file that is correctly
+    // named but in the wrong shard directory is unreachable by hash lookup.
+    let rel = path.strip_prefix(files_dir).unwrap_or(path);
+    let expected_rel = crate::import::relative_lib_path(named_hash);
+    if rel != Path::new(&expected_rel) {
+        anyhow::bail!(
+            "misplaced: named {named_hash} but filed at {} instead of {expected_rel}",
+            rel.display()
+        );
+    }
+
+    // Same hex form the importer names files with, so the two are comparable.
+    let embedded = read_original_hash(path)
+        .with_context(|| format!("read ORIG hash from {}", path.display()))?;
+    let embedded = blake3::Hash::from(embedded).to_hex();
+
+    if !embedded.eq_ignore_ascii_case(named_hash) {
+        anyhow::bail!(
+            "identity mismatch: file is named for {named_hash} but embeds {embedded} \
+             — misdirected write or misfiled copy"
+        );
+    }
+    Ok(())
 }
 
 /// Re-save a clean file as v5, staging through `tmp` and renaming over `path`.

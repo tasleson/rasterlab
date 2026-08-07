@@ -637,6 +637,52 @@ pub fn verify_and_repair_degraded(
     })
 }
 
+/// Read the Blake3 of the embedded original image out of the `ORIG` chunk.
+///
+/// Seeks over the image payload rather than loading it, so this stays cheap
+/// enough to run across a whole library.  The point is to learn *which* photo a
+/// file holds, not to re-verify that it holds it intact — [`verify_and_repair`]
+/// covers the latter, and covers it over the same bytes this hash describes.
+pub fn read_original_hash(path: &Path) -> RasterResult<[u8; 32]> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+
+    let mut header = [0u8; FILE_HEADER_LEN];
+    file.read_exact(&mut header)?;
+    if !header.starts_with(MAGIC) {
+        return Err(RasterError::decode(
+            "rlab",
+            "invalid magic bytes — not a .rlab project file",
+        ));
+    }
+
+    loop {
+        let mut tag = [0u8; 4];
+        match file.read_exact(&mut tag) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+
+        let mut len_buf = [0u8; 8];
+        file.read_exact(&mut len_buf)?;
+        let len = i64::try_from(u64::from_le_bytes(len_buf))
+            .map_err(|_| RasterError::decode("rlab", "chunk length out of range"))?;
+
+        if &tag == TAG_ORIG {
+            file.seek(SeekFrom::Current(len))?;
+            let mut hash = [0u8; HASH_LEN];
+            file.read_exact(&mut hash)?;
+            return Ok(hash);
+        }
+
+        file.seek(SeekFrom::Current(len + HASH_LEN as i64))?;
+    }
+
+    Err(RasterError::decode("rlab", "missing ORIG chunk"))
+}
+
 /// Read the format version straight from the file header, without parsing.
 fn read_format_version(data: &[u8]) -> Option<u16> {
     if !data.starts_with(MAGIC) || data.len() < FILE_HEADER_LEN {

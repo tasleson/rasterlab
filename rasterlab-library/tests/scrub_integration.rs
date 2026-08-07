@@ -179,3 +179,71 @@ fn scrub_honours_cancellation() {
     assert!(out.cancelled);
     assert_eq!(out.checked, 0);
 }
+
+// ── Identity ──────────────────────────────────────────────────────────────────
+//
+// Library files are named for the Blake3 of their embedded original, so path
+// and content are two independent records of the same fact. When they disagree
+// the file is intact and in the wrong place — nothing inside it is wrong, so no
+// parity can detect it.
+
+#[test]
+fn scrub_flags_a_file_holding_the_wrong_photo() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open_or_create(tmp.path()).unwrap();
+    let (hash, path) = import_one(&lib);
+
+    // Simulate a misdirected write: this path now holds a different original,
+    // written correctly and verifying perfectly against its own parity.
+    let mut other = RlabFile::read(&path).unwrap();
+    other.original_bytes.extend_from_slice(b"a different photo");
+    let rebuilt = RlabFile::new(
+        other.meta.clone(),
+        other.original_bytes.clone(),
+        other.copies.clone(),
+        0,
+        None,
+    );
+    rebuilt.write_v5(&path).unwrap();
+
+    // The file itself is beyond reproach.
+    let report = verify_and_repair(&path, None).unwrap();
+    assert!(
+        report.file_hash_ok && report.damaged_chunks.is_empty(),
+        "{report:?}"
+    );
+
+    let out = run_scrub(&lib);
+    assert_eq!(out.errors.len(), 1, "{out:?}");
+    let msg = &out.errors[0].1;
+    assert!(msg.contains("identity mismatch"), "{msg}");
+    assert!(msg.contains(&hash), "{msg}");
+}
+
+#[test]
+fn scrub_flags_a_file_in_the_wrong_shard_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open_or_create(tmp.path()).unwrap();
+    let (hash, path) = import_one(&lib);
+
+    // Correct name, wrong directory — unreachable by hash lookup even though
+    // the bytes are perfect.
+    let wrong_dir = tmp.path().join("files").join("00").join("11");
+    std::fs::create_dir_all(&wrong_dir).unwrap();
+    let moved = wrong_dir.join(format!("{hash}.rlab"));
+    std::fs::rename(&path, &moved).unwrap();
+
+    let out = run_scrub(&lib);
+    assert_eq!(out.errors.len(), 1, "{out:?}");
+    assert!(out.errors[0].1.contains("misplaced"), "{:?}", out.errors[0]);
+}
+
+#[test]
+fn scrub_accepts_a_correctly_filed_library() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open_or_create(tmp.path()).unwrap();
+    import_one(&lib);
+
+    let out = run_scrub(&lib);
+    assert!(out.errors.is_empty(), "{out:?}");
+}

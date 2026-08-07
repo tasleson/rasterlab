@@ -14,8 +14,8 @@ use rasterlab_core::{
     degraded_read::DegradedRead,
     pipeline::PipelineState,
     project::{
-        FORMAT_VERSION_V4, FORMAT_VERSION_V5, RlabFile, RlabMeta, SavedCopy, verify_and_repair,
-        verify_and_repair_degraded,
+        FORMAT_VERSION_V4, FORMAT_VERSION_V5, RlabFile, RlabMeta, SavedCopy, read_original_hash,
+        verify_and_repair, verify_and_repair_degraded,
     },
 };
 use tempfile::NamedTempFile;
@@ -448,4 +448,56 @@ fn verifying_content_is_still_rewritten_when_sectors_were_unreadable() {
         "a file on failing media must be rewritten even when its bytes verify"
     );
     RlabFile::read(out.path()).expect("rewritten file must parse");
+}
+
+// ── Identity ──────────────────────────────────────────────────────────────────
+
+/// The library names files for the Blake3 of their embedded original, so this
+/// is the value that lets a caller tell whether a file is the photo its path
+/// claims. It must agree with hashing ORIG directly, and must not require
+/// loading the payload.
+#[test]
+fn read_original_hash_matches_the_embedded_payload() {
+    let tmp = NamedTempFile::new().unwrap();
+    fixture().write_v5(tmp.path()).unwrap();
+
+    let expected = blake3::hash(&vec![ORIG_FILL; ORIG_LEN]);
+    assert_eq!(
+        read_original_hash(tmp.path()).unwrap(),
+        *expected.as_bytes()
+    );
+
+    // Also agrees with what a full parse reports.
+    assert_eq!(
+        read_original_hash(tmp.path()).unwrap(),
+        RlabFile::read(tmp.path()).unwrap().original_hash
+    );
+}
+
+#[test]
+fn read_original_hash_works_across_layouts() {
+    for (label, write) in [
+        (
+            "v3",
+            (|f: &RlabFile, p: &std::path::Path| f.write(p))
+                as fn(&RlabFile, &std::path::Path) -> rasterlab_core::error::RasterResult<()>,
+        ),
+        ("v4", |f: &RlabFile, p: &std::path::Path| f.write_v4(p)),
+        ("v5", |f: &RlabFile, p: &std::path::Path| f.write_v5(p)),
+    ] {
+        let tmp = NamedTempFile::new().unwrap();
+        write(&fixture(), tmp.path()).unwrap();
+        assert_eq!(
+            read_original_hash(tmp.path()).unwrap(),
+            *blake3::hash(&vec![ORIG_FILL; ORIG_LEN]).as_bytes(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn read_original_hash_rejects_a_non_rlab_file() {
+    let tmp = NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), b"not a project file at all").unwrap();
+    assert!(read_original_hash(tmp.path()).is_err());
 }
