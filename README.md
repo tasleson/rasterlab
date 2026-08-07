@@ -1,4 +1,4 @@
-<img width="1408" height="768" alt="RasterLab editor" src="https://github.com/user-attachments/assets/bcf3af6b-4982-4dad-b460-99cca597660a" />
+<img width="1472" height="741" alt="rasterlab" src="https://github.com/user-attachments/assets/bbbd7756-9b7a-4431-a1e7-03ffbae72b30" />
 
 # RasterLab
 
