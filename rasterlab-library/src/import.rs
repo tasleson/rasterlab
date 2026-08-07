@@ -544,7 +544,7 @@ fn write_rlab(
     rlab.set_lmta(Some(lmta.clone()));
     // Write v4 with Reed-Solomon `RECC` parity (~20% overhead) so a later
     // integrity scrub can repair bitrot in place. See `crate::scrub`.
-    rlab.write_v4(path).context("write .rlab")
+    rlab.write_v5(path).context("write .rlab")
 }
 
 // ── Path helpers ──────────────────────────────────────────────────────────────

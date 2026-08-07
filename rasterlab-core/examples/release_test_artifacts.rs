@@ -72,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         0,
         None,
     );
-    project.write_v4(&project_path)?;
+    project.write_v5(&project_path)?;
 
     println!("Wrote {}", source_path.display());
     println!("Wrote {}", rendered_path.display());

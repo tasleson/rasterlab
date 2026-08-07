@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
 };
 
-use rasterlab_core::project::{RlabFile, verify_and_repair};
+use rasterlab_core::project::{FORMAT_VERSION_V5, RlabFile, verify_and_repair};
 use rasterlab_library::{Library, ScrubOutcome, db_trait::SortOrder, import::relative_lib_path};
 
 fn jpeg_path() -> PathBuf {
@@ -39,7 +39,7 @@ fn flip(bytes: &mut [u8], range: std::ops::Range<usize>, mask: u8) {
 }
 
 #[test]
-fn scrub_clean_v4_library_makes_no_changes() {
+fn scrub_clean_v5_library_makes_no_changes() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = Library::open_or_create(tmp.path()).unwrap();
     import_one(&lib);
@@ -47,7 +47,7 @@ fn scrub_clean_v4_library_makes_no_changes() {
     let out = run_scrub(&lib);
     assert_eq!(out.checked, 1);
     assert_eq!(out.repaired, 0);
-    // Imports are already written as v4, so nothing to upgrade.
+    // Imports are already written as v5, so nothing to upgrade.
     assert_eq!(out.upgraded, 0);
     assert!(out.errors.is_empty(), "{out:?}");
     assert!(!out.cancelled);
@@ -88,25 +88,60 @@ fn scrub_repairs_corruption_and_backs_up_original() {
 }
 
 #[test]
-fn scrub_upgrades_v3_file_to_v4() {
+fn scrub_upgrades_older_formats_to_v5() {
+    // v3 has no parity at all; v4 has parity but keeps both copies at the tail,
+    // where one truncation destroys the pair. Both must be migrated.
+    for (label, rewrite) in [
+        (
+            "v3",
+            (|f: &RlabFile, p: &std::path::Path| f.write(p))
+                as fn(&RlabFile, &std::path::Path) -> rasterlab_core::error::RasterResult<()>,
+        ),
+        ("v4", |f: &RlabFile, p: &std::path::Path| f.write_v4(p)),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = Library::open_or_create(tmp.path()).unwrap();
+        let (_hash, path) = import_one(&lib);
+
+        rewrite(&RlabFile::read(&path).unwrap(), &path).unwrap();
+        let pre = verify_and_repair(&path, None).unwrap();
+        assert!(pre.file_hash_ok, "{label}: {pre:?}");
+        assert_ne!(pre.format_version, Some(FORMAT_VERSION_V5), "{label}");
+
+        let out = run_scrub(&lib);
+        assert_eq!(out.upgraded, 1, "{label}: {out:?}");
+        assert_eq!(out.repaired, 0, "{label}");
+        assert!(out.errors.is_empty(), "{label}: {out:?}");
+
+        // It now carries v5 parity, and a clean upgrade leaves no backup behind.
+        let post = verify_and_repair(&path, None).unwrap();
+        assert!(post.file_hash_ok && post.recc_present, "{label}: {post:?}");
+        assert_eq!(post.format_version, Some(FORMAT_VERSION_V5), "{label}");
+        assert!(!tmp.path().join("recovered").exists(), "{label}");
+    }
+}
+
+/// End truncation is the case v4 could not survive: both parity copies sat at
+/// the tail. A v5 library file must come back from losing its trailing copy.
+#[test]
+fn scrub_repairs_end_truncation() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = Library::open_or_create(tmp.path()).unwrap();
     let (_hash, path) = import_one(&lib);
 
-    // Rewrite the file in the older v3 format (no RECC parity).
-    RlabFile::read(&path).unwrap().write(&path).unwrap();
-    let pre = verify_and_repair(&path, None).unwrap();
-    assert!(pre.file_hash_ok && !pre.recc_present, "{pre:?}");
+    let original = RlabFile::read(&path).unwrap().original_bytes;
+
+    // Drop the file hash and the whole trailing RECC chunk.
+    let bytes = std::fs::read(&path).unwrap();
+    let last_recc = (0..bytes.len() - 4)
+        .rfind(|&i| &bytes[i..i + 4] == b"RECC")
+        .expect("trailing RECC copy");
+    std::fs::write(&path, &bytes[..last_recc]).unwrap();
 
     let out = run_scrub(&lib);
-    assert_eq!(out.upgraded, 1, "{out:?}");
-    assert_eq!(out.repaired, 0);
+    assert_eq!(out.repaired, 1, "{out:?}");
     assert!(out.errors.is_empty(), "{out:?}");
-
-    // It now carries parity, and a clean upgrade leaves no backup behind.
-    let post = verify_and_repair(&path, None).unwrap();
-    assert!(post.file_hash_ok && post.recc_present, "{post:?}");
-    assert!(!tmp.path().join("recovered").exists());
+    assert_eq!(RlabFile::read(&path).unwrap().original_bytes, original);
 }
 
 #[test]

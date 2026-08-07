@@ -3,10 +3,11 @@
 //! Walks every `.rlab` file under `library_root/files/`, verifies its per-chunk
 //! and whole-file Blake3 hashes, and acts on the result:
 //!
-//! * **Clean, with parity** — left untouched.
-//! * **Clean, no parity** (older v3 files) — rewritten as v4 so they gain
-//!   Reed-Solomon `RECC` parity and become repairable in future scrubs. This is
-//!   a lossless re-save; the corrupted-file backup path is *not* taken.
+//! * **Clean, already v5** — left untouched.
+//! * **Clean, older format** — rewritten as v5. v3 files gain Reed-Solomon
+//!   `RECC` parity for the first time; v4 files gain the split parity placement
+//!   that survives truncation from either end. This is a lossless re-save; the
+//!   corrupted-file backup path is *not* taken.
 //! * **Correctable corruption** — the damaged original is copied to
 //!   `library_root/recovered/` (mirroring its `ab/cd/{hash}.rlab` layout) and
 //!   the file is repaired from its `RECC` parity and re-saved in place.
@@ -25,7 +26,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rasterlab_core::project::{RlabFile, verify_and_repair};
+use rasterlab_core::project::{FORMAT_VERSION_V5, RlabFile, verify_and_repair};
 use walkdir::WalkDir;
 
 /// Extension used for the temporary file a repair/upgrade is staged into before
@@ -40,7 +41,7 @@ pub struct ScrubProgress {
     pub done: usize,
     /// Files repaired from `RECC` parity after corruption was found.
     pub repaired: usize,
-    /// Clean v3 files rewritten as v4 to add ECC parity.
+    /// Clean pre-v5 files rewritten as v5 for stronger parity placement.
     pub upgraded: usize,
     pub current_file: PathBuf,
     /// Per-file uncorrectable failures: `(path, message)`.
@@ -145,16 +146,17 @@ fn scrub_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scru
 
     if clean {
         // A clean file produces no output, so `tmp` does not exist here.
-        if report.recc_present {
+        if report.format_version == Some(FORMAT_VERSION_V5) {
             return Ok(ScrubAction::Clean);
         }
-        // v3 (no ECC): re-save as v4 so it becomes repairable. Best-effort —
-        // a write failure (e.g. a locked/protected file) leaves the intact
-        // original in place and is not a corruption error.
-        match upgrade_to_v4(path, &tmp) {
+        // Older layout: re-save as v5. v3 gains parity at all; v4 gains the
+        // split placement that survives end truncation. Best-effort — a write
+        // failure (e.g. a locked/protected file) leaves the intact original in
+        // place and is not a corruption error.
+        match upgrade_to_v5(path, &tmp) {
             Ok(()) => Ok(ScrubAction::Upgraded),
             Err(e) => {
-                eprintln!("scrub: could not upgrade {} to v4: {e}", path.display());
+                eprintln!("scrub: could not upgrade {} to v5: {e}", path.display());
                 let _ = std::fs::remove_file(&tmp);
                 Ok(ScrubAction::Clean)
             }
@@ -181,11 +183,11 @@ fn scrub_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scru
     }
 }
 
-/// Re-save a clean file as v4, staging through `tmp` and renaming over `path`.
-fn upgrade_to_v4(path: &Path, tmp: &Path) -> Result<()> {
+/// Re-save a clean file as v5, staging through `tmp` and renaming over `path`.
+fn upgrade_to_v5(path: &Path, tmp: &Path) -> Result<()> {
     let rlab = RlabFile::read(path).with_context(|| format!("read {}", path.display()))?;
-    rlab.write_v4(tmp)
-        .with_context(|| format!("write v4 {}", tmp.display()))?;
+    rlab.write_v5(tmp)
+        .with_context(|| format!("write v5 {}", tmp.display()))?;
     replace_atomically(tmp, path)
 }
 
