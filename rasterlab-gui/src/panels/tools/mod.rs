@@ -138,8 +138,9 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     metadata::ui(ui, state, has_image);
 
-    // Clear one-frame force-open flag
+    // Clear the one-frame force-open and reveal flags
     state.tools_force_open = None;
+    state.tools.reveal_tool = None;
 }
 
 fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
@@ -148,13 +149,21 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
 
     let has_image = state.pipeline().is_some();
     let editing = state.editing;
-    let force_open = state.tools_force_open;
 
     // Header with collapsing
     let id = tool.id();
     let display_name = tool.display_name();
     let editing_tool = tool.editing_tool();
     let default_open = state.prefs.is_tool_open(id);
+
+    // A tool that was just handed its input from outside the panel opens and
+    // scrolls into view, overriding an Expand-All/Collapse-All in the same frame.
+    let reveal = state.tools.reveal_tool == Some(id);
+    let force_open = if reveal {
+        Some(true)
+    } else {
+        state.tools_force_open
+    };
 
     let header = if let Some(et) = editing_tool {
         header_for_tool(force_open, display_name, editing, et)
@@ -192,6 +201,10 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
             };
             tool.render_ui(ui, &ctx)
         });
+
+    if reveal {
+        resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+    }
 
     if resp.header_response.clicked() {
         state.prefs.tools_open.insert(id.to_string(), !default_open);

@@ -10,7 +10,7 @@ use crate::{
         canvas::CanvasState, edit_stack, export_dialog, histogram_panel, library_detail,
         library_panel, tools,
     },
-    state::{AppMode, AppState},
+    state::{AppMode, AppState, FocusStackRequest},
 };
 
 /// What to do once the user confirms discarding unsaved changes on open.
@@ -28,6 +28,9 @@ enum PendingOpen {
         lib_root: PathBuf,
         hash: String,
     },
+    /// Focus-stack a library selection: opens the base photo and loads every
+    /// selected frame into the Focus Stack tool.
+    FocusStack(FocusStackRequest),
 }
 
 pub struct RasterLabApp {
@@ -325,6 +328,28 @@ impl RasterLabApp {
         self.state.mode = AppMode::Editor;
     }
 
+    /// Start a focus stack over a library selection, prompting to discard
+    /// unsaved changes first if needed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_focus_stack(&mut self, req: FocusStackRequest) {
+        if self.state.is_dirty {
+            self.pending_open = Some(PendingOpen::FocusStack(req));
+            self.open_confirm_open = true;
+        } else {
+            self.start_focus_stack(req);
+        }
+    }
+
+    /// Load the selection into the Focus Stack tool and open the base photo to
+    /// host the result. Assumes any unsaved-changes prompt has been handled.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_focus_stack(&mut self, req: FocusStackRequest) {
+        // Frames first: `open_library_photo` starts an async load whose
+        // completion renders the editor's tool state as it stands then.
+        self.state.load_focus_stack_frames(req.frame_paths);
+        self.open_library_photo(req.base_rlab_path, req.library_root, req.base_hash);
+    }
+
     /// Save in-place if a project path is already known; otherwise open Save As.
     #[cfg(not(target_arch = "wasm32"))]
     fn save_project_or_prompt(&mut self, ctx: &Context) {
@@ -448,6 +473,9 @@ impl eframe::App for RasterLabApp {
         }
         if let Some((rlab_path, lib_root, hash)) = self.state.library.pending_open_photo.take() {
             self.request_open_library_photo(rlab_path, lib_root, hash);
+        }
+        if let Some(req) = self.state.library.pending_focus_stack.take() {
+            self.request_focus_stack(req);
         }
 
         self.handle_keyboard(&ctx);
@@ -1132,6 +1160,7 @@ impl RasterLabApp {
                                 lib_root,
                                 hash,
                             }) => self.open_library_photo(rlab_path, lib_root, hash),
+                            Some(PendingOpen::FocusStack(req)) => self.start_focus_stack(req),
                             None => {}
                         }
                     }

@@ -1,12 +1,12 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
 use rasterlab_library::{
     CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, PhotoId, PhotoRow,
-    RebuildProgress, ScrubProgress, SearchFilter, SortOrder,
+    RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
 };
 
 // ── LibraryView ───────────────────────────────────────────────────────────────
@@ -17,6 +17,45 @@ pub enum LibraryView {
     AllPhotos,
     Session(String),
     Collection(CollectionId),
+}
+
+// ── FocusStackRequest ─────────────────────────────────────────────────────────
+
+/// Fewest frames a focus stack can fuse.
+pub const MIN_FOCUS_STACK_FRAMES: usize = 2;
+
+/// A focus stack started from a multi-selection in the library grid.
+///
+/// The fused result has to live somewhere, so the first selected photo is
+/// opened in the editor and hosts the operation; every selected photo — that
+/// one included — becomes a source frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusStackRequest {
+    /// `.rlab` path of the photo to open in the editor.
+    pub base_rlab_path: PathBuf,
+    /// Library root, for the editor's library context.
+    pub library_root: PathBuf,
+    /// Hash of the base photo, likewise for the library context.
+    pub base_hash: String,
+    /// `.rlab` path of every frame, in grid order.
+    pub frame_paths: Vec<PathBuf>,
+}
+
+/// `(hash, .rlab path)` of every selected photo, in grid order.
+///
+/// Grid order rather than the click order held in `selected`, so the frame
+/// list — and with it the photo that hosts the result — depends only on what
+/// is selected, not on how the user got there.
+fn selected_frames(
+    results: &[PhotoRow],
+    selected: &[PhotoId],
+    root: &Path,
+) -> Vec<(String, PathBuf)> {
+    results
+        .iter()
+        .filter(|p| selected.contains(&p.id))
+        .map(|p| (p.hash.clone(), rlab_path(root, &p.hash)))
+        .collect()
 }
 
 // ── LibraryState ──────────────────────────────────────────────────────────────
@@ -86,6 +125,11 @@ pub struct LibraryState {
     /// dialog. Tuple is `(rlab_path, library_root, photo_hash)`.
     pub pending_open_photo: Option<(PathBuf, PathBuf, String)>,
 
+    /// Set by the grid's context menu when the user asks to focus-stack the
+    /// current selection. Routed through the same unsaved-changes dialog as
+    /// `pending_open_photo`, since it too opens a photo in the editor.
+    pub pending_focus_stack: Option<FocusStackRequest>,
+
     /// When set, the grid will scroll to — and select — the photo with this
     /// hash on the next frame, then clear the field.
     pub scroll_to_hash: Option<String>,
@@ -126,6 +170,7 @@ impl Default for LibraryState {
             aperture_error: None,
             shutter_error: None,
             pending_open_photo: None,
+            pending_focus_stack: None,
             scroll_to_hash: None,
             thumb_target_side: 0,
         }
@@ -278,6 +323,24 @@ impl LibraryState {
         self.refresh();
     }
 
+    /// Raise a focus-stack request for the current selection, to be picked up
+    /// by `app.rs`. Does nothing unless a library is open and at least
+    /// [`MIN_FOCUS_STACK_FRAMES`] photos are selected.
+    pub fn request_focus_stack(&mut self) {
+        let Some(lib) = &self.library else { return };
+        let frames = selected_frames(&self.results, &self.selected, lib.root());
+        if frames.len() < MIN_FOCUS_STACK_FRAMES {
+            return;
+        }
+        let (base_hash, base_rlab_path) = frames[0].clone();
+        self.pending_focus_stack = Some(FocusStackRequest {
+            base_rlab_path,
+            library_root: lib.root().to_path_buf(),
+            base_hash,
+            frame_paths: frames.into_iter().map(|(_, path)| path).collect(),
+        });
+    }
+
     /// True if every selected photo is currently protected (and there is at
     /// least one selection). Used to choose the Protect/Unprotect label.
     pub fn all_selected_protected(&self) -> bool {
@@ -423,6 +486,53 @@ impl ThumbCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(id: PhotoId, hash: &str) -> PhotoRow {
+        PhotoRow {
+            id,
+            hash: hash.to_owned(),
+            lib_path: format!("{}/{}/{hash}.rlab", &hash[0..2], &hash[2..4]),
+            width: 100,
+            height: 100,
+            import_date: 0,
+            import_session: "s".into(),
+            capture_date: None,
+            original_filename: None,
+            stack_id: None,
+            stack_is_primary: true,
+            has_edits: false,
+            protected: false,
+        }
+    }
+
+    /// The frame list follows the grid, not the order the user clicked in, so
+    /// the same selection always fuses the same way and always hosts the
+    /// result on the same photo.
+    #[test]
+    fn focus_stack_frames_follow_grid_order() {
+        let root = Path::new("/lib");
+        let results = [row(1, "aabbcc01"), row(2, "aabbcc02"), row(3, "aabbcc03")];
+
+        // Selected bottom-up; photo 3 was clicked first.
+        let frames = selected_frames(&results, &[3, 1], root);
+
+        let hashes: Vec<&str> = frames.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(hashes, ["aabbcc01", "aabbcc03"]);
+        assert_eq!(
+            frames[0].1,
+            Path::new("/lib/files/aa/bb/aabbcc01.rlab"),
+            "frames must resolve to the library's content-addressed .rlab files",
+        );
+    }
+
+    #[test]
+    fn unselected_photos_are_not_frames() {
+        let root = Path::new("/lib");
+        let results = [row(1, "aabbcc01"), row(2, "aabbcc02")];
+
+        assert!(selected_frames(&results, &[], root).is_empty());
+        assert_eq!(selected_frames(&results, &[2], root).len(), 1);
+    }
 
     #[test]
     fn thumb_target_side_buckets_clamps_and_never_upscales() {

@@ -85,6 +85,14 @@ impl Tool for FocusStackTool {
                     .small()
                     .color(egui::Color32::from_rgb(200, 150, 50)),
             );
+        } else if self.paths.len() > 1 && !self.preview_active {
+            // Reached by way of the library's Focus Stack action, which fills
+            // the frame list without starting a preview.
+            ui.label(
+                egui::RichText::new(format!("{} frames ready — press Stack.", self.paths.len()))
+                    .small()
+                    .color(Color32::from_gray(140)),
+            );
         }
         action
     }

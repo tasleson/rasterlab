@@ -171,6 +171,7 @@ Current library features include:
 - Filtering by text, rating, flag, color label, camera, lens, capture date, aperture, shutter speed, ISO, and edited state.
 - Sorting by import date, capture date, rating, or filename.
 - Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals.
+- Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
 - Index rebuilding, integrity scrubbing, protected-photo deletion guards, and recoverable move-to-trash behavior.
 
 ## Building and running

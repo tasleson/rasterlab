@@ -57,6 +57,12 @@ pub struct ToolState {
 
     // ── Dialog request flags ─────────────────────────────────────────────
     pub pending_dialog: Option<DialogKind>,
+
+    /// `id()` of a tool the panel should open and scroll into view on the next
+    /// frame, then clear. Set when something outside the panel hands a tool its
+    /// input (e.g. the library's Focus Stack action) and the user has to be
+    /// shown where that landed.
+    pub reveal_tool: Option<&'static str>,
 }
 
 impl ToolState {
@@ -84,6 +90,7 @@ impl ToolState {
             export_border: crate::panels::export_border::ExportBorderOptions::default(),
             export_dialog: crate::panels::export_dialog::ExportDialogState::default(),
             pending_dialog: None,
+            reveal_tool: None,
         }
     }
 

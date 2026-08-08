@@ -1665,6 +1665,27 @@ impl AppState {
         }
     }
 
+    /// Load `paths` into the Focus Stack tool as its frame list, replacing
+    /// whatever was there, and reveal the tool in the panel.
+    ///
+    /// Used by the library grid's Focus Stack action. No preview is started:
+    /// the op reloads and fuses every frame at full resolution, which for a
+    /// bulk selection of RAW frames is minutes of work the user has not asked
+    /// for yet. They press Stack when ready.
+    pub fn load_focus_stack_frames(&mut self, paths: Vec<std::path::PathBuf>) {
+        use crate::panels::tools::focus_stack::FocusStackTool;
+        use crate::panels::tools::tool_trait::Tool;
+
+        self.cancel_all_previews();
+        let tool = self.tools.find_mut::<FocusStackTool>().unwrap();
+        tool.paths = paths
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let id = tool.id();
+        self.tools.reveal_tool = Some(id);
+    }
+
     pub fn hdr_merge_add_image(&mut self, path: std::path::PathBuf) {
         use crate::panels::tools::hdr_merge::HdrMergeTool;
         let tool = self.tools.find_mut::<HdrMergeTool>().unwrap();
