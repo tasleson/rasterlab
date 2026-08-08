@@ -3,7 +3,7 @@ use std::any::Any;
 use rasterlab_core::ops::PanoramaOp;
 use rasterlab_core::traits::operation::Operation;
 
-use super::shared::{StackFrame, frame_paths, path_list_ui};
+use super::shared::{MIN_STACK_FRAMES, StackFrame, frame_list_ui, frame_paths};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::file_chooser::DialogKind;
 
@@ -39,12 +39,13 @@ impl Tool for PanoramaTool {
                     .small()
                     .italics(),
             );
-        } else if let Some(idx) = path_list_ui(ui, &self.frames, "panorama_list") {
-            self.frames.remove(idx);
-            if self.frames.len() < 2 && self.preview_active {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
+        } else {
+            action = frame_list_ui(
+                ui,
+                &mut self.frames,
+                &mut self.preview_active,
+                "panorama_list",
+            );
         }
 
         ui.add_space(4.0);
@@ -70,13 +71,13 @@ impl Tool for PanoramaTool {
                     .add(egui::Slider::new(&mut self.feather_px, 1u32..=300).suffix(" px"))
                     .changed();
                 ui.end_row();
-                if changed && self.frames.len() >= 2 {
+                if changed && self.frames.len() >= MIN_STACK_FRAMES {
                     self.preview_active = true;
                 }
             });
 
         ui.horizontal(|ui| {
-            let ready = self.frames.len() >= 2;
+            let ready = self.frames.len() >= MIN_STACK_FRAMES;
             if ui
                 .add_enabled(ctx.has_image && ready, egui::Button::new("Stitch"))
                 .clicked()
@@ -118,7 +119,7 @@ impl Tool for PanoramaTool {
 
     super::shared::impl_preview_controls!();
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active && self.frames.len() >= 2 {
+        if self.preview_active && self.frames.len() >= MIN_STACK_FRAMES {
             Some(Box::new(PanoramaOp::new(
                 frame_paths(&self.frames),
                 self.feather_px,

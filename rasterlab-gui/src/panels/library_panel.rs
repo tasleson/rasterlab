@@ -3,7 +3,8 @@ use rasterlab_library::{
     ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, SearchFilter, SortOrder, ymd_from_unix,
 };
 
-use crate::state::library_state::{MIN_FOCUS_STACK_FRAMES, thumb_target_side};
+use crate::panels::tools::shared::MIN_STACK_FRAMES;
+use crate::state::library_state::thumb_target_side;
 use crate::state::{AppState, LibraryView};
 
 /// Scroll-margin multiple for the resident texture cap: keep roughly this many
@@ -1046,7 +1047,7 @@ fn thumb_cell(
 
         // Focus Stack the whole selection. Shown disabled below the minimum so
         // the action is discoverable from a single-photo right-click too.
-        let enabled = n >= MIN_FOCUS_STACK_FRAMES;
+        let enabled = n >= MIN_STACK_FRAMES;
         let label = if enabled {
             format!("🎯  Focus Stack {n} Photos")
         } else {
@@ -1057,9 +1058,7 @@ fn thumb_cell(
             .on_hover_text(
                 "Open the first photo in the editor with every selected photo as a frame",
             )
-            .on_disabled_hover_text(format!(
-                "Select {MIN_FOCUS_STACK_FRAMES} or more photos to fuse"
-            ))
+            .on_disabled_hover_text(format!("Select {MIN_STACK_FRAMES} or more photos to fuse"))
             .clicked()
         {
             state.library.request_focus_stack();

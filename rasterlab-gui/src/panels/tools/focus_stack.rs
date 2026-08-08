@@ -4,7 +4,7 @@ use egui::Color32;
 use rasterlab_core::ops::FocusStackOp;
 use rasterlab_core::traits::operation::Operation;
 
-use super::shared::{StackFrame, frame_paths, path_list_ui};
+use super::shared::{MIN_STACK_FRAMES, StackFrame, frame_list_ui, frame_paths};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::file_chooser::DialogKind;
 
@@ -45,12 +45,13 @@ impl Tool for FocusStackTool {
                     .small()
                     .italics(),
             );
-        } else if let Some(idx) = path_list_ui(ui, &self.frames, "focus_stack_list") {
-            self.frames.remove(idx);
-            if self.frames.len() < 2 && self.preview_active {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
+        } else {
+            action = frame_list_ui(
+                ui,
+                &mut self.frames,
+                &mut self.preview_active,
+                "focus_stack_list",
+            );
         }
 
         ui.add_space(4.0);
@@ -99,7 +100,7 @@ impl Tool for FocusStackTool {
 
     super::shared::impl_preview_controls!();
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active && self.frames.len() >= 2 {
+        if self.preview_active && self.frames.len() >= MIN_STACK_FRAMES {
             Some(Box::new(FocusStackOp::new(frame_paths(&self.frames))))
         } else {
             None

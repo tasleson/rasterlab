@@ -9,6 +9,8 @@ use rasterlab_library::{
     RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
 };
 
+use crate::panels::tools::shared::MIN_STACK_FRAMES;
+
 // ── LibraryView ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -20,9 +22,6 @@ pub enum LibraryView {
 }
 
 // ── FocusStackRequest ─────────────────────────────────────────────────────────
-
-/// Fewest frames a focus stack can fuse.
-pub const MIN_FOCUS_STACK_FRAMES: usize = 2;
 
 /// A focus stack started from a multi-selection in the library grid.
 ///
@@ -325,11 +324,11 @@ impl LibraryState {
 
     /// Raise a focus-stack request for the current selection, to be picked up
     /// by `app.rs`. Does nothing unless a library is open and at least
-    /// [`MIN_FOCUS_STACK_FRAMES`] photos are selected.
+    /// [`MIN_STACK_FRAMES`] photos are selected.
     pub fn request_focus_stack(&mut self) {
         let Some(lib) = &self.library else { return };
         let frames = selected_frames(&self.results, &self.selected, lib.root());
-        if frames.len() < MIN_FOCUS_STACK_FRAMES {
+        if frames.len() < MIN_STACK_FRAMES {
             return;
         }
         let (base_hash, base_rlab_path) = frames[0].clone();

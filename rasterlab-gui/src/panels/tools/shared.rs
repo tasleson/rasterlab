@@ -132,25 +132,91 @@ pub(super) fn frame_paths(frames: &[StackFrame]) -> Vec<String> {
     frames.iter().map(|f| f.path.clone()).collect()
 }
 
-pub(super) fn path_list_ui(ui: &mut Ui, frames: &[StackFrame], id_salt: &str) -> Option<usize> {
-    let mut remove_idx: Option<usize> = None;
+/// Fewest frames any of the multi-image ops can work with.
+pub const MIN_STACK_FRAMES: usize = 2;
+
+/// What the user clicked on a row of the frame list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FrameEdit {
+    MoveUp(usize),
+    MoveDown(usize),
+    Remove(usize),
+}
+
+/// Apply a row edit. A move off either end of the list is a no-op — the
+/// buttons that would produce one are disabled, so this only guards the
+/// arithmetic.
+fn apply_frame_edit(frames: &mut Vec<StackFrame>, edit: FrameEdit) {
+    match edit {
+        FrameEdit::MoveUp(i) if i > 0 && i < frames.len() => frames.swap(i - 1, i),
+        FrameEdit::MoveDown(i) if i + 1 < frames.len() => frames.swap(i, i + 1),
+        FrameEdit::Remove(i) if i < frames.len() => {
+            frames.remove(i);
+        }
+        _ => {}
+    }
+}
+
+/// Draw the frame list and apply whatever reorder or removal was clicked.
+///
+/// Panorama chains its homographies between neighbours, so its list order is
+/// the shooting order and a wrong one fails to stitch at all. Focus Stack and
+/// HDR Merge fuse symmetrically and do not care, but they share the numbered
+/// list because seeing the frames in a known order is how the set gets
+/// checked. The controls lead the row so a long file name is what gets
+/// clipped in a narrow panel, never the buttons.
+pub(super) fn frame_list_ui(
+    ui: &mut Ui,
+    frames: &mut Vec<StackFrame>,
+    preview_active: &mut bool,
+    id_salt: &str,
+) -> ToolAction {
+    let mut edit = None;
+    let last = frames.len().saturating_sub(1);
     egui::ScrollArea::vertical()
         .max_height(120.0)
         .id_salt(id_salt)
         .show(ui, |ui| {
             for (i, frame) in frames.iter().enumerate() {
                 ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(i > 0, egui::Button::new("⏶").small())
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        edit = Some(FrameEdit::MoveUp(i));
+                    }
+                    if ui
+                        .add_enabled(i < last, egui::Button::new("⏷").small())
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        edit = Some(FrameEdit::MoveDown(i));
+                    }
+                    if ui.small_button("✕").on_hover_text("Remove").clicked() {
+                        edit = Some(FrameEdit::Remove(i));
+                    }
                     // Two library photos can share an imported name, so the
                     // full path stays reachable on hover.
                     ui.label(format!("{}. {}", i + 1, frame.label))
                         .on_hover_text(&frame.path);
-                    if ui.small_button("✕").clicked() {
-                        remove_idx = Some(i);
-                    }
                 });
             }
         });
-    remove_idx
+
+    let Some(edit) = edit else {
+        return ToolAction::None;
+    };
+    apply_frame_edit(frames, edit);
+
+    // An edited list makes any preview of the old one stale.
+    if !*preview_active {
+        return ToolAction::None;
+    }
+    if frames.len() < MIN_STACK_FRAMES {
+        *preview_active = false;
+    }
+    ToolAction::RequestRender
 }
 
 pub(super) enum PreviewButtonAction {
@@ -204,7 +270,7 @@ where
 {
     let mut action = ToolAction::None;
     ui.horizontal(|ui| {
-        let ready = frames.len() >= 2;
+        let ready = frames.len() >= MIN_STACK_FRAMES;
         if ui
             .add_enabled(has_image && ready, egui::Button::new(apply_label))
             .clicked()
@@ -324,6 +390,49 @@ mod tests {
             StackFrame::new(path.to_string_lossy()).label,
             "DSC_0042.NEF",
         );
+    }
+
+    fn frames(names: &[&str]) -> Vec<StackFrame> {
+        names.iter().map(|n| StackFrame::new(*n)).collect()
+    }
+
+    fn labels(frames: &[StackFrame]) -> Vec<&str> {
+        frames.iter().map(|f| f.label.as_str()).collect()
+    }
+
+    /// Panorama stitches in list order, so a move has to be an exact
+    /// neighbour swap — every other frame keeps its place.
+    #[test]
+    fn moving_a_frame_swaps_it_with_its_neighbour() {
+        let mut list = frames(&["a.jpg", "b.jpg", "c.jpg"]);
+
+        apply_frame_edit(&mut list, FrameEdit::MoveDown(0));
+        assert_eq!(labels(&list), ["b.jpg", "a.jpg", "c.jpg"]);
+
+        apply_frame_edit(&mut list, FrameEdit::MoveUp(2));
+        assert_eq!(labels(&list), ["b.jpg", "c.jpg", "a.jpg"]);
+
+        apply_frame_edit(&mut list, FrameEdit::Remove(1));
+        assert_eq!(labels(&list), ["b.jpg", "a.jpg"]);
+    }
+
+    /// The buttons at the ends of the list are disabled, so these edits are
+    /// unreachable from the UI — but a move that ran off the end would panic
+    /// on the index, so it must stay a no-op rather than an assumption.
+    #[test]
+    fn moves_off_the_ends_leave_the_list_alone() {
+        let mut list = frames(&["a.jpg", "b.jpg"]);
+
+        for edit in [
+            FrameEdit::MoveUp(0),
+            FrameEdit::MoveDown(1),
+            FrameEdit::MoveUp(9),
+            FrameEdit::MoveDown(9),
+            FrameEdit::Remove(9),
+        ] {
+            apply_frame_edit(&mut list, edit);
+            assert_eq!(labels(&list), ["a.jpg", "b.jpg"], "{edit:?}");
+        }
     }
 
     #[test]
