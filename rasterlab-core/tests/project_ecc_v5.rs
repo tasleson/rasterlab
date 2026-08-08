@@ -14,8 +14,8 @@ use rasterlab_core::{
     degraded_read::DegradedRead,
     pipeline::PipelineState,
     project::{
-        FORMAT_VERSION_V4, FORMAT_VERSION_V5, RlabFile, RlabMeta, SavedCopy, read_original_hash,
-        verify_and_repair, verify_and_repair_degraded,
+        FORMAT_VERSION_V4, FORMAT_VERSION_V5, RlabFile, RlabMeta, SavedCopy,
+        read_original_filename, read_original_hash, verify_and_repair, verify_and_repair_degraded,
     },
 };
 use tempfile::NamedTempFile;
@@ -500,4 +500,72 @@ fn read_original_hash_rejects_a_non_rlab_file() {
     let tmp = NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), b"not a project file at all").unwrap();
     assert!(read_original_hash(tmp.path()).is_err());
+}
+
+/// A library file's own name is the Blake3 of its content, so anything showing
+/// the user a list of frames has to get the name from inside the file. `LMTA`
+/// carries what was imported; an editor-only project falls back to the file
+/// name in its `META` source path.
+#[test]
+fn read_original_filename_prefers_library_metadata() {
+    let tmp = NamedTempFile::new().unwrap();
+
+    // Editor-only project: no LMTA, so the META source path answers.
+    let mut file = fixture();
+    file.write_v5(tmp.path()).unwrap();
+    assert_eq!(
+        read_original_filename(tmp.path()).unwrap().as_deref(),
+        Some("test.jpg"),
+    );
+
+    // Imported photo: LMTA wins, and the meaningless hashed path never shows.
+    file.set_lmta(Some(rasterlab_core::library_meta::LibraryMeta {
+        original_filename: Some("DSC_0042.NEF".to_owned()),
+        source_path: Some("/cards/DCIM/DSC_0042.NEF".to_owned()),
+        ..Default::default()
+    }));
+    file.write_v5(tmp.path()).unwrap();
+    assert_eq!(
+        read_original_filename(tmp.path()).unwrap().as_deref(),
+        Some("DSC_0042.NEF"),
+    );
+}
+
+#[test]
+fn read_original_filename_is_none_without_a_recorded_source() {
+    let tmp = NamedTempFile::new().unwrap();
+    let meta = RlabMeta::new("0.3.0", None::<String>, 8, 8);
+    let copies = vec![SavedCopy {
+        name: "Copy 1".into(),
+        pipeline_state: PipelineState {
+            entries: vec![],
+            cursor: 0,
+        },
+    }];
+    RlabFile::new(meta, vec![ORIG_FILL; 64], copies, 0, None)
+        .write_v5(tmp.path())
+        .unwrap();
+
+    assert_eq!(read_original_filename(tmp.path()).unwrap(), None);
+}
+
+#[test]
+fn read_original_filename_works_across_layouts() {
+    for (label, write) in [
+        (
+            "v3",
+            (|f: &RlabFile, p: &std::path::Path| f.write(p))
+                as fn(&RlabFile, &std::path::Path) -> rasterlab_core::error::RasterResult<()>,
+        ),
+        ("v4", |f: &RlabFile, p: &std::path::Path| f.write_v4(p)),
+        ("v5", |f: &RlabFile, p: &std::path::Path| f.write_v5(p)),
+    ] {
+        let tmp = NamedTempFile::new().unwrap();
+        write(&fixture(), tmp.path()).unwrap();
+        assert_eq!(
+            read_original_filename(tmp.path()).unwrap().as_deref(),
+            Some("test.jpg"),
+            "{label}",
+        );
+    }
 }

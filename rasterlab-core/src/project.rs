@@ -111,6 +111,11 @@ const CHUNK_HEADER_LEN: usize = 12;
 /// Width of a Blake3 digest as stored in the file.
 const HASH_LEN: usize = 32;
 
+/// Largest `META` / `LMTA` payload a chunk-scanning reader will allocate.
+/// Both hold small JSON documents; anything past this is a damaged length
+/// field, not metadata.
+const MAX_JSON_CHUNK_LEN: u64 = 16 * 1024 * 1024;
+
 /// Fixed prefix of a `RECC` payload: shard size, shard counts, protected length.
 const RECC_HEADER_LEN: usize = 20;
 
@@ -645,6 +650,86 @@ pub fn verify_and_repair_degraded(
 pub fn is_rlab_path(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case(RLAB_EXTENSION))
+}
+
+/// Name of the image a `.rlab` was made from, for display.
+///
+/// Library files are named after the Blake3 of their content, so their own
+/// file name tells the user nothing; the name they imported lives in `LMTA`,
+/// and an editor-only project keeps its source path in `META`.  Prefers the
+/// former, falls back to the latter, and returns `None` when neither records
+/// one.
+///
+/// Seeks over `ORIG` and the parity chunks rather than loading them, so this
+/// is cheap enough to call while building a list of frames.
+pub fn read_original_filename(path: &Path) -> RasterResult<Option<String>> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+
+    let mut header = [0u8; FILE_HEADER_LEN];
+    file.read_exact(&mut header)?;
+    if !header.starts_with(MAGIC) {
+        return Err(RasterError::decode(
+            "rlab",
+            "invalid magic bytes — not a .rlab project file",
+        ));
+    }
+
+    // The whole-file digest sits past the last chunk; walking into it would
+    // read its bytes as a chunk header.
+    let chunks_end = file_len.saturating_sub(HASH_LEN as u64);
+    let mut pos = FILE_HEADER_LEN as u64;
+
+    // `META` precedes `LMTA` in write order, so hold its name until the whole
+    // chunk chain has been walked.
+    let mut from_meta = None;
+
+    while pos + (CHUNK_HEADER_LEN + HASH_LEN) as u64 <= chunks_end {
+        let mut head = [0u8; CHUNK_HEADER_LEN];
+        file.read_exact(&mut head)?;
+        let tag: [u8; 4] = head[..4].try_into().expect("4-byte tag");
+        let len = u64::from_le_bytes(head[4..].try_into().expect("8-byte length"));
+
+        // A damaged length can point past the chunk chain. Stop the walk and
+        // report whatever was read so far — this is a display name, and
+        // refusing to produce one is worse than producing a partial answer.
+        let Some(next) = pos
+            .checked_add((CHUNK_HEADER_LEN + HASH_LEN) as u64)
+            .and_then(|p| p.checked_add(len))
+            .filter(|next| *next <= chunks_end)
+        else {
+            break;
+        };
+
+        // Only the two small JSON chunks are worth reading.
+        if (tag == *TAG_META || tag == *TAG_LMTA) && len <= MAX_JSON_CHUNK_LEN {
+            let mut data = vec![0u8; len as usize];
+            file.read_exact(&mut data)?;
+
+            if tag == *TAG_LMTA {
+                // The imported original's name — the best answer, so stop here.
+                if let Ok(lmta) = serde_json::from_slice::<LibraryMeta>(&data)
+                    && let Some(name) = lmta.original_filename
+                {
+                    return Ok(Some(name));
+                }
+            } else if let Ok(meta) = serde_json::from_slice::<RlabMeta>(&data) {
+                from_meta = meta
+                    .source_path
+                    .as_deref()
+                    .map(Path::new)
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned());
+            }
+        }
+
+        pos = next;
+        file.seek(SeekFrom::Start(pos))?;
+    }
+
+    Ok(from_meta)
 }
 
 /// Read the Blake3 of the embedded original image out of the `ORIG` chunk.
