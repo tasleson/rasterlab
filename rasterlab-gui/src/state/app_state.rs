@@ -1822,13 +1822,13 @@ impl AppState {
 
         // Obtain the starting image for the render thread.
         //
-        // For full-resolution renders we vacate the cache slot so the render
-        // thread receives the sole Arc reference (refcount = 1).  This lets
-        // Arc::try_unwrap succeed in the render loop, avoiding a 136 MiB
-        // deep_clone before the first operation runs.  Preview renders use
-        // the read-only path because they downsample first and never write
-        // back to the step cache.
-        let start_image = if is_preview {
+        // For committed full-resolution renders, vacate the cache slot so the
+        // render thread gets the sole Arc reference and can avoid a deep clone.
+        // Preview results are never written into the committed pipeline cache,
+        // so both reduced and full-resolution previews keep its best image in
+        // place. Tools can then reliably use the pre-preview dimensions when
+        // constructing follow-up geometric operations such as auto-crop.
+        let start_image = if is_preview || preview_op.is_some() {
             self.pipeline().unwrap().best_cached_start().1
         } else {
             self.pipeline_mut().unwrap().take_start_for_render().1

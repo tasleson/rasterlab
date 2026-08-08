@@ -49,6 +49,12 @@ use egui::{Color32, Stroke, Ui};
 use self::shared::header_for_tool;
 use self::tool_trait::{ToolAction, ToolUiCtx};
 use crate::state::AppState;
+use rasterlab_core::pipeline::EditPipeline;
+
+fn committed_pipeline_dims(pipeline: &EditPipeline) -> Option<(u32, u32)> {
+    let (start_index, image) = pipeline.best_cached_start();
+    (start_index == pipeline.cursor()).then_some((image.width, image.height))
+}
 
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
@@ -181,8 +187,7 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
                 source_dims: state
                     .pipeline()
                     .map(|p| (p.source().width, p.source().height)),
-                rendered_dims: state.rendered.as_ref().map(|r| (r.width, r.height)),
-                rendered_scale: state.rendered_scale,
+                committed_dims: state.pipeline().and_then(committed_pipeline_dims),
                 force_open,
             };
             tool.render_ui(ui, &ctx)
@@ -250,5 +255,26 @@ impl tool_trait::Tool for PlaceholderTool {
     }
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::committed_pipeline_dims;
+    use rasterlab_core::{Image, ops::RotateOp, pipeline::EditPipeline};
+
+    #[test]
+    fn committed_dims_come_from_pipeline_cache_not_preview_output() {
+        let mut pipeline = EditPipeline::new(Image::new(400, 300));
+        assert_eq!(committed_pipeline_dims(&pipeline), Some((400, 300)));
+
+        pipeline.push_op(Box::new(RotateOp::arbitrary(10.0)));
+        assert_eq!(committed_pipeline_dims(&pipeline), None);
+
+        let rendered = pipeline.render().unwrap();
+        assert_eq!(
+            committed_pipeline_dims(&pipeline),
+            Some((rendered.width, rendered.height))
+        );
     }
 }

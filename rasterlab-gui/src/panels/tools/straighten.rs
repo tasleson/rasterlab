@@ -4,7 +4,7 @@ use egui::Vec2;
 use rasterlab_core::ops::RotateOp;
 use rasterlab_core::traits::operation::Operation;
 
-use super::shared::straighten_crop_op;
+use super::shared::{apply_button, straighten_crop_op};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 
 pub struct StraightenTool {
@@ -69,20 +69,14 @@ impl Tool for StraightenTool {
             ToolAction::None
         };
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply Straighten"))
-                .clicked()
-            {
+            if apply_button(ui, ctx, "Apply Straighten", self.crop) {
                 self.preview_active = false;
                 let angle = self.angle;
                 let rotate_op: Box<dyn Operation> = Box::new(RotateOp::arbitrary(angle));
 
                 let crop_op = if self.crop {
-                    ctx.rendered_dims.map(|(rw, rh)| {
-                        let w = (rw as f32 / ctx.rendered_scale).round() as u32;
-                        let h = (rh as f32 / ctx.rendered_scale).round() as u32;
-                        straighten_crop_op(w, h, angle)
-                    })
+                    ctx.committed_dims
+                        .map(|(w, h)| straighten_crop_op(w, h, angle))
                 } else {
                     None
                 };

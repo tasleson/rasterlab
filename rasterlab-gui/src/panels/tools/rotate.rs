@@ -4,7 +4,7 @@ use egui::DragValue;
 use rasterlab_core::ops::RotateOp;
 use rasterlab_core::traits::operation::Operation;
 
-use super::shared::straighten_crop_op;
+use super::shared::{apply_button, straighten_crop_op};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 
 pub struct RotateTool {
@@ -69,14 +69,10 @@ impl Tool for RotateTool {
         });
         ui.horizontal(|ui| {
             let has_rotation = self.preview_active && (self.deg % 360.0).abs() > 0.001;
-            if has_rotation
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Apply"))
-                    .clicked()
-            {
+            let is_right_angle = (self.deg % 90.0).abs() < 0.001;
+            if has_rotation && apply_button(ui, ctx, "Apply", self.crop && !is_right_angle) {
                 self.preview_active = false;
                 let angle = self.deg;
-                let is_right_angle = (angle % 90.0).abs() < 0.001;
 
                 let rotate_op: Box<dyn Operation> = match angle as i32 % 360 {
                     90 | -270 => Box::new(RotateOp::cw90()),
@@ -86,11 +82,8 @@ impl Tool for RotateTool {
                 };
 
                 let crop_op = if self.crop && !is_right_angle {
-                    ctx.rendered_dims.map(|(rw, rh)| {
-                        let w = (rw as f32 / ctx.rendered_scale).round() as u32;
-                        let h = (rh as f32 / ctx.rendered_scale).round() as u32;
-                        straighten_crop_op(w, h, angle)
-                    })
+                    ctx.committed_dims
+                        .map(|(w, h)| straighten_crop_op(w, h, angle))
                 } else {
                     None
                 };

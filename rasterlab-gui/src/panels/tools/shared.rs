@@ -2,7 +2,7 @@ use egui::Ui;
 use rasterlab_core::ops::CropOp;
 use rasterlab_core::traits::operation::Operation;
 
-use super::tool_trait::ToolAction;
+use super::tool_trait::{ToolAction, ToolUiCtx};
 use crate::state::{EditSession, EditingTool};
 
 macro_rules! impl_preview_tool {
@@ -212,4 +212,30 @@ pub(super) fn straighten_crop_op(w: u32, h: u32, angle_deg: f32) -> CropOp {
     let y = (rot_h.saturating_sub(inner_h)) / 2;
 
     CropOp::new(x, y, inner_w.max(1), inner_h.max(1))
+}
+
+/// Apply button for geometric tools that pair their operation with an
+/// auto-crop.
+///
+/// The crop is derived from [`ToolUiCtx::committed_dims`], which is `None`
+/// while the committed pipeline output is not cached (a render is in flight).
+/// Committing then would push the geometric op *without* its crop, silently
+/// ignoring the checkbox — so the button is disabled until the dimensions are
+/// known.  Pass `needs_crop = false` when the pending apply does not use the
+/// crop; the button then only depends on there being an image.
+pub(super) fn apply_button(
+    ui: &mut Ui,
+    ctx: &ToolUiCtx<'_>,
+    label: &str,
+    needs_crop: bool,
+) -> bool {
+    let awaiting_dims = needs_crop && ctx.committed_dims.is_none();
+    let response = ui.add_enabled(ctx.has_image && !awaiting_dims, egui::Button::new(label));
+    if awaiting_dims {
+        response
+            .on_disabled_hover_text("Waiting for the current render to finish…")
+            .clicked()
+    } else {
+        response.clicked()
+    }
 }

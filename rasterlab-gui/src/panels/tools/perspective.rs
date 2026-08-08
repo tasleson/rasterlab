@@ -4,6 +4,7 @@ use egui::DragValue;
 use rasterlab_core::ops::{CropOp, PerspectiveOp, auto_crop_rect};
 use rasterlab_core::traits::operation::Operation;
 
+use super::shared::apply_button;
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 
 pub struct PerspectiveTool {
@@ -100,17 +101,12 @@ impl Tool for PerspectiveTool {
             ToolAction::None
         };
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
-                .clicked()
-            {
+            if apply_button(ui, ctx, "Apply", self.crop) {
                 self.preview_active = false;
                 let corners = self.computed_corners();
 
                 let crop_op = if self.crop {
-                    ctx.rendered_dims.and_then(|(rw, rh)| {
-                        let w = (rw as f32 / ctx.rendered_scale).round() as u32;
-                        let h = (rh as f32 / ctx.rendered_scale).round() as u32;
+                    ctx.committed_dims.and_then(|(w, h)| {
                         auto_crop_rect(corners, w, h)
                             .map(|[cx, cy, cw, ch]| CropOp::new(cx, cy, cw, ch))
                     })
