@@ -3,12 +3,12 @@ use std::any::Any;
 use rasterlab_core::ops::PanoramaOp;
 use rasterlab_core::traits::operation::Operation;
 
-use super::shared::path_list_ui;
+use super::shared::{StackFrame, frame_paths, path_list_ui};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::file_chooser::DialogKind;
 
 pub struct PanoramaTool {
-    pub paths: Vec<String>,
+    pub frames: Vec<StackFrame>,
     pub feather_px: u32,
     pub preview_active: bool,
 }
@@ -16,7 +16,7 @@ pub struct PanoramaTool {
 impl PanoramaTool {
     pub fn new() -> Self {
         Self {
-            paths: Vec::new(),
+            frames: Vec::new(),
             feather_px: 80,
             preview_active: false,
         }
@@ -33,15 +33,15 @@ impl Tool for PanoramaTool {
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
         let mut action = ToolAction::None;
-        if self.paths.is_empty() {
+        if self.frames.is_empty() {
             ui.label(
                 egui::RichText::new("No images added yet.")
                     .small()
                     .italics(),
             );
-        } else if let Some(idx) = path_list_ui(ui, &self.paths, "panorama_list") {
-            self.paths.remove(idx);
-            if self.paths.len() < 2 && self.preview_active {
+        } else if let Some(idx) = path_list_ui(ui, &self.frames, "panorama_list") {
+            self.frames.remove(idx);
+            if self.frames.len() < 2 && self.preview_active {
                 self.preview_active = false;
                 action = ToolAction::RequestRender;
             }
@@ -52,10 +52,10 @@ impl Tool for PanoramaTool {
             .add_enabled(ctx.has_image, egui::Button::new("+ Add Image…"))
             .clicked()
         {
-            if self.paths.is_empty()
+            if self.frames.is_empty()
                 && let Some(p) = ctx.last_path
             {
-                self.paths.push(p.to_string_lossy().into_owned());
+                self.frames.push(StackFrame::new(p.to_string_lossy()));
             }
             return ToolAction::RequestFileDialog(DialogKind::PanoramaAddImage);
         }
@@ -70,23 +70,23 @@ impl Tool for PanoramaTool {
                     .add(egui::Slider::new(&mut self.feather_px, 1u32..=300).suffix(" px"))
                     .changed();
                 ui.end_row();
-                if changed && self.paths.len() >= 2 {
+                if changed && self.frames.len() >= 2 {
                     self.preview_active = true;
                 }
             });
 
         ui.horizontal(|ui| {
-            let ready = self.paths.len() >= 2;
+            let ready = self.frames.len() >= 2;
             if ui
                 .add_enabled(ctx.has_image && ready, egui::Button::new("Stitch"))
                 .clicked()
             {
                 self.preview_active = false;
                 action = ToolAction::PushOp(Box::new(PanoramaOp::new(
-                    self.paths.clone(),
+                    frame_paths(&self.frames),
                     self.feather_px,
                 )));
-                self.paths.clear();
+                self.frames.clear();
             }
             if self.preview_active
                 && ui
@@ -97,7 +97,7 @@ impl Tool for PanoramaTool {
                 action = ToolAction::RequestRender;
             }
             if ui.button("Reset").clicked() {
-                self.paths.clear();
+                self.frames.clear();
                 self.feather_px = 80;
                 if self.preview_active {
                     self.preview_active = false;
@@ -106,7 +106,7 @@ impl Tool for PanoramaTool {
             }
         });
 
-        if self.paths.len() == 1 {
+        if self.frames.len() == 1 {
             ui.label(
                 egui::RichText::new("Add at least one more image to stitch.")
                     .small()
@@ -118,9 +118,9 @@ impl Tool for PanoramaTool {
 
     super::shared::impl_preview_controls!();
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active && self.paths.len() >= 2 {
+        if self.preview_active && self.frames.len() >= 2 {
             Some(Box::new(PanoramaOp::new(
-                self.paths.clone(),
+                frame_paths(&self.frames),
                 self.feather_px,
             )))
         } else {
@@ -129,7 +129,11 @@ impl Tool for PanoramaTool {
     }
     fn load_from_op(&mut self, op: &dyn Operation) -> bool {
         if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<PanoramaOp>()) {
-            self.paths = o.image_paths.clone();
+            self.frames = o
+                .image_paths
+                .iter()
+                .map(|p| StackFrame::new(p.as_str()))
+                .collect();
             self.feather_px = o.feather_px;
             true
         } else {

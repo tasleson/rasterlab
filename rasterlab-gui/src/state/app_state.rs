@@ -1641,9 +1641,10 @@ impl AppState {
 
     pub fn panorama_add_image(&mut self, path: std::path::PathBuf) {
         use crate::panels::tools::panorama::PanoramaTool;
+        use crate::panels::tools::shared::StackFrame;
         let tool = self.tools.find_mut::<PanoramaTool>().unwrap();
-        tool.paths.push(path.to_string_lossy().into_owned());
-        let needs_render = tool.paths.len() >= 2;
+        tool.frames.push(StackFrame::new(path.to_string_lossy()));
+        let needs_render = tool.frames.len() >= 2;
         if needs_render {
             tool.preview_active = true;
         }
@@ -1654,9 +1655,10 @@ impl AppState {
 
     pub fn focus_stack_add_image(&mut self, path: std::path::PathBuf) {
         use crate::panels::tools::focus_stack::FocusStackTool;
+        use crate::panels::tools::shared::StackFrame;
         let tool = self.tools.find_mut::<FocusStackTool>().unwrap();
-        tool.paths.push(path.to_string_lossy().into_owned());
-        let needs_render = tool.paths.len() >= 2;
+        tool.frames.push(StackFrame::new(path.to_string_lossy()));
+        let needs_render = tool.frames.len() >= 2;
         if needs_render {
             tool.preview_active = true;
         }
@@ -1674,13 +1676,14 @@ impl AppState {
     /// for yet. They press Stack when ready.
     pub fn load_focus_stack_frames(&mut self, paths: Vec<std::path::PathBuf>) {
         use crate::panels::tools::focus_stack::FocusStackTool;
+        use crate::panels::tools::shared::StackFrame;
         use crate::panels::tools::tool_trait::Tool;
 
         self.cancel_all_previews();
         let tool = self.tools.find_mut::<FocusStackTool>().unwrap();
-        tool.paths = paths
+        tool.frames = paths
             .into_iter()
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|p| StackFrame::new(p.to_string_lossy()))
             .collect();
         let id = tool.id();
         self.tools.reveal_tool = Some(id);
@@ -1688,9 +1691,10 @@ impl AppState {
 
     pub fn hdr_merge_add_image(&mut self, path: std::path::PathBuf) {
         use crate::panels::tools::hdr_merge::HdrMergeTool;
+        use crate::panels::tools::shared::StackFrame;
         let tool = self.tools.find_mut::<HdrMergeTool>().unwrap();
-        tool.paths.push(path.to_string_lossy().into_owned());
-        let needs_render = tool.paths.len() >= 2;
+        tool.frames.push(StackFrame::new(path.to_string_lossy()));
+        let needs_render = tool.frames.len() >= 2;
         if needs_render {
             tool.preview_active = true;
         }

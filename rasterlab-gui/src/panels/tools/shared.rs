@@ -87,19 +87,63 @@ pub(super) fn header_for_tool(
     }
 }
 
-pub(super) fn path_list_ui(ui: &mut Ui, paths: &[String], id_salt: &str) -> Option<usize> {
+/// One source frame in a multi-image tool's list.
+///
+/// The op stores a plain path, but a managed-library photo is stored under the
+/// Blake3 of its content, so a list built from path file names shows the user
+/// 64 hex characters where they expect their own file names — and no way to
+/// tell whether the frames are the ones they picked, in the order they picked
+/// them. The name is resolved once, when the frame is added, and travels with
+/// the path from there.
+#[derive(Clone)]
+pub struct StackFrame {
+    pub path: String,
+    label: String,
+}
+
+impl StackFrame {
+    pub fn new(path: impl Into<String>) -> Self {
+        let path = path.into();
+        Self {
+            label: frame_label(&path),
+            path,
+        }
+    }
+}
+
+/// Display name for a frame: its file name, or — for a `.rlab` container —
+/// the name of the image it was made from. Falls back to the file name when
+/// the container records no source or cannot be read.
+fn frame_label(path: &str) -> String {
+    let path = std::path::Path::new(path);
+    if rasterlab_core::project::is_rlab_path(path)
+        && let Ok(Some(name)) = rasterlab_core::project::read_original_filename(path)
+    {
+        return name;
+    }
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The paths to hand an op, in list order.
+pub(super) fn frame_paths(frames: &[StackFrame]) -> Vec<String> {
+    frames.iter().map(|f| f.path.clone()).collect()
+}
+
+pub(super) fn path_list_ui(ui: &mut Ui, frames: &[StackFrame], id_salt: &str) -> Option<usize> {
     let mut remove_idx: Option<usize> = None;
     egui::ScrollArea::vertical()
         .max_height(120.0)
         .id_salt(id_salt)
         .show(ui, |ui| {
-            for (i, path) in paths.iter().enumerate() {
+            for (i, frame) in frames.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    let name = std::path::Path::new(path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.clone());
-                    ui.label(format!("{}. {}", i + 1, name));
+                    // Two library photos can share an imported name, so the
+                    // full path stays reachable on hover.
+                    ui.label(format!("{}. {}", i + 1, frame.label))
+                        .on_hover_text(&frame.path);
                     if ui.small_button("✕").clicked() {
                         remove_idx = Some(i);
                     }
@@ -150,7 +194,7 @@ pub(super) fn preview_buttons(
 pub(super) fn path_stack_buttons<F>(
     ui: &mut Ui,
     has_image: bool,
-    paths: &mut Vec<String>,
+    frames: &mut Vec<StackFrame>,
     preview_active: &mut bool,
     apply_label: &str,
     build_op: F,
@@ -160,14 +204,14 @@ where
 {
     let mut action = ToolAction::None;
     ui.horizontal(|ui| {
-        let ready = paths.len() >= 2;
+        let ready = frames.len() >= 2;
         if ui
             .add_enabled(has_image && ready, egui::Button::new(apply_label))
             .clicked()
         {
             *preview_active = false;
-            action = ToolAction::PushOp(build_op(paths.clone()));
-            paths.clear();
+            action = ToolAction::PushOp(build_op(frame_paths(frames)));
+            frames.clear();
         }
         if *preview_active
             && ui
@@ -178,7 +222,7 @@ where
             action = ToolAction::RequestRender;
         }
         if ui.button("Reset").clicked() {
-            paths.clear();
+            frames.clear();
             if *preview_active {
                 *preview_active = false;
                 action = ToolAction::RequestRender;
@@ -237,5 +281,59 @@ pub(super) fn apply_button(
             .clicked()
     } else {
         response.clicked()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rasterlab_core::{
+        library_meta::LibraryMeta,
+        pipeline::PipelineState,
+        project::{RlabFile, RlabMeta, SavedCopy},
+    };
+
+    /// A library photo is stored under the Blake3 of its content, so labelling
+    /// frames with their path's file name shows the user 64 hex characters and
+    /// no way to check that the stack holds the photos they picked.
+    #[test]
+    fn library_frames_are_labelled_with_the_imported_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(format!("{}.rlab", "9f".repeat(32)));
+
+        let mut rlab = RlabFile::new(
+            RlabMeta::new("test", Some("/cards/DCIM/DSC_0042.NEF"), 4, 4),
+            vec![0u8; 8],
+            vec![SavedCopy {
+                name: "Copy 1".into(),
+                pipeline_state: PipelineState {
+                    entries: Vec::new(),
+                    cursor: 0,
+                },
+            }],
+            0,
+            None,
+        );
+        rlab.set_lmta(Some(LibraryMeta {
+            original_filename: Some("DSC_0042.NEF".to_owned()),
+            ..Default::default()
+        }));
+        rlab.write_v5(&path).unwrap();
+
+        assert_eq!(
+            StackFrame::new(path.to_string_lossy()).label,
+            "DSC_0042.NEF",
+        );
+    }
+
+    #[test]
+    fn other_frames_keep_their_file_name() {
+        assert_eq!(
+            StackFrame::new("/photos/DSC_0001.NEF").label,
+            "DSC_0001.NEF",
+        );
+        // A container that cannot be read still gets a stable label rather
+        // than an empty row in the list.
+        assert_eq!(StackFrame::new("/gone/abc123.rlab").label, "abc123.rlab");
     }
 }

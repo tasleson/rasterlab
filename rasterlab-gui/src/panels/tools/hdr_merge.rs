@@ -4,19 +4,19 @@ use egui::Color32;
 use rasterlab_core::ops::HdrMergeOp;
 use rasterlab_core::traits::operation::Operation;
 
-use super::shared::path_list_ui;
+use super::shared::{StackFrame, frame_paths, path_list_ui};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::file_chooser::DialogKind;
 
 pub struct HdrMergeTool {
-    pub paths: Vec<String>,
+    pub frames: Vec<StackFrame>,
     pub preview_active: bool,
 }
 
 impl HdrMergeTool {
     pub fn new() -> Self {
         Self {
-            paths: Vec::new(),
+            frames: Vec::new(),
             preview_active: false,
         }
     }
@@ -39,15 +39,15 @@ impl Tool for HdrMergeTool {
         ui.add_space(2.0);
 
         let mut action = ToolAction::None;
-        if self.paths.is_empty() {
+        if self.frames.is_empty() {
             ui.label(
                 egui::RichText::new("No exposures added yet.")
                     .small()
                     .italics(),
             );
-        } else if let Some(idx) = path_list_ui(ui, &self.paths, "hdr_merge_list") {
-            self.paths.remove(idx);
-            if self.paths.len() < 2 && self.preview_active {
+        } else if let Some(idx) = path_list_ui(ui, &self.frames, "hdr_merge_list") {
+            self.frames.remove(idx);
+            if self.frames.len() < 2 && self.preview_active {
                 self.preview_active = false;
                 action = ToolAction::RequestRender;
             }
@@ -58,10 +58,10 @@ impl Tool for HdrMergeTool {
             .add_enabled(ctx.has_image, egui::Button::new("+ Add Exposure…"))
             .clicked()
         {
-            if self.paths.is_empty()
+            if self.frames.is_empty()
                 && let Some(p) = ctx.last_path
             {
-                self.paths.push(p.to_string_lossy().into_owned());
+                self.frames.push(StackFrame::new(p.to_string_lossy()));
             }
             return ToolAction::RequestFileDialog(DialogKind::HdrMergeAddImage);
         }
@@ -70,7 +70,7 @@ impl Tool for HdrMergeTool {
         let button_action = super::shared::path_stack_buttons(
             ui,
             ctx.has_image,
-            &mut self.paths,
+            &mut self.frames,
             &mut self.preview_active,
             "Merge",
             |paths| Box::new(HdrMergeOp::new(paths)),
@@ -79,7 +79,7 @@ impl Tool for HdrMergeTool {
             action = button_action;
         }
 
-        if self.paths.len() == 1 {
+        if self.frames.len() == 1 {
             ui.label(
                 egui::RichText::new("Add at least one more bracket to merge.")
                     .small()
@@ -91,15 +91,19 @@ impl Tool for HdrMergeTool {
 
     super::shared::impl_preview_controls!();
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active && self.paths.len() >= 2 {
-            Some(Box::new(HdrMergeOp::new(self.paths.clone())))
+        if self.preview_active && self.frames.len() >= 2 {
+            Some(Box::new(HdrMergeOp::new(frame_paths(&self.frames))))
         } else {
             None
         }
     }
     fn load_from_op(&mut self, op: &dyn Operation) -> bool {
         if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<HdrMergeOp>()) {
-            self.paths = o.image_paths.clone();
+            self.frames = o
+                .image_paths
+                .iter()
+                .map(|p| StackFrame::new(p.as_str()))
+                .collect();
             true
         } else {
             false
