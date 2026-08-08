@@ -200,6 +200,12 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
     match action {
         ToolAction::None => {}
         ToolAction::RequestRender => {
+            // A slider change activates this tool's preview. Rendering supports
+            // one preview op at a time, so dismiss any stale preview left by a
+            // different tool before selecting the active operation.
+            if state.tools.tools[idx].is_preview_active() {
+                state.tools.cancel_previews_except(idx);
+            }
             state.request_render();
         }
         ToolAction::CancelRender => {

@@ -154,6 +154,19 @@ impl ToolState {
         self.sprocket_crop_active = false;
     }
 
+    /// Keep the preview owned by `keep_idx` and dismiss every other tool's
+    /// preview. The render path accepts a single preview operation, so allowing
+    /// multiple tools to remain active would make the first tool in the list
+    /// silently hide changes made in a later tool.
+    pub fn cancel_previews_except(&mut self, keep_idx: usize) {
+        for (idx, tool) in self.tools.iter_mut().enumerate() {
+            if idx != keep_idx {
+                tool.cancel_preview();
+            }
+        }
+        self.sprocket_crop_active = false;
+    }
+
     pub fn current_mask_shape(&self) -> Option<MaskShape> {
         match self.mask_sel {
             1 => Some(MaskShape::Linear(LinearMask {
@@ -204,6 +217,34 @@ impl ToolState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newest_tool_preview_can_exclusively_own_the_render() {
+        let mut state = ToolState::new();
+        let first = state
+            .tools
+            .iter()
+            .position(|tool| tool.id() == "brightness_contrast")
+            .unwrap();
+        let hsl = state
+            .tools
+            .iter()
+            .position(|tool| tool.id() == "hsl_panel")
+            .unwrap();
+
+        state.tools[first].activate_preview();
+        state.tools[hsl].activate_preview();
+
+        // Without exclusive ownership, the earlier tool shadows HSL because
+        // preview_op returns the first active preview in display order.
+        assert_eq!(state.preview_op().unwrap().name(), "brightness_contrast");
+
+        state.cancel_previews_except(hsl);
+
+        assert!(!state.tools[first].is_preview_active());
+        assert!(state.tools[hsl].is_preview_active());
+        assert_eq!(state.preview_op().unwrap().name(), "hsl_panel");
+    }
 
     /// Strip the leading icon/emoji prefix from a display name so the
     /// alphabetical-ordering check compares only the human-readable label.
