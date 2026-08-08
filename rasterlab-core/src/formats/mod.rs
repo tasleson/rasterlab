@@ -160,6 +160,22 @@ impl FormatRegistry {
         handler.decode(data)
     }
 
+    /// Decode an image file, transparently unwrapping a `.rlab` container.
+    ///
+    /// Managed-library photos exist only as `.rlab` files whose `ORIG` chunk
+    /// holds the verbatim original, so the multi-frame ops can take a library
+    /// photo as a source frame without the caller first exporting it. Edits
+    /// recorded in the project are ignored: the frame is the unedited original,
+    /// which is what those ops fuse.
+    pub fn decode_source_file(&self, path: &Path) -> RasterResult<Image> {
+        if !crate::project::is_rlab_path(path) {
+            return self.decode_file(path);
+        }
+        let rlab = crate::project::RlabFile::read(path)?;
+        let hint = rlab.meta.source_path.as_deref().map(Path::new);
+        self.decode_bytes(&rlab.original_bytes, hint)
+    }
+
     /// Encode an image to the format implied by `path`'s extension.
     pub fn encode_file(
         &self,

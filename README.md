@@ -94,7 +94,7 @@ The table follows the tool order in the GUI.
 | Vignette | Applies radial darkening with strength, radius, and feather controls. |
 | White Balance | Adjusts temperature and tint. |
 
-A linear or radial gradient mask can wrap the next applied operation. Multi-image tools such as Focus Stack, HDR Merge, and Panorama prompt for additional source files and add their result to the same non-destructive pipeline.
+A linear or radial gradient mask can wrap the next applied operation. Multi-image tools such as Focus Stack, HDR Merge, and Panorama prompt for additional source files and add their result to the same non-destructive pipeline. They accept managed-library photos as source frames, reading each one's embedded original.
 
 ## Protecting images and projects
 

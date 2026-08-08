@@ -34,7 +34,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     cancel,
     error::{RasterError, RasterResult},
-    formats::FormatRegistry,
     image::Image,
     traits::operation::Operation,
 };
@@ -83,19 +82,7 @@ impl Operation for HdrMergeOp {
             ));
         }
 
-        let reg = FormatRegistry::with_builtins();
-        let images: Vec<Image> = self
-            .image_paths
-            .iter()
-            .map(|p| {
-                if cancel::is_requested() {
-                    return Err(RasterError::Cancelled);
-                }
-                reg.decode_file(std::path::Path::new(p)).map_err(|e| {
-                    RasterError::InvalidParams(format!("HDR Merge: cannot load '{p}': {e}"))
-                })
-            })
-            .collect::<RasterResult<_>>()?;
+        let images = super::frames::load_frames(&self.image_paths, "HDR Merge")?;
 
         if images.len() == 1 {
             return Ok(images.into_iter().next().unwrap());

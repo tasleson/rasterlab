@@ -87,6 +87,9 @@ use crate::{
 /// Magic bytes that identify every `.rlab` file.
 const MAGIC: &[u8; 8] = b"RLAB\x00\x01\r\n";
 
+/// File extension of a project / managed-library container.
+pub const RLAB_EXTENSION: &str = "rlab";
+
 /// Format version written by [`RlabFile::write`] (v3, no ECC).
 pub const FORMAT_VERSION: u16 = 3;
 
@@ -635,6 +638,13 @@ pub fn verify_and_repair_degraded(
         recc_present,
         repaired,
     })
+}
+
+/// True when `path` names a `.rlab` container, matching the extension
+/// case-insensitively so `PHOTO.RLAB` is recognised too.
+pub fn is_rlab_path(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(RLAB_EXTENSION))
 }
 
 /// Read the Blake3 of the embedded original image out of the `ORIG` chunk.

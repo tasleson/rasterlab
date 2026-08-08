@@ -12,6 +12,7 @@ pub mod denoise;
 pub mod faux_hdr;
 pub mod flip;
 pub mod focus_stack;
+mod frames;
 pub mod grain;
 pub mod hdr_merge;
 pub mod heal;

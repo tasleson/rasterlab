@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     cancel,
     error::{RasterError, RasterResult},
-    formats::FormatRegistry,
     image::Image,
     traits::operation::Operation,
 };
@@ -103,21 +102,8 @@ fn stack(op: &FocusStackOp) -> RasterResult<Image> {
         ));
     }
 
-    let reg = FormatRegistry::with_builtins();
-
-    // Load every frame.
-    let images: Vec<Image> = op
-        .image_paths
-        .iter()
-        .map(|p| {
-            if cancel::is_requested() {
-                return Err(RasterError::Cancelled);
-            }
-            reg.decode_file(std::path::Path::new(p)).map_err(|e| {
-                RasterError::InvalidParams(format!("Focus Stack: cannot load '{p}': {e}"))
-            })
-        })
-        .collect::<RasterResult<_>>()?;
+    // Load every frame (plain image files or library `.rlab` photos).
+    let images = super::frames::load_frames(&op.image_paths, "Focus Stack")?;
 
     if images.len() == 1 {
         // Nothing to fuse — return the single loaded frame unchanged.

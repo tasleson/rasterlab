@@ -777,3 +777,78 @@ fn batch_metadata_update_applies_to_all() {
     let results = lib.search(&filter, SortOrder::default()).unwrap();
     assert_eq!(results.len(), 2, "both photos should have rating 5");
 }
+
+// ── Library photos as multi-frame op sources ──────────────────────────────────
+
+/// A 64×64 frame that is sharp (checkerboard) inside `sharp_x` and flat grey
+/// everywhere else — the focus measure has to prefer this frame in that band.
+fn focus_frame(sharp_x: std::ops::Range<usize>) -> rasterlab_core::Image {
+    const SIDE: u32 = 64;
+    let mut img = rasterlab_core::Image::new(SIDE, SIDE);
+    for y in 0..SIDE as usize {
+        for x in 0..SIDE as usize {
+            let v = if sharp_x.contains(&x) && (x + y) % 2 == 0 {
+                30
+            } else if sharp_x.contains(&x) {
+                220
+            } else {
+                120
+            };
+            let px = &mut img.data[(y * SIDE as usize + x) * 4..][..4];
+            px.copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    img
+}
+
+fn write_png(path: &std::path::Path, image: &rasterlab_core::Image) {
+    use rasterlab_core::{formats::FormatRegistry, traits::format_handler::EncodeOptions};
+    let bytes = FormatRegistry::with_builtins()
+        .encode_file(image, path, &EncodeOptions::default())
+        .expect("encode png");
+    std::fs::write(path, bytes).expect("write png");
+}
+
+/// A library photo is a `.rlab` container, not an image file, so starting a
+/// focus stack from the library grid hands the op paths that no image decoder
+/// understands. It has to fuse them from their embedded originals.
+#[test]
+fn focus_stack_fuses_imported_library_photos() {
+    use rasterlab_core::{Image, ops::FocusStackOp, traits::operation::Operation};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let left = tmp.path().join("left.png");
+    let right = tmp.path().join("right.png");
+    write_png(&left, &focus_frame(8..24));
+    write_png(&right, &focus_frame(40..56));
+
+    let lib = open_library(&tmp.path().join("lib"));
+    let session = lib.import_files(&[left, right], |_| {}).unwrap();
+    assert!(session.errors.is_empty(), "{:?}", session.errors);
+
+    let frames: Vec<String> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .iter()
+        .map(|row| lib.rlab_path(&row.hash).to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(frames.len(), 2);
+
+    let fused = FocusStackOp::new(frames)
+        .apply(Image::new(1, 1))
+        .expect("focus stack over library photos");
+
+    assert_eq!((fused.width, fused.height), (64, 64));
+    // Both sharp bands survive the fusion: each was in focus in one frame only,
+    // so a fused pixel there must keep the checker's contrast rather than the
+    // flat 120 grey the other frame contributed.
+    for x in [16usize, 48] {
+        let row = 32 * 64;
+        let a = fused.data[(row + x) * 4] as i16;
+        let b = fused.data[(row + x + 1) * 4] as i16;
+        assert!(
+            (a - b).abs() > 100,
+            "x={x} lost the in-focus detail: {a} vs {b}",
+        );
+    }
+}
