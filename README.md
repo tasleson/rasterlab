@@ -69,7 +69,7 @@ The table follows the tool order in the GUI.
 | Curves | Applies an interactive tone curve with draggable control points. |
 | Denoise | Applies a bilateral filter with configurable strength and radius. |
 | Faux HDR | Builds virtual ±1 EV brackets from one image and exposure-fuses them. |
-| Focus Stack | Fuses multiple focus-bracketed images using a Sum-Modified-Laplacian focus measure. |
+| Focus Stack | Fuses multiple focus-bracketed images using a Sum-Modified-Laplacian focus measure, correcting the magnification difference focus breathing leaves between frames. |
 | Grain | Adds configurable film grain. |
 | HDR Merge | Merges two or more bracketed exposures using exposure estimation, radiance merging, and Reinhard tone mapping. |
 | Heal | Performs spot healing with an automatically selected source patch or a clone source. |

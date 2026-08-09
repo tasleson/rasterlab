@@ -1,21 +1,33 @@
 //! Focus stacking operation.
 //!
 //! Fuses multiple images captured at different focus distances into a single
-//! all-in-focus result.  The inputs are assumed to be pre-aligned (same
-//! camera position, same framing) — only the focus plane differs.
+//! all-in-focus result.  The frames come from one camera position, framed the
+//! same way — but they do not land on the sensor the same way, because racking
+//! focus also changes the lens's magnification a little (focus breathing), so
+//! the op fits and removes that difference before fusing.  See
+//! [`super::align`].
 //!
 //! Algorithm:
 //! 1. Load every frame from disk (op is self-contained for replay).
 //! 2. Verify all frames have matching dimensions.
-//! 3. For each frame, compute a per-pixel focus measure using the
+//! 3. Align every frame to the first one — a scale, rotation and shift fitted
+//!    per frame, then resampled into the first frame's grid.  Each resampled
+//!    frame carries a coverage map marking where the fit reached past its own
+//!    edge.
+//! 4. For each frame, compute a per-pixel focus measure using the
 //!    **Sum-Modified-Laplacian** (SML) aggregated over a 7×7 window.
-//! 4. Smooth each SML map with a separable box blur so the per-pixel
+//! 5. Smooth each SML map with a separable box blur so the per-pixel
 //!    winner-selection doesn't flicker between adjacent pixels on flat
 //!    content.
-//! 5. Fuse with a weighted blend `w_i = SML_blur_i^p / Σ SML_blur_j^p`
+//! 6. Fuse with a weighted blend `w_i = SML_blur_i^p / Σ SML_blur_j^p`
 //!    (p = 4).  The high exponent behaves like winner-takes-all where one
 //!    image is clearly sharper while still producing soft transitions on
-//!    tied regions.
+//!    tied regions.  Weights are scaled by coverage, so a frame contributes
+//!    nothing where it was resampled from outside itself.
+//!
+//! The output keeps the first frame's geometry, so the edges of the result are
+//! fused from however many frames still reach that far — never fewer than one,
+//! since the first frame is the reference and covers itself completely.
 //!
 //! `apply()` ignores the input `Image` and reloads every frame from the
 //! stored `image_paths`, making the op fully self-contained for
@@ -24,6 +36,7 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::align;
 use crate::{
     cancel,
     error::{RasterError, RasterResult},
@@ -50,8 +63,33 @@ const WEIGHT_POWER: f32 = 4.0;
 /// no usable focus signal (completely flat in every frame) still produce
 /// a finite output instead of NaN.
 const WEIGHT_EPSILON: f32 = 1e-4;
+/// Radius over which a resampled frame's coverage is feathered before it
+/// scales the weights.
+///
+/// It is exactly how far the focus measure reaches: a pixel this close to the
+/// edge of a resampled frame has the edge itself inside its SML window, and
+/// that edge is the strongest "detail" in the whole map.  Feathering rather
+/// than cutting keeps the hand-over to the remaining frames smooth.
+const COVERAGE_FEATHER_RADIUS: usize = SML_HALF + WEIGHT_BLUR_RADIUS;
 
 // ── Public op ────────────────────────────────────────────────────────────────
+
+/// How the frames are brought into a common geometry before they are fused.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameAlignment {
+    /// Fuse the frames exactly as they were loaded.
+    ///
+    /// This is the *serialisation* default, not the one [`FocusStackOp::new`]
+    /// picks: stacks saved before alignment existed were rendered without it,
+    /// and a non-destructive edit has to replay to the pixels it was created
+    /// with.
+    #[default]
+    None,
+    /// Fit a scale, rotation and shift for every frame against the first one
+    /// and resample into its geometry.  This is what cancels focus breathing.
+    Similarity,
+}
 
 /// Non-destructive focus-stacking op.
 ///
@@ -60,13 +98,25 @@ const WEIGHT_EPSILON: f32 = 1e-4;
 /// the op is self-contained and replayable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FocusStackOp {
-    /// Absolute paths to the source frames, in any order.
+    /// Absolute paths to the source frames.  The first is the reference: the
+    /// result keeps its framing, and every other frame is fitted onto it.
     pub image_paths: Vec<String>,
+    /// How the frames are brought into a common geometry.
+    #[serde(default)]
+    pub alignment: FrameAlignment,
 }
 
 impl FocusStackOp {
+    /// A stack that corrects focus breathing.
     pub fn new(image_paths: Vec<String>) -> Self {
-        Self { image_paths }
+        Self::with_alignment(image_paths, FrameAlignment::Similarity)
+    }
+
+    pub fn with_alignment(image_paths: Vec<String>, alignment: FrameAlignment) -> Self {
+        Self {
+            image_paths,
+            alignment,
+        }
     }
 }
 
@@ -85,7 +135,11 @@ impl Operation for FocusStackOp {
     }
 
     fn describe(&self) -> String {
-        format!("Focus Stack ({} frames)", self.image_paths.len())
+        let frames = self.image_paths.len();
+        match self.alignment {
+            FrameAlignment::None => format!("Focus Stack ({frames} frames)"),
+            FrameAlignment::Similarity => format!("Focus Stack ({frames} frames, aligned)"),
+        }
     }
 
     fn is_geometric(&self) -> bool {
@@ -104,14 +158,32 @@ fn stack(op: &FocusStackOp) -> RasterResult<Image> {
 
     // Load every frame (plain image files or library `.rlab` photos).
     let images = super::frames::load_frames(&op.image_paths, "Focus Stack")?;
+    let refs: Vec<&Image> = images.iter().collect();
+    fuse_frames(&refs, op.alignment)
+}
+
+/// Fuse pre-loaded frames into one all-in-focus image, aligning them first if
+/// asked to.  `images[0]` is the reference: the result has its dimensions and
+/// its framing.
+///
+/// Exposed publicly so tests and callers that already hold decoded frames can
+/// exercise the fusion without going through disk I/O.
+pub fn fuse_frames(images: &[&Image], alignment: FrameAlignment) -> RasterResult<Image> {
+    let Some(&reference) = images.first() else {
+        return Err(RasterError::InvalidParams(
+            "Focus Stack: no frames provided".into(),
+        ));
+    };
 
     if images.len() == 1 {
-        // Nothing to fuse — return the single loaded frame unchanged.
-        return Ok(images.into_iter().next().unwrap());
+        // Nothing to fuse — hand back the single frame unchanged.
+        return Ok(reference.deep_clone());
     }
 
-    // All frames must have identical dimensions (the op assumes alignment).
-    let (w, h) = (images[0].width, images[0].height);
+    // Every frame must arrive the same size.  Breathing changes magnification,
+    // not pixel count, so differing dimensions mean the frames are not one
+    // bracket and no amount of alignment will make them into one.
+    let (w, h) = (reference.width, reference.height);
     for (i, img) in images.iter().enumerate().skip(1) {
         if img.width != w || img.height != h {
             return Err(RasterError::InvalidParams(format!(
@@ -121,14 +193,29 @@ fn stack(op: &FocusStackOp) -> RasterResult<Image> {
         }
     }
 
-    // ── Per-frame focus measure ──────────────────────────────────────────
     let wu = w as usize;
     let hu = h as usize;
 
-    let weights: Vec<Vec<f32>> = images
+    // ── Alignment ────────────────────────────────────────────────────────
+    //
+    // Resampled frames own their pixels, so they have to outlive the fusion;
+    // `frames` then points at either the resampled copy or the original.
+    let aligned = align_frames(images, alignment)?;
+    let frames: Vec<&Image> = images
+        .iter()
+        .zip(&aligned)
+        .map(|(original, aligned)| match aligned {
+            Some(a) => &a.image,
+            None => *original,
+        })
+        .collect();
+
+    // ── Per-frame focus measure ──────────────────────────────────────────
+
+    let weights: Vec<Vec<f32>> = frames
         .par_iter()
         .map(|img| {
-            let gray = to_gray(img);
+            let gray = super::luma_f32(img);
             let sml = sum_modified_laplacian(&gray, wu, hu);
             box_blur(&sml, wu, hu, WEIGHT_BLUR_RADIUS)
         })
@@ -141,14 +228,14 @@ fn stack(op: &FocusStackOp) -> RasterResult<Image> {
     // ── Weighted fusion ─────────────────────────────────────────────────
     //
     // For each output pixel:
-    //   w_i = (weights[i] + EPS)^p
+    //   w_i = coverage_i · (weights[i] + EPS)^p
     //   out = Σ w_i · src_i  /  Σ w_i
     //
     // Parallelise over output scanlines; each worker touches every
     // source image's row-slice, which is cache-friendly.
 
     let mut out = Image::new(w, h);
-    let n = images.len();
+    let n = frames.len();
 
     out.data
         .par_chunks_mut(wu * 4)
@@ -162,19 +249,31 @@ fn stack(op: &FocusStackOp) -> RasterResult<Image> {
                 let mut w_sum = 0.0f32;
 
                 for k in 0..n {
-                    let wt = (weights[k][idx] + WEIGHT_EPSILON).powf(WEIGHT_POWER);
-                    let p = &images[k].data[idx * 4..idx * 4 + 4];
+                    let mut wt = (weights[k][idx] + WEIGHT_EPSILON).powf(WEIGHT_POWER);
+                    if let Some(a) = &aligned[k] {
+                        wt *= a.coverage[idx];
+                    }
+                    if wt <= 0.0 {
+                        continue;
+                    }
+                    let p = &frames[k].data[idx * 4..idx * 4 + 4];
                     r_acc += wt * p[0] as f32;
                     g_acc += wt * p[1] as f32;
                     b_acc += wt * p[2] as f32;
                     w_sum += wt;
                 }
 
-                let inv = 1.0 / w_sum;
                 let px = &mut row[x * 4..x * 4 + 4];
-                px[0] = (r_acc * inv).clamp(0.0, 255.0) as u8;
-                px[1] = (g_acc * inv).clamp(0.0, 255.0) as u8;
-                px[2] = (b_acc * inv).clamp(0.0, 255.0) as u8;
+                if w_sum > 0.0 {
+                    let inv = 1.0 / w_sum;
+                    px[0] = (r_acc * inv).clamp(0.0, 255.0) as u8;
+                    px[1] = (g_acc * inv).clamp(0.0, 255.0) as u8;
+                    px[2] = (b_acc * inv).clamp(0.0, 255.0) as u8;
+                } else {
+                    // The reference frame always covers itself, so this is only
+                    // reachable if every weight underflowed to zero.
+                    px[..3].copy_from_slice(&reference.data[idx * 4..idx * 4 + 3]);
+                }
                 px[3] = 255;
             }
         });
@@ -182,16 +281,58 @@ fn stack(op: &FocusStackOp) -> RasterResult<Image> {
     Ok(out)
 }
 
-// ── Focus measure: Sum of Modified Laplacian ────────────────────────────────
+// ── Alignment ────────────────────────────────────────────────────────────────
 
-/// Luminance conversion (Rec. 709 weights).
-fn to_gray(image: &Image) -> Vec<f32> {
-    image
-        .data
-        .chunks_exact(4)
-        .map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
+/// A frame resampled into the reference frame's grid.
+struct Aligned {
+    image: Image,
+    /// Per-pixel weight multiplier in 0..1.  One where the frame genuinely
+    /// covers the output, ramping to zero over the strip where the focus
+    /// measure would otherwise be reading the resampled frame's own edge.
+    coverage: Vec<f32>,
+}
+
+/// Fit and resample every frame onto `images[0]`.
+///
+/// The returned slot is `None` for any frame used as it arrived: the reference
+/// itself, every frame when alignment is off, and any frame whose fit was
+/// refused — leaving a frame where it lies is what the op did before alignment
+/// existed, and it beats warping it by an answer we do not believe.
+fn align_frames(
+    images: &[&Image],
+    alignment: FrameAlignment,
+) -> RasterResult<Vec<Option<Aligned>>> {
+    if alignment == FrameAlignment::None {
+        return Ok((0..images.len()).map(|_| None).collect());
+    }
+
+    let reference = images[0];
+    let wu = reference.width as usize;
+    let hu = reference.height as usize;
+
+    images
+        .par_iter()
+        .enumerate()
+        .map(|(i, frame)| {
+            if cancel::is_requested() {
+                return Err(RasterError::Cancelled);
+            }
+            if i == 0 {
+                return Ok(None);
+            }
+            let Some(fit) = align::estimate_similarity(reference, frame) else {
+                return Ok(None);
+            };
+            let (image, coverage) = align::warp_to_reference(frame, fit);
+            Ok(Some(Aligned {
+                image,
+                coverage: box_blur(&coverage, wu, hu, COVERAGE_FEATHER_RADIUS),
+            }))
+        })
         .collect()
 }
+
+// ── Focus measure: Sum of Modified Laplacian ────────────────────────────────
 
 /// Modified Laplacian at a single pixel, using horizontal and vertical
 /// second differences (Nayar 1994).
@@ -301,6 +442,9 @@ fn box_blur(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::test_utils::{
+        box_blurred, magnified, mean_abs_diff, split_halves, textured_scene,
+    };
 
     /// When every frame is identical, focus stacking must return an
     /// image whose pixels match the input (up to rounding in the fusion).
@@ -316,47 +460,104 @@ mod tests {
             chunk[3] = 255;
         }
 
-        // Fake a three-frame stack where every frame is identical.  Skip the
-        // op's file loading by calling the internal fusion path directly.
-        let images = [img.deep_clone(), img.deep_clone(), img.deep_clone()];
-        let wu = w as usize;
-        let hu = h as usize;
-        let weights: Vec<Vec<f32>> = images
-            .iter()
-            .map(|i| {
-                let g = to_gray(i);
-                let sml = sum_modified_laplacian(&g, wu, hu);
-                box_blur(&sml, wu, hu, WEIGHT_BLUR_RADIUS)
-            })
-            .collect();
-
-        let mut out = Image::new(w, h);
-        let n = images.len();
-        #[allow(clippy::needless_range_loop)]
-        for idx in 0..(wu * hu) {
-            let mut r = 0.0f32;
-            let mut g = 0.0f32;
-            let mut b = 0.0f32;
-            let mut ws = 0.0f32;
-            for k in 0..n {
-                let wt = (weights[k][idx] + WEIGHT_EPSILON).powf(WEIGHT_POWER);
-                let p = &images[k].data[idx * 4..idx * 4 + 4];
-                r += wt * p[0] as f32;
-                g += wt * p[1] as f32;
-                b += wt * p[2] as f32;
-                ws += wt;
-            }
-            let inv = 1.0 / ws;
-            let px = &mut out.data[idx * 4..idx * 4 + 4];
-            px[0] = (r * inv).clamp(0.0, 255.0) as u8;
-            px[1] = (g * inv).clamp(0.0, 255.0) as u8;
-            px[2] = (b * inv).clamp(0.0, 255.0) as u8;
-            px[3] = 255;
-        }
+        let out = fuse_frames(&[&img, &img, &img], FrameAlignment::None).unwrap();
 
         for (a, b) in img.data.iter().zip(out.data.iter()) {
             assert!((*a as i16 - *b as i16).abs() <= 1, "{a} vs {b}");
         }
+    }
+
+    /// Alignment on frames that already line up must not disturb them: every
+    /// fit is refused as no improvement, so nothing is resampled.
+    #[test]
+    fn aligning_already_aligned_frames_changes_nothing() {
+        let img = textured_scene(96, 72);
+        let plain = fuse_frames(&[&img, &img], FrameAlignment::None).unwrap();
+        let aligned = fuse_frames(&[&img, &img], FrameAlignment::Similarity).unwrap();
+        assert_eq!(plain.data, aligned.data);
+    }
+
+    /// The bug this alignment exists for.  Two frames of one scene, each sharp
+    /// where the other is defocused — but the second was shot at a slightly
+    /// longer effective focal length, as every lens does when it racks focus.
+    /// Fused as-shot, its detail lands in the wrong place and the result is
+    /// visibly worse than the scene it came from.
+    #[test]
+    fn focus_breathing_is_corrected_before_fusing() {
+        let (w, h) = (480u32, 360u32);
+        let sharp = textured_scene(w, h);
+        let soft = box_blurred(&sharp, 3);
+
+        // Near frame: sharp on the left.  Far frame: sharp on the right, and
+        // 1.5 % larger — a modest amount of breathing for a macro lens.
+        let near = split_halves(&sharp, &soft);
+        let far = magnified(&split_halves(&soft, &sharp), 1.015, 0.0, 0.0);
+
+        let unaligned = fuse_frames(&[&near, &far], FrameAlignment::None).unwrap();
+        let aligned = fuse_frames(&[&near, &far], FrameAlignment::Similarity).unwrap();
+
+        // Judged against the all-sharp scene the stack is trying to recover.
+        // The inset skips the band down the middle where the two halves meet
+        // and the frame edges, neither of which is what breathing broke.
+        // Measures 9.0 → 2.6 levels of mean error; the bar is set well below
+        // that, since what is being pinned is that alignment helps decisively
+        // rather than any particular resampling quality.
+        let inset = 16;
+        let before = mean_abs_diff(&unaligned, &sharp, inset);
+        let after = mean_abs_diff(&aligned, &sharp, inset);
+        assert!(
+            after < before * 0.5,
+            "aligned error {after:.2} should be far below the unaligned {before:.2}",
+        );
+    }
+
+    /// Alignment resamples the frames into the reference's grid, so the result
+    /// keeps the reference's dimensions no matter what the fit was.
+    #[test]
+    fn output_keeps_the_reference_geometry() {
+        let reference = textured_scene(128, 96);
+        let frame = magnified(&reference, 1.02, 3.0, -2.0);
+        let out = fuse_frames(&[&reference, &frame], FrameAlignment::Similarity).unwrap();
+        assert_eq!((out.width, out.height), (reference.width, reference.height));
+    }
+
+    /// Frames of different sizes are not one bracket, and alignment does not
+    /// pretend otherwise.
+    #[test]
+    fn mismatched_frames_are_rejected() {
+        let a = textured_scene(64, 64);
+        let b = textured_scene(64, 48);
+        for alignment in [FrameAlignment::None, FrameAlignment::Similarity] {
+            let err = fuse_frames(&[&a, &b], alignment).unwrap_err();
+            assert!(err.to_string().contains("Focus Stack"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_single_frame_is_returned_unchanged() {
+        let img = textured_scene(32, 32);
+        let out = fuse_frames(&[&img], FrameAlignment::Similarity).unwrap();
+        assert_eq!(out.data, img.data);
+    }
+
+    #[test]
+    fn no_frames_is_an_error() {
+        assert!(fuse_frames(&[], FrameAlignment::Similarity).is_err());
+    }
+
+    /// Stacks saved before alignment existed have no `alignment` field, and
+    /// replaying one has to produce the pixels it was created with — not the
+    /// ones today's default would produce.
+    #[test]
+    fn a_stack_saved_without_alignment_replays_unaligned() {
+        let op: FocusStackOp =
+            serde_json::from_str(r#"{"image_paths":["a.png","b.png"]}"#).unwrap();
+        assert_eq!(op.alignment, FrameAlignment::None);
+        assert_eq!(
+            FocusStackOp::new(vec!["a.png".into()]).alignment,
+            FrameAlignment::Similarity,
+            "new stacks correct breathing",
+        );
     }
 
     #[test]

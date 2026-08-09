@@ -1,4 +1,5 @@
 pub mod airplane_window;
+mod align;
 pub mod blur;
 pub mod brightness_contrast;
 pub mod bw;
@@ -55,7 +56,7 @@ pub use curves::CurvesOp;
 pub use denoise::DenoiseOp;
 pub use faux_hdr::FauxHdrOp;
 pub use flip::FlipOp;
-pub use focus_stack::FocusStackOp;
+pub use focus_stack::{FocusStackOp, FrameAlignment};
 pub use grain::GrainOp;
 pub use hdr_merge::HdrMergeOp;
 pub use heal::{HealOp, HealSpot};
@@ -180,5 +181,113 @@ pub(super) mod test_utils {
 
     pub fn grey(v: u8) -> Image {
         solid(v, v, v)
+    }
+
+    /// A scene with structure at every scale, for the ops that measure detail
+    /// rather than colour.  Deterministic, so a failure is reproducible, and
+    /// non-periodic, so nothing can align or match it to the wrong place.
+    pub fn textured_scene(w: u32, h: u32) -> Image {
+        let mut img = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (x as f32, y as f32);
+                let slow = 40.0 + 0.05 * fx + 0.08 * fy;
+                let ripple =
+                    50.0 * (fx * 0.11).sin() * (fy * 0.07).cos() + 30.0 * ((fx + fy) * 0.031).sin();
+                let hash = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) >> 16;
+                let v = (slow + ripple + (hash % 64) as f32).clamp(0.0, 255.0);
+                let o = img.pixel_offset(x, y);
+                img.data[o] = v as u8;
+                img.data[o + 1] = (v * 0.8 + 20.0).clamp(0.0, 255.0) as u8;
+                img.data[o + 2] = (255.0 - v).clamp(0.0, 255.0) as u8;
+                img.data[o + 3] = 255;
+            }
+        }
+        img
+    }
+
+    /// `src` as it would look at `scale`× magnification about the frame centre,
+    /// shifted by `(tx, ty)` pixels — a lens breathing and the camera drifting,
+    /// in one step.  Bilinear and edge-clamped, written out here rather than
+    /// reused from the ops so a test never resamples with the code it is
+    /// checking.
+    pub fn magnified(src: &Image, scale: f32, tx: f32, ty: f32) -> Image {
+        let (w, h) = (src.width, src.height);
+        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let mut out = Image::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                // Continuous coordinates, so `scale` is about the centre of the
+                // frame rather than the centre of the top-left pixel.
+                let sx = cx + (x as f32 + 0.5 - cx - tx) / scale - 0.5;
+                let sy = cy + (y as f32 + 0.5 - cy - ty) / scale - 0.5;
+                let o = out.pixel_offset(x, y);
+                out.data[o..o + 4].copy_from_slice(&super::bilinear_sample(src, sx, sy));
+            }
+        }
+        out
+    }
+
+    /// One frame's left half beside another's right half — a focus bracket's
+    /// defining property, that each frame is sharp where the others are not.
+    pub fn split_halves(left: &Image, right: &Image) -> Image {
+        assert_eq!((left.width, left.height), (right.width, right.height));
+        let mut out = left.deep_clone();
+        for y in 0..left.height {
+            for x in left.width / 2..left.width {
+                let o = left.pixel_offset(x, y);
+                out.data[o..o + 4].copy_from_slice(&right.data[o..o + 4]);
+            }
+        }
+        out
+    }
+
+    /// Square box blur over the whole frame, standing in for defocus.
+    pub fn box_blurred(src: &Image, radius: u32) -> Image {
+        let (w, h) = (src.width as i64, src.height as i64);
+        let r = radius as i64;
+        let mut out = Image::new(src.width, src.height);
+        for y in 0..h {
+            for x in 0..w {
+                let mut acc = [0.0f32; 3];
+                let mut n = 0.0f32;
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let o = src.pixel_offset(
+                            (x + dx).clamp(0, w - 1) as u32,
+                            (y + dy).clamp(0, h - 1) as u32,
+                        );
+                        for (a, c) in acc.iter_mut().zip(&src.data[o..o + 3]) {
+                            *a += *c as f32;
+                        }
+                        n += 1.0;
+                    }
+                }
+                let o = out.pixel_offset(x as u32, y as u32);
+                for (c, a) in out.data[o..o + 3].iter_mut().zip(acc) {
+                    *c = (a / n) as u8;
+                }
+                out.data[o + 3] = 255;
+            }
+        }
+        out
+    }
+
+    /// Mean absolute RGB difference over the interior, ignoring `inset` pixels
+    /// of border where resampling and window-based measures run out of data.
+    pub fn mean_abs_diff(a: &Image, b: &Image, inset: u32) -> f32 {
+        assert_eq!((a.width, a.height), (b.width, b.height));
+        let mut sum = 0.0f64;
+        let mut n = 0u64;
+        for y in inset..a.height - inset {
+            for x in inset..a.width - inset {
+                let o = a.pixel_offset(x, y);
+                for c in 0..3 {
+                    sum += (a.data[o + c] as i32 - b.data[o + c] as i32).unsigned_abs() as f64;
+                    n += 1;
+                }
+            }
+        }
+        (sum / n as f64) as f32
     }
 }
