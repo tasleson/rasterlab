@@ -1,6 +1,37 @@
 use crate::error::{RasterError, RasterResult};
 use std::path::PathBuf;
 
+/// Largest pixel count an [`Image`] may be allocated for: 2^30 pixels, or
+/// 4 GiB as RGBA8.
+///
+/// A gigapixel is already past what the pipeline can render — every stage holds
+/// its own copy of the buffer — and two orders of magnitude past the largest
+/// camera sensor, so the cap only ever rejects dimensions that came from a
+/// damaged or hostile file.  Something has to: a `u32` pair can name 1.8 × 10^19
+/// pixels, an arithmetically valid request that would sit in the allocator until
+/// the process is killed.
+pub const MAX_PIXELS: u64 = 1 << 30;
+
+/// Byte length of an RGBA8 buffer holding `width × height` pixels.
+///
+/// `None` when the product overflows or exceeds [`MAX_PIXELS`].  Every image
+/// allocation goes through this: `width * height * 4` in `u32` wraps for
+/// dimensions as ordinary as 65536², which in a release build silently yields a
+/// buffer far too small for the dimensions recorded beside it.
+pub fn rgba8_byte_len(width: u32, height: u32) -> Option<usize> {
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    if pixels > MAX_PIXELS {
+        return None;
+    }
+    usize::try_from(pixels * 4).ok()
+}
+
+fn dimension_error(width: u32, height: u32) -> RasterError {
+    RasterError::DimensionsOutOfRange(format!(
+        "{width}×{height} exceeds the maximum of {MAX_PIXELS} pixels"
+    ))
+}
+
 /// Internal pixel representation.  Always `Rgba8` after decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PixelFormat {
@@ -138,21 +169,39 @@ impl std::fmt::Debug for Image {
 
 impl Image {
     /// Create a blank (transparent black) RGBA8 image.
+    ///
+    /// # Panics
+    ///
+    /// If `width × height` exceeds [`MAX_PIXELS`].  Use
+    /// [`try_new`](Self::try_new) for any dimensions that came from a file,
+    /// a plugin, or a serialised operation.
     pub fn new(width: u32, height: u32) -> Self {
-        Self {
+        Self::try_new(width, height).expect("Image::new with unusable dimensions — use try_new")
+    }
+
+    /// Fallible [`new`](Self::new), for dimensions that are not trusted.
+    ///
+    /// Anything read back from a `.rlab` project is in that category: the edit
+    /// stack is deserialised JSON, so an operation can name an output size that
+    /// no image ever had.
+    pub fn try_new(width: u32, height: u32) -> RasterResult<Self> {
+        let len = rgba8_byte_len(width, height).ok_or_else(|| dimension_error(width, height))?;
+        Ok(Self {
             width,
             height,
             format: PixelFormat::Rgba8,
-            data: vec![0u8; (width * height * 4) as usize],
+            data: vec![0u8; len],
             metadata: ImageMetadata::default(),
-        }
+        })
     }
 
     /// Create from a pre-existing RGBA8 buffer.
     ///
-    /// Returns `Err` if `data.len() != width * height * 4`.
+    /// Returns `Err` if `data.len() != width * height * 4`, or if the
+    /// dimensions are outside [`MAX_PIXELS`].
     pub fn from_rgba8(width: u32, height: u32, data: Vec<u8>) -> RasterResult<Self> {
-        let expected = (width as usize) * (height as usize) * 4;
+        let expected =
+            rgba8_byte_len(width, height).ok_or_else(|| dimension_error(width, height))?;
         if data.len() != expected {
             return Err(RasterError::InvalidParams(format!(
                 "Buffer length {} does not match expected {} ({}×{}×4)",
@@ -274,6 +323,36 @@ mod tests {
         assert!(Image::from_rgba8(3, 2, data).is_ok());
         let bad = vec![0u8; 10];
         assert!(Image::from_rgba8(3, 2, bad).is_err());
+    }
+
+    /// `width * height * 4` in `u32` wraps to 0 at 65536², and to a small
+    /// non-zero value just past it.  Both used to produce an `Image` whose
+    /// buffer did not match its own dimensions.
+    #[test]
+    fn oversized_dimensions_rejected() {
+        for (w, h) in [
+            (65536, 65536),       // u32 product × 4 wraps to exactly 0
+            (65536, 65537),       // wraps to a small non-zero length
+            (u32::MAX, u32::MAX), // largest pixel count a u32 pair can name
+            (1 << 20, 1 << 11),   // no wrap, simply past MAX_PIXELS
+        ] {
+            assert!(rgba8_byte_len(w, h).is_none(), "{w}×{h} should be rejected");
+            assert!(Image::try_new(w, h).is_err(), "{w}×{h} should not allocate");
+            assert!(
+                Image::from_rgba8(w, h, Vec::new()).is_err(),
+                "{w}×{h} should not construct from a buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn plausible_dimensions_accepted() {
+        // 150 MP — past the largest medium-format sensor on the market.
+        assert_eq!(rgba8_byte_len(15000, 10000), Some(15000 * 10000 * 4));
+        assert_eq!(rgba8_byte_len(0, 0), Some(0));
+        assert_eq!(rgba8_byte_len(u32::MAX, 0), Some(0));
+        // The cap is on the pixel count, not on either dimension alone.
+        assert!(rgba8_byte_len(1 << 20, 1 << 9).is_some());
     }
 
     #[test]

@@ -1,7 +1,11 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::{error::RasterResult, image::Image, traits::operation::Operation};
+use crate::{
+    error::{RasterError, RasterResult},
+    image::Image,
+    traits::operation::Operation,
+};
 
 /// Resampling algorithm used when resizing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,13 +217,24 @@ impl Operation for ResizeOp {
             return Ok(image);
         }
 
+        // `ResizeOp::new` clamps these to 1, but deserialisation does not go
+        // through it, and a zero-width row chunk panics inside rayon.
+        if self.width == 0 || self.height == 0 {
+            return Err(RasterError::InvalidParams(
+                "Resize width and height must be non-zero".into(),
+            ));
+        }
+
         let dst_w = self.width as usize;
         let x_ratio = image.width as f32 / self.width as f32;
         let y_ratio = image.height as f32 / self.height as f32;
         let mode = self.mode;
         let metadata = image.metadata.clone();
 
-        let mut out = Image::new(self.width, self.height);
+        // The target size is deserialised straight out of a project file, so it
+        // is the one place in the pipeline where dimensions are not derived from
+        // an image that already exists.
+        let mut out = Image::try_new(self.width, self.height)?;
 
         out.data
             .par_chunks_mut(dst_w * 4)
@@ -419,5 +434,35 @@ mod tests {
         let out = reduce_pow2(&src, 0);
         assert_eq!((out.width, out.height), (5, 7));
         assert_eq!(out.data, src.data);
+    }
+
+    fn resize_to(width: u32, height: u32) -> RasterResult<Image> {
+        ResizeOp {
+            width,
+            height,
+            mode: ResampleMode::Bilinear,
+        }
+        .apply(solid(1, 2, 3, 4, 4))
+    }
+
+    /// A target size is deserialised JSON, never clamped by `ResizeOp::new`.
+    /// `width * height * 4` in `u32` wraps at 65536², which used to hand back an
+    /// image whose buffer was far smaller than its dimensions claimed.
+    #[test]
+    fn oversized_target_is_rejected() {
+        for (w, h) in [(65536, 65536), (65536, 65537), (u32::MAX, u32::MAX)] {
+            let err = resize_to(w, h)
+                .err()
+                .unwrap_or_else(|| panic!("{w}×{h} should not have resized"));
+            assert!(err.to_string().contains("out of range"), "{w}×{h}: {err}");
+        }
+    }
+
+    /// Zero is the other end of the same problem: it clears any size ceiling but
+    /// panics inside rayon once it becomes a chunk length of zero.
+    #[test]
+    fn zero_target_is_rejected() {
+        assert!(resize_to(0, 8).is_err());
+        assert!(resize_to(8, 0).is_err());
     }
 }
