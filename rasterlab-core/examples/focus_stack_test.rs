@@ -2,7 +2,7 @@
 
 use rasterlab_core::formats::FormatRegistry;
 use rasterlab_core::image::Image;
-use rasterlab_core::ops::FocusStackOp;
+use rasterlab_core::ops::{FocusStackOp, FrameAlignment};
 use rasterlab_core::traits::format_handler::EncodeOptions;
 use rasterlab_core::traits::operation::Operation;
 
@@ -24,8 +24,30 @@ fn main() {
         reference = Some(args.remove(i + 1));
         args.remove(i);
     }
+    // `--out <path>` chooses where the stacked result lands.
+    let mut out_path = String::from("focus_stack_out.png");
+    if let Some(i) = args.iter().position(|s| s == "--out") {
+        if i + 1 >= args.len() {
+            eprintln!("--out requires a path");
+            std::process::exit(1);
+        }
+        out_path = args.remove(i + 1);
+        args.remove(i);
+    }
+    // `--no-align` fuses the frames as shot, for comparing against the
+    // breathing-corrected result.
+    let alignment = match args.iter().position(|s| s == "--no-align") {
+        Some(i) => {
+            args.remove(i);
+            FrameAlignment::None
+        }
+        None => FrameAlignment::Similarity,
+    };
     if args.len() < 2 {
-        eprintln!("usage: focus_stack_test [--reference <path>] <img1> <img2> [img3 ...]");
+        eprintln!(
+            "usage: focus_stack_test [--reference <path>] [--out <path>] [--no-align] \
+             <img1> <img2> [img3 ...]"
+        );
         std::process::exit(1);
     }
 
@@ -37,7 +59,7 @@ fn main() {
         }
     }
 
-    let op = FocusStackOp::new(args.clone());
+    let op = FocusStackOp::with_alignment(args.clone(), alignment);
     let dummy = Image::new(1, 1);
 
     let t0 = std::time::Instant::now();
@@ -46,7 +68,7 @@ fn main() {
             let ms = t0.elapsed().as_millis();
             println!("OK: {}x{} in {} ms", image.width, image.height, ms);
             let reg = FormatRegistry::with_builtins();
-            let out = std::path::Path::new("/Users/tony/rasterlab/focus_stack_out.png");
+            let out = std::path::Path::new(&out_path);
             let bytes = reg
                 .encode_file(&image, out, &EncodeOptions::default())
                 .expect("encode failed");

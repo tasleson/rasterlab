@@ -815,6 +815,77 @@ fn gen_focus_stack_3(scene: &RgbImage, dir: &Path) {
     println!("    band split: top=0..{t1}, mid={t1}..{t2}, bot={t2}..{h} (blur σ=4 elsewhere)");
 }
 
+/// Magnify `src` about its centre by `scale`, keeping the frame size.
+fn magnify(src: &RgbImage, scale: f32) -> RgbImage {
+    let (w, h) = (src.width(), src.height());
+    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+    let mut out = RgbImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let sx = cx + (x as f32 + 0.5 - cx) / scale - 0.5;
+            let sy = cy + (y as f32 + 0.5 - cy) / scale - 0.5;
+            let x0 = sx.floor().clamp(0.0, (w - 1) as f32) as u32;
+            let y0 = sy.floor().clamp(0.0, (h - 1) as f32) as u32;
+            let x1 = (x0 + 1).min(w - 1);
+            let y1 = (y0 + 1).min(h - 1);
+            let fx = (sx - sx.floor()).clamp(0.0, 1.0);
+            let fy = (sy - sy.floor()).clamp(0.0, 1.0);
+            let mut px = [0u8; 3];
+            for (c, out_c) in px.iter_mut().enumerate() {
+                let p00 = src.get_pixel(x0, y0).0[c] as f32;
+                let p10 = src.get_pixel(x1, y0).0[c] as f32;
+                let p01 = src.get_pixel(x0, y1).0[c] as f32;
+                let p11 = src.get_pixel(x1, y1).0[c] as f32;
+                let top = p00 + (p10 - p00) * fx;
+                let bot = p01 + (p11 - p01) * fx;
+                *out_c = (top + (bot - top) * fy).round() as u8;
+            }
+            out.put_pixel(x, y, Rgb(px));
+        }
+    }
+    out
+}
+
+/// The same three-frame bracket, but with the magnification difference a real
+/// lens introduces as it racks focus.
+///
+/// Stacked without alignment these produce doubled edges that grow towards the
+/// corners; stacked with it they should come back to `focus_scene_full.png`
+/// like the frames above.
+fn gen_focus_stack_breathing(scene: &RgbImage, dir: &Path) {
+    let h = scene.height();
+    let t1 = h / 3;
+    let t2 = 2 * h / 3;
+
+    // 0.8 % per step — a modest bracket for a lens that breathes.
+    let frames = [
+        (
+            "focus_breath_near.png",
+            1.000,
+            vec![(t1, t2, 1.0), (t2, h, 1.0)],
+        ),
+        (
+            "focus_breath_mid.png",
+            1.008,
+            vec![(0, t1, 1.0), (t2, h, 1.0)],
+        ),
+        (
+            "focus_breath_far.png",
+            1.016,
+            vec![(0, t1, 1.0), (t1, t2, 1.0)],
+        ),
+    ];
+    for (name, scale, bands) in frames {
+        save(
+            magnify(&gaussian_blur_bands(scene, &bands), scale),
+            dir,
+            name,
+        );
+    }
+
+    println!("    magnification: 1.000 / 1.008 / 1.016 about the frame centre");
+}
+
 // ─── HDR merge test images ──────────────────────────────────────────────────
 
 /// sRGB OETF applied to a linear-light value in [0, 1].
@@ -1059,6 +1130,7 @@ fn main() {
     let focus_scene = gen_focus_scene();
     save(focus_scene.clone(), out_dir, "focus_scene_full.png");
     gen_focus_stack_3(&focus_scene, out_dir);
+    gen_focus_stack_breathing(&focus_scene, out_dir);
 
     println!("\n  [HDR merge test images]");
     gen_hdr_brackets(out_dir);
@@ -1084,6 +1156,8 @@ fn main() {
     println!("  focus_scene_full.png       — the all-in-focus reference");
     println!("  focus_top / focus_mid / focus_bot — three frames, one sharp band each");
     println!("  open focus_top, add focus_mid + focus_bot, stack → should match reference");
+    println!("  focus_breath_near / _mid / _far — the same bracket, with the lens breathing");
+    println!("  stack those with 'Correct focus breathing' off, then on, and compare");
     println!("\nHDR merge test workflow:");
     println!(
         "  hdr_bracket_under / hdr_bracket_mid / hdr_bracket_over — 10-stop scene at −2/0/+2 EV"
