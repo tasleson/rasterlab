@@ -160,11 +160,12 @@ fn apply_frame_edit(frames: &mut Vec<StackFrame>, edit: FrameEdit) {
 /// Draw the frame list and apply whatever reorder or removal was clicked.
 ///
 /// Panorama chains its homographies between neighbours, so its list order is
-/// the shooting order and a wrong one fails to stitch at all. Focus Stack and
-/// HDR Merge fuse symmetrically and do not care, but they share the numbered
-/// list because seeing the frames in a known order is how the set gets
-/// checked. The controls lead the row so a long file name is what gets
-/// clipped in a narrow panel, never the buttons.
+/// the shooting order and a wrong one fails to stitch at all. Focus Stack cares
+/// about the first frame only — it is the one the rest are aligned onto, and
+/// the result keeps its framing. HDR Merge fuses symmetrically and does not
+/// care at all, but all three share the numbered list because seeing the frames
+/// in a known order is how the set gets checked. The controls lead the row so a
+/// long file name is what gets clipped in a narrow panel, never the buttons.
 pub(super) fn frame_list_ui(
     ui: &mut Ui,
     frames: &mut Vec<StackFrame>,

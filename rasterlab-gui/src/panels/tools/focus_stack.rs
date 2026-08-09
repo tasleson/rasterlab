@@ -1,7 +1,7 @@
 use std::any::Any;
 
 use egui::Color32;
-use rasterlab_core::ops::FocusStackOp;
+use rasterlab_core::ops::{FocusStackOp, FrameAlignment};
 use rasterlab_core::traits::operation::Operation;
 
 use super::shared::{MIN_STACK_FRAMES, StackFrame, frame_list_ui, frame_paths};
@@ -10,6 +10,8 @@ use crate::file_chooser::DialogKind;
 
 pub struct FocusStackTool {
     pub frames: Vec<StackFrame>,
+    /// Whether to fit out the magnification difference between frames.
+    pub correct_breathing: bool,
     pub preview_active: bool,
 }
 
@@ -17,7 +19,16 @@ impl FocusStackTool {
     pub fn new() -> Self {
         Self {
             frames: Vec::new(),
+            correct_breathing: true,
             preview_active: false,
+        }
+    }
+
+    fn alignment(&self) -> FrameAlignment {
+        if self.correct_breathing {
+            FrameAlignment::Similarity
+        } else {
+            FrameAlignment::None
         }
     }
 }
@@ -68,13 +79,28 @@ impl Tool for FocusStackTool {
         }
 
         ui.add_space(4.0);
+        if ui
+            .checkbox(&mut self.correct_breathing, "Correct focus breathing")
+            .on_hover_text(
+                "Racking focus also changes the lens's magnification, so the frames do not \
+                 overlap pixel for pixel.  Fits a scale, rotation and shift for each frame \
+                 against the first one before fusing.",
+            )
+            .changed()
+            && self.preview_active
+        {
+            action = ToolAction::RequestRender;
+        }
+
+        ui.add_space(4.0);
+        let alignment = self.alignment();
         let button_action = super::shared::path_stack_buttons(
             ui,
             ctx.has_image,
             &mut self.frames,
             &mut self.preview_active,
             "Stack",
-            |paths| Box::new(FocusStackOp::new(paths)),
+            |paths| Box::new(FocusStackOp::with_alignment(paths, alignment)),
         );
         if !matches!(button_action, ToolAction::None) {
             action = button_action;
@@ -101,7 +127,10 @@ impl Tool for FocusStackTool {
     super::shared::impl_preview_controls!();
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
         if self.preview_active && self.frames.len() >= MIN_STACK_FRAMES {
-            Some(Box::new(FocusStackOp::new(frame_paths(&self.frames))))
+            Some(Box::new(FocusStackOp::with_alignment(
+                frame_paths(&self.frames),
+                self.alignment(),
+            )))
         } else {
             None
         }
@@ -113,6 +142,7 @@ impl Tool for FocusStackTool {
                 .iter()
                 .map(|p| StackFrame::new(p.as_str()))
                 .collect();
+            self.correct_breathing = o.alignment != FrameAlignment::None;
             true
         } else {
             false
