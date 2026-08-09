@@ -126,7 +126,7 @@ fn stitch(op: &PanoramaOp) -> RasterResult<Image> {
         if cancel::is_requested() {
             return Err(RasterError::Cancelled);
         }
-        let gray = to_gray(img);
+        let gray = super::luma_f32(img);
         let kps = harris_corners(&gray, img.width as usize, img.height as usize);
         let descs = extract_descriptors(&gray, img.width as usize, img.height as usize, &kps);
         all_kps.push(kps);
@@ -289,16 +289,6 @@ fn stitch(op: &PanoramaOp) -> RasterResult<Image> {
         });
 
     Ok(canvas)
-}
-
-// ── Grayscale ────────────────────────────────────────────────────────────────
-
-fn to_gray(image: &Image) -> Vec<f32> {
-    image
-        .data
-        .chunks_exact(4)
-        .map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
-        .collect()
 }
 
 // ── Harris corner detection ───────────────────────────────────────────────────

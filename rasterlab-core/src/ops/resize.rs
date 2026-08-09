@@ -163,8 +163,11 @@ fn cubic_weight(t: f32) -> f32 {
     }
 }
 
+/// Catmull-Rom bicubic sample at float coordinates `(sx, sy)`, clamped to
+/// border.  Shared with [`super::align`], which resamples for the same reason a
+/// resize does and wants the same kernel.
 #[inline]
-fn sample_bicubic(src: &Image, sx: f32, sy: f32) -> [u8; 4] {
+pub(super) fn sample_bicubic(src: &Image, sx: f32, sy: f32) -> [u8; 4] {
     let x0 = sx.floor() as i64;
     let y0 = sy.floor() as i64;
     let fx = sx - x0 as f32;

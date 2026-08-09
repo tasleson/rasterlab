@@ -126,6 +126,17 @@ where
     });
 }
 
+/// Rec. 709 luminance per pixel, on the same 0–255 scale as the channels it
+/// came from.  Shared by the ops that measure structure rather than colour:
+/// focus stacking, panorama feature detection, and frame alignment.
+pub(super) fn luma_f32(image: &crate::image::Image) -> Vec<f32> {
+    image
+        .data
+        .chunks_exact(4)
+        .map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
+        .collect()
+}
+
 /// Bilinear sample from `image` at float coordinates `(sx, sy)`, clamped to border.
 #[inline]
 pub(super) fn bilinear_sample(image: &crate::image::Image, sx: f32, sy: f32) -> [u8; 4] {
