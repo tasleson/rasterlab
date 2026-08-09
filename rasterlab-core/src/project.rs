@@ -33,6 +33,12 @@
 //! `LMTA` is written by the library importer and absent in editor-only files.
 //! Unknown chunks are skipped on read, enabling forward compatibility.
 //!
+//! A chunk's length is a `u64` read straight off disk, and the whole-file digest
+//! that precedes the chunk walk is no obstacle to a file built deliberately.
+//! Readers therefore check every length against the bytes actually present
+//! before touching it, and hold the named chunks to a per-kind ceiling —
+//! `ORIG` alone is bounded only by the file, since it is the photograph.
+//!
 //! ## `RECC` parity placement
 //!
 //! `RECC` holds Reed-Solomon parity over a contiguous *protected region*, plus a
@@ -116,6 +122,14 @@ const HASH_LEN: usize = 32;
 /// field, not metadata.
 const MAX_JSON_CHUNK_LEN: u64 = 16 * 1024 * 1024;
 
+/// Largest `EDIT` / `VCPS` payload accepted.  These hold the serialised edit
+/// stacks of every virtual copy — brush strokes and mask geometry can make them
+/// genuinely large, but not this large.
+const MAX_EDIT_CHUNK_LEN: u64 = 256 * 1024 * 1024;
+
+/// Largest `PREV` payload accepted.  The writer stores a ~512 px JPEG.
+const MAX_PREVIEW_CHUNK_LEN: u64 = 64 * 1024 * 1024;
+
 /// Fixed prefix of a `RECC` payload: shard size, shard counts, protected length.
 const RECC_HEADER_LEN: usize = 20;
 
@@ -124,8 +138,7 @@ const GF8_MAX_SHARDS: usize = 255;
 
 const TAG_META: &[u8; 4] = b"META";
 const TAG_ORIG: &[u8; 4] = b"ORIG";
-#[allow(dead_code)] // v1 only — used as a literal in the read match arm
-const TAG_EDIT: &[u8; 4] = b"EDIT";
+const TAG_EDIT: &[u8; 4] = b"EDIT"; // v1 only — replaced by VCPS
 const TAG_VCPS: &[u8; 4] = b"VCPS"; // v2+ — replaces EDIT
 const TAG_PREV: &[u8; 4] = b"PREV";
 const TAG_LMTA: &[u8; 4] = b"LMTA"; // v3+ — library metadata (optional)
@@ -412,12 +425,8 @@ impl RlabFile {
             ));
         }
 
-        let mut cur = std::io::Cursor::new(payload);
-
         // ── Magic ─────────────────────────────────────────────────────────
-        let mut magic = [0u8; 8];
-        cur.read_exact(&mut magic)?;
-        if &magic != MAGIC {
+        if !payload.starts_with(MAGIC) {
             return Err(RasterError::decode(
                 "rlab",
                 "invalid magic bytes — not a .rlab project file",
@@ -425,9 +434,11 @@ impl RlabFile {
         }
 
         // ── Format version ────────────────────────────────────────────────
-        let mut ver = [0u8; 2];
-        cur.read_exact(&mut ver)?;
-        let format_version = u16::from_le_bytes(ver);
+        let format_version = u16::from_le_bytes(
+            payload[MAGIC.len()..FILE_HEADER_LEN]
+                .try_into()
+                .expect("2-byte version"),
+        );
         if format_version > FORMAT_VERSION_V5 {
             return Err(RasterError::decode(
                 "rlab",
@@ -447,65 +458,47 @@ impl RlabFile {
         let mut thumbnail: Option<Vec<u8>> = None;
         let mut lmta: Option<LibraryMeta> = None;
 
-        loop {
-            if cur.position() as usize >= payload.len() {
-                break;
-            }
+        let mut pos = FILE_HEADER_LEN;
+        while pos < payload.len() {
+            let chunk = chunk_at(payload, pos)?;
+            pos = chunk.end;
 
-            let mut tag = [0u8; 4];
-            match cur.read_exact(&mut tag) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            }
-
-            let mut len_buf = [0u8; 8];
-            cur.read_exact(&mut len_buf)?;
-            let len = u64::from_le_bytes(len_buf) as usize;
-
-            let mut chunk_data = vec![0u8; len];
-            cur.read_exact(&mut chunk_data)?;
-
-            let mut chunk_hash_stored = [0u8; 32];
-            cur.read_exact(&mut chunk_hash_stored)?;
-
-            let chunk_hash_computed = blake3::hash(&chunk_data);
-            if chunk_hash_computed.as_bytes() != &chunk_hash_stored {
+            if blake3::hash(chunk.data).as_bytes() != chunk.hash {
                 return Err(RasterError::decode(
                     "rlab",
                     format!(
                         "chunk '{}' integrity check failed",
-                        String::from_utf8_lossy(&tag)
+                        String::from_utf8_lossy(&chunk.tag)
                     ),
                 ));
             }
 
-            match &tag {
+            match &chunk.tag {
                 b"META" => {
-                    let m: RlabMeta = serde_json::from_slice(&chunk_data)
+                    let m: RlabMeta = serde_json::from_slice(chunk.data)
                         .map_err(|e| RasterError::Serialization(e.to_string()))?;
                     meta = Some(m);
                 }
                 b"ORIG" => {
-                    original_hash = Some(chunk_hash_stored);
-                    original_bytes = Some(chunk_data);
+                    original_hash = Some(chunk.hash.try_into().expect("32-byte chunk hash"));
+                    original_bytes = Some(chunk.data.to_vec());
                 }
                 b"EDIT" => {
                     // Version 1 files only — synthesised into a single SavedCopy on load.
-                    let state: PipelineState = serde_json::from_slice(&chunk_data)
+                    let state: PipelineState = serde_json::from_slice(chunk.data)
                         .map_err(|e| RasterError::Serialization(e.to_string()))?;
                     edit_v1 = Some(state);
                 }
                 b"VCPS" => {
-                    let v: VcpsChunk = serde_json::from_slice(&chunk_data)
+                    let v: VcpsChunk = serde_json::from_slice(chunk.data)
                         .map_err(|e| RasterError::Serialization(e.to_string()))?;
                     vcps = Some(v);
                 }
                 b"PREV" => {
-                    thumbnail = Some(chunk_data);
+                    thumbnail = Some(chunk.data.to_vec());
                 }
                 b"LMTA" => {
-                    let m: LibraryMeta = serde_json::from_slice(&chunk_data)
+                    let m: LibraryMeta = serde_json::from_slice(chunk.data)
                         .map_err(|e| RasterError::Serialization(e.to_string()))?;
                     lmta = Some(m);
                 }
@@ -777,7 +770,12 @@ pub fn read_original_hash(path: &Path) -> RasterResult<[u8; 32]> {
             return Ok(hash);
         }
 
-        file.seek(SeekFrom::Current(len + HASH_LEN as i64))?;
+        // Seeking past the end is harmless — the next read reports EOF — but a
+        // length near i64::MAX overflows before the seek ever happens.
+        let skip = len
+            .checked_add(HASH_LEN as i64)
+            .ok_or_else(|| RasterError::decode("rlab", "chunk length out of range"))?;
+        file.seek(SeekFrom::Current(skip))?;
     }
 
     Err(RasterError::decode("rlab", "missing ORIG chunk"))
@@ -791,6 +789,89 @@ fn read_format_version(data: &[u8]) -> Option<u16> {
     Some(u16::from_le_bytes(
         data[MAGIC.len()..FILE_HEADER_LEN].try_into().unwrap(),
     ))
+}
+
+// ── Chunk reading ─────────────────────────────────────────────────────────────
+
+/// One chunk borrowed out of a file image, its declared length already checked
+/// against the bytes actually present.
+struct RawChunk<'a> {
+    tag: [u8; 4],
+    data: &'a [u8],
+    /// The stored Blake3 of `data`, exactly [`HASH_LEN`] bytes.
+    hash: &'a [u8],
+    /// Offset just past this chunk, where the next one begins.
+    end: usize,
+}
+
+/// Slice the chunk starting at `pos`, trusting nothing in its header.
+///
+/// The length is a `u64` read straight off disk.  A damaged — or crafted, since
+/// the whole-file digest is trivial to recompute — file can declare a chunk of
+/// 2^63 bytes, and reserving that before comparing it against the bytes on hand
+/// aborts the process inside the allocator rather than returning an error.  So
+/// the length is bounds-checked first and the payload is then borrowed from the
+/// file image rather than read into a buffer sized by the file itself.
+fn chunk_at(payload: &[u8], pos: usize) -> RasterResult<RawChunk<'_>> {
+    let rest = &payload[pos..];
+    if rest.len() < CHUNK_HEADER_LEN + HASH_LEN {
+        return Err(RasterError::decode(
+            "rlab",
+            format!("truncated chunk header at offset {pos}"),
+        ));
+    }
+    let tag: [u8; 4] = rest[..4].try_into().expect("4-byte tag");
+    let declared = u64::from_le_bytes(rest[4..CHUNK_HEADER_LEN].try_into().expect("8-byte length"));
+    let body = &rest[CHUNK_HEADER_LEN..];
+
+    let name = String::from_utf8_lossy(&tag);
+    if let Some(max) = max_chunk_len(&tag)
+        && declared > max
+    {
+        return Err(RasterError::decode(
+            "rlab",
+            format!("chunk '{name}' is {declared} bytes, over the {max}-byte limit for its kind"),
+        ));
+    }
+
+    // Room for the payload *and* the digest that follows it.
+    let available = body.len() - HASH_LEN;
+    let len = usize::try_from(declared)
+        .ok()
+        .filter(|len| *len <= available)
+        .ok_or_else(|| {
+            RasterError::decode(
+                "rlab",
+                format!("chunk '{name}' declares {declared} bytes, {available} remain"),
+            )
+        })?;
+
+    let (data, tail) = body.split_at(len);
+    Ok(RawChunk {
+        tag,
+        data,
+        hash: &tail[..HASH_LEN],
+        end: pos + CHUNK_HEADER_LEN + len + HASH_LEN,
+    })
+}
+
+/// Ceiling on a chunk's payload, by tag.
+///
+/// `ORIG` is the photograph itself and is bounded only by the file; the rest
+/// hold documents whose size the writer controls, so a length far past what one
+/// could plausibly reach is damage rather than data.  Unknown tags are left
+/// unbounded — they are skipped, never parsed, and a future version may well
+/// have reason to make one large.
+fn max_chunk_len(tag: &[u8; 4]) -> Option<u64> {
+    if tag == TAG_META || tag == TAG_LMTA {
+        Some(MAX_JSON_CHUNK_LEN)
+    } else if tag == TAG_EDIT || tag == TAG_VCPS {
+        Some(MAX_EDIT_CHUNK_LEN)
+    } else if tag == TAG_PREV {
+        Some(MAX_PREVIEW_CHUNK_LEN)
+    } else {
+        None
+    }
 }
 
 // ── Internal scan helpers ─────────────────────────────────────────────────────
