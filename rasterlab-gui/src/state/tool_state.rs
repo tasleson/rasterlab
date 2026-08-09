@@ -174,6 +174,29 @@ impl ToolState {
         self.sprocket_crop_active = false;
     }
 
+    /// Reset the per-image tool state for a freshly loaded `w`×`h` image.
+    ///
+    /// Previews are dismissed as well: one left active from the previous image
+    /// is picked up by `preview_op` as soon as the new image renders, so the
+    /// user would see an edit they never asked for on top of a file they just
+    /// opened.
+    pub fn reset_for_new_image(&mut self, w: u32, h: u32) {
+        self.cancel_all_previews();
+        if let Some(crop) = self.find_mut::<CropTool>() {
+            crop.x = 0;
+            crop.y = 0;
+            crop.w = w;
+            crop.h = h;
+        }
+        if let Some(resize) = self.find_mut::<ResizeTool>() {
+            resize.w = w;
+            resize.h = h;
+        }
+        if let Some(rotate) = self.find_mut::<RotateTool>() {
+            rotate.deg = 0.0;
+        }
+    }
+
     pub fn current_mask_shape(&self) -> Option<MaskShape> {
         match self.mask_sel {
             1 => Some(MaskShape::Linear(LinearMask {
@@ -321,6 +344,43 @@ mod tests {
                 t.id(),
             );
         }
+    }
+
+    /// Opening a file must not carry a preview over from the previous image:
+    /// `preview_op` feeds the render directly, so a leftover preview shows the
+    /// user an edit they never applied to the file they just opened.
+    #[test]
+    fn loading_a_new_image_leaves_no_preview_active() {
+        let mut state = ToolState::new();
+        for tool in &mut state.tools {
+            tool.activate_preview();
+        }
+        state.sprocket_crop_active = true;
+
+        state.reset_for_new_image(800, 600);
+
+        assert!(!state.any_preview_active());
+        assert!(state.preview_op().is_none());
+        assert!(!state.sprocket_crop_active);
+    }
+
+    #[test]
+    fn loading_a_new_image_resizes_the_geometry_tools() {
+        let mut state = ToolState::new();
+        let crop = state.find_mut::<CropTool>().unwrap();
+        crop.x = 100;
+        crop.y = 50;
+        crop.w = 10;
+        crop.h = 10;
+        state.find_mut::<RotateTool>().unwrap().deg = 90.0;
+
+        state.reset_for_new_image(800, 600);
+
+        let crop = state.find::<CropTool>().unwrap();
+        assert_eq!((crop.x, crop.y, crop.w, crop.h), (0, 0, 800, 600));
+        let resize = state.find::<ResizeTool>().unwrap();
+        assert_eq!((resize.w, resize.h), (800, 600));
+        assert_eq!(state.find::<RotateTool>().unwrap().deg, 0.0);
     }
 
     #[test]

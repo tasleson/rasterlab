@@ -1584,26 +1584,13 @@ impl AppState {
     }
 
     /// Reset tool-specific state when a new image is loaded.
+    ///
+    /// This also drops every preview: the overlay and cached noise-reduction
+    /// preview describe the image being replaced, and a still-active tool
+    /// preview would be applied to the new image on its very first render.
     fn reset_tools_for_new_image(&mut self, w: u32, h: u32) {
-        use crate::panels::tools::crop::CropTool;
-        use crate::panels::tools::resize::ResizeTool;
-        use crate::panels::tools::rotate::RotateTool;
-
-        if let Some(crop) = self.tools.find_mut::<CropTool>() {
-            crop.x = 0;
-            crop.y = 0;
-            crop.w = w;
-            crop.h = h;
-        }
-        self.tools.sprocket_crop_active = false;
-        if let Some(resize) = self.tools.find_mut::<ResizeTool>() {
-            resize.w = w;
-            resize.h = h;
-        }
-        if let Some(rotate) = self.tools.find_mut::<RotateTool>() {
-            rotate.deg = 0.0;
-            rotate.preview_active = false;
-        }
+        self.cancel_all_previews();
+        self.tools.reset_for_new_image(w, h);
     }
 
     // -----------------------------------------------------------------------
