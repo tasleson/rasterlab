@@ -79,7 +79,7 @@ use crate::{
     error::{RasterError, RasterResult},
     library_meta::LibraryMeta,
     pipeline::PipelineState,
-    verified_write::write_verified,
+    verified_write::write_verified_atomic,
 };
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -306,11 +306,16 @@ impl RlabFile {
     /// files, ~20 % for large ones, stored twice), but v5's split placement
     /// keeps one copy reachable when the other end of the file is truncated.
     ///
+    /// The write is staged and renamed into place, and read back before it
+    /// counts as done (see [`write_verified_atomic`]), so an interrupted or
+    /// mis-stored save leaves the previous file intact rather than a truncated
+    /// one — which for a library photo would be the only copy of the original.
+    ///
     /// The resulting file can be verified and repaired with [`verify_and_repair`].
     pub fn write_v5(&self, path: &Path) -> RasterResult<()> {
         let mut content: Vec<u8> = Vec::new();
         self.write_content_chunks(&mut content)?;
-        write_verified(path, &assemble_v5(&content)?)?;
+        write_verified_atomic(path, &assemble_v5(&content)?)?;
         Ok(())
     }
 

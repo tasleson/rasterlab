@@ -569,3 +569,44 @@ fn read_original_filename_works_across_layouts() {
         );
     }
 }
+
+// ── Save durability ───────────────────────────────────────────────────────────
+
+/// A save must never be a window in which the previous file is gone.  A `.rlab`
+/// carries the only copy of the original photo, and the library rewrites one
+/// whole for something as small as a star rating, so a write in place would put
+/// the photograph at risk on every such edit.
+///
+/// A second hard link to the destination is the witness: it names the same
+/// inode, so it sees the new bytes if the save wrote in place, and keeps the old
+/// ones if the save staged a new file and renamed it over the name.
+#[cfg(unix)]
+#[test]
+fn a_v5_save_replaces_the_file_rather_than_overwriting_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("photo.rlab");
+    fixture().write_v5(&dst).unwrap();
+    let before = std::fs::read(&dst).unwrap();
+
+    let witness = dir.path().join("witness.rlab");
+    std::fs::hard_link(&dst, &witness).unwrap();
+
+    let mut edited = fixture();
+    edited.thumbnail = Some(vec![0xAB; 4096]);
+    edited.write_v5(&dst).unwrap();
+
+    assert_ne!(std::fs::read(&dst).unwrap(), before, "save did not take");
+    assert_eq!(
+        std::fs::read(&witness).unwrap(),
+        before,
+        "the previous file was overwritten in place"
+    );
+
+    // And the staging file is not left behind for a library walk to trip over.
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["photo.rlab", "witness.rlab"]);
+}
