@@ -45,6 +45,8 @@ members = [
 [workspace.package]
 version   = "0.3.0"
 edition   = "2024"
+# Floor set by the dependency tree (egui 0.34); CI builds against it.
+rust-version = "1.92"
 license   = "MIT OR Apache-2.0"
 authors   = ["RasterLab Contributors (mostly Claude)"]
 

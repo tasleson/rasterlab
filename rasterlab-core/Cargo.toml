@@ -4,6 +4,7 @@ description = "Core image processing engine for RasterLab"
 version.workspace   = true
 edition.workspace   = true
 license.workspace   = true
+rust-version.workspace = true
 
 [dependencies]
 rasterlab-plugin-api = { workspace = true }

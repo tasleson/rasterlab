@@ -4,6 +4,7 @@ description = "Example RasterLab plugin: Sepia tone filter"
 version.workspace   = true
 edition.workspace   = true
 license.workspace   = true
+rust-version.workspace = true
 
 # cdylib produces a .so/.dylib/.dll loadable by rasterlab-core's plugin loader
 [lib]

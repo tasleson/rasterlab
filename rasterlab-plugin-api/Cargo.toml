@@ -7,3 +7,4 @@ description = "Stable C-ABI plugin interface for RasterLab"
 version.workspace   = true
 edition.workspace   = true
 license.workspace   = true
+rust-version.workspace = true
