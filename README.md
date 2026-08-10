@@ -176,7 +176,7 @@ Current library features include:
 
 ## Building and running
 
-RasterLab uses Rust 2024 edition, so use Rust 1.85 or newer. Platform packages required by `eframe`, `wgpu`, and native file dialogs may also be needed.
+RasterLab uses Rust 2024 edition and its dependencies require Rust 1.92 or newer; that minimum is recorded as `rust-version` in the workspace manifest and built by CI. Platform packages required by `eframe`, `wgpu`, and native file dialogs may also be needed.
 
 ```sh
 cargo build --release
@@ -193,6 +193,13 @@ Run the test suite with:
 
 ```sh
 cargo test --workspace
+```
+
+The GPU kernel tests are marked `#[ignore]` because they need a working `wgpu`
+adapter. Run them explicitly on a machine that has one:
+
+```sh
+cargo test -p rasterlab-gpu -- --ignored
 ```
 
 ## Command-line interface

@@ -30,17 +30,7 @@ jobs:
 
       - name: Install Linux dependencies
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libwayland-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libgtk-3-dev \
-            pkg-config
+        uses: ./.github/actions/linux-deps
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}

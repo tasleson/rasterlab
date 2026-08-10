@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Monday 06:00 UTC — the GPU tests are too slow and too adapter-dependent
+    # to gate every push, but they still need to run on a regular cadence.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-clippy-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-clippy-cargo-
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-test-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-test-cargo-
+      # Tests marked #[ignore] need a GPU adapter or measure wall-clock time;
+      # the `gpu` job below covers the former.
+      - run: cargo test --workspace --locked
+
+  release-build:
+    name: Release build
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      # The workspace keeps debug info in release builds for profiling; CI only
+      # needs to know the optimised build compiles, and dropping it keeps the
+      # artifacts (and therefore the cache) to a sane size.
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-release-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-release-cargo-
+      - run: cargo build --release --workspace --locked
+
+  msrv:
+    name: MSRV
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+      - name: Read MSRV from the workspace manifest
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-msrv-${{ steps.msrv.outputs.version }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-msrv-${{ steps.msrv.outputs.version }}-cargo-
+      - run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets --locked
+
+  gpu:
+    name: GPU tests
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+      - name: Install a software Vulkan adapter
+        run: |
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      # The GPU tests return early when no adapter is present, so without this
+      # gate a runner that lost its Vulkan ICD would report a green run that
+      # tested nothing.
+      - name: Verify an adapter is available
+        run: vulkaninfo --summary
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-gpu-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-gpu-cargo-
+      # One thread: each test builds its own device, and thirty concurrent
+      # devices has been observed to take the driver down with it.
+      - run: cargo test --package rasterlab-gpu --locked -- --ignored --test-threads=1
