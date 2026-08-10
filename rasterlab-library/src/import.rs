@@ -14,7 +14,11 @@ use rasterlab_core::{
 };
 use uuid::Uuid;
 
-use crate::{db_trait::LibraryDb, library::ImportProgress, thumbnail::generate_thumbnail};
+use crate::{
+    db_trait::LibraryDb,
+    library::ImportProgress,
+    thumbnail::{generate_thumbnail, write_thumbnail},
+};
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -50,12 +54,12 @@ pub fn import_files(
         .unwrap_or_default()
         .into_iter()
         .find(|s| s.name == session_name);
-    let (session_id, existing_count, session_started_at) = match existing {
-        Some(s) => (s.id, s.photo_count, s.started_at),
+    let (session_id, session_started_at) = match existing {
+        Some(s) => (s.id, s.started_at),
         None => {
             let id = Uuid::new_v4().to_string();
             db.insert_session(&id, &session_name, now, None)?;
-            (id, 0, now)
+            (id, now)
         }
     };
 
@@ -117,7 +121,7 @@ pub fn import_files(
         processed += 1;
     }
 
-    db.update_session_count(&session_id, existing_count + imported as i64)?;
+    recount_session(db, &session_id)?;
 
     progress_cb(ImportProgress {
         total: paths.len(),
@@ -216,13 +220,13 @@ pub fn import_folder_grouped(
             .unwrap_or_default()
             .into_iter()
             .find(|s| s.name == session_name);
-        let (session_id, existing_count, session_started_at) = match existing {
-            Some(s) => (s.id, s.photo_count, s.started_at),
+        let (session_id, session_started_at) = match existing {
+            Some(s) => (s.id, s.started_at),
             None => {
                 let id = Uuid::new_v4().to_string();
                 let source = source_dir.map(|d| d.to_string_lossy().into_owned());
                 db.insert_session(&id, &session_name, group_start, source.as_deref())?;
-                (id, 0, group_start)
+                (id, group_start)
             }
         };
 
@@ -260,7 +264,7 @@ pub fn import_folder_grouped(
             processed += 1;
         }
 
-        db.update_session_count(&session_id, existing_count + group_done as i64)?;
+        recount_session(db, &session_id)?;
         sessions.push(ImportSession {
             id: session_id,
             name: session_name,
@@ -378,6 +382,18 @@ fn cluster_by_day(sorted_ts: &[u64]) -> Vec<std::ops::Range<usize>> {
     groups
 }
 
+/// Set a session's cached `photo_count` from the photos that actually carry it.
+///
+/// Counting the rows rather than adding this run's tally to the one read at the
+/// start is what makes the number survive interruption: a cancelled import, a
+/// crash that skipped the update entirely, a second import into the same
+/// session, and two importers running at once all converge on the same count
+/// the next time any of them finishes.
+fn recount_session(db: &dyn LibraryDb, session_id: &str) -> Result<()> {
+    let count = db.session_photo_count(session_id)?;
+    db.update_session_count(session_id, count)
+}
+
 // ── Single-file import ────────────────────────────────────────────────────────
 
 /// Returns `Ok(Some(hash))` on success, `Ok(None)` if duplicate, `Err` on failure.
@@ -471,12 +487,18 @@ fn import_one(
         ..Default::default()
     };
 
-    // 9. Write thumbnail
+    // 9. Write thumbnail.
+    //
+    // Steps 9–11 are ordered storage-first: the `.rlab` holds the only copy of
+    // the original, the index can be rebuilt from it, so the file is written
+    // and verified before anything is recorded about it.  An import that stops
+    // between them leaves a complete `.rlab` that no row mentions — invisible
+    // until the next rebuild, and recovered by it.  Re-running the same import
+    // also heals it: with no row to find, the file is simply rewritten (same
+    // hash, same path) and inserted.  Nothing is deleted on failure for the
+    // same reason: the photograph outranks the bookkeeping.
     let thumb_path = thumb_path(library_root, &hash);
-    if let Some(parent) = thumb_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&thumb_path, &thumb_bytes)?;
+    write_thumbnail(&thumb_path, &thumb_bytes)?;
 
     // 10. Write .rlab
     let rlab_path = rlab_path(library_root, &hash);

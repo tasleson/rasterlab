@@ -18,7 +18,7 @@ use crate::{
     reconstruct::{self, RebuildProgress},
     search::SearchFilter,
     stoolap_db::StoolapDb,
-    thumbnail::generate_thumbnail,
+    thumbnail::{generate_thumbnail, write_thumbnail},
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -165,6 +165,12 @@ impl Library {
         self.delete_photo_with_mode(photo_id, DeleteStorageMode::Permanent)
     }
 
+    /// Storage first, index second, and every step tolerant of already having
+    /// happened: an interrupted delete leaves a row pointing at a file that is
+    /// gone, which reads as a photo that will not open — recoverable, and
+    /// cleaned up by the next [`Library::rebuild_index`].  The other order
+    /// would drop the row first and leave the file to be re-indexed by that
+    /// same rebuild, resurrecting a photo the user deleted.
     fn delete_photo_with_mode(&self, photo_id: PhotoId, mode: DeleteStorageMode) -> Result<()> {
         // Find the hash so we can remove thumbnail
         let photos = self.db.all_photos(SortOrder::default())?;
@@ -194,18 +200,35 @@ impl Library {
         self.db.delete_photo(photo_id)
     }
 
+    /// Write new metadata to the photo's `.rlab` first, then to the index.
+    ///
+    /// The `.rlab` is the record; the database is a cache of it that
+    /// [`Library::rebuild_index`] can regenerate.  Writing the file first means
+    /// a failure or a crash costs at worst a stale index row — the edit itself
+    /// is already durable, and a rebuild recovers it.  The other order loses
+    /// the edit outright the next time the index is rebuilt.
     pub fn update_metadata(&self, photo_id: PhotoId, lmta: LibraryMeta) -> Result<()> {
-        // Update DB
-        self.db.update_lmta(photo_id, &lmta)?;
-        // Rewrite LMTA chunk in the .rlab file
-        self.rewrite_lmta_in_file(photo_id, &lmta)
+        self.rewrite_lmta_in_file(photo_id, &lmta)?;
+        self.db.update_lmta(photo_id, &lmta)
     }
 
+    /// Same ordering as [`Library::update_metadata`], with the index caught up
+    /// in one transaction once the files are written.  A photo whose file could
+    /// not be rewritten is left out of that transaction and reported, so a
+    /// rating applied to forty photos never ends up recorded for a file that
+    /// does not carry it.
     pub fn update_metadata_batch(&self, updates: &[(PhotoId, LibraryMeta)]) -> Result<()> {
+        let mut written: Vec<(PhotoId, LibraryMeta)> = Vec::with_capacity(updates.len());
+        let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
         for (id, lmta) in updates {
-            self.update_metadata(*id, lmta.clone())?;
+            match self.rewrite_lmta_in_file(*id, lmta) {
+                Ok(()) => written.push((*id, lmta.clone())),
+                Err(e) => failed.push((*id, e)),
+            }
         }
-        Ok(())
+
+        self.db.update_lmta_batch(&written)?;
+        report_partial("update metadata", failed)
     }
 
     /// Mark a photo protected (or not). A protected photo cannot be deleted via
@@ -261,27 +284,26 @@ impl Library {
         })
     }
 
-    /// Rename a collection.  DB is updated immediately; all affected `.rlab`
-    /// files are rewritten in the background (best-effort).
+    /// Rename a collection in every member `.rlab` first, then in the index.
+    ///
+    /// Membership lives in each file's `LMTA` chunk, so the files decide what
+    /// the collection is called after a rebuild; renaming them first means an
+    /// interruption leaves the new name already durable.  Files that could not
+    /// be rewritten are reported once the index is updated.
     pub fn rename_collection(&self, id: CollectionId, new_name: &str) -> Result<()> {
-        // Fetch old name before rename
-        let collections = self.db.all_collections()?;
-        let old_name = collections
-            .iter()
-            .find(|c| c.id == id)
-            .map(|c| c.name.clone());
+        let old_name = self.collection_name(id)?;
+        let photos = self.db.collection_photos(id)?;
 
-        self.db.rename_collection(id, new_name)?;
-
-        // Rewrite LMTA in all affected .rlab files (best-effort background)
-        if let Some(old) = old_name {
-            let photos = self.db.collection_photos(id)?;
-            for row in &photos {
-                let rlab_path = self.rlab_path(&row.hash);
-                rewrite_collection_name_in_file(&rlab_path, &old, new_name).ok();
+        let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
+        for row in &photos {
+            let rlab_path = self.rlab_path(&row.hash);
+            if let Err(e) = rewrite_collection_name_in_file(&rlab_path, &old_name, new_name) {
+                failed.push((row.id, e));
             }
         }
-        Ok(())
+
+        self.db.rename_collection(id, new_name)?;
+        report_partial("rename collection", failed)
     }
 
     pub fn delete_collection(&self, id: CollectionId) -> Result<()> {
@@ -292,37 +314,57 @@ impl Library {
         self.db.all_collections()
     }
 
+    /// Add photos to a collection, recording membership in each `.rlab` before
+    /// the index.  Only the photos whose file was actually rewritten are added
+    /// to the index, so the two never disagree about a photo; the rest are
+    /// reported as an error and simply stay out of the collection.
     pub fn add_to_collection(
         &self,
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
-        self.db.add_to_collection(collection_id, photo_ids)?;
-        // Update collection names in .rlab LMTA
-        if let Ok(coll) = self.db.all_collections()
-            && let Some(c) = coll.iter().find(|c| c.id == collection_id)
-        {
-            for pid in photo_ids {
-                self.add_collection_to_file(*pid, &c.name).ok();
+        let name = self.collection_name(collection_id)?;
+        let mut written = Vec::with_capacity(photo_ids.len());
+        let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
+        for &pid in photo_ids {
+            match self.add_collection_to_file(pid, &name) {
+                Ok(()) => written.push(pid),
+                Err(e) => failed.push((pid, e)),
             }
         }
-        Ok(())
+
+        self.db.add_to_collection(collection_id, &written)?;
+        report_partial("add to collection", failed)
     }
 
+    /// Mirror of [`Library::add_to_collection`]: the `.rlab` files lose the
+    /// collection first, and only those photos leave it in the index.
     pub fn remove_from_collection(
         &self,
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
-        self.db.remove_from_collection(collection_id, photo_ids)?;
-        if let Ok(coll) = self.db.all_collections()
-            && let Some(c) = coll.iter().find(|c| c.id == collection_id)
-        {
-            for pid in photo_ids {
-                self.remove_collection_from_file(*pid, &c.name).ok();
+        let name = self.collection_name(collection_id)?;
+        let mut written = Vec::with_capacity(photo_ids.len());
+        let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
+        for &pid in photo_ids {
+            match self.remove_collection_from_file(pid, &name) {
+                Ok(()) => written.push(pid),
+                Err(e) => failed.push((pid, e)),
             }
         }
-        Ok(())
+
+        self.db.remove_from_collection(collection_id, &written)?;
+        report_partial("remove from collection", failed)
+    }
+
+    fn collection_name(&self, id: CollectionId) -> Result<String> {
+        self.db
+            .all_collections()?
+            .into_iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name)
+            .with_context(|| format!("collection {id} not found"))
     }
 
     pub fn collection_photos(&self, id: CollectionId) -> Result<Vec<PhotoRow>> {
@@ -370,11 +412,7 @@ impl Library {
             .render()
             .map_err(|e| anyhow::anyhow!("render pipeline: {e}"))?;
         let thumb = generate_thumbnail(&rendered, 512)?;
-        let tpath = self.thumb_path(hash);
-        if let Some(parent) = tpath.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&tpath, &thumb)?;
+        write_thumbnail(&self.thumb_path(hash), &thumb)?;
 
         // Also update PREV chunk in the .rlab
         let mut updated = rlab;
@@ -445,6 +483,20 @@ impl Library {
 }
 
 // ── File-level helpers ────────────────────────────────────────────────────────
+
+/// Turn per-photo file failures into one error, raised only after the index has
+/// been brought in line with the files that *were* written.  Reporting before
+/// that would leave the index describing files that never changed.
+fn report_partial(what: &str, mut failed: Vec<(PhotoId, anyhow::Error)>) -> Result<()> {
+    if failed.is_empty() {
+        return Ok(());
+    }
+    let count = failed.len();
+    let (photo_id, first) = failed.swap_remove(0);
+    Err(first.context(format!(
+        "{what}: {count} photo(s) could not be written, starting with photo {photo_id}"
+    )))
+}
 
 fn rewrite_collection_name_in_file(rlab_path: &Path, old_name: &str, new_name: &str) -> Result<()> {
     let mut rlab = RlabFile::read(rlab_path)?;

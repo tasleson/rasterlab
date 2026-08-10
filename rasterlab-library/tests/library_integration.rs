@@ -495,6 +495,151 @@ fn rebuild_index_restores_session_counts_and_names() {
     assert_eq!(photos.len(), 2);
 }
 
+// ── Recovery: bringing the index back in line with the files ──────────────────
+
+/// A delete that stopped after trashing the file — or a photo removed from
+/// `files/` by hand — leaves a row describing something that is not there.
+#[test]
+fn rebuild_index_drops_rows_whose_file_is_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    assert_eq!(photos.len(), 2);
+
+    let doomed = photos[0].clone();
+    std::fs::remove_file(lib.rlab_path(&doomed.hash)).unwrap();
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    let after = lib.all_photos(SortOrder::default()).unwrap();
+    assert_eq!(
+        after.len(),
+        1,
+        "the row for the missing file should be gone"
+    );
+    assert_ne!(after[0].hash, doomed.hash);
+    assert_eq!(
+        lib.all_sessions().unwrap()[0].photo_count,
+        1,
+        "the session count should follow the surviving photo"
+    );
+}
+
+/// An empty `files/` is far more often an unmounted volume than a library the
+/// user emptied, so a rebuild that finds nothing must not wipe the index.
+#[test]
+fn rebuild_index_does_not_prune_when_it_finds_no_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    std::fs::remove_dir_all(tmp.path().join("files")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("files")).unwrap();
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    assert_eq!(
+        lib.all_photos(SortOrder::default()).unwrap().len(),
+        2,
+        "an empty files/ must not be read as a deleted library"
+    );
+}
+
+/// The generated date name is only a fallback for a session the index has
+/// lost; a name the user chose has to survive the pass that rebuilds it.
+#[test]
+fn rebuild_index_keeps_a_renamed_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let session = lib.all_sessions().unwrap()[0].clone();
+    lib.rename_session(&session.id, "Kate's wedding").unwrap();
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    let after = lib.all_sessions().unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].name, "Kate's wedding");
+    assert_eq!(after[0].photo_count, 1);
+}
+
+/// The session count is a cache of the rows, not a running total: a photo
+/// deleted out from under it is corrected by the next import, where the old
+/// add-this-run's-tally arithmetic would have drifted further with each one.
+#[test]
+fn session_count_is_recomputed_rather_than_incremented() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let src = tempfile::tempdir().unwrap();
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    assert_eq!(lib.all_sessions().unwrap()[0].photo_count, 2);
+
+    // Deleting a photo does not touch the cached count …
+    let doomed = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    lib.delete_photo_permanently(doomed.id).unwrap();
+
+    // … importing into the same session recomputes it from what is there.
+    let extra = src.path().join("extra.png");
+    write_png_with_mtime(&extra, 7, 1_600_000_000);
+    lib.import_files(&[extra], |_| {}).unwrap();
+
+    let sessions = lib.all_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].photo_count, 2,
+        "one survivor plus one new photo, not the pre-delete total plus one"
+    );
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 2);
+}
+
+/// Collection membership is recorded in each `.rlab` before the index, so the
+/// files alone are enough to put a collection back together.
+#[test]
+fn collection_membership_survives_a_rebuild() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let coll = lib.create_collection("Portfolio").unwrap();
+    lib.add_to_collection(coll.id, &[photos[0].id]).unwrap();
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    let coll = lib
+        .all_collections()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "Portfolio")
+        .expect("collection should be rebuilt from the LMTA chunks");
+    let members = lib.collection_photos(coll.id).unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].hash, photos[0].hash);
+}
+
+/// Adding to a collection that is not there used to update the index and
+/// silently skip the files; it has to fail before touching either.
+#[test]
+fn adding_to_an_unknown_collection_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+
+    let err = lib
+        .add_to_collection(9999, &[photo.id])
+        .expect_err("unknown collection must be rejected");
+    assert!(err.to_string().contains("9999"), "{err}");
+}
+
 // ── Search (EXIF-based) ───────────────────────────────────────────────────────
 
 #[test]

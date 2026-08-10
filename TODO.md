@@ -6,7 +6,7 @@
 
 - [x] DONE Add continuous-integration quality gates for pushes and pull requests. Run formatting checks, Clippy with warnings denied, workspace tests, release compilation, and an MSRV build; run GPU-backed tests periodically on a suitable adapter.
 
-- [ ] Define recoverable consistency semantics for filesystem and library-database updates. Use atomic file staging and database transactions where possible, make multi-step operations idempotent, and add reconciliation or retry handling for interrupted imports, metadata updates, and deletions.
+- [x] DONE Define recoverable consistency semantics for filesystem and library-database updates. Use atomic file staging and database transactions where possible, make multi-step operations idempotent, and add reconciliation or retry handling for interrupted imports, metadata updates, and deletions.
 
 - [ ] Decompose orchestration-heavy GUI modules along responsibility boundaries. Extract project/session persistence, render coordination, and library background tasks from `AppState`; split crop, mask, heal, straighten, split-view, and presentation-texture behavior out of the canvas module. Consolidate the duplicated full-render and preview GPU batching loops documented in `doc/FUTURE_REFACTOR.md`.
 

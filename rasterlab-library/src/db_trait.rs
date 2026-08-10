@@ -61,6 +61,13 @@ pub enum SortOrder {
 
 /// All library logic talks to this trait. Only [`crate::stoolap_db::StoolapDb`]
 /// (and test fakes) implement it, keeping the concrete DB dependency isolated.
+///
+/// Every method here is atomic: one photo's rows span six tables, and an
+/// implementation must land all of a method's writes or none of them, so a
+/// caller that sees an error knows the index is unchanged rather than
+/// half-updated.  Callers get no such guarantee *across* methods — that is what
+/// [`crate::library`]'s file-first ordering and
+/// [`crate::reconstruct::rebuild`] are for.
 pub trait LibraryDb: Send + Sync {
     /// Create tables and indexes if they don't exist.
     fn init(&self) -> anyhow::Result<()>;
@@ -124,6 +131,16 @@ pub trait LibraryDb: Send + Sync {
 
     fn update_session_count(&self, id: &str, count: i64) -> anyhow::Result<()>;
 
+    /// Photos currently attributed to this session, counted from the `photos`
+    /// rows themselves.  The stored `photo_count` is a cache of this number;
+    /// recomputing instead of incrementing is what lets an import that was
+    /// cancelled, crashed, or run twice still leave a correct count behind.
+    fn session_photo_count(&self, session_id: &str) -> anyhow::Result<i64>;
+
+    /// Drop sessions no photo belongs to, returning how many went.  Empty
+    /// sessions are what an interrupted import or a deleted batch leaves.
+    fn delete_empty_sessions(&self) -> anyhow::Result<usize>;
+
     fn all_sessions(&self) -> anyhow::Result<Vec<ImportSessionRow>>;
 
     // ── Stacks ────────────────────────────────────────────────────────────
@@ -151,9 +168,4 @@ pub trait LibraryDb: Send + Sync {
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> anyhow::Result<()>;
-
-    // ── Bulk rebuild ──────────────────────────────────────────────────────
-
-    /// Drop all rows from every table. Used by `rebuild_index`.
-    fn clear_all(&self) -> anyhow::Result<()>;
 }

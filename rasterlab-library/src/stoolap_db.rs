@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rasterlab_core::library_meta::LibraryMeta;
 use stoolap::Value;
-use stoolap::api::Database;
+use stoolap::api::{Database, Transaction};
 
 use crate::{
     db_trait::{
@@ -28,6 +28,22 @@ impl StoolapDb {
     pub fn open_in_memory() -> Result<Self> {
         let db = Database::open_in_memory().context("open in-memory db")?;
         Ok(Self { db })
+    }
+
+    /// Run `f` in one transaction, committing only if it returns `Ok`.
+    ///
+    /// One photo is spread over `photos`, `exif`, `ratings`, `keywords`,
+    /// `user_meta` and `collection_photos`, so any mutation that writes more
+    /// than one statement can land half-applied: a photo row with no rating,
+    /// EXIF belonging to nothing, a keyword list emptied for a rewrite that
+    /// never arrived.  A [`Transaction`] rolls back when it is dropped
+    /// uncommitted, so an early `?` inside `f` takes its partial writes with
+    /// it and the error the caller sees means nothing changed.
+    fn in_transaction<T>(&self, f: impl FnOnce(&mut Transaction) -> Result<T>) -> Result<T> {
+        let mut tx = self.db.begin().context("begin transaction")?;
+        let value = f(&mut tx)?;
+        tx.commit().context("commit transaction")?;
+        Ok(value)
     }
 }
 
@@ -205,143 +221,7 @@ impl LibraryDb for StoolapDb {
         height: u32,
         stack_id: Option<&str>,
     ) -> Result<PhotoId> {
-        let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
-
-        let opt_text =
-            |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
-        let opt_int =
-            |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
-        let opt_f64 =
-            |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
-
-        // 14 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
-        let photo_params: Vec<Value> = vec![
-            Value::text(hash),
-            Value::text(lib_path),
-            Value::integer(width as i64),
-            Value::integer(height as i64),
-            Value::integer(lmta.import_date as i64),
-            Value::text(lmta.import_session_id.as_str()),
-            opt_text(capture_date),
-            opt_text(lmta.original_filename.as_deref()),
-            opt_text(stack_id),
-            Value::integer(if lmta.stack_is_primary { 1 } else { 0 }),
-            Value::integer(if lmta.protected { 1 } else { 0 }),
-            opt_text(lmta.source_path.as_deref()),
-            opt_int(lmta.source_size.map(|s| s as i64)),
-            opt_int(lmta.source_mtime.map(|t| t.secs)),
-        ];
-        let photo_id: i64 = self
-            .db
-            .query_one(
-                "INSERT INTO photos
-             (hash, lib_path, width, height, import_date, import_session,
-              capture_date, original_filename, stack_id, stack_is_primary, protected,
-              source_path, source_size, source_mtime)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-             RETURNING id",
-                photo_params,
-            )
-            .context("insert photo")?;
-
-        // EXIF — 17 params exceeds tuple impl limit; use Vec<Value>
-        if let Some(exif) = &lmta.exif {
-            let params: Vec<Value> = vec![
-                Value::integer(photo_id),
-                opt_text(exif.camera_make.as_deref()),
-                opt_text(exif.camera_model.as_deref()),
-                opt_text(exif.lens_make.as_deref()),
-                opt_text(exif.lens_model.as_deref()),
-                opt_int(exif.iso.map(|v| v as i64)),
-                opt_f64(exif.shutter_sec),
-                opt_text(exif.shutter_display.as_deref()),
-                opt_f64(exif.aperture.map(|v| v as f64)),
-                opt_f64(exif.focal_length.map(|v| v as f64)),
-                opt_f64(exif.focal_length_35mm.map(|v| v as f64)),
-                opt_f64(exif.exposure_bias.map(|v| v as f64)),
-                opt_text(exif.exposure_program.as_deref()),
-                opt_text(exif.metering_mode.as_deref()),
-                opt_int(exif.flash.map(|v| if v { 1i64 } else { 0i64 })),
-                opt_f64(exif.gps_lat),
-                opt_f64(exif.gps_lon),
-                opt_f64(exif.gps_alt.map(|v| v as f64)),
-            ];
-            self.db
-                .execute(
-                    "INSERT INTO exif
-                 (photo_id, camera_make, camera_model, lens_make, lens_model, iso,
-                  shutter_sec, shutter_display, aperture, focal_length,
-                  focal_length_35mm, exposure_bias, exposure_program,
-                  metering_mode, flash, gps_lat, gps_lon, gps_alt)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
-                    params,
-                )
-                .context("insert exif")?;
-        }
-
-        // Ratings row
-        self.db
-            .execute(
-                "INSERT INTO ratings (photo_id, rating, color_label, flag) VALUES ($1,$2,$3,$4)",
-                (
-                    photo_id,
-                    lmta.rating as i64,
-                    lmta.color_label.as_deref(),
-                    lmta.flag.as_deref(),
-                ),
-            )
-            .context("insert rating")?;
-
-        // Keywords
-        for kw in &lmta.keywords {
-            self.db
-                .execute(
-                    "INSERT INTO keywords (photo_id, keyword) VALUES ($1, $2)",
-                    (photo_id, kw.as_str()),
-                )
-                .context("insert keyword")?;
-        }
-
-        // user_meta
-        self.db
-            .execute(
-                "INSERT INTO user_meta
-             (photo_id, caption, copyright, creator, location_city, location_country)
-             VALUES ($1,$2,$3,$4,$5,$6)",
-                (
-                    photo_id,
-                    lmta.caption.as_deref(),
-                    lmta.copyright.as_deref(),
-                    lmta.creator.as_deref(),
-                    lmta.location_city.as_deref(),
-                    lmta.location_country.as_deref(),
-                ),
-            )
-            .context("insert user_meta")?;
-
-        // Collections
-        for coll_name in &lmta.collections {
-            self.db
-                .execute(
-                    "INSERT INTO collections (name, created_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                    (coll_name.as_str(), unix_now() as i64),
-                )
-                .ok();
-            if let Ok(coll_id) = self.db.query_one::<i64, _>(
-                "SELECT id FROM collections WHERE name = $1",
-                (coll_name.as_str(),),
-            ) {
-                self.db
-                    .execute(
-                        "INSERT INTO collection_photos
-                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-                        (coll_id, photo_id, unix_now() as i64),
-                    )
-                    .ok();
-            }
-        }
-
-        Ok(photo_id)
+        self.in_transaction(|tx| insert_photo_tx(tx, hash, lib_path, lmta, width, height, stack_id))
     }
 
     fn photo_by_hash(&self, hash: &str) -> Result<Option<PhotoRow>> {
@@ -370,36 +250,7 @@ impl LibraryDb for StoolapDb {
     }
 
     fn update_lmta(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> Result<()> {
-        self.db.execute(
-            "UPDATE ratings SET rating=$1, color_label=$2, flag=$3 WHERE photo_id=$4",
-            (
-                lmta.rating as i64,
-                lmta.color_label.as_deref(),
-                lmta.flag.as_deref(),
-                photo_id,
-            ),
-        )?;
-        self.db.execute(
-            "UPDATE user_meta SET caption=$1, copyright=$2, creator=$3,
-             location_city=$4, location_country=$5 WHERE photo_id=$6",
-            (
-                lmta.caption.as_deref(),
-                lmta.copyright.as_deref(),
-                lmta.creator.as_deref(),
-                lmta.location_city.as_deref(),
-                lmta.location_country.as_deref(),
-                photo_id,
-            ),
-        )?;
-        self.db
-            .execute("DELETE FROM keywords WHERE photo_id = $1", (photo_id,))?;
-        for kw in &lmta.keywords {
-            self.db.execute(
-                "INSERT INTO keywords (photo_id, keyword) VALUES ($1,$2)",
-                (photo_id, kw.as_str()),
-            )?;
-        }
-        Ok(())
+        self.in_transaction(|tx| update_lmta_tx(tx, photo_id, lmta))
     }
 
     fn set_has_edits(&self, photo_id: PhotoId, has_edits: bool) -> Result<()> {
@@ -418,30 +269,20 @@ impl LibraryDb for StoolapDb {
         Ok(())
     }
 
+    /// One transaction for the whole batch: a rating applied to a selection of
+    /// forty photos either lands on all of them or on none, so a failure never
+    /// leaves the user guessing which half took.
     fn update_lmta_batch(&self, updates: &[(PhotoId, LibraryMeta)]) -> Result<()> {
-        for (id, lmta) in updates {
-            self.update_lmta(*id, lmta)?;
-        }
-        Ok(())
+        self.in_transaction(|tx| {
+            for (id, lmta) in updates {
+                update_lmta_tx(tx, *id, lmta)?;
+            }
+            Ok(())
+        })
     }
 
     fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
-        // Manual cascade since we dropped ON DELETE CASCADE
-        for tbl in &[
-            "keywords",
-            "ratings",
-            "exif",
-            "user_meta",
-            "collection_photos",
-        ] {
-            self.db.execute(
-                &format!("DELETE FROM {} WHERE photo_id = $1", tbl),
-                (photo_id,),
-            )?;
-        }
-        self.db
-            .execute("DELETE FROM photos WHERE id = $1", (photo_id,))?;
-        Ok(())
+        self.in_transaction(|tx| delete_photo_tx(tx, photo_id))
     }
 
     fn all_photos(&self, sort: SortOrder) -> Result<Vec<PhotoRow>> {
@@ -672,6 +513,34 @@ impl LibraryDb for StoolapDb {
         Ok(())
     }
 
+    fn session_photo_count(&self, session_id: &str) -> Result<i64> {
+        self.db
+            .query_one(
+                "SELECT COUNT(*) FROM photos WHERE import_session = $1",
+                (session_id,),
+            )
+            .context("count session photos")
+    }
+
+    fn delete_empty_sessions(&self) -> Result<usize> {
+        // Counted per session rather than with a `NOT IN` subquery: sessions
+        // number in the hundreds at most, and an anti-join against a column
+        // that can be NULL is the kind of thing that silently deletes
+        // everything.
+        let stale: Vec<String> = self
+            .all_sessions()?
+            .into_iter()
+            .map(|s| s.id)
+            .filter(|id| self.session_photo_count(id).unwrap_or(1) == 0)
+            .collect();
+        self.in_transaction(|tx| {
+            for id in &stale {
+                tx.execute("DELETE FROM import_sessions WHERE id = $1", (id.as_str(),))?;
+            }
+            Ok(stale.len())
+        })
+    }
+
     fn all_sessions(&self) -> Result<Vec<ImportSessionRow>> {
         let rows = self.db.query(
             "SELECT id, name, started_at, source_dir, photo_count
@@ -727,13 +596,14 @@ impl LibraryDb for StoolapDb {
     }
 
     fn delete_collection(&self, id: CollectionId) -> Result<()> {
-        self.db.execute(
-            "DELETE FROM collection_photos WHERE collection_id=$1",
-            (id,),
-        )?;
-        self.db
-            .execute("DELETE FROM collections WHERE id=$1", (id,))?;
-        Ok(())
+        self.in_transaction(|tx| {
+            tx.execute(
+                "DELETE FROM collection_photos WHERE collection_id=$1",
+                (id,),
+            )?;
+            tx.execute("DELETE FROM collections WHERE id=$1", (id,))?;
+            Ok(())
+        })
     }
 
     fn all_collections(&self) -> Result<Vec<CollectionRow>> {
@@ -755,14 +625,16 @@ impl LibraryDb for StoolapDb {
 
     fn add_to_collection(&self, collection_id: CollectionId, photo_ids: &[PhotoId]) -> Result<()> {
         let now = unix_now() as i64;
-        for &pid in photo_ids {
-            self.db.execute(
-                "INSERT INTO collection_photos
-                 (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-                (collection_id, pid, now),
-            )?;
-        }
-        Ok(())
+        self.in_transaction(|tx| {
+            for &pid in photo_ids {
+                tx.execute(
+                    "INSERT INTO collection_photos
+                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+                    (collection_id, pid, now),
+                )?;
+            }
+            Ok(())
+        })
     }
 
     fn remove_from_collection(
@@ -770,34 +642,215 @@ impl LibraryDb for StoolapDb {
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
-        for &pid in photo_ids {
-            self.db.execute(
-                "DELETE FROM collection_photos WHERE collection_id=$1 AND photo_id=$2",
-                (collection_id, pid),
-            )?;
-        }
-        Ok(())
+        self.in_transaction(|tx| {
+            for &pid in photo_ids {
+                tx.execute(
+                    "DELETE FROM collection_photos WHERE collection_id=$1 AND photo_id=$2",
+                    (collection_id, pid),
+                )?;
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── Transaction bodies ────────────────────────────────────────────────────────
+//
+// Written against `&mut Transaction` rather than `&self` so a caller can put
+// several of them in one transaction — `update_lmta_batch` does exactly that.
+
+/// Insert a photo row and every row that hangs off it.
+#[allow(clippy::too_many_arguments)]
+fn insert_photo_tx(
+    tx: &mut Transaction,
+    hash: &str,
+    lib_path: &str,
+    lmta: &LibraryMeta,
+    width: u32,
+    height: u32,
+    stack_id: Option<&str>,
+) -> Result<PhotoId> {
+    let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
+
+    let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+    let opt_int = |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
+    let opt_f64 = |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
+
+    // 14 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
+    let photo_params: Vec<Value> = vec![
+        Value::text(hash),
+        Value::text(lib_path),
+        Value::integer(width as i64),
+        Value::integer(height as i64),
+        Value::integer(lmta.import_date as i64),
+        Value::text(lmta.import_session_id.as_str()),
+        opt_text(capture_date),
+        opt_text(lmta.original_filename.as_deref()),
+        opt_text(stack_id),
+        Value::integer(if lmta.stack_is_primary { 1 } else { 0 }),
+        Value::integer(if lmta.protected { 1 } else { 0 }),
+        opt_text(lmta.source_path.as_deref()),
+        opt_int(lmta.source_size.map(|s| s as i64)),
+        opt_int(lmta.source_mtime.map(|t| t.secs)),
+    ];
+    let photo_id: i64 = tx
+        .query_one(
+            "INSERT INTO photos
+             (hash, lib_path, width, height, import_date, import_session,
+              capture_date, original_filename, stack_id, stack_is_primary, protected,
+              source_path, source_size, source_mtime)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+             RETURNING id",
+            photo_params,
+        )
+        .context("insert photo")?;
+
+    // EXIF — 17 params exceeds tuple impl limit; use Vec<Value>
+    if let Some(exif) = &lmta.exif {
+        let params: Vec<Value> = vec![
+            Value::integer(photo_id),
+            opt_text(exif.camera_make.as_deref()),
+            opt_text(exif.camera_model.as_deref()),
+            opt_text(exif.lens_make.as_deref()),
+            opt_text(exif.lens_model.as_deref()),
+            opt_int(exif.iso.map(|v| v as i64)),
+            opt_f64(exif.shutter_sec),
+            opt_text(exif.shutter_display.as_deref()),
+            opt_f64(exif.aperture.map(|v| v as f64)),
+            opt_f64(exif.focal_length.map(|v| v as f64)),
+            opt_f64(exif.focal_length_35mm.map(|v| v as f64)),
+            opt_f64(exif.exposure_bias.map(|v| v as f64)),
+            opt_text(exif.exposure_program.as_deref()),
+            opt_text(exif.metering_mode.as_deref()),
+            opt_int(exif.flash.map(|v| if v { 1i64 } else { 0i64 })),
+            opt_f64(exif.gps_lat),
+            opt_f64(exif.gps_lon),
+            opt_f64(exif.gps_alt.map(|v| v as f64)),
+        ];
+        tx.execute(
+            "INSERT INTO exif
+                 (photo_id, camera_make, camera_model, lens_make, lens_model, iso,
+                  shutter_sec, shutter_display, aperture, focal_length,
+                  focal_length_35mm, exposure_bias, exposure_program,
+                  metering_mode, flash, gps_lat, gps_lon, gps_alt)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+            params,
+        )
+        .context("insert exif")?;
     }
 
-    // ── Bulk rebuild ──────────────────────────────────────────────────────
+    // Ratings row
+    tx.execute(
+        "INSERT INTO ratings (photo_id, rating, color_label, flag) VALUES ($1,$2,$3,$4)",
+        (
+            photo_id,
+            lmta.rating as i64,
+            lmta.color_label.as_deref(),
+            lmta.flag.as_deref(),
+        ),
+    )
+    .context("insert rating")?;
 
-    fn clear_all(&self) -> Result<()> {
-        for tbl in &[
-            "collection_photos",
-            "collections",
-            "keywords",
-            "user_meta",
-            "ratings",
-            "exif",
-            "import_sessions",
-            "photos",
-        ] {
-            self.db
-                .execute(&format!("DELETE FROM {}", tbl), ())
-                .with_context(|| format!("clear {}", tbl))?;
-        }
-        Ok(())
+    // Keywords
+    for kw in &lmta.keywords {
+        tx.execute(
+            "INSERT INTO keywords (photo_id, keyword) VALUES ($1, $2)",
+            (photo_id, kw.as_str()),
+        )
+        .context("insert keyword")?;
     }
+
+    // user_meta
+    tx.execute(
+        "INSERT INTO user_meta
+             (photo_id, caption, copyright, creator, location_city, location_country)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        (
+            photo_id,
+            lmta.caption.as_deref(),
+            lmta.copyright.as_deref(),
+            lmta.creator.as_deref(),
+            lmta.location_city.as_deref(),
+            lmta.location_country.as_deref(),
+        ),
+    )
+    .context("insert user_meta")?;
+
+    // Collections
+    for coll_name in &lmta.collections {
+        tx.execute(
+            "INSERT INTO collections (name, created_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            (coll_name.as_str(), unix_now() as i64),
+        )
+        .ok();
+        if let Ok(coll_id) = tx.query_one::<i64, _>(
+            "SELECT id FROM collections WHERE name = $1",
+            (coll_name.as_str(),),
+        ) {
+            tx.execute(
+                "INSERT INTO collection_photos
+                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+                (coll_id, photo_id, unix_now() as i64),
+            )
+            .ok();
+        }
+    }
+
+    Ok(photo_id)
+}
+
+/// Rewrite the mutable metadata of one photo: rating, user fields, keywords.
+fn update_lmta_tx(tx: &mut Transaction, photo_id: PhotoId, lmta: &LibraryMeta) -> Result<()> {
+    tx.execute(
+        "UPDATE ratings SET rating=$1, color_label=$2, flag=$3 WHERE photo_id=$4",
+        (
+            lmta.rating as i64,
+            lmta.color_label.as_deref(),
+            lmta.flag.as_deref(),
+            photo_id,
+        ),
+    )?;
+    tx.execute(
+        "UPDATE user_meta SET caption=$1, copyright=$2, creator=$3,
+             location_city=$4, location_country=$5 WHERE photo_id=$6",
+        (
+            lmta.caption.as_deref(),
+            lmta.copyright.as_deref(),
+            lmta.creator.as_deref(),
+            lmta.location_city.as_deref(),
+            lmta.location_country.as_deref(),
+            photo_id,
+        ),
+    )?;
+    // Keywords are replaced wholesale; the delete and the re-insert have to be
+    // in the same transaction or a failure between them loses the list.
+    tx.execute("DELETE FROM keywords WHERE photo_id = $1", (photo_id,))?;
+    for kw in &lmta.keywords {
+        tx.execute(
+            "INSERT INTO keywords (photo_id, keyword) VALUES ($1,$2)",
+            (photo_id, kw.as_str()),
+        )?;
+    }
+    Ok(())
+}
+
+/// Remove a photo row and its dependents.
+fn delete_photo_tx(tx: &mut Transaction, photo_id: PhotoId) -> Result<()> {
+    // Manual cascade since we dropped ON DELETE CASCADE
+    for tbl in &[
+        "keywords",
+        "ratings",
+        "exif",
+        "user_meta",
+        "collection_photos",
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {} WHERE photo_id = $1", tbl),
+            (photo_id,),
+        )?;
+    }
+    tx.execute("DELETE FROM photos WHERE id = $1", (photo_id,))?;
+    Ok(())
 }
 
 fn unix_now() -> u64 {
@@ -805,4 +858,91 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db() -> StoolapDb {
+        let db = StoolapDb::open_in_memory().unwrap();
+        db.init().unwrap();
+        db
+    }
+
+    fn lmta(session: &str) -> LibraryMeta {
+        LibraryMeta {
+            import_session_id: session.to_owned(),
+            import_date: 1_600_000_000,
+            keywords: vec!["alpha".into(), "beta".into()],
+            ..Default::default()
+        }
+    }
+
+    fn count(db: &StoolapDb, sql: &str) -> i64 {
+        db.db.query_one::<i64, _>(sql, ()).unwrap()
+    }
+
+    /// The point of wrapping `insert_photo`: `hash` is UNIQUE, so a second
+    /// insert of the same photo fails — after the EXIF, rating, keyword and
+    /// user_meta statements would have run.  Without the transaction those
+    /// rows would survive, attached to a photo id that does not exist.
+    #[test]
+    fn a_failed_insert_leaves_no_rows_behind() {
+        let db = db();
+        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 100, 50, None)
+            .unwrap();
+
+        let before = count(&db, "SELECT COUNT(*) FROM keywords");
+        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 100, 50, None)
+            .expect_err("duplicate hash must be rejected");
+
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM photos"), 1);
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM keywords"),
+            before,
+            "the rolled-back insert left keyword rows behind"
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM ratings"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM user_meta"), 1);
+    }
+
+    #[test]
+    fn session_photo_count_reflects_the_rows() {
+        let db = db();
+        db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
+            .unwrap();
+        assert_eq!(db.session_photo_count("s1").unwrap(), 0);
+
+        let id = db
+            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .unwrap();
+        db.insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
+            .unwrap();
+        assert_eq!(db.session_photo_count("s1").unwrap(), 2);
+
+        db.delete_photo(id).unwrap();
+        assert_eq!(db.session_photo_count("s1").unwrap(), 1);
+        assert_eq!(db.session_photo_count("nonexistent").unwrap(), 0);
+    }
+
+    #[test]
+    fn delete_empty_sessions_keeps_the_ones_with_photos() {
+        let db = db();
+        db.insert_session("full", "Jun 3 2025", 1_600_000_000, None)
+            .unwrap();
+        db.insert_session("empty", "Jun 4 2025", 1_600_100_000, None)
+            .unwrap();
+        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("full"), 10, 10, None)
+            .unwrap();
+
+        assert_eq!(db.delete_empty_sessions().unwrap(), 1);
+        let ids: Vec<String> = db
+            .all_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, ["full"]);
+    }
 }

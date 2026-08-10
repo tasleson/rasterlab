@@ -1,6 +1,8 @@
-use anyhow::Result;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use image as img_crate;
-use rasterlab_core::image::Image;
+use rasterlab_core::{image::Image, verified_write::write_verified_atomic};
 
 /// Encode `image` as a JPEG thumbnail at most `max_side` pixels wide.
 /// Returns JPEG bytes.
@@ -28,4 +30,18 @@ pub fn generate_thumbnail(image: &Image, max_side: u32) -> Result<Vec<u8>> {
     let mut encoder = img_crate::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
     encoder.encode_image(&rgb)?;
     Ok(buf)
+}
+
+/// Write a thumbnail to `path`, creating its directory, replacing whatever is
+/// there in one step.
+///
+/// Staged and renamed like every other file the library writes: a thumbnail
+/// truncated by a crash mid-write would survive as a torn image that nothing
+/// repairs — the rebuild pass only regenerates thumbnails that are *missing*,
+/// having no way to tell a damaged JPEG from an ugly one.
+pub fn write_thumbnail(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    write_verified_atomic(path, bytes).with_context(|| format!("write {}", path.display()))
 }
