@@ -12,7 +12,7 @@
 
 - [x] DONE Contain background-worker failures. Catch panics at worker boundaries and turn them into error results, make thread spawning fallible, handle disconnected channels, and ensure the GUI always clears loading state when a worker terminates unexpectedly.
 
-- [ ] Make `ColorSpaceOp` reachable from the GPU dispatcher. It never overrides
+- [x] DONE Make `ColorSpaceOp` reachable from the GPU dispatcher. It never overrides
   `Operation::as_any`, so `rasterlab_gpu::ops::classify` cannot downcast it and
   `apply_one` returns `UnsupportedOperation("color_space")`; the color_space
   kernel, its dispatch arm, and its shader are unreachable, and the render

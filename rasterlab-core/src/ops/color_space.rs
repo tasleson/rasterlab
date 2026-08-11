@@ -109,6 +109,10 @@ impl Operation for ColorSpaceOp {
         Ok(image)
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn describe(&self) -> String {
         match self.conversion {
             ColorSpaceConversion::SrgbToDisplayP3 => "sRGB → Display P3".into(),

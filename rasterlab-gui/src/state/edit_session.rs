@@ -31,6 +31,7 @@ pub enum EditingTool {
     FauxHdr,
     Grain,
     ColorBalance,
+    ColorSpace,
     HslPanel,
     Blur,
     Denoise,
@@ -51,7 +52,10 @@ pub struct EditSession {
 /// file-based ops, etc.).
 pub fn load_op_into_tools(op: &dyn Operation, tools: &mut ToolState) -> Option<EditingTool> {
     for tool in tools.tools.iter_mut() {
-        if tool.load_from_op(op) {
+        // Only tools that can host an edit session are consulted: a tool with
+        // no `EditingTool` cannot be bound to one, so loading `op` into it
+        // would mutate its widgets for nothing.
+        if tool.editing_tool().is_some() && tool.load_from_op(op) {
             return tool.editing_tool();
         }
     }

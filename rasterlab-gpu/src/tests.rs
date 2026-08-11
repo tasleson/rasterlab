@@ -1,10 +1,12 @@
 use super::*;
+use crate::ops::SUPPORTED_GPU_OP_COUNT;
 use rasterlab_core::{
     Image,
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, BwMode, ClarityTextureOp, ColorBalanceOp,
-        ColorSpaceConversion, ColorSpaceOp, CurvesOp, DenoiseOp, FauxHdrOp, HslPanelOp, HueShiftOp,
-        NoiseReductionOp, NrMethod, SaturationOp, SharpenOp, VibranceOp, WhiteBalanceOp,
+        ColorSpaceConversion, ColorSpaceOp, CurvesOp, DenoiseOp, FauxHdrOp, HighlightsShadowsOp,
+        HslPanelOp, HueShiftOp, LevelsOp, NoiseReductionOp, NrMethod, SaturationOp, SepiaOp,
+        ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::operation::Operation,
 };
@@ -719,4 +721,79 @@ fn clarity_texture_roughly_matches_cpu() {
         assert_eq!(a[3], b[3]);
     }
     assert!(max_delta <= 2, "clarity_texture max_delta={max_delta}");
+}
+
+/// One instance of every op the dispatcher claims to support.  Kept in sync
+/// with the `SupportedGpuOp` variants by `every_supported_op_is_dispatchable`.
+fn supported_op_samples() -> Vec<Box<dyn Operation>> {
+    vec![
+        Box::new(BrightnessContrastOp::new(0.1, 0.1)),
+        Box::new(CurvesOp {
+            points: vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]],
+        }),
+        Box::new(HueShiftOp::new(30.0)),
+        Box::new(SaturationOp::new(1.2)),
+        Box::new(VibranceOp::new(0.4)),
+        Box::new(WhiteBalanceOp::new(0.2, -0.1)),
+        Box::new(NoiseReductionOp {
+            method: NrMethod::NonLocalMeans,
+            luma_strength: 0.5,
+            color_strength: 0.5,
+            detail_preservation: 0.5,
+        }),
+        Box::new(SepiaOp::new(0.8)),
+        Box::new(LevelsOp::new(0.05, 0.95, 1.1)),
+        Box::new(HighlightsShadowsOp::new(-0.3, 0.4)),
+        Box::new(VignetteOp::new(0.5, 0.6, 0.4)),
+        Box::new(ShadowExposureOp::new(0.7, 2.0)),
+        Box::new(SplitToneOp::new(210.0, 0.3, 40.0, 0.25, 0.0)),
+        Box::new(BlackAndWhiteOp {
+            mode: BwMode::Luminance,
+        }),
+        Box::new(BlurOp::new(2.0)),
+        Box::new(ColorBalanceOp::new(
+            [0.3, 0.0, -0.2],
+            [0.0, 0.2, 0.0],
+            [-0.1, 0.0, 0.3],
+        )),
+        Box::new(ColorSpaceOp::new(ColorSpaceConversion::SrgbToDisplayP3)),
+        Box::new(DenoiseOp {
+            strength: 0.3,
+            radius: 2,
+        }),
+        Box::new(HslPanelOp::new(
+            [20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )),
+        Box::new(SharpenOp::new(1.0)),
+        Box::new(FauxHdrOp::new(0.8)),
+        Box::new(ClarityTextureOp::new(0.5, 0.3)),
+    ]
+}
+
+/// Every GPU-backed op must override `Operation::as_any`, otherwise `classify`
+/// cannot downcast it and the render pipeline silently falls back to the CPU
+/// with its kernel and shader left unreachable.  Needs no adapter, so it runs
+/// in the normal test job rather than the scheduled GPU one.
+#[test]
+fn every_supported_op_is_dispatchable() {
+    let samples = supported_op_samples();
+    assert_eq!(
+        samples.len(),
+        SUPPORTED_GPU_OP_COUNT,
+        "supported_op_samples() is out of sync with SupportedGpuOp"
+    );
+    for op in samples {
+        assert!(
+            op.as_any().is_some(),
+            "{} does not override Operation::as_any",
+            op.name()
+        );
+        assert!(
+            supports(op.as_ref()),
+            "{} is not reachable from the GPU dispatcher",
+            op.name()
+        );
+    }
 }

@@ -4,6 +4,7 @@ use rasterlab_core::ops::{ColorSpaceConversion, ColorSpaceOp};
 use rasterlab_core::traits::operation::Operation;
 
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
 
 pub struct ColorSpaceTool {
     pub conversion: ColorSpaceConversion,
@@ -23,6 +24,9 @@ impl Tool for ColorSpaceTool {
     }
     fn display_name(&self) -> &'static str {
         "⬛  Color Space"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::ColorSpace)
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {

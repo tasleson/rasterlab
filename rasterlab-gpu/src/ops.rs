@@ -19,6 +19,12 @@ use crate::{
     pipeline::{GpuPipeline, GpuTimings},
 };
 
+/// Number of `SupportedGpuOp` variants.  Bump when adding a kernel: the
+/// dispatch test asserts it against its sample op per variant, so every new
+/// kernel gets checked for an `Operation::as_any` override.
+#[cfg(test)]
+pub(crate) const SUPPORTED_GPU_OP_COUNT: usize = 22;
+
 enum SupportedGpuOp<'a> {
     BrightnessContrast(&'a BrightnessContrastOp),
     Curves(&'a CurvesOp),
