@@ -55,9 +55,7 @@ impl ExportDialogState {
         self.progress = None;
         self.done = false;
         self.errors.clear();
-        if let Ok(mut s) = self.shared.lock() {
-            *s = ExportShared::default();
-        }
+        *lock_shared(&self.shared) = ExportShared::default();
     }
 }
 
@@ -117,20 +115,17 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
     // reflect the current run.
     {
         let export = &mut state.tools.export_dialog;
-        let snapshot = export
-            .shared
-            .lock()
-            .map(|s| (s.done, s.total, s.finished, s.errors.clone()))
-            .ok();
-        if let Some((done, total, finished, errors)) = snapshot {
-            if finished {
-                export.progress = None;
-                export.done = true;
-                export.errors = errors;
-            } else if total > 0 {
-                export.progress = Some((done, total));
-                export.done = false;
-            }
+        let (done, total, finished, errors) = {
+            let s = lock_shared(&export.shared);
+            (s.done, s.total, s.finished, s.errors.clone())
+        };
+        if finished {
+            export.progress = None;
+            export.done = true;
+            export.errors = errors;
+        } else if total > 0 {
+            export.progress = Some((done, total));
+            export.done = false;
         }
         // Also repaint while a run is in flight so progress ticks visibly.
         if export.progress.is_some() {
@@ -357,38 +352,59 @@ fn start_export(state: &mut AppState) {
     state.tools.export_dialog.progress = Some((0, total));
     state.tools.export_dialog.done = false;
     state.tools.export_dialog.errors.clear();
-    if let Ok(mut s) = shared.lock() {
-        *s = ExportShared {
-            done: 0,
-            total,
-            finished: false,
-            errors: Vec::new(),
-        };
-    }
+    *lock_shared(&shared) = ExportShared {
+        done: 0,
+        total,
+        finished: false,
+        errors: Vec::new(),
+    };
 
-    std::thread::Builder::new()
+    let failure_shared = Arc::clone(&shared);
+    let spawned = std::thread::Builder::new()
         .name("rasterlab-export".into())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let registry = FormatRegistry::with_builtins();
-            for photo in &photos {
-                let rlab_path = lib.rlab_path(&photo.hash);
-                if let Err(e) = export_one(&rlab_path, &dest_dir, &registry, &settings, &photo.hash)
-                {
-                    eprintln!("export error {}: {e}", photo.hash);
-                    if let Ok(mut s) = shared.lock() {
-                        s.errors.push(format!("{}: {e}", photo.hash));
+            // Encoders are third-party code. A panic here would leave
+            // `finished` unset, so the dialog would show a progress bar that
+            // never completes and refuse to start another export.
+            let outcome = rasterlab_core::panic_guard::guard(|| {
+                let registry = FormatRegistry::with_builtins();
+                for photo in &photos {
+                    let rlab_path = lib.rlab_path(&photo.hash);
+                    if let Err(e) =
+                        export_one(&rlab_path, &dest_dir, &registry, &settings, &photo.hash)
+                    {
+                        eprintln!("export error {}: {e}", photo.hash);
+                        lock_shared(&shared)
+                            .errors
+                            .push(format!("{}: {e}", photo.hash));
                     }
+                    lock_shared(&shared).done += 1;
                 }
-                if let Ok(mut s) = shared.lock() {
-                    s.done += 1;
-                }
+            });
+            let mut s = lock_shared(&shared);
+            if let Err(panic) = outcome {
+                s.errors.push(format!("export worker panicked: {panic}"));
             }
-            if let Ok(mut s) = shared.lock() {
-                s.finished = true;
-            }
-        })
-        .ok();
+            s.finished = true;
+        });
+
+    if let Err(e) = spawned {
+        let mut s = lock_shared(&failure_shared);
+        s.errors
+            .push(format!("could not start the export worker: {e}"));
+        s.finished = true;
+    }
+}
+
+/// Borrow the shared export state, recovering from a poisoned lock.
+///
+/// `ExportShared` is a progress counter and an error list: a worker that
+/// panicked while holding it left nothing inconsistent, and refusing the lock
+/// afterwards would strand the dialog with a progress bar it can never finish
+/// or reset.
+fn lock_shared(shared: &Mutex<ExportShared>) -> std::sync::MutexGuard<'_, ExportShared> {
+    shared.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn export_one(

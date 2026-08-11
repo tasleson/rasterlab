@@ -233,19 +233,11 @@ impl AppState {
                 }
             }
             RenderResult::Error(e) => {
+                self.clear_render_in_flight();
                 self.status = format!("Error: {}", e);
-                self.loading = false;
-                self.nr_in_flight = false;
-                self.render_start = None;
-                self.render_backend = None;
-                self.pending_nr_preview_key = None;
             }
             RenderResult::Cancelled => {
-                self.loading = false;
-                self.nr_in_flight = false;
-                self.pending_nr_preview_key = None;
-                self.render_start = None;
-                self.render_backend = None;
+                self.clear_render_in_flight();
                 self.status = "Cancelled".into();
                 if self.needs_rerender {
                     self.needs_rerender = false;
@@ -515,6 +507,27 @@ impl AppState {
             follow_up_full_res,
         };
         let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(move || ctx.request_repaint());
-        rasterlab_render::spawn_render(request, meta, tx, repaint);
+        if let Err(e) = rasterlab_render::spawn_render(request, meta, tx, repaint) {
+            // Nothing was sent and nothing will be, so this is the only chance
+            // to release the in-flight state set just above. Leaving `loading`
+            // set would make every later render request a silent no-op.
+            self.clear_render_in_flight();
+            self.status = format!("Error: could not start the render thread: {e}");
+        }
+    }
+
+    /// Release the state that marks a render as running, discarding whatever
+    /// the run would have produced.
+    ///
+    /// Used by the terminal paths with nothing to show for the work — error,
+    /// cancellation, and a render thread that never started. Completion clears
+    /// the same fields itself, but consumes `render_start` and
+    /// `pending_nr_preview_key` on the way rather than dropping them.
+    fn clear_render_in_flight(&mut self) {
+        self.loading = false;
+        self.nr_in_flight = false;
+        self.render_start = None;
+        self.render_backend = None;
+        self.pending_nr_preview_key = None;
     }
 }

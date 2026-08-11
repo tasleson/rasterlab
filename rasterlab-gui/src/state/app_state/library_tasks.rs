@@ -12,8 +12,9 @@ use std::{
 };
 
 use image as img_crate;
+use rasterlab_core::panic_guard;
 
-use super::{AppMode, AppState, BgMessage};
+use super::{AppMode, AppState, BgMessage, workers};
 
 /// Number of worker threads servicing thumbnail loads. Fixed and small so a
 /// large library grid can't spawn thousands of threads at once.
@@ -57,30 +58,28 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
-        std::thread::Builder::new()
-            .name("rasterlab-import".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
-                let progress_tx = tx.clone();
+        let progress_tx = self.bg_tx.clone();
+        let progress_ctx = self.ctx.clone();
+        workers::spawn(
+            "rasterlab-import",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            BgMessage::ImportFailed,
+            move || {
                 let result = lib.import_files(&paths, move |p| {
                     let _ = progress_tx.send(BgMessage::ImportProgress(p));
-                    ctx.request_repaint();
+                    progress_ctx.request_repaint();
                 });
                 match result {
-                    Ok(session) => {
-                        let _ = tx.send(BgMessage::ImportComplete {
-                            errors: Vec::new(),
-                            session,
-                        });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(BgMessage::Error(e.to_string()));
-                    }
+                    Ok(session) => BgMessage::ImportComplete {
+                        errors: Vec::new(),
+                        session,
+                    },
+                    Err(e) => BgMessage::ImportFailed(e.to_string()),
                 }
-            })
-            .ok();
+            },
+        );
     }
 
     /// Recursively import `folder`, grouping photos into back-dated import
@@ -89,16 +88,18 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
-        std::thread::Builder::new()
-            .name("rasterlab-import".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
-                let progress_tx = tx.clone();
+        let progress_tx = self.bg_tx.clone();
+        let progress_ctx = self.ctx.clone();
+        workers::spawn(
+            "rasterlab-import",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            BgMessage::ImportFailed,
+            move || {
                 let result = lib.import_folder(&folder, move |p| {
                     let _ = progress_tx.send(BgMessage::ImportProgress(p));
-                    ctx.request_repaint();
+                    progress_ctx.request_repaint();
                 });
                 match result {
                     Ok(sessions) => {
@@ -114,17 +115,15 @@ impl AppState {
                             photo_count: total,
                             errors: Vec::new(),
                         };
-                        let _ = tx.send(BgMessage::ImportComplete {
+                        BgMessage::ImportComplete {
                             errors,
                             session: summary,
-                        });
+                        }
                     }
-                    Err(e) => {
-                        let _ = tx.send(BgMessage::Error(e.to_string()));
-                    }
+                    Err(e) => BgMessage::ImportFailed(e.to_string()),
                 }
-            })
-            .ok();
+            },
+        );
     }
 
     pub(super) fn on_import_progress(&mut self, progress: rasterlab_library::ImportProgress) {
@@ -163,6 +162,18 @@ impl AppState {
         self.library.last_import_errors = errors;
     }
 
+    /// Terminal handler for an import that will never report progress again.
+    ///
+    /// Tears the progress bar down and refreshes the grid: an import that died
+    /// partway through still committed the photos it had already written, and
+    /// they should be visible rather than waiting for the next library open.
+    pub(super) fn on_import_failed(&mut self, message: String) {
+        self.library.import_progress = None;
+        self.library.thumbs.clear();
+        self.library.refresh();
+        self.status = format!("Import failed: {message}");
+    }
+
     // -----------------------------------------------------------------------
     // Integrity scrub
     // -----------------------------------------------------------------------
@@ -187,29 +198,25 @@ impl AppState {
         self.library.last_scrub_errors.clear();
         self.status = "Scrubbing library…".into();
 
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
-        std::thread::Builder::new()
-            .name("rasterlab-scrub".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
-                let progress_tx = tx.clone();
-                let progress_ctx = ctx.clone();
+        let progress_tx = self.bg_tx.clone();
+        let progress_ctx = self.ctx.clone();
+        workers::spawn(
+            "rasterlab-scrub",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            BgMessage::ScrubFailed,
+            move || {
                 let result = lib.scrub(cancel, move |p| {
                     let _ = progress_tx.send(BgMessage::ScrubProgress(p));
                     progress_ctx.request_repaint();
                 });
                 match result {
-                    Ok(outcome) => {
-                        let _ = tx.send(BgMessage::ScrubComplete { outcome });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(BgMessage::Error(format!("Scrub failed: {e}")));
-                    }
+                    Ok(outcome) => BgMessage::ScrubComplete { outcome },
+                    Err(e) => BgMessage::ScrubFailed(e.to_string()),
                 }
-                ctx.request_repaint();
-            })
-            .ok();
+            },
+        );
     }
 
     /// Request that a running scrub stop after the current file.
@@ -245,6 +252,17 @@ impl AppState {
         self.library.last_scrub_errors = outcome.errors;
     }
 
+    /// Terminal handler for a scrub that will never complete.
+    ///
+    /// Releasing `scrub_cancel` matters beyond the status line: it is what
+    /// [`Self::scrub_running`] reports, so leaving it set would pin the File
+    /// menu to "Stop scrub" and make every later [`Self::start_scrub`] a no-op.
+    pub(super) fn on_scrub_failed(&mut self, message: String) {
+        self.scrub_cancel = None;
+        self.library.scrub_progress = None;
+        self.status = format!("Scrub failed: {message}");
+    }
+
     // -----------------------------------------------------------------------
     // Index rebuild
     // -----------------------------------------------------------------------
@@ -256,16 +274,23 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
+        let progress_tx = self.bg_tx.clone();
+        let progress_ctx = self.ctx.clone();
         self.library.rebuild_started = Some(std::time::Instant::now());
         self.status = "Rebuilding library index…".into();
-        std::thread::Builder::new()
-            .name("rasterlab-rebuild".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
-                let progress_tx = tx.clone();
-                let progress_ctx = ctx.clone();
+        workers::spawn(
+            "rasterlab-rebuild",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            // A rebuild that dies has no total to report; the fatal message is
+            // what clears `rebuild_started` and unblocks a retry.
+            |message| BgMessage::RebuildComplete {
+                total: 0,
+                errors: Vec::new(),
+                fatal: Some(message),
+            },
+            move || {
                 // Track the last progress report so the completion message can
                 // carry the final total and per-file errors (rebuild_index only
                 // exposes them through the callback).
@@ -276,14 +301,13 @@ impl AppState {
                     progress_ctx.request_repaint();
                 });
                 let (total, errors) = last.into_inner();
-                let _ = tx.send(BgMessage::RebuildComplete {
+                BgMessage::RebuildComplete {
                     total,
                     errors,
                     fatal: result.err().map(|e| e.to_string()),
-                });
-                ctx.request_repaint();
-            })
-            .ok();
+                }
+            },
+        );
     }
 
     pub(super) fn on_rebuild_progress(&mut self, progress: rasterlab_library::RebuildProgress) {
@@ -337,12 +361,13 @@ impl AppState {
         self.library.thumbs.remove(hash);
 
         let hash = hash.to_owned();
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
-        std::thread::Builder::new()
-            .name("rasterlab-copy-select".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
+        workers::spawn(
+            "rasterlab-copy-select",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            |message| BgMessage::TaskFailed(format!("set active copy: {message}")),
+            move || {
                 let rlab_path = lib.rlab_path(&hash);
                 let result = (|| -> anyhow::Result<Vec<u8>> {
                     let mut rlab = rasterlab_core::project::RlabFile::read(&rlab_path)?;
@@ -352,16 +377,11 @@ impl AppState {
                     Ok(std::fs::read(lib.thumb_path(&hash))?)
                 })();
                 match result {
-                    Ok(bytes) => {
-                        let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(BgMessage::Error(format!("set active copy: {e}")));
-                    }
+                    Ok(bytes) => BgMessage::ThumbLoaded { hash, bytes },
+                    Err(e) => BgMessage::TaskFailed(format!("set active copy: {e}")),
                 }
-                ctx.request_repaint();
-            })
-            .ok();
+            },
+        );
     }
 
     /// Rebuild the on-disk thumbnail for `hash` in the background and push the
@@ -370,23 +390,22 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
-        std::thread::Builder::new()
-            .name("rasterlab-thumb-regen".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
+        workers::spawn(
+            "rasterlab-thumb-regen",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            |message| BgMessage::TaskFailed(format!("thumbnail regeneration: {message}")),
+            move || {
                 if let Err(e) = lib.regenerate_thumbnail(&hash) {
-                    eprintln!("thumb-regen failed: {:#}", e);
-                    return;
+                    return BgMessage::TaskFailed(format!("thumbnail regeneration failed: {e:#}"));
                 }
-                let thumb_path = lib.thumb_path(&hash);
-                if let Ok(bytes) = std::fs::read(&thumb_path) {
-                    let _ = tx.send(BgMessage::ThumbLoaded { hash, bytes });
-                    ctx.request_repaint();
+                match std::fs::read(lib.thumb_path(&hash)) {
+                    Ok(bytes) => BgMessage::ThumbLoaded { hash, bytes },
+                    Err(e) => BgMessage::TaskFailed(format!("thumbnail read failed: {e}")),
                 }
-            })
-            .ok();
+            },
+        );
     }
 
     /// Request that the thumbnail for `hash` be loaded from disk in the background.
@@ -406,56 +425,86 @@ impl AppState {
             rlab_path: lib.rlab_path(&hash),
             hash: hash.clone(),
         };
-        self.library.thumbs.mark_requested(hash);
+        // Mark only once the request is actually queued; a hash marked against
+        // a pool that never started would never be retried.
         self.ensure_thumb_pool();
-        if let Some(tx) = &self.thumb_req_tx {
-            let _ = tx.send(req);
+        if let Some(tx) = &self.thumb_req_tx
+            && tx.send(req).is_ok()
+        {
+            self.library.thumbs.mark_requested(hash);
         }
     }
 
     /// Lazily spawn the fixed-size thumbnail-loader pool. Workers pull requests
     /// off a shared queue, read the thumbnail bytes, and post them back as
     /// `BgMessage::ThumbLoaded`. Idempotent; the pool lives for the app's life.
+    ///
+    /// The sender is only installed once at least one worker is running, so a
+    /// grid that cannot get a pool reports it instead of quietly queueing
+    /// requests into a channel nobody is reading.
     fn ensure_thumb_pool(&mut self) {
         if self.thumb_req_tx.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel::<ThumbLoadRequest>();
         let rx = Arc::new(Mutex::new(rx));
+        let mut running = 0usize;
         for _ in 0..THUMB_LOADER_THREADS {
             let rx = Arc::clone(&rx);
             let bg_tx = self.bg_tx.clone();
             let ctx = self.ctx.clone();
-            std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name("rasterlab-thumb".into())
                 .stack_size(1024 * 1024)
                 .spawn(move || {
                     loop {
                         // Hold the lock only to dequeue; release before reading.
+                        // Recover from poisoning: a worker that panicked mid-load
+                        // corrupted nothing here, and taking the queue down with
+                        // it would silently stop every remaining worker.
                         let req = {
-                            let guard = rx.lock().unwrap();
+                            let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
                             guard.recv()
                         };
                         let Ok(req) = req else {
                             break; // sender dropped — app shutting down
                         };
-                        // Primary source: separate JPEG in thumbs/.
-                        // Fallback: thumbnail embedded in the PREV chunk of the .rlab.
-                        let bytes = std::fs::read(&req.thumb_path).ok().or_else(|| {
-                            rasterlab_core::project::RlabFile::read(&req.rlab_path)
-                                .ok()
-                                .and_then(|r| r.thumbnail)
+                        // One bad `.rlab` must cost its own thumbnail, not this
+                        // worker: a panic that escaped here would shrink the pool
+                        // for the rest of the session.
+                        let bytes = panic_guard::guard(|| {
+                            // Primary source: separate JPEG in thumbs/.
+                            // Fallback: thumbnail embedded in the PREV chunk of the .rlab.
+                            std::fs::read(&req.thumb_path).ok().or_else(|| {
+                                rasterlab_core::project::RlabFile::read(&req.rlab_path)
+                                    .ok()
+                                    .and_then(|r| r.thumbnail)
+                            })
                         });
-                        if let Some(bytes) = bytes {
-                            let _ = bg_tx.send(BgMessage::ThumbLoaded {
-                                hash: req.hash,
-                                bytes,
-                            });
-                            ctx.request_repaint();
+                        match bytes {
+                            Ok(Some(bytes)) => {
+                                let _ = bg_tx.send(BgMessage::ThumbLoaded {
+                                    hash: req.hash,
+                                    bytes,
+                                });
+                                ctx.request_repaint();
+                            }
+                            Ok(None) => {}
+                            Err(panic) => {
+                                eprintln!(
+                                    "thumbnail load panicked for {}: {panic}",
+                                    req.rlab_path.display()
+                                );
+                            }
                         }
                     }
                 })
-                .ok();
+                .is_ok();
+            running += usize::from(spawned);
+        }
+        if running == 0 {
+            self.status = "Could not start the thumbnail loaders".into();
+            return;
         }
         self.thumb_req_tx = Some(tx);
     }

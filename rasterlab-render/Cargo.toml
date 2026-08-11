@@ -18,3 +18,5 @@ gpu = ["dep:rasterlab-gpu"]
 [dev-dependencies]
 pollster = "0.4"
 wgpu = { workspace = true }
+serde = { workspace = true }
+typetag = { workspace = true }

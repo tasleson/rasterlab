@@ -15,7 +15,7 @@ use rasterlab_core::{
 
 use crate::state::VirtualCopyStore;
 
-use super::{AppMode, AppState, BgMessage};
+use super::{AppMode, AppState, BgMessage, workers};
 
 impl AppState {
     // -----------------------------------------------------------------------
@@ -167,69 +167,62 @@ impl AppState {
         self.preview_overlay_rect = None;
         self.histogram = None;
 
-        let tx = self.bg_tx.clone();
-        let ctx = self.ctx.clone();
-
         let is_project = path
             .extension()
             .map(|e| e.eq_ignore_ascii_case("rlab"))
             .unwrap_or(false);
 
-        std::thread::Builder::new()
-            .name("rasterlab-load".into())
-            .stack_size(32 * 1024 * 1024)
-            .spawn(move || {
-                // Decoders are third-party code (e.g. rawler) and not guaranteed
-                // panic-free on malformed input. A panic here would unwind the
-                // thread without ever sending a message, leaving the UI stuck on
-                // "Loading…" forever. Contain it so a bad file becomes an error.
-                let path_label = path.display().to_string();
-                let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if is_project {
-                        match RlabFile::read(&path) {
-                            Ok(rlab) => {
-                                let registry = FormatRegistry::with_builtins();
-                                let hint =
-                                    rlab.meta.source_path.as_deref().map(std::path::Path::new);
-                                match registry.decode_bytes(&rlab.original_bytes, hint) {
-                                    Ok(image) => BgMessage::ProjectLoaded {
-                                        path,
-                                        rlab: Box::new(rlab),
-                                        image,
-                                    },
-                                    Err(e) => BgMessage::Error(e.to_string()),
-                                }
+        // Decoders are third-party code (e.g. rawler) and not guaranteed
+        // panic-free on malformed input, so the worker is spawned through the
+        // helper that converts a panic — or a thread that never starts — into a
+        // `BgMessage::Error`. That is what clears `loading`; without it the UI
+        // would sit on "Loading…" for the rest of the session.
+        workers::spawn(
+            "rasterlab-load",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            |message| {
+                BgMessage::Error(format!(
+                    "{message} (the file may be corrupt or an unsupported camera variant)"
+                ))
+            },
+            move || {
+                if is_project {
+                    match RlabFile::read(&path) {
+                        Ok(rlab) => {
+                            let registry = FormatRegistry::with_builtins();
+                            let hint = rlab.meta.source_path.as_deref().map(std::path::Path::new);
+                            match registry.decode_bytes(&rlab.original_bytes, hint) {
+                                Ok(image) => BgMessage::ProjectLoaded {
+                                    path,
+                                    rlab: Box::new(rlab),
+                                    image,
+                                },
+                                Err(e) => BgMessage::Error(e.to_string()),
                             }
-                            Err(e) => BgMessage::Error(e.to_string()),
                         }
-                    } else {
-                        // Read the raw bytes for storage in .rlab saves, then decode.
-                        match std::fs::read(&path) {
-                            Ok(original_bytes) => {
-                                let registry = FormatRegistry::with_builtins();
-                                match registry.decode_file(&path) {
-                                    Ok(image) => BgMessage::ImageLoaded {
-                                        path,
-                                        image,
-                                        original_bytes,
-                                    },
-                                    Err(e) => BgMessage::Error(e.to_string()),
-                                }
-                            }
-                            Err(e) => BgMessage::Error(e.to_string()),
-                        }
+                        Err(e) => BgMessage::Error(e.to_string()),
                     }
-                }));
-                let msg = computed.unwrap_or_else(|_| {
-                    BgMessage::Error(format!(
-                        "Failed to load {path_label}: decoder panicked \
-                         (corrupt file or unsupported camera variant)"
-                    ))
-                });
-                let _ = tx.send(msg);
-                ctx.request_repaint();
-            })
-            .expect("failed to spawn load thread");
+                } else {
+                    // Read the raw bytes for storage in .rlab saves, then decode.
+                    match std::fs::read(&path) {
+                        Ok(original_bytes) => {
+                            let registry = FormatRegistry::with_builtins();
+                            match registry.decode_file(&path) {
+                                Ok(image) => BgMessage::ImageLoaded {
+                                    path,
+                                    image,
+                                    original_bytes,
+                                },
+                                Err(e) => BgMessage::Error(e.to_string()),
+                            }
+                        }
+                        Err(e) => BgMessage::Error(e.to_string()),
+                    }
+                }
+            },
+        );
     }
 
     pub fn save_file(&mut self, path: std::path::PathBuf) {

@@ -15,6 +15,7 @@
 mod library_tasks;
 mod persistence;
 mod render;
+mod workers;
 
 use std::{
     path::PathBuf as StdPathBuf,
@@ -76,8 +77,13 @@ enum BgMessage {
     },
     /// Result from the background render thread (via `rasterlab-render` crate).
     Render(RenderResult),
-    /// Non-render error from a background thread (file load, export, etc.).
+    /// A background thread failed at loading the open document. Terminal for
+    /// the editor's `loading` flag.
     Error(String),
+    /// An auxiliary background task failed — a thumbnail that could not be
+    /// rebuilt, say. Reported without touching `loading`, which belongs to
+    /// whatever render or load is actually in flight.
+    TaskFailed(String),
     /// Progress update from a running import.
     ImportProgress(rasterlab_library::ImportProgress),
     /// Import finished; thumbnail cache should be invalidated.
@@ -85,6 +91,9 @@ enum BgMessage {
         session: rasterlab_library::ImportSession,
         errors: Vec<(StdPathBuf, String)>,
     },
+    /// The import worker gave up, panicked, or never started. Terminal, so the
+    /// progress bar it owns has to be torn down.
+    ImportFailed(String),
     /// A thumbnail image was loaded from disk; ready to upload to egui.
     ThumbLoaded { hash: String, bytes: Vec<u8> },
     /// Progress update from a running integrity scrub.
@@ -102,6 +111,9 @@ enum BgMessage {
     ScrubComplete {
         outcome: rasterlab_library::ScrubOutcome,
     },
+    /// The scrub worker gave up, panicked, or never started. Terminal, so the
+    /// cancellation handle that drives the Start/Stop toggle has to be released.
+    ScrubFailed(String),
 }
 
 impl From<RenderResult> for BgMessage {
@@ -357,10 +369,12 @@ impl AppState {
                     self.status = format!("Error: {}", e);
                     self.loading = false;
                 }
+                BgMessage::TaskFailed(e) => self.status = format!("Error: {}", e),
                 BgMessage::ImportProgress(p) => self.on_import_progress(p),
                 BgMessage::ImportComplete { session, errors } => {
                     self.on_import_complete(session, errors)
                 }
+                BgMessage::ImportFailed(e) => self.on_import_failed(e),
                 BgMessage::ThumbLoaded { hash, bytes } => self.on_thumb_loaded(hash, bytes),
                 BgMessage::ScrubProgress(p) => self.on_scrub_progress(p),
                 BgMessage::RebuildProgress(p) => self.on_rebuild_progress(p),
@@ -370,6 +384,7 @@ impl AppState {
                     fatal,
                 } => self.on_rebuild_complete(total, errors, fatal),
                 BgMessage::ScrubComplete { outcome } => self.on_scrub_complete(outcome),
+                BgMessage::ScrubFailed(e) => self.on_scrub_failed(e),
             }
         }
         self.update_processing_status();

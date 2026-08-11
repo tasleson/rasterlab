@@ -10,7 +10,7 @@
 
 - [x] DONE Decompose orchestration-heavy GUI modules along responsibility boundaries. Extract project/session persistence, render coordination, and library background tasks from `AppState`; split crop, mask, heal, straighten, split-view, and presentation-texture behavior out of the canvas module. Consolidate the duplicated full-render and preview GPU batching loops documented in `doc/FUTURE_REFACTOR.md`.
 
-- [ ] Contain background-worker failures. Catch panics at worker boundaries and turn them into error results, make thread spawning fallible, handle disconnected channels, and ensure the GUI always clears loading state when a worker terminates unexpectedly.
+- [x] DONE Contain background-worker failures. Catch panics at worker boundaries and turn them into error results, make thread spawning fallible, handle disconnected channels, and ensure the GUI always clears loading state when a worker terminates unexpectedly.
 
 - [ ] Make `ColorSpaceOp` reachable from the GPU dispatcher. It never overrides
   `Operation::as_any`, so `rasterlab_gpu::ops::classify` cannot downcast it and

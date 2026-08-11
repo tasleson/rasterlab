@@ -39,6 +39,7 @@ pub mod formats;
 pub mod image;
 pub mod library_meta;
 pub mod ops;
+pub mod panic_guard;
 pub mod pipeline;
 pub mod plugin_loader;
 pub mod project;

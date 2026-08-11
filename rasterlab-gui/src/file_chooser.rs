@@ -380,24 +380,35 @@ impl FileChooser {
         let spec = kind.spec();
         let start_dir = self.pending_start_dir.take();
 
-        std::thread::spawn(move || {
-            let mut dlg = rfd::FileDialog::new();
-            for (name, exts) in &spec.filters {
-                let exts = native_filter_exts(exts);
-                dlg = dlg.add_filter(*name, &exts);
-            }
-            if let Some(start) = &start_dir {
-                dlg = dlg.set_directory(start);
-            }
-            let paths = match spec.mode {
-                DialogMode::PickFile => dlg.pick_file().map(|p| vec![p]).unwrap_or_default(),
-                DialogMode::SaveFile => dlg.save_file().map(|p| vec![p]).unwrap_or_default(),
-                DialogMode::PickDirectory => dlg.pick_folder().map(|p| vec![p]).unwrap_or_default(),
-                DialogMode::PickMultiple => dlg.pick_files().unwrap_or_default(),
-            };
-            let _ = tx.send(paths);
-            ctx.request_repaint();
-        });
+        // A dialog thread that dies takes its sender with it, and `poll_rfd`
+        // reads the resulting disconnect as "no selection" — so the only case
+        // that needs handling here is a thread that never starts, which would
+        // otherwise leave `rfd_rx` set and `is_busy` true for good.
+        let spawned = std::thread::Builder::new()
+            .name("rasterlab-file-dialog".into())
+            .spawn(move || {
+                let mut dlg = rfd::FileDialog::new();
+                for (name, exts) in &spec.filters {
+                    let exts = native_filter_exts(exts);
+                    dlg = dlg.add_filter(*name, &exts);
+                }
+                if let Some(start) = &start_dir {
+                    dlg = dlg.set_directory(start);
+                }
+                let paths = match spec.mode {
+                    DialogMode::PickFile => dlg.pick_file().map(|p| vec![p]).unwrap_or_default(),
+                    DialogMode::SaveFile => dlg.save_file().map(|p| vec![p]).unwrap_or_default(),
+                    DialogMode::PickDirectory => {
+                        dlg.pick_folder().map(|p| vec![p]).unwrap_or_default()
+                    }
+                    DialogMode::PickMultiple => dlg.pick_files().unwrap_or_default(),
+                };
+                let _ = tx.send(paths);
+                ctx.request_repaint();
+            });
+        if spawned.is_err() {
+            self.rfd_rx = None;
+        }
     }
 
     fn poll_rfd(&mut self) -> Option<(DialogKind, Vec<PathBuf>)> {

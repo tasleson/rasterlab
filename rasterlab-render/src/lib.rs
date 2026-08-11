@@ -8,7 +8,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use rasterlab_core::{
-    Image, cancel as core_cancel, ops::HistogramData, traits::operation::Operation,
+    Image, cancel as core_cancel, ops::HistogramData, panic_guard, traits::operation::Operation,
 };
 #[cfg(feature = "gpu")]
 use rasterlab_gpu::{GpuContext, GpuPipeline};
@@ -59,30 +59,42 @@ pub struct RenderMeta {
 /// Sends exactly one `RenderResult` on completion via `tx`, then calls
 /// `repaint` so the host UI can wake up. The thread is named
 /// `"rasterlab-render"` and gets a 32 MiB stack.
+///
+/// A panic inside the pipeline is contained and reported as
+/// [`RenderResult::Error`]: operations include plugin-supplied code, and a
+/// render thread that unwound without sending would leave the host marking a
+/// render as permanently in flight, refusing every render afterwards.
+///
+/// Returns the spawn error when the thread cannot be created. Nothing is sent
+/// in that case, so the caller is responsible for clearing the in-flight state
+/// it set before calling.
 pub fn spawn_render<M>(
     request: RenderRequest,
     meta: RenderMeta,
     tx: mpsc::Sender<M>,
     repaint: Arc<dyn Fn() + Send + Sync>,
-) where
+) -> std::io::Result<()>
+where
     M: From<RenderResult> + Send + 'static,
 {
     std::thread::Builder::new()
         .name("rasterlab-render".into())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
-            let result = render_pipeline(
-                request.start_image,
-                request.committed_ops,
-                request.preview_op,
-                request.preview_scale,
-                request.preview_viewport,
-                request.overlay_viewport,
-                #[cfg(feature = "gpu")]
-                request.gpu,
-            );
+            let result = panic_guard::guard(|| {
+                render_pipeline(
+                    request.start_image,
+                    request.committed_ops,
+                    request.preview_op,
+                    request.preview_scale,
+                    request.preview_viewport,
+                    request.overlay_viewport,
+                    #[cfg(feature = "gpu")]
+                    request.gpu,
+                )
+            });
             let msg = match result {
-                Ok((image, hist, intermediates, overlay_rect)) => RenderResult::Complete {
+                Ok(Ok((image, hist, intermediates, overlay_rect))) => RenderResult::Complete {
                     image,
                     hist: Box::new(hist),
                     intermediates,
@@ -92,18 +104,19 @@ pub fn spawn_render<M>(
                     follow_up_full_res: meta.follow_up_full_res,
                     overlay_rect,
                 },
-                Err(e) => {
+                Ok(Err(e)) => {
                     if core_cancel::is_requested() {
                         RenderResult::Cancelled
                     } else {
                         RenderResult::Error(e)
                     }
                 }
+                Err(panic) => RenderResult::Error(format!("render thread panicked: {panic}")),
             };
             let _ = tx.send(M::from(msg));
             repaint();
         })
-        .expect("failed to spawn render thread");
+        .map(|_handle| ())
 }
 
 /// Initialize the global rayon thread pool with 32 MiB stack per worker.
@@ -899,7 +912,7 @@ mod tests {
             is_preview: false,
             follow_up_full_res: false,
         };
-        spawn_render(request, meta, tx, repaint);
+        spawn_render(request, meta, tx, repaint).unwrap();
         let result = rx.recv().unwrap();
         match result {
             RenderResult::Complete { image, .. } => {
@@ -907,6 +920,67 @@ mod tests {
                 assert_eq!(image.height, 64);
             }
             _ => panic!("expected Complete"),
+        }
+    }
+
+    /// An operation that panics the way a malformed input can panic a decoder
+    /// or a third-party plugin: partway through `apply`, with no error return.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct PanickingOp;
+
+    #[typetag::serde]
+    impl Operation for PanickingOp {
+        fn name(&self) -> &'static str {
+            "panicking_test_op"
+        }
+        fn clone_box(&self) -> Box<dyn Operation> {
+            Box::new(self.clone())
+        }
+        fn apply(&self, _image: Image) -> rasterlab_core::RasterResult<Image> {
+            panic!("op exploded");
+        }
+        fn describe(&self) -> String {
+            "Panicking test op".into()
+        }
+    }
+
+    #[test]
+    fn a_panicking_op_is_reported_as_an_error_not_a_lost_render() {
+        let request = RenderRequest {
+            start_image: Arc::new(Image::new(8, 8)),
+            committed_ops: vec![Some(Box::new(PanickingOp))],
+            preview_op: None,
+            preview_scale: None,
+            preview_viewport: None,
+            overlay_viewport: None,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<RenderResult>();
+        let repaint = Arc::new(|| {});
+        let meta = RenderMeta {
+            start_index: 0,
+            cache_gen: 0,
+            is_preview: false,
+            follow_up_full_res: false,
+        };
+
+        // The panic is expected: keep it out of the test log so a passing run
+        // does not look like a failing one.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        spawn_render(request, meta, tx, repaint).unwrap();
+        let result = rx.recv().expect("render thread must report even on panic");
+        std::panic::set_hook(previous_hook);
+
+        match result {
+            RenderResult::Error(message) => {
+                assert!(
+                    message.contains("panicked") && message.contains("op exploded"),
+                    "unhelpful panic report: {message}"
+                );
+            }
+            _ => panic!("expected Error"),
         }
     }
 
