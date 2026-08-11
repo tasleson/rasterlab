@@ -219,9 +219,10 @@ fn render_pipeline(
     // ── Overlay path ─────────────────────────────────────────────────────
     if let (Some(op), Some([vp_x, vp_y, vp_w, vp_h])) = (&preview_op, overlay_viewport) {
         let mut current = start_image;
-        apply_committed_ops_batched_for_preview(
+        run_committed_ops(
             &mut current,
             &committed_ops,
+            no_intermediates,
             #[cfg(feature = "gpu")]
             gpu.as_deref(),
         )?;
@@ -335,6 +336,8 @@ fn apply_committed_ops(
     #[cfg(feature = "gpu")] gpu: Option<&GpuContext>,
 ) -> Result<(), String> {
     if is_preview {
+        // Preview results are never written into the committed step cache, so
+        // the run records nothing.
         let scaled_ops;
         let committed_ops = if let Some(scale) = preview_scale {
             scaled_ops = committed_ops
@@ -345,18 +348,44 @@ fn apply_committed_ops(
         } else {
             &committed_ops
         };
-        return apply_committed_ops_batched_for_preview(
+        return run_committed_ops(
             current,
             committed_ops,
+            no_intermediates,
             #[cfg(feature = "gpu")]
             gpu,
         );
     }
 
+    run_committed_ops(
+        current,
+        &committed_ops,
+        |index, image| intermediates.push((index, Arc::clone(image))),
+        #[cfg(feature = "gpu")]
+        gpu,
+    )
+}
+
+/// Cache hook for runs whose output is not written to the committed step cache.
+fn no_intermediates(_index: usize, _image: &Arc<Image>) {}
+
+/// Apply a run of committed operations to `current`, batching adjacent
+/// GPU-supported operations where the GPU policy says it is worthwhile.
+///
+/// `record` is called with the index of every op position whose output is
+/// available as a cacheable image. A batched run reports only its final index,
+/// so the caller records a sparse intermediate at the readback boundary rather
+/// than forcing a readback per operation. Disabled (`None`) entries report the
+/// unchanged image so index-addressed caches keep their slots aligned.
+fn run_committed_ops(
+    current: &mut Arc<Image>,
+    committed_ops: &[Option<Box<dyn Operation>>],
+    mut record: impl FnMut(usize, &Arc<Image>),
+    #[cfg(feature = "gpu")] gpu: Option<&GpuContext>,
+) -> Result<(), String> {
     let mut index = 0;
     while index < committed_ops.len() {
-        let maybe_op = &committed_ops[index];
-        if let Some(op) = maybe_op {
+        if let Some(op) = &committed_ops[index] {
             #[cfg(feature = "gpu")]
             if let Some(gpu) = gpu
                 && rasterlab_gpu::supports(op.as_ref())
@@ -382,32 +411,20 @@ fn apply_committed_ops(
                         // This contiguous GPU-supported run is too cheap or too
                         // numerically divergent for the default GPU policy.
                     } else {
-                        let img = match Arc::try_unwrap(std::mem::replace(
-                            current,
-                            Arc::new(Image::new(1, 1)),
-                        )) {
-                            Ok(img) => img,
-                            Err(a) => a.as_ref().deep_clone(),
-                        };
-                        let result = apply_gpu_batch_or_cpu(img, &ops, gpu)?;
+                        let result = apply_gpu_batch_or_cpu(take_image(current), &ops, gpu)?;
                         for op in ops {
                             debug_validate_image(&result, op.name());
                         }
                         *current = Arc::new(result);
-                        intermediates.push((end - 1, Arc::clone(current)));
+                        record(end - 1, current);
                         index = end;
                         continue;
                     }
                 }
             }
 
-            let img = match Arc::try_unwrap(std::mem::replace(current, Arc::new(Image::new(1, 1))))
-            {
-                Ok(img) => img,
-                Err(a) => a.as_ref().deep_clone(),
-            };
             let result = apply_one_with_optional_gpu(
-                img,
+                take_image(current),
                 op.as_ref(),
                 #[cfg(feature = "gpu")]
                 gpu,
@@ -416,83 +433,20 @@ fn apply_committed_ops(
             debug_validate_image(&result, op.name());
             *current = Arc::new(result);
         }
-        intermediates.push((index, Arc::clone(current)));
+        record(index, current);
         index += 1;
     }
     Ok(())
 }
 
-fn apply_committed_ops_batched_for_preview(
-    current: &mut Arc<Image>,
-    committed_ops: &[Option<Box<dyn Operation>>],
-    #[cfg(feature = "gpu")] gpu: Option<&GpuContext>,
-) -> Result<(), String> {
-    let mut index = 0;
-    while index < committed_ops.len() {
-        let Some(op) = &committed_ops[index] else {
-            index += 1;
-            continue;
-        };
-
-        #[cfg(feature = "gpu")]
-        if let Some(gpu) = gpu
-            && rasterlab_gpu::supports(op.as_ref())
-        {
-            let start = index;
-            let mut end = index + 1;
-            while end < committed_ops.len() {
-                let Some(next_op) = &committed_ops[end] else {
-                    break;
-                };
-                if !rasterlab_gpu::supports(next_op.as_ref()) {
-                    break;
-                }
-                end += 1;
-            }
-
-            if end - start > 1 {
-                let ops = committed_ops[start..end]
-                    .iter()
-                    .filter_map(|op| op.as_deref())
-                    .collect::<Vec<_>>();
-                if gpu_batch_skip_reason(&ops, current.pixel_count(), true).is_some() {
-                    // This contiguous GPU-supported run is too cheap or too
-                    // numerically divergent for the default GPU policy.
-                } else {
-                    let img = match Arc::try_unwrap(std::mem::replace(
-                        current,
-                        Arc::new(Image::new(1, 1)),
-                    )) {
-                        Ok(img) => img,
-                        Err(a) => a.as_ref().deep_clone(),
-                    };
-                    let result = apply_gpu_batch_or_cpu(img, &ops, gpu)?;
-                    for op in ops {
-                        debug_validate_image(&result, op.name());
-                    }
-                    *current = Arc::new(result);
-                    index = end;
-                    continue;
-                }
-            }
-        }
-
-        let img = match Arc::try_unwrap(std::mem::replace(current, Arc::new(Image::new(1, 1)))) {
-            Ok(img) => img,
-            Err(a) => a.as_ref().deep_clone(),
-        };
-        let result = apply_one_with_optional_gpu(
-            img,
-            op.as_ref(),
-            #[cfg(feature = "gpu")]
-            gpu,
-        )
-        .map_err(|e| format!("Op '{}' failed: {}", op.name(), e))?;
-        debug_validate_image(&result, op.name());
-        *current = Arc::new(result);
-        index += 1;
+/// Take ownership of the image behind `current`, avoiding a deep clone when
+/// this is the only live reference. `current` is left holding a 1×1 placeholder
+/// and must be reassigned by the caller.
+fn take_image(current: &mut Arc<Image>) -> Image {
+    match Arc::try_unwrap(std::mem::replace(current, Arc::new(Image::new(1, 1)))) {
+        Ok(img) => img,
+        Err(shared) => shared.as_ref().deep_clone(),
     }
-    Ok(())
 }
 
 #[cfg(feature = "gpu")]

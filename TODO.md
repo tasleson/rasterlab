@@ -8,7 +8,7 @@
 
 - [x] DONE Define recoverable consistency semantics for filesystem and library-database updates. Use atomic file staging and database transactions where possible, make multi-step operations idempotent, and add reconciliation or retry handling for interrupted imports, metadata updates, and deletions.
 
-- [ ] Decompose orchestration-heavy GUI modules along responsibility boundaries. Extract project/session persistence, render coordination, and library background tasks from `AppState`; split crop, mask, heal, straighten, split-view, and presentation-texture behavior out of the canvas module. Consolidate the duplicated full-render and preview GPU batching loops documented in `doc/FUTURE_REFACTOR.md`.
+- [x] DONE Decompose orchestration-heavy GUI modules along responsibility boundaries. Extract project/session persistence, render coordination, and library background tasks from `AppState`; split crop, mask, heal, straighten, split-view, and presentation-texture behavior out of the canvas module. Consolidate the duplicated full-render and preview GPU batching loops documented in `doc/FUTURE_REFACTOR.md`.
 
 - [ ] Contain background-worker failures. Catch panics at worker boundaries and turn them into error results, make thread spawning fallible, handle disconnected channels, and ensure the GUI always clears loading state when a worker terminates unexpectedly.
 
