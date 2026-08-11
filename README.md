@@ -26,7 +26,7 @@ RasterLab began as a one-month AI-assisted development experiment and has contin
 - **Adaptive Enhance needs more work.** It is an experimental analysis-driven tool whose correction choices and regional adjustments still need tuning. Treat its output as a starting point and inspect the individual operations it adds to the edit stack.
 - Camera RAW support depends on `rawler`; support can vary by camera model and file variant even when the extension is recognized.
 - Non-Local Means noise reduction and some geometric or multi-image operations can be slow on large inputs.
-- The plugin interface exists and an example plugin is included, but the third-party plugin ecosystem is not established.
+- The plugin interface exists and an example plugin is included, but the third-party plugin ecosystem is not established. Plugins are loaded through the library API only; there is no command-line flag or user interface for loading them, and a loaded plugin is trusted native code (see [Plugins](#plugins)).
 
 ## Supported files
 
@@ -173,6 +173,17 @@ Current library features include:
 - Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals.
 - Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
 - Index rebuilding, integrity scrubbing, protected-photo deletion guards, and recoverable move-to-trash behavior.
+
+## Plugins
+
+RasterLab can load additional operations from shared libraries that implement the C ABI in `rasterlab-plugin-api`. `plugins/example-plugin` is a complete working example (a sepia tone filter).
+
+> [!WARNING]
+> **A plugin is trusted native code.** It is loaded into the RasterLab process with `dlopen` and runs with the full privileges of the user running the application: it can read and write any file that user can, open network connections, and corrupt any memory in the process. The plugin ABI is not a security boundary — there is no sandbox and no separate address space, and a plugin can bypass the ABI entirely. Install plugins only from sources you would trust to run as an ordinary program.
+
+The loader does check what a plugin reports, so that an honest plugin bug produces an error rather than a crash or a corrupted image: the ABI version must match exactly, plugin metadata must be short, null-terminated UTF-8 with a non-empty name, and every image an operation returns must carry a known pixel format and a byte length that matches its dimensions. Image sizes are computed in 64-bit arithmetic on both sides of the boundary, and a buffer a plugin allocates is always released by that plugin's own deallocator, since host and plugin have separate allocators.
+
+Loading is a library-level API — `rasterlab_core::plugin_loader::PluginRegistry`, which can load one library or scan a directory. There is no `--plugin` command-line flag and no user interface for loading plugins yet.
 
 ## Building and running
 

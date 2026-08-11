@@ -25,4 +25,10 @@
   reaches 19 against a tolerance of 2. Decide the per-op tolerance that still
   catches real breakage, so the scheduled GPU job means something.
 
-- [ ] Clarify and harden the native plugin boundary. Document that plugins are trusted native code, use checked image-size arithmetic, define robust cross-library allocation/deallocation ownership, validate returned metadata where possible, add plugin-loader/ABI tests, and either implement or remove the documented `--plugin` loading path.
+- [x] DONE Clarify and harden the native plugin boundary. Document that plugins
+  are trusted native code, use checked image-size arithmetic, define robust
+  cross-library allocation/deallocation ownership, validate returned metadata
+  where possible, add plugin-loader/ABI tests, and either implement or remove
+  the documented `--plugin` loading path.  ABI v2 adds
+  `PluginVTable::free_image_data`; the `--plugin` flag was only ever claimed in
+  the example plugin's header comment and is now documented as not existing.
