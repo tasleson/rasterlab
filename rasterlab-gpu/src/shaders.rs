@@ -805,10 +805,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.y * params.width + gid.x;
     if (i >= params.pixel_count) { return; }
 
+    // `sigma_r2` is expressed in the [0,1] colour space the CPU op works in,
+    // so the colour distance has to be computed there too.
     let px = input_pixels[i];
-    let cr = f32(px & 0xffu);
-    let cg = f32((px >> 8u) & 0xffu);
-    let cb = f32((px >> 16u) & 0xffu);
+    let cr = f32(px & 0xffu) / 255.0;
+    let cg = f32((px >> 8u) & 0xffu) / 255.0;
+    let cb = f32((px >> 16u) & 0xffu) / 255.0;
     let a = px & 0xff000000u;
 
     var sum_r = 0.0;
@@ -818,12 +820,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var dy: i32 = -i32(params.radius); dy <= i32(params.radius); dy = dy + 1) {
         for (var dx: i32 = -i32(params.radius); dx <= i32(params.radius); dx = dx + 1) {
-            let nx = clamp(i32(gid.x) + dx, 0, i32(params.width) - 1);
-            let ny = clamp(i32(gid.y) + dy, 0, i32(params.height) - 1);
+            // The CPU op truncates the window at the border rather than
+            // replicating the edge pixel; skip the neighbours it drops.
+            let nx = i32(gid.x) + dx;
+            let ny = i32(gid.y) + dy;
+            if (nx < 0 || ny < 0 || nx >= i32(params.width) || ny >= i32(params.height)) {
+                continue;
+            }
             let npx = input_pixels[u32(ny) * params.width + u32(nx)];
-            let nr = f32(npx & 0xffu);
-            let ng = f32((npx >> 8u) & 0xffu);
-            let nb = f32((npx >> 16u) & 0xffu);
+            let nr = f32(npx & 0xffu) / 255.0;
+            let ng = f32((npx >> 8u) & 0xffu) / 255.0;
+            let nb = f32((npx >> 16u) & 0xffu) / 255.0;
 
             let spatial_d = f32(dx * dx + dy * dy);
             let s_w = exp(-spatial_d / params.sigma_s2);
@@ -843,9 +850,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     if (sum_w > 1e-9) {
-        let out_r = u32(clamp(sum_r / sum_w, 0.0, 255.0));
-        let out_g = u32(clamp(sum_g / sum_w, 0.0, 255.0));
-        let out_b = u32(clamp(sum_b / sum_w, 0.0, 255.0));
+        let out_r = u32(clamp((sum_r / sum_w) * 255.0, 0.0, 255.0));
+        let out_g = u32(clamp((sum_g / sum_w) * 255.0, 0.0, 255.0));
+        let out_b = u32(clamp((sum_b / sum_w) * 255.0, 0.0, 255.0));
         output_pixels[i] = out_r | (out_g << 8u) | (out_b << 16u) | a;
     } else {
         output_pixels[i] = px;

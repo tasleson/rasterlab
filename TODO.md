@@ -18,7 +18,7 @@
   kernel, its dispatch arm, and its shader are unreachable, and the render
   pipeline silently falls back to the CPU. Audit the other ops for the same gap.
 
-- [ ] Give the GPU/CPU comparison tests an adapter-independent tolerance. Seven
+- [x] DONE Give the GPU/CPU comparison tests an adapter-independent tolerance. Seven
   of the thirty tests in `rasterlab-gpu/src/tests.rs` fail on an AMD Radeon 780M:
   the hue-shift, saturation, vibrance, and pipeline-chaining tests assert exact
   byte equality against the CPU reference but drift by up to 3 LSB, and denoise

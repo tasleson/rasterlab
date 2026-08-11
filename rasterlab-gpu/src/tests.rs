@@ -44,6 +44,70 @@ fn test_image(width: u32, height: u32) -> Image {
     image
 }
 
+// Tolerance policy for GPU-versus-CPU comparisons.
+//
+// The two implementations are separate pieces of arithmetic, so they only
+// agree bit-for-bit where no float math survives to the GPU.  Everywhere else
+// an adapter is free to contract a multiply-add, approximate a reciprocal, or
+// ship its own `exp`/`pow`, and both sides *truncate* the final f32 to 8 bits
+// — so a result that lands an ulp below a whole level on one adapter and on
+// it on another differs by a whole level.  These budgets are therefore stated
+// per shader pass rather than measured off one GPU; the drift on an AMD Radeon
+// 780M sits inside them with a level to spare, and anything larger is a bug in
+// the kernel, not adapter variation.
+//
+/// A GPU pass that only applies a lookup table the CPU built: no float math
+/// runs on the GPU, so the results are byte-identical on every adapter.
+const EXACT: u8 = 0;
+/// One point-wise pass of f32 math in the shader, truncated to 8 bits.
+const POINT_PASS: u8 = 1;
+/// One pass that sums a window of pixels before truncating: ulp differences
+/// accumulate across the window first.
+const WINDOW_PASS: u8 = 2;
+
+/// Compare a GPU result against the CPU reference for the same operation.
+///
+/// RGB may deviate by up to `tolerance` levels; alpha must survive exactly,
+/// since every op compared this way leaves it alone.  Failures report the
+/// worst pixel plus the mean deviation, which is what distinguishes a real
+/// regression (a shifted mean) from an adapter rounding a few pixels the
+/// other way.
+#[track_caller]
+fn assert_matches_cpu(actual: &Image, expected: &Image, tolerance: u8, case: &str) {
+    assert_eq!(actual.width, expected.width, "{case}: width");
+    assert_eq!(actual.height, expected.height, "{case}: height");
+    assert_eq!(actual.data.len(), expected.data.len(), "{case}: length");
+
+    let mut max_delta = 0u8;
+    let mut worst = 0usize;
+    let mut sum_delta = 0u64;
+    for (i, (a, b)) in actual
+        .data
+        .chunks(4)
+        .zip(expected.data.chunks(4))
+        .enumerate()
+    {
+        for channel in 0..3 {
+            let delta = a[channel].abs_diff(b[channel]);
+            if delta > max_delta {
+                max_delta = delta;
+                worst = i;
+            }
+            sum_delta += u64::from(delta);
+        }
+        assert_eq!(a[3], b[3], "{case}: alpha changed at pixel {i}");
+    }
+
+    let mean_delta = sum_delta as f64 / (actual.data.len() / 4 * 3) as f64;
+    assert!(
+        max_delta <= tolerance,
+        "{case}: GPU drifted from CPU by {max_delta} levels (tolerance {tolerance}), \
+         mean {mean_delta:.3}; worst pixel {worst} gpu={:?} cpu={:?}",
+        &actual.data[worst * 4..worst * 4 + 4],
+        &expected.data[worst * 4..worst * 4 + 4],
+    );
+}
+
 #[test]
 #[ignore = "requires a working wgpu adapter"]
 fn rgba8_upload_readback_exact() {
@@ -78,7 +142,12 @@ fn brightness_contrast_matches_cpu() {
         let expected = op.apply(src.deep_clone()).unwrap();
         let gpu = GpuImage::from_image(&ctx, &src).unwrap();
         let actual = apply_one(&ctx, &op, gpu).unwrap().into_image(&ctx).unwrap();
-        assert_eq!(actual.data, expected.data);
+        assert_matches_cpu(
+            &actual,
+            &expected,
+            EXACT,
+            &format!("brightness_contrast b={brightness} c={contrast}"),
+        );
     }
 }
 
@@ -97,11 +166,13 @@ fn curves_matches_cpu() {
     ];
     for points in cases {
         let src = test_image(31, 17);
-        let op = CurvesOp { points };
+        let op = CurvesOp {
+            points: points.clone(),
+        };
         let expected = op.apply(src.deep_clone()).unwrap();
         let gpu = GpuImage::from_image(&ctx, &src).unwrap();
         let actual = apply_one(&ctx, &op, gpu).unwrap().into_image(&ctx).unwrap();
-        assert_eq!(actual.data, expected.data);
+        assert_matches_cpu(&actual, &expected, EXACT, &format!("curves {points:?}"));
     }
 }
 
@@ -118,7 +189,14 @@ fn hue_shift_matches_cpu() {
         let expected = op.apply(src.deep_clone()).unwrap();
         let gpu = GpuImage::from_image(&ctx, &src).unwrap();
         let actual = apply_one(&ctx, &op, gpu).unwrap().into_image(&ctx).unwrap();
-        assert_eq!(actual.data, expected.data, "degrees={degrees}");
+        // An HSL round trip: `rgb_to_hsl` divides by a channel spread that can
+        // be tiny, so an ulp of adapter disagreement is easy to come by.
+        assert_matches_cpu(
+            &actual,
+            &expected,
+            POINT_PASS,
+            &format!("hue_shift degrees={degrees}"),
+        );
     }
 }
 
@@ -135,7 +213,12 @@ fn saturation_matches_cpu() {
         let expected = op.apply(src.deep_clone()).unwrap();
         let gpu = GpuImage::from_image(&ctx, &src).unwrap();
         let actual = apply_one(&ctx, &op, gpu).unwrap().into_image(&ctx).unwrap();
-        assert_eq!(actual.data, expected.data, "saturation={saturation}");
+        assert_matches_cpu(
+            &actual,
+            &expected,
+            POINT_PASS,
+            &format!("saturation={saturation}"),
+        );
     }
 }
 
@@ -152,7 +235,12 @@ fn vibrance_matches_cpu() {
         let expected = op.apply(src.deep_clone()).unwrap();
         let gpu = GpuImage::from_image(&ctx, &src).unwrap();
         let actual = apply_one(&ctx, &op, gpu).unwrap().into_image(&ctx).unwrap();
-        assert_eq!(actual.data, expected.data, "strength={strength}");
+        assert_matches_cpu(
+            &actual,
+            &expected,
+            POINT_PASS,
+            &format!("vibrance strength={strength}"),
+        );
     }
 }
 
@@ -176,9 +264,11 @@ fn white_balance_matches_cpu() {
         let expected = op.apply(src.deep_clone()).unwrap();
         let gpu = GpuImage::from_image(&ctx, &src).unwrap();
         let actual = apply_one(&ctx, &op, gpu).unwrap().into_image(&ctx).unwrap();
-        assert_eq!(
-            actual.data, expected.data,
-            "temperature={temperature} tint={tint}"
+        assert_matches_cpu(
+            &actual,
+            &expected,
+            POINT_PASS,
+            &format!("white_balance temperature={temperature} tint={tint}"),
         );
     }
 }
@@ -202,7 +292,7 @@ fn gpu_pipeline_chains_ops_with_single_readback() {
     assert_eq!(pipeline.op_count(), 2);
     let (actual, timings) = pipeline.into_image(&ctx).unwrap();
 
-    assert_eq!(actual.data, expected.data);
+    assert_matches_cpu(&actual, &expected, EXACT, "chained brightness/contrast");
     assert!(timings.upload > Default::default());
     assert!(timings.dispatch > Default::default());
     assert!(timings.readback > Default::default());
@@ -229,7 +319,7 @@ fn gpu_pipeline_chains_brightness_and_curves() {
     assert_eq!(pipeline.op_count(), 2);
     let (actual, timings) = pipeline.into_image(&ctx).unwrap();
 
-    assert_eq!(actual.data, expected.data);
+    assert_matches_cpu(&actual, &expected, EXACT, "chained brightness + curves");
     assert!(timings.upload > Default::default());
     assert!(timings.dispatch > Default::default());
     assert!(timings.readback > Default::default());
@@ -275,7 +365,16 @@ fn gpu_pipeline_chains_point_color_ops() {
     assert_eq!(pipeline.op_count(), 6);
     let (actual, timings) = pipeline.into_image(&ctx).unwrap();
 
-    assert_eq!(actual.data, expected.data);
+    // The pipeline keeps its intermediates as RGBA8, so each of the four
+    // shader-computed ops in the chain (hue shift, saturation, vibrance,
+    // white balance) re-quantizes and can hand the next one a level of drift;
+    // the two lookup-table ops contribute none.
+    assert_matches_cpu(
+        &actual,
+        &expected,
+        4 * POINT_PASS,
+        "chained point colour ops",
+    );
     assert!(timings.upload > Default::default());
     assert!(timings.dispatch > Default::default());
     assert!(timings.readback > Default::default());
@@ -341,23 +440,9 @@ fn noise_reduction_nlm_roughly_matches_cpu() {
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
 
-    let mut max_delta = 0u8;
-    let mut sum_delta = 0u64;
-    let mut count = 0u64;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for channel in 0..3 {
-            let delta = a[channel].abs_diff(b[channel]);
-            max_delta = max_delta.max(delta);
-            sum_delta += u64::from(delta);
-            count += 1;
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    let mean_delta = sum_delta as f64 / count as f64;
-    assert!(
-        mean_delta <= 3.0 && max_delta <= 16,
-        "GPU NLM drifted too far from CPU: mean_delta={mean_delta:.2} max_delta={max_delta}"
-    );
+    // Two windowed passes: the non-local means average, then the detail blend
+    // that reads it back.
+    assert_matches_cpu(&actual, &expected, 2 * WINDOW_PASS, "noise_reduction nlm");
 }
 
 #[test]
@@ -392,14 +477,7 @@ fn black_and_white_roughly_matches_cpu() {
     };
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
-    let mut max_delta = 0u8;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for ch in 0..3 {
-            max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    assert!(max_delta <= 1, "black_and_white max_delta={max_delta}");
+    assert_matches_cpu(&actual, &expected, POINT_PASS, "black_and_white");
 }
 
 #[test]
@@ -467,14 +545,7 @@ fn color_balance_roughly_matches_cpu() {
     let op = ColorBalanceOp::new([0.3, 0.0, -0.2], [0.0, 0.2, 0.0], [-0.1, 0.0, 0.3]);
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
-    let mut max_delta = 0u8;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for ch in 0..3 {
-            max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    assert!(max_delta <= 2, "color_balance max_delta={max_delta}");
+    assert_matches_cpu(&actual, &expected, POINT_PASS, "color_balance");
 }
 
 #[test]
@@ -509,14 +580,7 @@ fn color_space_roughly_matches_cpu() {
     };
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
-    let mut max_delta = 0u8;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for ch in 0..3 {
-            max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    assert!(max_delta <= 2, "color_space max_delta={max_delta}");
+    assert_matches_cpu(&actual, &expected, POINT_PASS, "color_space");
 }
 
 #[test]
@@ -553,14 +617,7 @@ fn denoise_roughly_matches_cpu() {
     };
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
-    let mut max_delta = 0u8;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for ch in 0..3 {
-            max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    assert!(max_delta <= 3, "denoise max_delta={max_delta}");
+    assert_matches_cpu(&actual, &expected, WINDOW_PASS, "denoise");
 }
 
 #[test]
@@ -599,14 +656,7 @@ fn hsl_panel_roughly_matches_cpu() {
     );
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
-    let mut max_delta = 0u8;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for ch in 0..3 {
-            max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    assert!(max_delta <= 2, "hsl_panel max_delta={max_delta}");
+    assert_matches_cpu(&actual, &expected, POINT_PASS, "hsl_panel");
 }
 
 #[test]
@@ -637,14 +687,7 @@ fn sharpen_roughly_matches_cpu() {
     let op = SharpenOp::new(1.0);
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
-    let mut max_delta = 0u8;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for ch in 0..3 {
-            max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    assert!(max_delta <= 2, "sharpen max_delta={max_delta}");
+    assert_matches_cpu(&actual, &expected, WINDOW_PASS, "sharpen");
 }
 
 #[test]
@@ -675,14 +718,7 @@ fn faux_hdr_roughly_matches_cpu() {
     let op = FauxHdrOp::new(0.8);
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
-    let mut max_delta = 0u8;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for ch in 0..3 {
-            max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    assert!(max_delta <= 1, "faux_hdr max_delta={max_delta}");
+    assert_matches_cpu(&actual, &expected, POINT_PASS, "faux_hdr");
 }
 
 #[test]
@@ -713,14 +749,7 @@ fn clarity_texture_roughly_matches_cpu() {
     let op = ClarityTextureOp::new(0.4, 0.0);
     let expected = op.apply(src.deep_clone()).unwrap();
     let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
-    let mut max_delta = 0u8;
-    for (a, b) in actual.data.chunks(4).zip(expected.data.chunks(4)) {
-        for ch in 0..3 {
-            max_delta = max_delta.max(a[ch].abs_diff(b[ch]));
-        }
-        assert_eq!(a[3], b[3]);
-    }
-    assert!(max_delta <= 2, "clarity_texture max_delta={max_delta}");
+    assert_matches_cpu(&actual, &expected, WINDOW_PASS, "clarity_texture");
 }
 
 /// One instance of every op the dispatcher claims to support.  Kept in sync
