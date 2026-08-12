@@ -8,6 +8,7 @@ pub mod auto_enhance;
 pub mod blur;
 pub mod brightness_contrast;
 pub mod bw;
+pub mod channel_levels;
 pub mod clarity_texture;
 pub mod color_balance;
 pub mod color_space;

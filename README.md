@@ -62,6 +62,7 @@ The table follows the tool order in the GUI.
 | Black & White | Converts with luminance, average, perceptual, or channel-mixer modes and presets. |
 | Blur | Applies a Gaussian blur with a configurable radius. |
 | Brightness / Contrast | Adjusts linear brightness and contrast. |
+| Channel Levels | Sets independent black, gamma, and white points for the red, green, and blue channels. |
 | Clarity / Texture | Adjusts local contrast at midtone and fine-detail spatial scales. |
 | Color Balance | Shifts cyan/red, magenta/green, and yellow/blue independently in shadows, midtones, and highlights. |
 | Color Space | Converts pixel values between sRGB and Display P3. |

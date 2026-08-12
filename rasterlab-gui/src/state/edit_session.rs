@@ -13,6 +13,7 @@ use super::tool_state::ToolState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditingTool {
     AirplaneWindow,
+    ChannelLevels,
     Levels,
     BlackAndWhite,
     BrightnessContrast,
@@ -60,4 +61,32 @@ pub fn load_op_into_tools(op: &dyn Operation, tools: &mut ToolState) -> Option<E
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use rasterlab_core::ops::{ChannelLevelsOp, ChannelRange};
+
+    use super::*;
+    use crate::panels::tools::channel_levels::ChannelLevelsTool;
+
+    #[test]
+    fn channel_levels_is_routed_to_its_editor() {
+        let op = ChannelLevelsOp::new(
+            ChannelRange::new(0.10, 1.50, 0.80),
+            ChannelRange::new(0.05, 2.25, 1.10),
+            ChannelRange::new(0.02, 0.90, 1.30),
+        );
+        let mut tools = ToolState::new();
+
+        assert_eq!(
+            load_op_into_tools(&op, &mut tools),
+            Some(EditingTool::ChannelLevels)
+        );
+
+        let editor = tools.find::<ChannelLevelsTool>().unwrap();
+        assert_eq!(editor.red, op.red);
+        assert_eq!(editor.green, op.green);
+        assert_eq!(editor.blue, op.blue);
+    }
 }
