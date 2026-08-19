@@ -238,6 +238,8 @@ fn render_pipeline(
             no_intermediates,
             #[cfg(feature = "gpu")]
             gpu.as_deref(),
+            #[cfg(feature = "gpu")]
+            default_batch_policy,
         )?;
         let x = vp_x.min(current.width.saturating_sub(1));
         let y = vp_y.min(current.height.saturating_sub(1));
@@ -367,6 +369,8 @@ fn apply_committed_ops(
             no_intermediates,
             #[cfg(feature = "gpu")]
             gpu,
+            #[cfg(feature = "gpu")]
+            default_batch_policy,
         );
     }
 
@@ -376,11 +380,28 @@ fn apply_committed_ops(
         |index, image| intermediates.push((index, Arc::clone(image))),
         #[cfg(feature = "gpu")]
         gpu,
+        #[cfg(feature = "gpu")]
+        default_batch_policy,
     )
 }
 
 /// Cache hook for runs whose output is not written to the committed step cache.
 fn no_intermediates(_index: usize, _image: &Arc<Image>) {}
+
+/// Decides whether a contiguous run of GPU-supported ops is worth dispatching
+/// as a single batch. `Some(reason)` keeps the run on the per-op path.
+///
+/// Injected rather than called directly so tests can drive the batching
+/// mechanics independently of the perf heuristic, which deliberately keeps
+/// cheap ops such as brightness/contrast on the CPU.
+#[cfg(feature = "gpu")]
+type BatchPolicy = fn(ops: &[&dyn Operation], pixel_count: usize) -> Option<&'static str>;
+
+/// The policy every production render runs under.
+#[cfg(feature = "gpu")]
+fn default_batch_policy(ops: &[&dyn Operation], pixel_count: usize) -> Option<&'static str> {
+    gpu_batch_skip_reason(ops, pixel_count, true)
+}
 
 /// Apply a run of committed operations to `current`, batching adjacent
 /// GPU-supported operations where the GPU policy says it is worthwhile.
@@ -395,6 +416,7 @@ fn run_committed_ops(
     committed_ops: &[Option<Box<dyn Operation>>],
     mut record: impl FnMut(usize, &Arc<Image>),
     #[cfg(feature = "gpu")] gpu: Option<&GpuContext>,
+    #[cfg(feature = "gpu")] batch_policy: BatchPolicy,
 ) -> Result<(), String> {
     let mut index = 0;
     while index < committed_ops.len() {
@@ -420,9 +442,9 @@ fn run_committed_ops(
                         .iter()
                         .filter_map(|op| op.as_deref())
                         .collect::<Vec<_>>();
-                    if gpu_batch_skip_reason(&ops, current.pixel_count(), true).is_some() {
+                    if batch_policy(&ops, current.pixel_count()).is_some() {
                         // This contiguous GPU-supported run is too cheap or too
-                        // numerically divergent for the default GPU policy.
+                        // numerically divergent for the active GPU policy.
                     } else {
                         let result = apply_gpu_batch_or_cpu(take_image(current), &ops, gpu)?;
                         for op in ops {
@@ -1169,15 +1191,22 @@ mod tests {
         assert_eq!(gpu_out.data, cpu.data);
     }
 
+    /// Batch policy for tests that exercise the batching mechanics themselves
+    /// rather than the perf heuristic.
+    #[cfg(feature = "gpu")]
+    fn always_batch(_ops: &[&dyn Operation], _pixel_count: usize) -> Option<&'static str> {
+        None
+    }
+
     #[cfg(feature = "gpu")]
     #[test]
     #[ignore = "requires a working wgpu adapter"]
-    fn gpu_full_render_batches_adjacent_supported_ops_at_sparse_cache_boundary() {
+    fn gpu_batched_run_records_one_intermediate_at_readback_boundary() {
         let Some(gpu) = pollster::block_on(make_gpu_context()) else {
             eprintln!("skipping: no wgpu adapter available");
             return;
         };
-        let mut img = Image::new(2048, 1024);
+        let mut img = Image::new(256, 128);
         for (i, pixel) in img.data.chunks_mut(4).enumerate() {
             pixel[0] = (i * 3 % 256) as u8;
             pixel[1] = (i * 5 % 256) as u8;
@@ -1190,31 +1219,36 @@ mod tests {
                 Some(Box::new(BrightnessContrastOp::new(-0.11, 0.14)) as Box<dyn Operation>),
             ]
         };
+        let run = |gpu: Option<&GpuContext>, policy: BatchPolicy| {
+            let mut current = Arc::new(img.deep_clone());
+            let mut intermediates = Vec::new();
+            run_committed_ops(
+                &mut current,
+                &ops(),
+                |index, image| intermediates.push((index, Arc::clone(image))),
+                gpu,
+                policy,
+            )
+            .unwrap();
+            (current, intermediates)
+        };
 
-        let (cpu, _, _, _) = render_pipeline(
-            Arc::new(img.deep_clone()),
-            ops(),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        let (gpu_out, _, intermediates, _) = render_pipeline(
-            Arc::new(img),
-            ops(),
-            None,
-            None,
-            None,
-            None,
-            Some(Arc::new(gpu)),
-        )
-        .unwrap();
+        // Without a GPU context every op runs on its own and fills its cache slot.
+        let (cpu, cpu_intermediates) = run(None, default_batch_policy);
+        assert_eq!(cpu_intermediates.len(), 2);
 
-        assert_eq!(gpu_out.data, cpu.data);
-        assert_eq!(intermediates.len(), 1);
-        assert_eq!(intermediates[0].0, 1);
-        assert_eq!(intermediates[0].1.data, cpu.data);
+        // Batched, the pair collapses into one dispatch and reports only the
+        // index it was read back at, leaving slot 0 uncached.
+        let (batched, batched_intermediates) = run(Some(&gpu), always_batch);
+        assert_eq!(batched.data, cpu.data);
+        assert_eq!(batched_intermediates.len(), 1);
+        assert_eq!(batched_intermediates[0].0, 1);
+        assert_eq!(batched_intermediates[0].1.data, cpu.data);
+
+        // Brightness/contrast is cheap enough that the shipping policy declines
+        // the batch, so the per-op path keeps every slot populated.
+        let (unbatched, unbatched_intermediates) = run(Some(&gpu), default_batch_policy);
+        assert_eq!(unbatched.data, cpu.data);
+        assert_eq!(unbatched_intermediates.len(), 2);
     }
 }
