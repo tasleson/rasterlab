@@ -1154,10 +1154,7 @@ fn attempt_repair(data: &[u8], copies: &[ReccCopy], repair_to: &Path) -> RasterR
 
             // v4 protects the file header along with the content chunks; v5
             // protects the content alone. The magic tells the two apart.
-            let content = match protected.strip_prefix(MAGIC.as_slice()) {
-                Some(rest) => &rest[2..],
-                None => &protected[..],
-            };
+            let content = repair_content(&protected)?;
 
             // Parity is recomputed rather than reused: a v4 payload describes a
             // protected region that included the header, so it would not
@@ -1172,6 +1169,29 @@ fn attempt_repair(data: &[u8], copies: &[ReccCopy], repair_to: &Path) -> RasterR
         }
     }
     Ok(false)
+}
+
+/// Strip the header from a reconstructed v4 protected region.
+///
+/// A header-bearing region can only have come from v4: v5 parity protects the
+/// content chunks alone, and earlier versions did not contain `RECC`.  Treat a
+/// truncated or contradictory header as malformed input instead of indexing
+/// into bytes that are not present.
+fn repair_content(protected: &[u8]) -> RasterResult<&[u8]> {
+    let Some(rest) = protected.strip_prefix(MAGIC.as_slice()) else {
+        return Ok(protected);
+    };
+    let version_bytes = rest.get(..2).ok_or_else(|| {
+        RasterError::decode("rlab", "truncated project header in RECC protected region")
+    })?;
+    let version = u16::from_le_bytes(version_bytes.try_into().expect("2-byte version"));
+    if version != FORMAT_VERSION_V4 {
+        return Err(RasterError::decode(
+            "rlab",
+            format!("invalid RECC protected-region format version {version} (expected 4)"),
+        ));
+    }
+    Ok(&rest[2..])
 }
 
 // ── RECC encoding helpers ─────────────────────────────────────────────────────
@@ -1293,4 +1313,56 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::degraded_read::DegradedRead;
+
+    #[test]
+    fn repair_rejects_header_bearing_region_without_version() {
+        let error = repair_content(MAGIC).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RasterError::Decode { ref format, ref message }
+                if format == "rlab" && message.contains("truncated project header")
+        ));
+    }
+
+    #[test]
+    fn malformed_recc_payload_with_magic_only_returns_decode_error() {
+        let payload = build_recc_payload(MAGIC).unwrap();
+        let mut data = MAGIC.to_vec();
+        write_chunk(&mut data, TAG_RECC, &payload);
+        data.extend_from_slice(&[0; HASH_LEN]); // Deliberately invalid file hash triggers repair.
+        let read = DegradedRead {
+            data,
+            unreadable: Vec::new(),
+        };
+        let output = tempfile::NamedTempFile::new().unwrap();
+
+        let error = verify_and_repair_degraded(&read, Some(output.path())).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RasterError::Decode { ref format, ref message }
+                if format == "rlab" && message.contains("truncated project header")
+        ));
+    }
+
+    #[test]
+    fn repair_rejects_header_bearing_region_with_non_v4_version() {
+        let mut protected = MAGIC.to_vec();
+        protected.extend_from_slice(&FORMAT_VERSION_V5.to_le_bytes());
+
+        let error = repair_content(&protected).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RasterError::Decode { ref format, ref message }
+                if format == "rlab" && message.contains("format version 5")
+        ));
+    }
 }
