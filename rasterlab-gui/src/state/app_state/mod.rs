@@ -417,6 +417,9 @@ impl AppState {
         }
     }
     pub fn undo(&mut self) {
+        if self.editing.is_some() {
+            return;
+        }
         if self.pipeline_mut().is_some_and(|p| p.undo()) {
             self.mark_dirty();
             self.cancel_all_previews();
@@ -424,6 +427,9 @@ impl AppState {
         }
     }
     pub fn redo(&mut self) {
+        if self.editing.is_some() {
+            return;
+        }
         if self.pipeline_mut().is_some_and(|p| p.redo()) {
             self.mark_dirty();
             self.cancel_all_previews();
@@ -911,10 +917,10 @@ impl AppState {
     }
 
     pub fn can_undo(&self) -> bool {
-        self.pipeline().is_some_and(|p| p.can_undo())
+        self.editing.is_none() && self.pipeline().is_some_and(|p| p.can_undo())
     }
     pub fn can_redo(&self) -> bool {
-        self.pipeline().is_some_and(|p| p.can_redo())
+        self.editing.is_none() && self.pipeline().is_some_and(|p| p.can_redo())
     }
 
     // -----------------------------------------------------------------------
@@ -1083,5 +1089,40 @@ mod sprocket_crop_tests {
         assert!(state.tools.any_preview_active());
         assert!(!state.pipeline().unwrap().ops()[0].enabled);
         assert_eq!(state.pipeline().unwrap().step_cache_gen(), cache_gen);
+    }
+
+    #[test]
+    fn undo_is_disabled_during_an_active_edit() {
+        let mut state = state_with_op(Box::new(SaturationOp::new(0.5)));
+        assert!(state.can_undo());
+        state.begin_edit(0);
+
+        assert!(!state.can_undo());
+        state.undo();
+
+        assert!(state.editing.is_some());
+        assert_eq!(state.pipeline().unwrap().cursor(), 1);
+        assert_eq!(state.pipeline().unwrap().ops().len(), 1);
+        assert!(!state.pipeline().unwrap().ops()[0].enabled);
+    }
+
+    #[test]
+    fn redo_is_disabled_during_an_active_edit() {
+        let mut pipeline = EditPipeline::new(Image::new(8, 8));
+        pipeline.push_op(Box::new(SaturationOp::new(0.5)));
+        pipeline.push_op(Box::new(SepiaOp::new(0.25)));
+        assert!(pipeline.undo());
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
+        assert!(state.can_redo());
+        state.begin_edit(0);
+
+        assert!(!state.can_redo());
+        state.redo();
+
+        assert!(state.editing.is_some());
+        assert_eq!(state.pipeline().unwrap().cursor(), 1);
+        assert_eq!(state.pipeline().unwrap().ops().len(), 1);
+        assert!(!state.pipeline().unwrap().ops()[0].enabled);
     }
 }

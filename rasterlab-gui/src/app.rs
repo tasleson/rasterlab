@@ -135,6 +135,8 @@ impl RasterLabApp {
         let no_focus = ctx.memory(|m| m.focused().is_none());
         #[cfg(not(target_arch = "wasm32"))]
         let can_save = self.state.pipeline().is_some() && self.state.editing.is_none();
+        let can_undo = self.state.can_undo();
+        let can_redo = self.state.can_redo();
 
         // Consume shortcut keys inside `input_mut`, but defer the handlers
         // until after the closure returns. Handlers like `state.undo()` end
@@ -158,10 +160,10 @@ impl RasterLabApp {
         let mut do_delete = false;
 
         ctx.input_mut(|i| {
-            if i.consume_key(Modifiers::CTRL, Key::Z) {
+            if can_undo && i.consume_key(Modifiers::CTRL, Key::Z) {
                 do_undo = true;
             }
-            if i.consume_key(Modifiers::CTRL, Key::Y) {
+            if can_redo && i.consume_key(Modifiers::CTRL, Key::Y) {
                 do_redo = true;
             }
             #[cfg(not(target_arch = "wasm32"))]
