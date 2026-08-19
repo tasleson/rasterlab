@@ -7,6 +7,7 @@ use rasterlab_core::traits::operation::Operation;
 use super::shared::{MIN_STACK_FRAMES, StackFrame, frame_list_ui, frame_paths};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::file_chooser::DialogKind;
+use crate::state::EditingTool;
 
 pub struct HdrMergeTool {
     pub frames: Vec<StackFrame>,
@@ -28,6 +29,9 @@ impl Tool for HdrMergeTool {
     }
     fn display_name(&self) -> &'static str {
         "✺  HDR Merge"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::HdrMerge)
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {

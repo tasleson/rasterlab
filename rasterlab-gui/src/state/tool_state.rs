@@ -1,5 +1,5 @@
 use rasterlab_core::{
-    ops::{FilmStock, LinearMask, MaskShape, RadialMask, ResampleMode},
+    ops::{FilmStock, LinearMask, MaskShape, RadialMask, ResampleMode, SprocketFilmOp},
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
 };
@@ -27,6 +27,10 @@ pub struct ToolState {
     // ── Looks ─────────────────────────────────────────────────────────────
     /// `None` keeps the original random-stock behaviour.
     pub sprocket_film_stock: Option<FilmStock>,
+    /// Original operation and preview state while a Sprocket Film stack row
+    /// is being edited through the non-trait Looks panel.
+    pub sprocket_edit_op: Option<SprocketFilmOp>,
+    pub sprocket_edit_preview_active: bool,
     /// Enables the fixed 2:1 crop overlay used by the sprocket look.
     pub sprocket_crop_active: bool,
 
@@ -70,6 +74,8 @@ impl ToolState {
         Self {
             tools: Self::build_tools(),
             sprocket_film_stock: None,
+            sprocket_edit_op: None,
+            sprocket_edit_preview_active: false,
             sprocket_crop_active: false,
             mask_sel: 0,
             mask_lin_cx: 0.5,
@@ -148,10 +154,19 @@ impl ToolState {
     }
 
     pub fn any_preview_active(&self) -> bool {
-        self.tools.iter().any(|t| t.is_preview_active())
+        self.sprocket_edit_preview_active || self.tools.iter().any(|t| t.is_preview_active())
     }
 
     pub fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        if self.sprocket_edit_preview_active {
+            return self.sprocket_edit_op.as_ref().map(|original| {
+                let mut op = original.clone();
+                if let Some(stock) = self.sprocket_film_stock {
+                    op.stock = stock;
+                }
+                Box::new(op) as Box<dyn Operation>
+            });
+        }
         self.tools.iter().find_map(|t| t.preview_op())
     }
 
@@ -160,6 +175,8 @@ impl ToolState {
             tool.cancel_preview();
         }
         self.sprocket_crop_active = false;
+        self.sprocket_edit_op = None;
+        self.sprocket_edit_preview_active = false;
     }
 
     /// Keep the preview owned by `keep_idx` and dismiss every other tool's
@@ -173,6 +190,8 @@ impl ToolState {
             }
         }
         self.sprocket_crop_active = false;
+        self.sprocket_edit_op = None;
+        self.sprocket_edit_preview_active = false;
     }
 
     /// Reset the per-image tool state for a freshly loaded `w`×`h` image.

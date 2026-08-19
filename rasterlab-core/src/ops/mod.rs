@@ -55,7 +55,7 @@ pub use crop::CropOp;
 pub use curves::CurvesOp;
 pub use denoise::DenoiseOp;
 pub use faux_hdr::FauxHdrOp;
-pub use flip::FlipOp;
+pub use flip::{FlipMode, FlipOp};
 pub use focus_stack::{FocusStackOp, FrameAlignment};
 pub use grain::GrainOp;
 pub use hdr_merge::HdrMergeOp;

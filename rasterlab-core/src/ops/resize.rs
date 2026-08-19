@@ -212,6 +212,10 @@ impl Operation for ResizeOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         if image.width == self.width && image.height == self.height {
             return Ok(image);

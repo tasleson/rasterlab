@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Duration};
 
 use rasterlab_core::{
     Image, cancel as core_cancel,
-    ops::{NoiseReductionOp, NrMethod},
+    ops::{MaskedOp, NoiseReductionOp, NrMethod},
     traits::operation::Operation,
 };
 use rasterlab_render::{PREVIEW_SCALE, RenderMeta, RenderRequest, RenderResult};
@@ -383,9 +383,30 @@ impl AppState {
         }
 
         // Preview op — applied on top of committed result but NOT cached.
-        let preview_op: Option<Box<dyn Operation>> = self.tools.preview_op();
+        let preview_op: Option<Box<dyn Operation>> = self.tools.preview_op().map(|preview| {
+            let edit_mask = self.editing.and_then(|session| {
+                self.pipeline()
+                    .and_then(|pipeline| pipeline.ops().get(session.op_index))
+                    .and_then(|entry| entry.operation.as_any())
+                    .and_then(|any| any.downcast_ref::<MaskedOp>())
+                    .map(|masked| masked.mask.clone())
+            });
+            if let Some(mask) = edit_mask {
+                Box::new(MaskedOp {
+                    inner: preview,
+                    mask,
+                }) as Box<dyn Operation>
+            } else {
+                preview
+            }
+        });
         let reusable_nr_signature = preview_op
             .as_deref()
+            .map(|op| {
+                op.as_any()
+                    .and_then(|any| any.downcast_ref::<MaskedOp>())
+                    .map_or(op, |masked| masked.inner.as_ref())
+            })
             .and_then(|op| op.as_any())
             .and_then(|any| any.downcast_ref::<NoiseReductionOp>())
             .filter(|nr| nr.method == NrMethod::NonLocalMeans)

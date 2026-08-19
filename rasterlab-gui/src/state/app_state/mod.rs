@@ -438,14 +438,18 @@ impl AppState {
     pub fn begin_edit(&mut self, index: usize) {
         // Already editing — first, cancel current session.
         self.end_edit();
-        let (op_clone, op_name) = {
+        let (op_clone, op_name, was_enabled) = {
             let Some(pipeline) = self.pipeline() else {
                 return;
             };
             let Some(entry) = pipeline.ops().get(index) else {
                 return;
             };
-            (entry.operation.clone_box(), entry.operation.name())
+            (
+                entry.operation.clone_box(),
+                entry.operation.name(),
+                entry.enabled,
+            )
         };
         let Some(tool) = load_op_into_tools(op_clone.as_ref(), &mut self.tools) else {
             self.status = format!("This op type cannot be edited: {}", op_name);
@@ -454,6 +458,7 @@ impl AppState {
         self.editing = Some(EditSession {
             op_index: index,
             tool,
+            was_enabled,
         });
         // Temporarily disable the op under edit so previewed values are shown
         // in situ rather than stacked on top of its committed output.
@@ -471,9 +476,10 @@ impl AppState {
         let Some(session) = self.editing.take() else {
             return;
         };
-        // Re-enable the op (it was toggled off when the session began).
+        // Restore the op's original enabled state (it was temporarily hidden
+        // while the editor's preview took its place).
         if let Some(p) = self.pipeline_mut() {
-            p.set_enabled_no_snapshot(session.op_index, true);
+            p.set_enabled_no_snapshot(session.op_index, session.was_enabled);
         }
         self.tools.cancel_all_previews();
         self.request_render();
@@ -488,7 +494,21 @@ impl AppState {
         };
         self.tools.cancel_all_previews();
         if let Some(p) = self.pipeline_mut() {
-            p.set_enabled_no_snapshot(session.op_index, true);
+            let mask = p
+                .ops()
+                .get(session.op_index)
+                .and_then(|entry| entry.operation.as_any())
+                .and_then(|any| any.downcast_ref::<MaskedOp>())
+                .map(|masked| masked.mask.clone());
+            let new_op: Box<dyn Operation> = if let Some(mask) = mask {
+                Box::new(MaskedOp {
+                    inner: new_op,
+                    mask,
+                })
+            } else {
+                new_op
+            };
+            p.set_enabled_no_snapshot(session.op_index, session.was_enabled);
             p.replace_op(session.op_index, new_op);
         }
         self.mark_dirty();
@@ -496,6 +516,10 @@ impl AppState {
     }
 
     fn activate_preview_for(&mut self, tool: EditingTool) {
+        if tool == EditingTool::SprocketFilm {
+            self.tools.sprocket_edit_preview_active = true;
+            return;
+        }
         for t in &mut self.tools.tools {
             if t.editing_tool() == Some(tool) {
                 t.activate_preview();
@@ -506,10 +530,9 @@ impl AppState {
 
     pub(crate) fn push_op(&mut self, op: Box<dyn Operation>) {
         // When an edit session is active, the tool's Apply button replaces the
-        // op under edit instead of pushing a new one.  The mask wrapper is
-        // skipped in this path — editing preserves the structure of the
-        // existing entry (including its own mask wrapper, if any, which we
-        // leave untouched by writing the new inner op type unwrapped).
+        // op under edit instead of pushing a new one. `commit_edit` preserves
+        // an existing mask wrapper rather than applying the currently selected
+        // global mask as though this were a new operation.
         if self.editing.is_some() {
             self.commit_edit(op);
             return;
@@ -946,7 +969,12 @@ impl AppState {
 
 #[cfg(test)]
 mod sprocket_crop_tests {
-    use super::{centered_sprocket_crop, clamp_sprocket_crop};
+    use rasterlab_core::ops::{LinearMask, MaskShape, MaskedOp, SaturationOp, SepiaOp};
+
+    use super::{
+        AppState, EditPipeline, EditSession, EditingTool, Image, VirtualCopyStore,
+        centered_sprocket_crop, clamp_sprocket_crop,
+    };
 
     #[test]
     fn centers_two_to_one_crop_in_portrait_source() {
@@ -964,5 +992,66 @@ mod sprocket_crop_tests {
             clamp_sprocket_crop([3900, 2900, 2000, 1000], 4000, 3000),
             [2000, 2000, 2000, 1000]
         );
+    }
+
+    fn state_with_op(op: Box<dyn rasterlab_core::traits::operation::Operation>) -> AppState {
+        let mut pipeline = EditPipeline::new(Image::new(8, 8));
+        pipeline.push_op(op);
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
+        state
+    }
+
+    #[test]
+    fn committing_an_edit_preserves_a_mask_wrapper() {
+        let mask = MaskShape::Linear(LinearMask {
+            cx: 0.4,
+            cy: 0.6,
+            angle_deg: 30.0,
+            feather: 0.2,
+            invert: true,
+        });
+        let mut state = state_with_op(Box::new(MaskedOp {
+            inner: Box::new(SepiaOp::new(0.25)),
+            mask: mask.clone(),
+        }));
+        state.editing = Some(EditSession {
+            op_index: 0,
+            tool: EditingTool::Sepia,
+            was_enabled: true,
+        });
+
+        state.commit_edit(Box::new(SepiaOp::new(0.75)));
+
+        let masked = state.pipeline().unwrap().ops()[0]
+            .operation
+            .as_any()
+            .and_then(|any| any.downcast_ref::<MaskedOp>())
+            .expect("mask wrapper was discarded");
+        assert_eq!(
+            serde_json::to_value(&masked.mask).unwrap(),
+            serde_json::to_value(&mask).unwrap()
+        );
+        let sepia = masked
+            .inner
+            .as_any()
+            .and_then(|any| any.downcast_ref::<SepiaOp>())
+            .unwrap();
+        assert!((sepia.strength - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cancelling_an_edit_restores_a_disabled_operation() {
+        let mut state = state_with_op(Box::new(SaturationOp::new(0.5)));
+        state.pipeline_mut().unwrap().toggle_op(0);
+        state.editing = Some(EditSession {
+            op_index: 0,
+            tool: EditingTool::Saturation,
+            was_enabled: false,
+        });
+
+        state.end_edit();
+
+        assert!(!state.pipeline().unwrap().ops()[0].enabled);
     }
 }

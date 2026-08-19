@@ -75,6 +75,10 @@ impl Operation for HdrMergeOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, _image: Image) -> RasterResult<Image> {
         if self.image_paths.is_empty() {
             return Err(RasterError::InvalidParams(

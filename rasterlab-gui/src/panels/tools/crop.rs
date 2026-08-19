@@ -5,6 +5,7 @@ use rasterlab_core::ops::CropOp;
 use rasterlab_core::traits::operation::Operation;
 
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
 
 const ASPECT_LABELS: &[&str] = &["Free", "3:2", "4:3", "1:1", "16:9", "9:16", "Custom"];
 
@@ -38,6 +39,9 @@ impl Tool for CropTool {
     }
     fn display_name(&self) -> &'static str {
         "✂  Crop"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Crop)
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {

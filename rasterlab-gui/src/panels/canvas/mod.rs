@@ -28,7 +28,7 @@ use crate::panels::tools::crop::CropTool;
 use crate::panels::tools::heal::HealTool;
 use crate::panels::tools::perspective::PerspectiveTool;
 use crate::panels::tools::straighten::StraightenTool;
-use crate::state::{AppState, SplitMode};
+use crate::state::{AppState, EditingTool, SplitMode};
 
 use self::crop::CropDragMode;
 use self::texture::{ContentId, PresentationTexture};
@@ -66,6 +66,8 @@ pub struct CanvasState {
     crop_end: Option<Pos2>,
     /// Tracks entry/exit from the Looks panel's fixed 2:1 crop workflow.
     sprocket_crop_was_active: bool,
+    /// Tracks entry/exit from editing a crop already in the stack.
+    stack_crop_was_active: bool,
     /// Active drag mode for the crop selection (create, move, or resize a handle).
     crop_drag: Option<CropDragMode>,
     /// Image-space pointer position captured when `crop_drag` started — used to
@@ -110,6 +112,7 @@ impl Default for CanvasState {
             crop_start: None,
             crop_end: None,
             sprocket_crop_was_active: false,
+            stack_crop_was_active: false,
             crop_drag: None,
             crop_drag_start_ptr: Pos2::ZERO,
             crop_drag_start_rect: Rect::ZERO,
@@ -163,6 +166,7 @@ impl CanvasState {
 
         self.reset_view_if_needed(state, canvas_size, pixels_per_point, img_w, img_h);
         self.sync_sprocket_crop(state);
+        self.sync_stack_crop(state);
 
         // ── Build a high-quality presentation texture ─────────────────────
         // See [`PresentationTexture`]: the canvas uploads the image reduced to
@@ -365,6 +369,31 @@ impl CanvasState {
             self.crop_drag = None;
         }
         self.sprocket_crop_was_active = active;
+    }
+
+    /// Seed the regular crop handles from a crop operation opened through the
+    /// stack. The crop itself stays disabled while editing so the canvas shows
+    /// the uncropped image and the user can move or enlarge the rectangle.
+    fn sync_stack_crop(&mut self, state: &AppState) {
+        let active = state
+            .editing
+            .is_some_and(|session| session.tool == EditingTool::Crop);
+        if active
+            && (!self.stack_crop_was_active || self.crop_start.is_none() || self.crop_end.is_none())
+        {
+            if let Some(crop) = state.tools.find::<CropTool>() {
+                self.crop_start = Some(Pos2::new(crop.x as f32, crop.y as f32));
+                self.crop_end = Some(Pos2::new(
+                    crop.x.saturating_add(crop.w) as f32,
+                    crop.y.saturating_add(crop.h) as f32,
+                ));
+            }
+        } else if !active && self.stack_crop_was_active && !state.tools.sprocket_crop_active {
+            self.crop_start = None;
+            self.crop_end = None;
+            self.crop_drag = None;
+        }
+        self.stack_crop_was_active = active;
     }
 
     /// Publish the visible image region so preview renders can be restricted to

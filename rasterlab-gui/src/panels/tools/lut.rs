@@ -5,6 +5,7 @@ use rasterlab_core::traits::operation::Operation;
 
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::file_chooser::DialogKind;
+use crate::state::EditingTool;
 
 pub struct LutTool {
     pub lut_op: Option<LutOp>,
@@ -31,8 +32,8 @@ impl Tool for LutTool {
     fn display_name(&self) -> &'static str {
         "🎞  LUT / Color Grading"
     }
-    fn editing_tool(&self) -> Option<crate::state::EditingTool> {
-        None
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Lut)
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {

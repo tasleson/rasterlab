@@ -74,7 +74,7 @@ impl Tool for StraightenTool {
                 let angle = self.angle;
                 let rotate_op: Box<dyn Operation> = Box::new(RotateOp::arbitrary(angle));
 
-                let crop_op = if self.crop {
+                let crop_op = if ctx.editing.is_none() && self.crop {
                     ctx.committed_dims
                         .map(|(w, h)| straighten_crop_op(w, h, angle))
                 } else {

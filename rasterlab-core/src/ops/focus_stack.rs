@@ -130,6 +130,10 @@ impl Operation for FocusStackOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, _image: Image) -> RasterResult<Image> {
         stack(self)
     }

@@ -234,6 +234,15 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
             state.push_op(op);
         }
         ToolAction::PushOps(ops) => {
+            if state.editing.is_some() {
+                if ops.len() == 1 {
+                    state.push_op(ops.into_iter().next().unwrap());
+                } else {
+                    state.status =
+                        "A stack entry can only be replaced by one operation".to_string();
+                }
+                return;
+            }
             state.cancel_all_previews();
             if let Some(store) = &mut state.copies {
                 let p = store.active_pipeline_mut();

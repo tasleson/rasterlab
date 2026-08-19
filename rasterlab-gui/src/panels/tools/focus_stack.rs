@@ -7,6 +7,7 @@ use rasterlab_core::traits::operation::Operation;
 use super::shared::{MIN_STACK_FRAMES, StackFrame, frame_list_ui, frame_paths};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::file_chooser::DialogKind;
+use crate::state::EditingTool;
 
 pub struct FocusStackTool {
     pub frames: Vec<StackFrame>,
@@ -39,6 +40,9 @@ impl Tool for FocusStackTool {
     }
     fn display_name(&self) -> &'static str {
         "🎯  Focus Stack"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::FocusStack)
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {

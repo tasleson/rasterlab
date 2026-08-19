@@ -44,6 +44,10 @@ impl Operation for CropOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         // Validate bounds
         if self.width == 0 || self.height == 0 {

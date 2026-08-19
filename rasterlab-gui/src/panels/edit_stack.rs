@@ -76,7 +76,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         let desc = entry.operation.describe();
         let (name, details) = split_description(&desc);
         let is_editing_this = editing.is_some_and(|s| s.op_index == i);
-        let editable = entry.operation.as_any().is_some();
+        let editable = crate::state::editing_tool_for_op(entry.operation.as_ref()).is_some();
 
         // Dimmed rows are in the "redo" area (after the cursor)
         let row_color = if !is_active {
@@ -87,9 +87,12 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             ui.visuals().text_color().gamma_multiply(0.55) // disabled
         };
 
-        // While editing a different op, disable this row so the user can only
-        // interact with the op under edit (its own pencil still works, to exit).
-        let row_enabled = editing.is_none() || is_editing_this;
+        // Stack mutations are locked for the whole edit session. In
+        // particular, the op under edit is temporarily unchecked for preview
+        // purposes; letting that checkbox or its delete/reorder buttons remain
+        // interactive would turn temporary state into a real stack mutation.
+        // Its pencil remains independently enabled below so edit mode can end.
+        let row_enabled = editing.is_none();
 
         ui.horizontal(|ui| {
             // ── Drag handle ──────────────────────────────────────────────

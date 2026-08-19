@@ -5,6 +5,7 @@ use rasterlab_core::ops::{HealOp, HealSpot};
 use rasterlab_core::traits::operation::Operation;
 
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
 
 pub struct HealTool {
     pub active: bool,
@@ -29,6 +30,11 @@ impl Tool for HealTool {
     fn display_name(&self) -> &'static str {
         "✦  Heal"
     }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Heal)
+    }
+
+    fn activate_preview(&mut self) {}
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
         egui::Grid::new("heal_grid")

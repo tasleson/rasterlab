@@ -6,6 +6,7 @@ use rasterlab_core::traits::operation::Operation;
 
 use super::shared::apply_button;
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
 
 pub struct PerspectiveTool {
     pub vertical: f32,
@@ -45,6 +46,9 @@ impl Tool for PerspectiveTool {
     }
     fn display_name(&self) -> &'static str {
         "⬡  Perspective"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Perspective)
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
@@ -101,11 +105,11 @@ impl Tool for PerspectiveTool {
             ToolAction::None
         };
         ui.horizontal(|ui| {
-            if apply_button(ui, ctx, "Apply", self.crop) {
+            if apply_button(ui, ctx, "Apply", ctx.editing.is_none() && self.crop) {
                 self.preview_active = false;
                 let corners = self.computed_corners();
 
-                let crop_op = if self.crop {
+                let crop_op = if ctx.editing.is_none() && self.crop {
                     ctx.committed_dims.and_then(|(w, h)| {
                         auto_crop_rect(corners, w, h)
                             .map(|[cx, cy, cw, ch]| CropOp::new(cx, cy, cw, ch))
@@ -175,9 +179,41 @@ impl Tool for PerspectiveTool {
         }
     }
     fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        op.as_any()
-            .and_then(|a| a.downcast_ref::<PerspectiveOp>())
-            .is_some()
+        let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<PerspectiveOp>()) else {
+            return false;
+        };
+
+        // Invert `computed_corners`. Perspective operations created by this
+        // tool live in this three-parameter subspace; reject hand-authored
+        // arbitrary corner sets rather than silently replacing them with the
+        // neutral defaults.
+        let k = o.corners[0][1];
+        let denom = 1.0 - 2.0 * k;
+        if denom <= 0.0 {
+            return false;
+        }
+        let vertical = (o.corners[0][0] - k) * 250.0;
+        let horizontal = (o.corners[1][1] - k) * 250.0;
+        let scale = 100.0 / denom;
+        if !(-100.0..=100.0).contains(&vertical)
+            || !(-100.0..=100.0).contains(&horizontal)
+            || !(100.0..=150.0).contains(&scale)
+        {
+            return false;
+        }
+
+        let old = (self.vertical, self.horizontal, self.scale);
+        (self.vertical, self.horizontal, self.scale) = (vertical, horizontal, scale);
+        let representable = self
+            .computed_corners()
+            .iter()
+            .flatten()
+            .zip(o.corners.iter().flatten())
+            .all(|(actual, expected)| (actual - expected).abs() < 1e-4);
+        if !representable {
+            (self.vertical, self.horizontal, self.scale) = old;
+        }
+        representable
     }
     fn as_any(&self) -> &dyn Any {
         self

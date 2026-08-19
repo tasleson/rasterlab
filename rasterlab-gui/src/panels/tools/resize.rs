@@ -5,12 +5,14 @@ use rasterlab_core::ops::{ResampleMode, ResizeOp};
 use rasterlab_core::traits::operation::Operation;
 
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
 
 pub struct ResizeTool {
     pub w: u32,
     pub h: u32,
     pub mode: ResampleMode,
     pub lock_aspect: bool,
+    pub preview_active: bool,
 }
 
 impl ResizeTool {
@@ -20,6 +22,7 @@ impl ResizeTool {
             h: 1080,
             mode: ResampleMode::Bicubic,
             lock_aspect: true,
+            preview_active: false,
         }
     }
 }
@@ -46,10 +49,14 @@ impl Tool for ResizeTool {
     fn display_name(&self) -> &'static str {
         "⤢  Resize"
     }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Resize)
+    }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
         let orig_w = self.w;
         let orig_h = self.h;
+        let orig_mode = self.mode;
 
         if let Some((src_w, src_h)) = ctx.source_dims {
             let src_px = src_w as u64 * src_h as u64;
@@ -153,9 +160,30 @@ impl Tool for ResizeTool {
             .add_enabled(ctx.has_image, egui::Button::new("Apply Resize"))
             .clicked()
         {
+            self.preview_active = false;
             return ToolAction::PushOp(Box::new(ResizeOp::new(self.w, self.h, self.mode)));
         }
-        ToolAction::None
+        if ctx.editing.is_some() && (orig_w != self.w || orig_h != self.h || orig_mode != self.mode)
+        {
+            self.preview_active = true;
+            ToolAction::RequestRender
+        } else {
+            ToolAction::None
+        }
+    }
+
+    fn is_preview_active(&self) -> bool {
+        self.preview_active
+    }
+    fn cancel_preview(&mut self) {
+        self.preview_active = false;
+    }
+    fn activate_preview(&mut self) {
+        self.preview_active = true;
+    }
+    fn preview_op(&self) -> Option<Box<dyn Operation>> {
+        self.preview_active
+            .then(|| Box::new(ResizeOp::new(self.w, self.h, self.mode)) as Box<dyn Operation>)
     }
 
     fn load_from_op(&mut self, op: &dyn Operation) -> bool {

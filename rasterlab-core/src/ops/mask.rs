@@ -160,6 +160,10 @@ impl Operation for MaskedOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         let w = image.width;
         let h = image.height;

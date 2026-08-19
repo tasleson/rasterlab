@@ -1,11 +1,12 @@
 use std::any::Any;
 
 use egui::DragValue;
-use rasterlab_core::ops::RotateOp;
+use rasterlab_core::ops::{FlipMode, FlipOp, RotateOp};
 use rasterlab_core::traits::operation::Operation;
 
 use super::shared::{apply_button, straighten_crop_op};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::state::EditingTool;
 
 pub struct RotateTool {
     pub deg: f32,
@@ -35,6 +36,9 @@ impl Tool for RotateTool {
     }
     fn display_name(&self) -> &'static str {
         "↻  Rotate"
+    }
+    fn editing_tool(&self) -> Option<EditingTool> {
+        Some(EditingTool::Rotate)
     }
 
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
@@ -70,7 +74,14 @@ impl Tool for RotateTool {
         ui.horizontal(|ui| {
             let has_rotation = self.preview_active && (self.deg % 360.0).abs() > 0.001;
             let is_right_angle = (self.deg % 90.0).abs() < 0.001;
-            if has_rotation && apply_button(ui, ctx, "Apply", self.crop && !is_right_angle) {
+            if has_rotation
+                && apply_button(
+                    ui,
+                    ctx,
+                    "Apply",
+                    ctx.editing.is_none() && self.crop && !is_right_angle,
+                )
+            {
                 self.preview_active = false;
                 let angle = self.deg;
 
@@ -81,7 +92,7 @@ impl Tool for RotateTool {
                     _ => Box::new(RotateOp::arbitrary(angle)),
                 };
 
-                let crop_op = if self.crop && !is_right_angle {
+                let crop_op = if ctx.editing.is_none() && self.crop && !is_right_angle {
                     ctx.committed_dims
                         .map(|(w, h)| straighten_crop_op(w, h, angle))
                 } else {
@@ -125,6 +136,9 @@ impl Tool for RotateTool {
                 .clicked()
             {
                 self.flip_h_pending = !self.flip_h_pending;
+                if ctx.editing.is_some() && self.flip_h_pending {
+                    self.flip_v_pending = false;
+                }
                 self.flip_preview_active = self.flip_h_pending || self.flip_v_pending;
                 action = ToolAction::RequestRender;
             }
@@ -138,6 +152,9 @@ impl Tool for RotateTool {
                 .clicked()
             {
                 self.flip_v_pending = !self.flip_v_pending;
+                if ctx.editing.is_some() && self.flip_v_pending {
+                    self.flip_h_pending = false;
+                }
                 self.flip_preview_active = self.flip_h_pending || self.flip_v_pending;
                 action = ToolAction::RequestRender;
             }
@@ -158,7 +175,9 @@ impl Tool for RotateTool {
                     self.flip_h_pending = false;
                     self.flip_v_pending = false;
                     self.flip_preview_active = false;
-                    if !ops.is_empty() {
+                    if ops.len() == 1 {
+                        action = ToolAction::PushOp(ops.pop().unwrap());
+                    } else if !ops.is_empty() {
                         action = ToolAction::PushOps(ops);
                     }
                 }
@@ -187,7 +206,11 @@ impl Tool for RotateTool {
         self.deg = 0.0;
     }
     fn activate_preview(&mut self) {
-        self.preview_active = true;
+        if self.flip_h_pending || self.flip_v_pending {
+            self.flip_preview_active = true;
+        } else {
+            self.preview_active = true;
+        }
     }
     fn preview_op(&self) -> Option<Box<dyn Operation>> {
         if self.preview_active && (self.deg % 360.0).abs() > 0.001 {
@@ -208,12 +231,22 @@ impl Tool for RotateTool {
     }
     fn load_from_op(&mut self, op: &dyn Operation) -> bool {
         if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<RotateOp>()) {
+            self.flip_h_pending = false;
+            self.flip_v_pending = false;
+            self.flip_preview_active = false;
             match o.mode {
                 rasterlab_core::ops::RotateMode::Cw90 => self.deg = 90.0,
                 rasterlab_core::ops::RotateMode::Cw180 => self.deg = 180.0,
                 rasterlab_core::ops::RotateMode::Cw270 => self.deg = 270.0,
                 rasterlab_core::ops::RotateMode::Arbitrary(d) => self.deg = d,
             }
+            true
+        } else if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<FlipOp>()) {
+            self.deg = 0.0;
+            self.preview_active = false;
+            self.flip_h_pending = matches!(o.mode, FlipMode::Horizontal);
+            self.flip_v_pending = matches!(o.mode, FlipMode::Vertical);
+            self.flip_preview_active = true;
             true
         } else {
             false

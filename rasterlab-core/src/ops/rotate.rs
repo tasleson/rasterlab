@@ -68,6 +68,10 @@ impl Operation for RotateOp {
         Box::new(self.clone())
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn apply(&self, image: Image) -> RasterResult<Image> {
         match self.mode {
             RotateMode::Cw90 => rotate_cw90(&image),
