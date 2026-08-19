@@ -5,9 +5,9 @@
       "id": 1,
       "operation": {
         "image_paths": [
-          "/Users/tony/codex_scan/rasterlab/test_images/hdr_bracket_under.png",
-          "/Users/tony/codex_scan/rasterlab/test_images/hdr_bracket_mid.png",
-          "/Users/tony/codex_scan/rasterlab/test_images/hdr_bracket_over.png"
+          "../test_images/hdr_bracket_under.png",
+          "../test_images/hdr_bracket_mid.png",
+          "../test_images/hdr_bracket_over.png"
         ],
         "type": "HdrMergeOp"
       }
@@ -16,10 +16,11 @@
       "enabled": true,
       "id": 2,
       "operation": {
+        "alignment": "similarity",
         "image_paths": [
-          "/Users/tony/codex_scan/rasterlab/test_images/focus_top.png",
-          "/Users/tony/codex_scan/rasterlab/test_images/focus_mid.png",
-          "/Users/tony/codex_scan/rasterlab/test_images/focus_bot.png"
+          "../test_images/focus_top.png",
+          "../test_images/focus_mid.png",
+          "../test_images/focus_bot.png"
         ],
         "type": "FocusStackOp"
       }
@@ -30,9 +31,9 @@
       "operation": {
         "feather_px": 40,
         "image_paths": [
-          "/Users/tony/codex_scan/rasterlab/test_images/pano3_a.png",
-          "/Users/tony/codex_scan/rasterlab/test_images/pano3_b.png",
-          "/Users/tony/codex_scan/rasterlab/test_images/pano3_c.png"
+          "../test_images/pano3_a.png",
+          "../test_images/pano3_b.png",
+          "../test_images/pano3_c.png"
         ],
         "type": "PanoramaOp"
       }

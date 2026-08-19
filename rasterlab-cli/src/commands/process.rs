@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args;
 use rasterlab_core::{
-    formats::FormatRegistry, pipeline::EditPipeline, traits::format_handler::EncodeOptions,
+    formats::FormatRegistry,
+    pipeline::{EditPipeline, PipelineState},
+    traits::format_handler::EncodeOptions,
 };
 
 use crate::pipeline_builder::PipelineSpec;
@@ -72,7 +74,13 @@ pub fn run(args: ProcessArgs) -> Result<()> {
         // Load saved pipeline
         let json = std::fs::read_to_string(pipeline_path)
             .with_context(|| format!("Cannot read pipeline '{}'", pipeline_path.display()))?;
-        let state = serde_json::from_str(&json).context("Failed to parse pipeline JSON")?;
+        let mut state: PipelineState =
+            serde_json::from_str(&json).context("Failed to parse pipeline JSON")?;
+        state.resolve_relative_paths(
+            pipeline_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        );
         pipeline
             .load_state(state)
             .context("Failed to restore pipeline")?;

@@ -21,8 +21,9 @@ fn main() {
         .expect("workspace root")
         .join("test_images/showcase.rlab");
 
-    let rlab = RlabFile::read(&rlab_path)
+    let mut rlab = RlabFile::read(&rlab_path)
         .unwrap_or_else(|e| panic!("read {}: {}", rlab_path.display(), e));
+    rlab.resolve_relative_paths(rlab_path.parent().expect("project directory"));
     let registry = FormatRegistry::with_builtins();
     let src = registry
         .decode_bytes(

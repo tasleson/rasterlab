@@ -83,9 +83,10 @@ impl AppState {
     pub(super) fn on_project_loaded(
         &mut self,
         path: std::path::PathBuf,
-        rlab: Box<RlabFile>,
+        mut rlab: Box<RlabFile>,
         image: Image,
     ) {
+        rlab.resolve_relative_paths(path.parent().unwrap_or_else(|| std::path::Path::new(".")));
         let w = image.width;
         let h = image.height;
         self.reset_tools_for_new_image(w, h);

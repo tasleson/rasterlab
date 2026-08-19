@@ -293,6 +293,20 @@ impl RlabFile {
         self.lmta = lmta;
     }
 
+    /// Resolve portable paths in this project against its containing
+    /// directory before rendering it.
+    pub fn resolve_relative_paths(&mut self, base_dir: &Path) {
+        if let Some(source_path) = self.meta.source_path.as_mut() {
+            let path = Path::new(source_path);
+            if path.is_relative() {
+                *source_path = base_dir.join(path).to_string_lossy().into_owned();
+            }
+        }
+        for copy in &mut self.copies {
+            copy.pipeline_state.resolve_relative_paths(base_dir);
+        }
+    }
+
     // ── Write ────────────────────────────────────────────────────────────────
 
     /// Serialise and write the project to `path` as format v3 (no ECC).

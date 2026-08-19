@@ -111,8 +111,9 @@ pub fn run(args: BatchArgs) -> Result<()> {
     let entries_json: Vec<serde_json::Value> = if let Some(pipeline_path) = &args.load_pipeline {
         let json = std::fs::read_to_string(pipeline_path)
             .with_context(|| format!("Cannot read pipeline '{}'", pipeline_path.display()))?;
-        let state: PipelineState =
+        let mut state: PipelineState =
             serde_json::from_str(&json).context("Failed to parse pipeline JSON")?;
+        state.resolve_relative_paths(pipeline_path.parent().unwrap_or_else(|| Path::new(".")));
         // Only include entries up to the saved cursor (respects undo state).
         let active = state.entries[..state.cursor.min(state.entries.len())].to_vec();
         eprintln!(

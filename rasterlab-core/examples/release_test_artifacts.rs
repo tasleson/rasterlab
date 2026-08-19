@@ -44,21 +44,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pipeline.push_op(op);
     }
 
-    let rendered = pipeline.render()?;
+    let state = pipeline.save_state()?;
+    let mut render_state = state.clone();
+    render_state.resolve_relative_paths(&out_dir);
+    let mut render_pipeline = EditPipeline::new(pipeline.source().as_ref().deep_clone());
+    render_pipeline.load_state(render_state)?;
+    let rendered = render_pipeline.render()?;
     let rendered_path = out_dir.join("all_tools_rendered.png");
     fs::write(
         &rendered_path,
         registry.encode_file(&rendered, &rendered_path, &options)?,
     )?;
 
-    let state = pipeline.save_state()?;
     let stack_path = out_dir.join("all_tools_stack.json");
     fs::write(&stack_path, serde_json::to_string_pretty(&state)?)?;
 
     let project_path = out_dir.join("all_tools_release_test.rlab");
     let meta = RlabMeta::new(
         env!("CARGO_PKG_VERSION"),
-        Some(source_path.display().to_string()),
+        Some("all_tools_source.png".to_owned()),
         pipeline.source().width,
         pipeline.source().height,
     );
@@ -104,7 +108,9 @@ fn release_source_image(width: u32, height: u32) -> Image {
 fn release_stack_ops(
     workspace: &Path,
 ) -> Result<Vec<Box<dyn Operation>>, Box<dyn std::error::Error>> {
-    let path = |rel: &str| workspace.join(rel).display().to_string();
+    // These paths are relative to the generated stack/project in
+    // `release_artifacts`, not to the checkout's absolute location.
+    let path = |rel: &str| format!("../{rel}");
 
     let mut hue = [0.0; 8];
     hue[0] = 8.0;

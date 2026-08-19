@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
@@ -36,6 +37,50 @@ pub struct PipelineState {
     pub entries: Vec<serde_json::Value>,
     /// Cursor position at save time (undo history depth).
     pub cursor: usize,
+}
+
+impl PipelineState {
+    /// Resolve file references stored by operations against the file that owns
+    /// this pipeline state.
+    ///
+    /// Pipeline JSON deliberately permits relative paths so stacks can be
+    /// moved with their supporting files. Multi-image operations keep those
+    /// paths in `image_paths`; turn them into runtime paths before the
+    /// operations are deserialised.
+    pub fn resolve_relative_paths(&mut self, base_dir: &Path) {
+        for entry in &mut self.entries {
+            resolve_relative_paths_in_value(entry, base_dir);
+        }
+    }
+}
+
+fn resolve_relative_paths_in_value(value: &mut serde_json::Value, base_dir: &Path) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if let Some(serde_json::Value::Array(paths)) = fields.get_mut("image_paths") {
+                for path in paths {
+                    let Some(path_string) = path.as_str() else {
+                        continue;
+                    };
+                    let path_value = Path::new(path_string);
+                    if path_value.is_relative() {
+                        *path = serde_json::Value::String(
+                            base_dir.join(path_value).to_string_lossy().into_owned(),
+                        );
+                    }
+                }
+            }
+            for child in fields.values_mut() {
+                resolve_relative_paths_in_value(child, base_dir);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for child in values {
+                resolve_relative_paths_in_value(child, base_dir);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The non-destructive editing pipeline.
@@ -624,6 +669,57 @@ mod tests {
 
         assert_eq!(p.ops()[0].id, 42);
         assert_eq!(p.ops()[1].id, 43);
+    }
+
+    #[test]
+    fn relative_multi_image_paths_resolve_against_state_directory() {
+        let mut state = PipelineState {
+            entries: vec![serde_json::json!({
+                "id": 1,
+                "enabled": true,
+                "operation": {
+                    "type": "HdrMergeOp",
+                    "image_paths": ["../frames/under.png", "/fixed/over.png"]
+                }
+            })],
+            cursor: 1,
+        };
+
+        state.resolve_relative_paths(Path::new("/projects/release_artifacts"));
+
+        let paths = state.entries[0]["operation"]["image_paths"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            paths[0],
+            serde_json::json!("/projects/release_artifacts/../frames/under.png")
+        );
+        assert_eq!(paths[1], serde_json::json!("/fixed/over.png"));
+    }
+
+    #[test]
+    fn relative_paths_resolve_inside_nested_operations() {
+        let mut state = PipelineState {
+            entries: vec![serde_json::json!({
+                "id": 1,
+                "enabled": true,
+                "operation": {
+                    "type": "MaskedOp",
+                    "inner": {
+                        "type": "FocusStackOp",
+                        "image_paths": ["frames/focus.png"]
+                    }
+                }
+            })],
+            cursor: 1,
+        };
+
+        state.resolve_relative_paths(Path::new("project"));
+
+        assert_eq!(
+            state.entries[0]["operation"]["inner"]["image_paths"][0],
+            serde_json::json!("project/frames/focus.png")
+        );
     }
 
     #[test]

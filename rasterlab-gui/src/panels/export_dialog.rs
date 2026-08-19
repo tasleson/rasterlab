@@ -414,7 +414,12 @@ fn export_one(
     settings: &ExportSettings,
     hash: &str,
 ) -> anyhow::Result<()> {
-    let rlab = RlabFile::read(rlab_path)?;
+    let mut rlab = RlabFile::read(rlab_path)?;
+    rlab.resolve_relative_paths(
+        rlab_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    );
 
     // ── Original export: write the verbatim ORIG bytes and restore mtime/atime. ──
     if settings.format == ExportFormat::Original {
