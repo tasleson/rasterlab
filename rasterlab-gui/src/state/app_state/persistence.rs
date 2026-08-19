@@ -333,6 +333,16 @@ impl AppState {
 
     /// Save the current project to `path` as a `.rlab` file.
     pub fn save_project(&mut self, path: std::path::PathBuf) {
+        // An edit session temporarily disables the committed operation while
+        // its replacement is shown as a live preview. Neither state is a valid
+        // save boundary: serialising now would persist the disabled operation
+        // but omit the preview. Keep this guard here as well as in the UI so a
+        // chooser that was already open (or any other direct caller) cannot
+        // write transient state.
+        if self.editing.is_some() {
+            self.status = "Finish or cancel the active edit before saving".into();
+            return;
+        }
         let Some(original_bytes) = self.original_bytes.clone() else {
             self.status = "Nothing to save — open an image first".into();
             return;
@@ -510,5 +520,75 @@ impl AppState {
         self.autosave_restore = Some((entry.data.copies, entry.data.active_copy));
         self.autosave_restore_session_id = Some(entry.data.started_at);
         self.open_file(restore_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rasterlab_core::{Image, ops::SaturationOp, pipeline::EditPipeline, project::RlabFile};
+
+    use super::*;
+
+    fn state_with_saturation(strength: f32) -> AppState {
+        let mut pipeline = EditPipeline::new(Image::new(8, 8));
+        pipeline.push_op(Box::new(SaturationOp::new(strength)));
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
+        state.original_bytes = Some(vec![1, 2, 3, 4]);
+        state
+    }
+
+    fn saved_entry(path: &std::path::Path) -> serde_json::Value {
+        RlabFile::read(path).unwrap().copies[0]
+            .pipeline_state
+            .entries[0]
+            .clone()
+    }
+
+    #[test]
+    fn save_during_edit_then_cancel_never_persists_the_transient_disabled_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cancel.rlab");
+        let mut state = state_with_saturation(0.5);
+        state.begin_edit(0);
+
+        state.save_project(path.clone());
+
+        assert!(!path.exists());
+        assert!(state.editing.is_some());
+        assert!(!state.pipeline().unwrap().ops()[0].enabled);
+        assert_eq!(
+            state.status,
+            "Finish or cancel the active edit before saving"
+        );
+
+        state.end_edit();
+        state.save_project(path.clone());
+
+        assert!(saved_entry(&path)["enabled"].as_bool().unwrap());
+        assert!(state.project_path.is_some());
+        assert!(!state.is_dirty);
+    }
+
+    #[test]
+    fn save_during_edit_then_apply_never_marks_the_unsaved_edit_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apply.rlab");
+        let mut state = state_with_saturation(0.5);
+        state.begin_edit(0);
+
+        state.save_project(path.clone());
+        state.commit_edit(Box::new(SaturationOp::new(1.25)));
+
+        assert!(!path.exists());
+        assert!(state.project_path.is_none());
+        assert!(state.is_dirty);
+
+        state.save_project(path.clone());
+
+        let entry = saved_entry(&path);
+        assert!(entry["enabled"].as_bool().unwrap());
+        assert_eq!(entry["operation"]["saturation"].as_f64().unwrap(), 1.25);
+        assert!(!state.is_dirty);
     }
 }

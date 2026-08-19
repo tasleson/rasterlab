@@ -133,6 +133,8 @@ impl RasterLabApp {
         // Only steal arrow/delete keys when no widget (text field, slider, …) has focus.
         #[cfg(not(target_arch = "wasm32"))]
         let no_focus = ctx.memory(|m| m.focused().is_none());
+        #[cfg(not(target_arch = "wasm32"))]
+        let can_save = self.state.pipeline().is_some() && self.state.editing.is_none();
 
         // Consume shortcut keys inside `input_mut`, but defer the handlers
         // until after the closure returns. Handlers like `state.undo()` end
@@ -168,11 +170,11 @@ impl RasterLabApp {
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::S) {
-                do_save = true;
+                do_save = can_save;
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::S) {
-                do_save_as = true;
+                do_save_as = can_save;
             }
             #[cfg(not(target_arch = "wasm32"))]
             if i.consume_key(Modifiers::CTRL, Key::E) {
@@ -695,7 +697,7 @@ impl eframe::App for RasterLabApp {
                         ui.separator();
                         if ui
                             .add_enabled(
-                                self.state.pipeline().is_some(),
+                                self.state.pipeline().is_some() && self.state.editing.is_none(),
                                 egui::Button::new("Save  (Ctrl+S)"),
                             )
                             .clicked()
@@ -706,7 +708,7 @@ impl eframe::App for RasterLabApp {
                         if self.state.project_path.is_some()
                             && ui
                                 .add_enabled(
-                                    self.state.pipeline().is_some(),
+                                    self.state.pipeline().is_some() && self.state.editing.is_none(),
                                     egui::Button::new("Save As…  (Ctrl+⇧S)"),
                                 )
                                 .clicked()
