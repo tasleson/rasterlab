@@ -242,15 +242,17 @@ impl Library {
         };
         let rlab_path = self.rlab_path(&row.hash);
         if rlab_path.exists() {
-            // Ensure the file is writable before rewriting its LMTA chunk.
-            let _ = fs_lock::set_locked(&rlab_path, false);
-            let mut rlab = RlabFile::read(&rlab_path)?;
-            if let Some(ref mut lmta) = rlab.lmta {
-                lmta.protected = protected;
-            }
-            rlab.meta = rlab.meta.touch();
-            rlab.write_v5(&rlab_path)
-                .context("rewrite lmta for protect")?;
+            // Keep the old lock in force if reading or rewriting fails. The
+            // guard also covers panics, so every exit restores the prior state.
+            fs_lock::with_unlocked(&rlab_path, || {
+                let mut rlab = RlabFile::read(&rlab_path)?;
+                if let Some(ref mut lmta) = rlab.lmta {
+                    lmta.protected = protected;
+                }
+                rlab.meta = rlab.meta.touch();
+                rlab.write_v5(&rlab_path)
+                    .context("rewrite lmta for protect")
+            })?;
             // Apply (or clear) the on-disk lock to match the new state.
             let _ = fs_lock::set_locked(&rlab_path, protected);
         }

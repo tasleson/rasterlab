@@ -413,6 +413,36 @@ fn metadata_edit_works_while_protected() {
 }
 
 #[test]
+fn failed_unprotect_restores_the_file_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let rlab_path = lib.rlab_path(&row.hash);
+    lib.set_protected(row.id, true).unwrap();
+
+    // Make the protected file unreadable as a project so set_protected fails
+    // after temporarily unlocking it.
+    rasterlab_library::fs_lock::with_unlocked(&rlab_path, || {
+        std::fs::write(&rlab_path, b"not an rlab file").unwrap()
+    });
+
+    assert!(lib.set_protected(row.id, false).is_err());
+    assert!(
+        rasterlab_library::fs_lock::is_locked(&rlab_path),
+        "a failed rewrite must restore the old protection"
+    );
+    assert!(
+        lib.all_photos(SortOrder::default()).unwrap()[0].protected,
+        "the DB must retain the old protection state"
+    );
+
+    // Keep cleanup portable to systems where deleting a read-only file is
+    // restricted more strongly than it is on Unix.
+    rasterlab_library::fs_lock::set_locked(&rlab_path, false).unwrap();
+}
+
+#[test]
 fn protection_survives_rebuild_index() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = open_library(tmp.path());
