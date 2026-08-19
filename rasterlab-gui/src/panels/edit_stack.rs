@@ -77,11 +77,17 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         let (name, details) = split_description(&desc);
         let is_editing_this = editing.is_some_and(|s| s.op_index == i);
         let editable = crate::state::editing_tool_for_op(entry.operation.as_ref()).is_some();
+        // The pipeline entry is temporarily disabled while its tool preview
+        // substitutes for it.  Keep showing the committed enabled state so
+        // this implementation detail does not look like a user toggle.
+        let displayed_enabled = editing
+            .filter(|session| session.op_index == i)
+            .map_or(entry.enabled, |session| session.was_enabled);
 
         // Dimmed rows are in the "redo" area (after the cursor)
         let row_color = if !is_active {
             ui.visuals().text_color().gamma_multiply(0.35)
-        } else if entry.enabled {
+        } else if displayed_enabled {
             ui.visuals().text_color()
         } else {
             ui.visuals().text_color().gamma_multiply(0.55) // disabled
@@ -100,7 +106,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
             ui.add_enabled_ui(row_enabled, |ui| {
                 // ── Enable / disable checkbox ─────────────────────────────
-                let mut enabled = entry.enabled;
+                let mut enabled = displayed_enabled;
                 if ui.checkbox(&mut enabled, "").changed() {
                     toggle_idx = Some(i);
                 }
@@ -141,9 +147,10 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                 });
 
                 // ── Edit (pencil) ────────────────────────────────────
-                // Always enabled for the row under edit (so the user can
-                // exit the session); otherwise only when no other edit is
-                // active and the op type supports editing.
+                // Keep the active row highlighted and clickable, but treat
+                // another click as the same edit request. Apply and the
+                // banner's Cancel Edit button are the explicit ways to leave
+                // the session, so a double-click cannot rapidly exit/re-enter.
                 let pencil_enabled =
                     is_editing_this || (editing.is_none() && editable && is_active);
                 let pencil_color = if is_editing_this {
@@ -152,7 +159,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
                     ui.visuals().text_color()
                 };
                 let hover = if is_editing_this {
-                    "Exit edit mode"
+                    "Already editing this operation"
                 } else if !editable {
                     "This op type cannot be edited"
                 } else {
@@ -194,11 +201,7 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 
     // ── Apply deferred mutations ──────────────────────────────────────────
     if let Some(idx) = edit_idx {
-        if state.editing.is_some_and(|s| s.op_index == idx) {
-            state.end_edit();
-        } else {
-            state.begin_edit(idx);
-        }
+        state.begin_edit(idx);
     } else if let Some(idx) = remove_idx {
         state.remove_op(idx);
     } else if let Some((from, to)) = reorder {

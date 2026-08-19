@@ -436,6 +436,16 @@ impl AppState {
     /// the user sees the current values while they adjust.  No-op when the op
     /// is not one we support editing (returns without changing state).
     pub fn begin_edit(&mut self, index: usize) {
+        // Treat repeated clicks on the active row as one request.  The edit
+        // stack's pencil is easy to double-click; restarting the session would
+        // briefly restore the committed op, cancel its preview, and queue an
+        // unnecessary render before disabling it again.
+        if self
+            .editing
+            .is_some_and(|session| session.op_index == index)
+        {
+            return;
+        }
         // Already editing — first, cancel current session.
         self.end_edit();
         let (op_clone, op_name, was_enabled) = {
@@ -969,7 +979,9 @@ impl AppState {
 
 #[cfg(test)]
 mod sprocket_crop_tests {
-    use rasterlab_core::ops::{LinearMask, MaskShape, MaskedOp, SaturationOp, SepiaOp};
+    use rasterlab_core::ops::{
+        BlackAndWhiteOp, LinearMask, MaskShape, MaskedOp, SaturationOp, SepiaOp,
+    };
 
     use super::{
         AppState, EditPipeline, EditSession, EditingTool, Image, VirtualCopyStore,
@@ -1053,5 +1065,23 @@ mod sprocket_crop_tests {
         state.end_edit();
 
         assert!(!state.pipeline().unwrap().ops()[0].enabled);
+    }
+
+    #[test]
+    fn repeated_edit_requests_keep_the_same_black_and_white_preview() {
+        let mut state = state_with_op(Box::new(BlackAndWhiteOp::luminance()));
+
+        state.begin_edit(0);
+        let cache_gen = state.pipeline().unwrap().step_cache_gen();
+        assert!(state.editing.is_some());
+        assert!(state.tools.any_preview_active());
+        assert!(!state.pipeline().unwrap().ops()[0].enabled);
+
+        state.begin_edit(0);
+
+        assert!(state.editing.is_some());
+        assert!(state.tools.any_preview_active());
+        assert!(!state.pipeline().unwrap().ops()[0].enabled);
+        assert_eq!(state.pipeline().unwrap().step_cache_gen(), cache_gen);
     }
 }
