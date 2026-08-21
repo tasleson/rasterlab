@@ -279,6 +279,47 @@ fn folder_import_groups_by_capture_day_and_back_dates() {
 }
 
 #[test]
+fn folder_import_gives_a_heavy_day_its_own_session() {
+    use rasterlab_library::import::HEAVY_DAY_PHOTOS;
+
+    const DAY: i64 = 86_400;
+    const BASE: i64 = 1_600_000_000; // 2020-09-13 UTC
+
+    let tmp_src = tempfile::tempdir().unwrap();
+    // One quiet day, a heavy shoot day, then another quiet day.  Without the
+    // heavy-day rule all three would merge into a single consecutive-day run.
+    let mut tag = 0u8;
+    let mut write = |name: String, mtime: i64| {
+        tag += 1;
+        write_png_with_mtime(&tmp_src.path().join(name), tag, mtime);
+    };
+    write("quiet0.png".into(), BASE);
+    for i in 0..=HEAVY_DAY_PHOTOS {
+        write(format!("shoot{i}.png"), BASE + DAY + i as i64);
+    }
+    write("quiet1.png".into(), BASE + 2 * DAY);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let sessions = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+    let mut by_start: Vec<_> = sessions
+        .iter()
+        .map(|s| (s.started_at, s.photo_count))
+        .collect();
+    by_start.sort();
+    assert_eq!(
+        by_start,
+        vec![
+            (BASE as u64, 1),
+            ((BASE + DAY) as u64, HEAVY_DAY_PHOTOS + 1),
+            ((BASE + 2 * DAY) as u64, 1),
+        ],
+        "the heavy day stands alone and does not bridge the quiet days"
+    );
+}
+
+#[test]
 fn folder_import_groups_jpeg_by_exif_capture_date_not_mtime() {
     // meta_test.jpg carries EXIF DateTimeOriginal 2024-06-15 10:30:00 UTC.
     const EXIF_CAPTURE: u64 = 1_718_447_400;

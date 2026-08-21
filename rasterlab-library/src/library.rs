@@ -109,7 +109,9 @@ impl Library {
 
     /// Recursively import all supported images found under `folder`, grouping
     /// them into one back-dated import session per run of same-or-consecutive
-    /// capture days.  Returns one [`ImportSession`] per group.
+    /// capture days.  A day of more than
+    /// [`HEAVY_DAY_PHOTOS`](crate::import::HEAVY_DAY_PHOTOS) photos gets a
+    /// session to itself.  Returns one [`ImportSession`] per group.
     pub fn import_folder(
         &self,
         folder: &Path,

@@ -167,7 +167,7 @@ The managed library imports each photo into a content-addressed v5 `.rlab` file 
 Current library features include:
 
 - File or recursive folder import, duplicate detection, RAW+JPEG pairing, and 512 px thumbnails.
-- Import-session grouping; folder imports use capture dates, with filesystem timestamps as fallback, to rebuild a useful historical timeline.
+- Import-session grouping; folder imports use capture dates, with filesystem timestamps as fallback, to rebuild a useful historical timeline. Consecutive shooting days merge into one session, except that a day of more than 100 photos is kept as a session of its own.
 - Collections, ratings, pick/reject flags, color labels, captions, keywords, and batch metadata edits.
 - Filtering by text, rating, flag, color label, camera, lens, capture date, aperture, shutter speed, ISO, and edited state.
 - Sorting by import date, capture date, rating, or filename.

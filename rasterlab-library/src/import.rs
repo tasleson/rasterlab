@@ -145,7 +145,9 @@ pub fn import_files(
 // ── Grouped folder import ───────────────────────────────────────────────────
 
 /// Import `paths` (typically the recursive contents of a folder), grouping them
-/// into one [`ImportSession`] per run of same-or-consecutive capture days.
+/// into one [`ImportSession`] per run of same-or-consecutive capture days.  A
+/// day of more than [`HEAVY_DAY_PHOTOS`] photos is a shoot of its own and gets
+/// its own session rather than being folded into the surrounding run.
 ///
 /// Each group's session is back-dated to the group's earliest capture time and
 /// every photo's `import_date` is back-dated to its own capture time, so that
@@ -190,7 +192,7 @@ pub fn import_folder_grouped(
     let sorted_paths: Vec<PathBuf> = dated.iter().map(|(p, _)| p.clone()).collect();
     let stack_map = detect_stacks(&sorted_paths);
 
-    // ── Phase 2: cluster into consecutive-day groups ──────────────────────
+    // ── Phase 2: cluster into consecutive-day groups, heavy days apart ────
     let timestamps: Vec<u64> = dated.iter().map(|(_, ts)| *ts).collect();
     let groups = cluster_by_day(&timestamps);
 
@@ -359,27 +361,60 @@ fn read_file_prefix(path: &Path, max: u64) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Group sorted timestamps into runs of same-or-consecutive UTC calendar days.
-/// A gap of more than one empty day between successive photos starts a new
-/// group.  Returns index ranges into the input slice.
-fn cluster_by_day(sorted_ts: &[u64]) -> Vec<std::ops::Range<usize>> {
-    let mut groups = Vec::new();
+/// Photos on a single capture day above which that day gets its own import
+/// session instead of joining a consecutive-day run.
+///
+/// Rolling a week of casual shooting into one library date keeps the timeline
+/// readable.  Doing the same to a week of heavy shooting does the opposite: the
+/// week's work lands in one undifferentiated pile of thousands and the days
+/// stop being findable.  A day past this count is treated as a shoot in its own
+/// right, which is also how a photographer thinks of it.
+pub const HEAVY_DAY_PHOTOS: usize = 100;
+
+/// Split sorted timestamps into one index range per distinct UTC calendar day.
+fn day_runs(sorted_ts: &[u64]) -> Vec<std::ops::Range<usize>> {
+    let mut runs = Vec::new();
     if sorted_ts.is_empty() {
-        return groups;
+        return runs;
     }
-    let day = |ts: u64| (ts / 86_400) as i64;
     let mut start = 0usize;
-    let mut prev_day = day(sorted_ts[0]);
-    for (i, &ts) in sorted_ts.iter().enumerate().skip(1) {
-        let d = day(ts);
-        if d - prev_day > 1 {
-            groups.push(start..i);
+    for i in 1..sorted_ts.len() {
+        if utc_day(sorted_ts[i]) != utc_day(sorted_ts[i - 1]) {
+            runs.push(start..i);
             start = i;
         }
-        prev_day = d;
     }
-    groups.push(start..sorted_ts.len());
+    runs.push(start..sorted_ts.len());
+    runs
+}
+
+/// Group sorted timestamps into runs of same-or-consecutive UTC calendar days.
+/// A gap of more than one empty day between successive photos starts a new
+/// group, and so does a day carrying more than [`HEAVY_DAY_PHOTOS`] photos —
+/// such a day is kept as a group of its own and does not extend the run on
+/// either side of it.  Returns index ranges into the input slice.
+fn cluster_by_day(sorted_ts: &[u64]) -> Vec<std::ops::Range<usize>> {
+    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+    // Day the last group ends on, while that group is still allowed to grow;
+    // `None` once a heavy day closed it off.
+    let mut open_day: Option<i64> = None;
+    for run in day_runs(sorted_ts) {
+        let d = utc_day(sorted_ts[run.start]);
+        let heavy = run.len() > HEAVY_DAY_PHOTOS;
+        match groups.last_mut() {
+            Some(last) if !heavy && open_day.is_some_and(|prev| d - prev == 1) => {
+                last.end = run.end
+            }
+            _ => groups.push(run),
+        }
+        open_day = (!heavy).then_some(d);
+    }
     groups
+}
+
+/// UTC calendar day number for a Unix timestamp.
+fn utc_day(ts: u64) -> i64 {
+    (ts / 86_400) as i64
 }
 
 /// Set a session's cached `photo_count` from the photos that actually carry it.
@@ -874,6 +909,50 @@ mod tests {
     fn cluster_by_day_edge_cases() {
         assert!(cluster_by_day(&[]).is_empty());
         assert_eq!(cluster_by_day(&[42]), vec![0..1]);
+    }
+
+    /// Sorted timestamps for `per_day` photos on each consecutive day, spread
+    /// across the day so the clustering sees real within-day spacing.
+    fn day_timestamps(per_day: &[usize]) -> Vec<u64> {
+        const BASE: u64 = 1_600_000_000 / DAY * DAY; // midnight UTC
+        let mut ts = Vec::new();
+        for (day, &count) in per_day.iter().enumerate() {
+            for i in 0..count {
+                ts.push(BASE + day as u64 * DAY + (i as u64 * 60) % DAY);
+            }
+        }
+        ts
+    }
+
+    #[test]
+    fn cluster_by_day_splits_out_heavy_days() {
+        // A light day, a heavy one, then two light days: the heavy day stands
+        // alone and does not bridge the days on either side of it, while the
+        // two light days following it still merge with each other.
+        let heavy = HEAVY_DAY_PHOTOS + 1;
+        let ts = day_timestamps(&[2, heavy, 3, 4]);
+        assert_eq!(
+            cluster_by_day(&ts),
+            vec![0..2, 2..2 + heavy, 2 + heavy..9 + heavy]
+        );
+    }
+
+    #[test]
+    fn cluster_by_day_keeps_days_at_the_threshold_together() {
+        // Exactly HEAVY_DAY_PHOTOS is not heavy — the rule is "more than".
+        let ts = day_timestamps(&[HEAVY_DAY_PHOTOS, HEAVY_DAY_PHOTOS]);
+        assert_eq!(cluster_by_day(&ts), vec![0..2 * HEAVY_DAY_PHOTOS]);
+    }
+
+    #[test]
+    fn cluster_by_day_splits_consecutive_heavy_days() {
+        // A week of heavy shooting becomes one session per day.
+        let heavy = HEAVY_DAY_PHOTOS + 1;
+        let ts = day_timestamps(&[heavy; 3]);
+        assert_eq!(
+            cluster_by_day(&ts),
+            vec![0..heavy, heavy..2 * heavy, 2 * heavy..3 * heavy]
+        );
     }
 
     #[test]
