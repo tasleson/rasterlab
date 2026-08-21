@@ -35,7 +35,7 @@ struct SessionAgg {
 /// This is the reconciliation pass for everything the two-step writes elsewhere
 /// can leave behind: photos whose file was written but never indexed (an import
 /// killed part-way), rows whose file is gone (a delete that stopped after the
-/// trash), and metadata a file records that the index does not.
+/// deletion), and metadata a file records that the index does not.
 ///
 /// It is written to be safely re-runnable and to never leave the library worse
 /// than it found it:
@@ -91,7 +91,7 @@ pub fn rebuild(
     }
 
     // Drop rows whose file is no longer there — a photo deleted outside the
-    // app, or a delete that stopped after trashing the file.  A file that
+    // app, or a delete that stopped after removing the file. A file that
     // failed to re-index is not evidence that it is gone, so anything that
     // errored above keeps its row.
     if !indexed.is_empty() {

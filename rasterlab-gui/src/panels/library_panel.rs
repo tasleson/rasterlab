@@ -60,27 +60,30 @@ fn no_library_ui(ui: &mut egui::Ui, _state: &mut AppState) {
 
 fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
-        // Sort order
-        ui.label("Sort:");
-        let cur = state.library.sort;
-        egui::ComboBox::from_id_salt("lib_sort")
-            .selected_text(sort_label(cur))
-            .show_ui(ui, |ui| {
-                for order in [
-                    SortOrder::ImportDateDesc,
-                    SortOrder::CaptureDateDesc,
-                    SortOrder::CaptureDateAsc,
-                    SortOrder::RatingDesc,
-                    SortOrder::FilenameAsc,
-                ] {
-                    if ui
-                        .selectable_value(&mut state.library.sort, order, sort_label(order))
-                        .clicked()
-                    {
-                        state.library.refresh();
+        let in_recently_deleted = state.library.view == LibraryView::RecentlyDeleted;
+
+        ui.add_enabled_ui(!in_recently_deleted, |ui| {
+            ui.label("Sort:");
+            let cur = state.library.sort;
+            egui::ComboBox::from_id_salt("lib_sort")
+                .selected_text(sort_label(cur))
+                .show_ui(ui, |ui| {
+                    for order in [
+                        SortOrder::ImportDateDesc,
+                        SortOrder::CaptureDateDesc,
+                        SortOrder::CaptureDateAsc,
+                        SortOrder::RatingDesc,
+                        SortOrder::FilenameAsc,
+                    ] {
+                        if ui
+                            .selectable_value(&mut state.library.sort, order, sort_label(order))
+                            .clicked()
+                        {
+                            state.library.refresh();
+                        }
                     }
-                }
-            });
+                });
+        });
 
         ui.separator();
 
@@ -99,10 +102,29 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
         let count = state.library.results.len();
         let selected = state.library.selected.len();
-        if selected > 0 {
+        if in_recently_deleted {
+            if selected > 0 {
+                ui.label(format!("{} selected / {} items", selected, count));
+                ui.separator();
+                if ui.button("Restore").clicked() {
+                    state.library.restore_selected();
+                }
+                if ui.button("Delete Permanently").clicked() {
+                    state.library.confirm_permanent_delete = true;
+                }
+            } else {
+                ui.label(format!("{} items", count));
+            }
+            if state.library.recently_deleted_count > 0 {
+                ui.separator();
+                if ui.button("Empty Recently Deleted").clicked() {
+                    state.library.confirm_empty_recently_deleted = true;
+                }
+            }
+        } else if selected > 0 {
             ui.label(format!("{} selected / {} photos", selected, count));
             ui.separator();
-            if ui.button("Move to Trash").clicked() {
+            if ui.button("Move to Recently Deleted").clicked() {
                 state.library.confirm_delete = true;
             }
         } else {
@@ -202,6 +224,12 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 // ── Confirmation dialog ───────────────────────────────────────────────────────
 
 pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
+    move_to_recently_deleted_dialog(ctx, state);
+    permanent_delete_dialog(ctx, state);
+    empty_recently_deleted_dialog(ctx, state);
+}
+
+fn move_to_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
     if !state.library.confirm_delete {
         return;
     }
@@ -215,7 +243,7 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
     });
     if enter {
         state.library.confirm_delete = false;
-        state.library.delete_selected();
+        state.library.move_selected_to_recently_deleted();
         return;
     }
     if esc {
@@ -225,9 +253,9 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
 
     let n = state.library.selected.len();
     let title = if n == 1 {
-        "Move to Trash?".to_owned()
+        "Move to Recently Deleted?".to_owned()
     } else {
-        format!("Move {} photos to Trash?", n)
+        format!("Move {} photos to Recently Deleted?", n)
     };
     let mut open = true;
     egui::Window::new(&title)
@@ -236,7 +264,7 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.label("The selected photo(s) will be moved to your system trash.");
+            ui.label("You can restore these photos later from Recently Deleted.");
             let protected = state
                 .library
                 .results
@@ -256,9 +284,9 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Move to Trash").clicked() {
+                if ui.button("Move to Recently Deleted").clicked() {
                     state.library.confirm_delete = false;
-                    state.library.delete_selected();
+                    state.library.move_selected_to_recently_deleted();
                 }
                 if ui.button("Cancel").clicked() {
                     state.library.confirm_delete = false;
@@ -267,6 +295,79 @@ pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         });
     if !open {
         state.library.confirm_delete = false;
+    }
+}
+
+fn permanent_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.library.confirm_permanent_delete {
+        return;
+    }
+    let n = state.library.selected.len();
+    let title = if n == 1 {
+        "Delete Photo Permanently?".to_owned()
+    } else {
+        format!("Delete {n} Photos Permanently?")
+    };
+    let mut open = true;
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 180, 80),
+                "This cannot be undone.",
+            );
+            ui.label("The selected photos and their RasterLab edits will be permanently removed.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Delete Permanently").clicked() {
+                    state.library.confirm_permanent_delete = false;
+                    state.library.permanently_delete_selected();
+                }
+                if ui.button("Cancel").clicked() {
+                    state.library.confirm_permanent_delete = false;
+                }
+            });
+        });
+    if !open {
+        state.library.confirm_permanent_delete = false;
+    }
+}
+
+fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if !state.library.confirm_empty_recently_deleted {
+        return;
+    }
+    let n = state.library.recently_deleted_count;
+    let mut open = true;
+    egui::Window::new("Empty Recently Deleted?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 180, 80),
+                "This cannot be undone.",
+            );
+            ui.label(format!(
+                "Permanently remove all {n} photo(s) from Recently Deleted?"
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Empty Recently Deleted").clicked() {
+                    state.library.confirm_empty_recently_deleted = false;
+                    state.library.empty_recently_deleted();
+                }
+                if ui.button("Cancel").clicked() {
+                    state.library.confirm_empty_recently_deleted = false;
+                }
+            });
+        });
+    if !open {
+        state.library.confirm_empty_recently_deleted = false;
     }
 }
 
@@ -360,15 +461,26 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         ui.strong("Library");
 
         let all_selected = state.library.view == LibraryView::AllPhotos;
-        let total = {
-            // Show total from sessions sum so we don't need a separate query
-            state.library.results.len()
-        };
+        let total = state.library.all_photo_count;
         if ui
             .selectable_label(all_selected, format!("All Photos ({})", total))
             .clicked()
         {
             select_view(state, LibraryView::AllPhotos);
+        }
+
+        let deleted_selected = state.library.view == LibraryView::RecentlyDeleted;
+        if ui
+            .selectable_label(
+                deleted_selected,
+                format!(
+                    "Recently Deleted ({})",
+                    state.library.recently_deleted_count
+                ),
+            )
+            .clicked()
+        {
+            select_view(state, LibraryView::RecentlyDeleted);
         }
 
         let sessions = state.library.sessions.clone();
@@ -400,6 +512,13 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
         ui.add_space(8.0);
         ui.separator();
+
+        // Filters describe active library metadata. Recently Deleted is kept
+        // intentionally simple and ordered by deletion time.
+        if deleted_selected {
+            ui.weak("Items remain here until restored or permanently deleted.");
+            return;
+        }
 
         // ── Filters ───────────────────────────────────────────────────────
         ui.strong("Filter");
@@ -586,6 +705,7 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 /// state, then reload. Shared by every sidebar entry so the reset stays in sync.
 fn select_view(state: &mut AppState, view: LibraryView) {
     state.library.view = view;
+    state.library.select_none();
     state.library.filter = SearchFilter::default();
     state.library.iso_exact_text.clear();
     state.library.aperture_exact_text.clear();
@@ -848,6 +968,8 @@ fn keyboard_nav(ui: &mut egui::Ui, state: &mut AppState, cols: usize) {
     // Don't steal keys from text fields or the delete-confirm dialog.
     if ui.ctx().egui_wants_keyboard_input()
         || state.library.confirm_delete
+        || state.library.confirm_permanent_delete
+        || state.library.confirm_empty_recently_deleted
         || state.library.results.is_empty()
     {
         return;
@@ -896,7 +1018,10 @@ fn keyboard_nav(ui: &mut egui::Ui, state: &mut AppState, cols: usize) {
         state.library.scroll_to_hash = Some(hash);
     }
 
-    if enter && state.library.selected.len() == 1 {
+    if enter
+        && state.library.view != LibraryView::RecentlyDeleted
+        && state.library.selected.len() == 1
+    {
         let selected_id = state.library.selected[0];
         if let (Some(photo), Some(lib)) = (
             state
@@ -917,6 +1042,13 @@ fn keyboard_nav(ui: &mut egui::Ui, state: &mut AppState, cols: usize) {
 // ── Thumbnail grid ────────────────────────────────────────────────────────────
 
 fn grid_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    if state.library.results.is_empty() && state.library.view == LibraryView::RecentlyDeleted {
+        ui.centered_and_justified(|ui| {
+            ui.weak("Recently Deleted is empty.");
+        });
+        return;
+    }
+
     let thumb_px = (512.0 * state.library.thumb_scale).max(64.0);
     let padding = 6.0;
     let cell_sz = thumb_px + padding * 2.0;
@@ -991,6 +1123,12 @@ fn thumb_cell(
     let cell_size = Vec2::splat(thumb_px + padding * 2.0);
 
     let (rect, resp) = ui.allocate_exact_size(cell_size, Sense::click());
+    let resp = resp.on_hover_text(
+        photo
+            .original_filename
+            .as_deref()
+            .unwrap_or("Unnamed photo"),
+    );
 
     // If this is the photo we just came from in the editor, scroll to it and
     // select it so the user can immediately see where they were.
@@ -1088,7 +1226,8 @@ fn thumb_cell(
         }
     }
 
-    if resp.double_clicked()
+    if state.library.view != LibraryView::RecentlyDeleted
+        && resp.double_clicked()
         && let Some(lib) = &state.library.library
     {
         // Defer the actual open to app.rs so the unsaved-changes dialog can
@@ -1105,6 +1244,23 @@ fn thumb_cell(
             state.library.select_only(id);
         }
         let n = state.library.selected.len();
+
+        if state.library.view == LibraryView::RecentlyDeleted {
+            if ui.button("Restore").clicked() {
+                state.library.restore_selected();
+                ui.close();
+            }
+            let label = if n == 1 {
+                "Delete Permanently".to_owned()
+            } else {
+                format!("Delete {n} Permanently")
+            };
+            if ui.button(label).clicked() {
+                state.library.confirm_permanent_delete = true;
+                ui.close();
+            }
+            return;
+        }
 
         // Focus Stack the whole selection. Shown disabled below the minimum so
         // the action is discoverable from a single-photo right-click too.
@@ -1140,9 +1296,9 @@ fn thumb_cell(
         }
 
         let label = if n == 1 {
-            "Move to Trash".to_owned()
+            "Move to Recently Deleted".to_owned()
         } else {
-            format!("Move {} to Trash", n)
+            format!("Move {n} to Recently Deleted")
         };
         if ui.button(label).clicked() {
             state.library.confirm_delete = true;

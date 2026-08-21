@@ -26,8 +26,8 @@
 //!   the collection operations write the `.rlab` before the index, so an
 //!   interruption costs at worst a stale row — the edit is already durable and
 //!   a rebuild recovers it.  Deletion is the one inversion: storage goes
-//!   first, because a row surviving a deleted file is a photo that will not
-//!   open, while a file surviving a deleted row is a photo that comes back.
+//!   first. Recently Deleted renames the file inside the library and then marks
+//!   its row hidden, rolling the rename back if the index update fails.
 //!
 //! * **Multi-step operations are idempotent.**  Imports are keyed by content
 //!   hash and skip what is already there, so a cancelled or crashed import
@@ -57,7 +57,8 @@ pub mod stoolap_db;
 pub mod thumbnail;
 
 pub use db_trait::{
-    CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow, SortOrder,
+    CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
+    RecentlyDeletedRow, SortOrder,
 };
 pub use import::{ImportSession, MONTH_NAMES, ymd_from_unix};
 pub use library::{ImportProgress, Library};

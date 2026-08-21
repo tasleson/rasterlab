@@ -446,6 +446,110 @@ fn folder_import_groups_jpeg_by_exif_capture_date_not_mtime() {
 // ── Delete ────────────────────────────────────────────────────────────────────
 
 #[test]
+fn recently_deleted_photo_can_be_restored_with_its_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let session = lib.all_sessions().unwrap()[0].clone();
+    lib.rename_session(&session.id, "Keep this name").unwrap();
+    let collection = lib.create_collection("Restorable").unwrap();
+    lib.add_to_collection(collection.id, &[photo.id]).unwrap();
+    let active_path = lib.rlab_path(&photo.hash);
+    let deleted_path = lib.recently_deleted_path(&photo.hash);
+    let thumb_path = lib.thumb_path(&photo.hash);
+
+    lib.delete_photo(photo.id)
+        .expect("move to Recently Deleted");
+
+    assert!(!active_path.exists());
+    assert!(deleted_path.exists());
+    assert!(thumb_path.exists(), "thumbnail is retained for recovery UI");
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    assert!(lib.collection_photos(collection.id).unwrap().is_empty());
+    assert!(
+        lib.all_sessions().unwrap().is_empty(),
+        "an all-deleted session should be hidden"
+    );
+    let deleted = lib.recently_deleted().unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].photo.id, photo.id);
+
+    lib.restore_photo(photo.id).expect("restore photo");
+
+    assert!(active_path.exists());
+    assert!(!deleted_path.exists());
+    assert!(lib.recently_deleted().unwrap().is_empty());
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+    assert_eq!(lib.collection_photos(collection.id).unwrap().len(), 1);
+    let restored_session = &lib.all_sessions().unwrap()[0];
+    assert_eq!(restored_session.photo_count, 1);
+    assert_eq!(restored_session.name, "Keep this name");
+}
+
+#[test]
+fn opening_library_finishes_an_interrupted_recently_deleted_move() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let active_path = lib.rlab_path(&photo.hash);
+    let deleted_path = lib.recently_deleted_path(&photo.hash);
+    std::fs::create_dir_all(deleted_path.parent().unwrap()).unwrap();
+    std::fs::rename(&active_path, &deleted_path).unwrap();
+    drop(lib);
+
+    let reopened = open_library(tmp.path());
+
+    assert!(
+        reopened
+            .all_photos(SortOrder::default())
+            .unwrap()
+            .is_empty()
+    );
+    let deleted = reopened.recently_deleted().unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].photo.hash, photo.hash);
+}
+
+#[test]
+fn empty_recently_deleted_permanently_removes_files_and_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let paths: Vec<_> = photos
+        .iter()
+        .map(|photo| {
+            (
+                lib.recently_deleted_path(&photo.hash),
+                lib.thumb_path(&photo.hash),
+            )
+        })
+        .collect();
+    lib.delete_photo(photos[0].id).unwrap();
+    assert_eq!(
+        lib.all_sessions().unwrap()[0].photo_count,
+        1,
+        "moving one photo must decrement the active session count"
+    );
+    lib.delete_photo(photos[1].id).unwrap();
+
+    assert_eq!(lib.recently_deleted().unwrap().len(), 2);
+    assert_eq!(lib.empty_recently_deleted().unwrap(), 2);
+
+    assert!(lib.recently_deleted().unwrap().is_empty());
+    assert!(lib.all_sessions().unwrap().is_empty());
+    for (rlab, thumb) in paths {
+        assert!(!rlab.exists());
+        assert!(!thumb.exists());
+    }
+}
+
+#[test]
 fn delete_photo_permanently_removes_files_and_db_row() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = open_library(tmp.path());
@@ -466,6 +570,10 @@ fn delete_photo_permanently_removes_files_and_db_row() {
     assert!(
         lib.all_photos(SortOrder::default()).unwrap().is_empty(),
         "DB row should be gone"
+    );
+    assert!(
+        lib.all_sessions().unwrap().is_empty(),
+        "the empty import session should not remain in the sidebar"
     );
 }
 

@@ -7,7 +7,8 @@ use stoolap::api::{Database, Transaction};
 
 use crate::{
     db_trait::{
-        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow, SortOrder,
+        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
+        RecentlyDeletedRow, SortOrder,
     },
     search::SearchFilter,
 };
@@ -66,7 +67,8 @@ const SCHEMA_STMTS: &[&str] = &[
         protected         INTEGER NOT NULL DEFAULT 0,
         source_path       TEXT,
         source_size       INTEGER,
-        source_mtime      INTEGER
+        source_mtime      INTEGER,
+        deleted_at        INTEGER NOT NULL DEFAULT 0
     )",
     "CREATE TABLE IF NOT EXISTS exif (
         photo_id          INTEGER PRIMARY KEY,
@@ -173,8 +175,12 @@ fn row_to_photo(row: &stoolap::api::rows::ResultRow) -> Result<PhotoRow> {
 const PHOTO_SELECT: &str = "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
             p.import_date, p.import_session, p.capture_date,
             p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits,
-            p.protected
+            p.protected, p.deleted_at
      FROM photos p";
+
+fn row_is_active(row: &stoolap::api::rows::ResultRow) -> Result<bool> {
+    Ok(row.get::<i64>(13).context("deleted_at")? == 0)
+}
 
 // ── LibraryDb impl ────────────────────────────────────────────────────────────
 
@@ -213,6 +219,16 @@ impl LibraryDb for StoolapDb {
         // rows, which readers treat as "unknown".
         let _ = self.db.execute(
             "ALTER TABLE import_sessions ADD COLUMN imported_at INTEGER",
+            (),
+        );
+        // Migration: library-owned Recently Deleted state. Zero means active;
+        // positive values are deletion timestamps.
+        let _ = self.db.execute(
+            "ALTER TABLE photos ADD COLUMN deleted_at INTEGER NOT NULL DEFAULT 0",
+            (),
+        );
+        let _ = self.db.execute(
+            "UPDATE photos SET deleted_at=0 WHERE deleted_at IS NULL",
             (),
         );
         Ok(())
@@ -289,6 +305,14 @@ impl LibraryDb for StoolapDb {
         })
     }
 
+    fn mark_photo_deleted(&self, photo_id: PhotoId, deleted_at: u64) -> Result<()> {
+        self.in_transaction(|tx| set_photo_deleted_tx(tx, photo_id, Some(deleted_at)))
+    }
+
+    fn restore_photo(&self, photo_id: PhotoId) -> Result<()> {
+        self.in_transaction(|tx| set_photo_deleted_tx(tx, photo_id, None))
+    }
+
     fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
         self.in_transaction(|tx| delete_photo_tx(tx, photo_id))
     }
@@ -302,7 +326,29 @@ impl LibraryDb for StoolapDb {
         let rows = self.db.query(&sql, ())?;
         let mut result = Vec::new();
         for row in rows {
-            result.push(row_to_photo(&row.context("all_photos row")?)?);
+            let row = row.context("all_photos row")?;
+            if row_is_active(&row)? {
+                result.push(row_to_photo(&row)?);
+            }
+        }
+        Ok(result)
+    }
+
+    fn recently_deleted(&self) -> Result<Vec<RecentlyDeletedRow>> {
+        let rows = self.db.query(
+            &format!(
+                "{} WHERE p.deleted_at > 0 ORDER BY p.deleted_at DESC, p.id DESC",
+                PHOTO_SELECT
+            ),
+            (),
+        )?;
+        let mut result = Vec::new();
+        for row in rows {
+            let row = row.context("recently_deleted row")?;
+            result.push(RecentlyDeletedRow {
+                photo: row_to_photo(&row)?,
+                deleted_at: row.get::<i64>(13).context("deleted_at")? as u64,
+            });
         }
         Ok(result)
     }
@@ -435,7 +481,8 @@ impl LibraryDb for StoolapDb {
         let sql = format!(
             "SELECT DISTINCT p.id, p.hash, p.lib_path, p.width, p.height,
                     p.import_date, p.import_session, p.capture_date,
-                    p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits
+                    p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits,
+                    p.protected, p.deleted_at
              FROM photos p
              LEFT JOIN exif       e  ON e.photo_id  = p.id
              LEFT JOIN ratings    r  ON r.photo_id  = p.id
@@ -449,7 +496,10 @@ impl LibraryDb for StoolapDb {
         let rows = self.db.query(&sql, params.as_slice())?;
         let mut result = Vec::new();
         for row in rows {
-            result.push(row_to_photo(&row.context("search row")?)?);
+            let row = row.context("search row")?;
+            if row_is_active(&row)? {
+                result.push(row_to_photo(&row)?);
+            }
         }
         Ok(result)
     }
@@ -465,25 +515,30 @@ impl LibraryDb for StoolapDb {
         )?;
         let mut result = Vec::new();
         for row in rows {
-            result.push(row_to_photo(&row.context("photos_by_session row")?)?);
+            let row = row.context("photos_by_session row")?;
+            if row_is_active(&row)? {
+                result.push(row_to_photo(&row)?);
+            }
         }
         Ok(result)
     }
 
     fn collection_photos(&self, collection_id: CollectionId) -> Result<Vec<PhotoRow>> {
         let rows = self.db.query(
-            "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
-                        p.import_date, p.import_session, p.capture_date,
-                        p.original_filename, p.stack_id, p.stack_is_primary
-                 FROM photos p
-                 JOIN collection_photos cp ON cp.photo_id = p.id
+            &format!(
+                "{} JOIN collection_photos cp ON cp.photo_id = p.id
                  WHERE cp.collection_id = $1
                  ORDER BY p.capture_date DESC, p.id DESC",
+                PHOTO_SELECT
+            ),
             (collection_id,),
         )?;
         let mut result = Vec::new();
         for row in rows {
-            result.push(row_to_photo(&row.context("collection_photos row")?)?);
+            let row = row.context("collection_photos row")?;
+            if row_is_active(&row)? {
+                result.push(row_to_photo(&row)?);
+            }
         }
         Ok(result)
     }
@@ -532,7 +587,8 @@ impl LibraryDb for StoolapDb {
     fn session_photo_count(&self, session_id: &str) -> Result<i64> {
         self.db
             .query_one(
-                "SELECT COUNT(*) FROM photos WHERE import_session = $1",
+                "SELECT COUNT(*) FROM photos
+                 WHERE deleted_at = 0 AND import_session = $1",
                 (session_id,),
             )
             .context("count session photos")
@@ -543,12 +599,18 @@ impl LibraryDb for StoolapDb {
         // number in the hundreds at most, and an anti-join against a column
         // that can be NULL is the kind of thing that silently deletes
         // everything.
-        let stale: Vec<String> = self
-            .all_sessions()?
-            .into_iter()
-            .map(|s| s.id)
-            .filter(|id| self.session_photo_count(id).unwrap_or(1) == 0)
-            .collect();
+        let rows = self.db.query("SELECT id FROM import_sessions", ())?;
+        let mut stale = Vec::new();
+        for row in rows {
+            let id = row.context("empty-session candidate")?.get::<String>(0)?;
+            let count: i64 = self.db.query_one(
+                "SELECT COUNT(*) FROM photos WHERE import_session = $1",
+                (id.as_str(),),
+            )?;
+            if count == 0 {
+                stale.push(id);
+            }
+        }
         self.in_transaction(|tx| {
             for id in &stale {
                 tx.execute("DELETE FROM import_sessions WHERE id = $1", (id.as_str(),))?;
@@ -560,7 +622,9 @@ impl LibraryDb for StoolapDb {
     fn all_sessions(&self) -> Result<Vec<ImportSessionRow>> {
         let rows = self.db.query(
             "SELECT id, name, started_at, imported_at, source_dir, photo_count
-             FROM import_sessions ORDER BY started_at DESC",
+             FROM import_sessions
+             WHERE photo_count > 0
+             ORDER BY started_at DESC",
             (),
         )?;
         let mut result = Vec::new();
@@ -591,7 +655,10 @@ impl LibraryDb for StoolapDb {
         )?;
         let mut result = Vec::new();
         for row in rows {
-            result.push(row_to_photo(&row.context("photos_in_stack row")?)?);
+            let row = row.context("photos_in_stack row")?;
+            if row_is_active(&row)? {
+                result.push(row_to_photo(&row)?);
+            }
         }
         Ok(result)
     }
@@ -851,8 +918,47 @@ fn update_lmta_tx(tx: &mut Transaction, photo_id: PhotoId, lmta: &LibraryMeta) -
     Ok(())
 }
 
-/// Remove a photo row and its dependents.
+/// Toggle a photo's Recently Deleted state and refresh its session's active
+/// count in the same transaction.
+fn set_photo_deleted_tx(
+    tx: &mut Transaction,
+    photo_id: PhotoId,
+    deleted_at: Option<u64>,
+) -> Result<()> {
+    let deleted_value = Value::integer(deleted_at.unwrap_or(0) as i64);
+    tx.execute(
+        "UPDATE photos SET deleted_at = $1 WHERE id = $2",
+        vec![deleted_value, Value::integer(photo_id)],
+    )?;
+    tx.execute(
+        "UPDATE import_sessions
+         SET photo_count = (
+             SELECT COUNT(*) FROM photos
+             WHERE import_session = import_sessions.id AND deleted_at = 0
+         )
+         WHERE id = (SELECT import_session FROM photos WHERE id = $1)",
+        (photo_id,),
+    )?;
+    Ok(())
+}
+
+/// Remove a photo row and its dependents, keeping its import-session count in sync.
 fn delete_photo_tx(tx: &mut Transaction, photo_id: PhotoId) -> Result<()> {
+    // `photo_count` is cached for the sidebar, so derive the post-delete value
+    // from the photo rows while the row (and therefore its session id) is still
+    // available. Empty-session pruning happens at the end of the surrounding
+    // operation: index rebuilding temporarily deletes and reinserts rows, and
+    // must retain the session row (including a custom name) in between.
+    tx.execute(
+        "UPDATE import_sessions
+         SET photo_count = (
+             SELECT COUNT(*) FROM photos
+             WHERE import_session = import_sessions.id
+               AND deleted_at = 0 AND id <> $1
+         )
+         WHERE id = (SELECT import_session FROM photos WHERE id = $1)",
+        (photo_id,),
+    )?;
     // Manual cascade since we dropped ON DELETE CASCADE
     for tbl in &[
         "keywords",
@@ -940,7 +1046,62 @@ mod tests {
 
         db.delete_photo(id).unwrap();
         assert_eq!(db.session_photo_count("s1").unwrap(), 1);
+        assert_eq!(db.all_sessions().unwrap()[0].photo_count, 1);
         assert_eq!(db.session_photo_count("nonexistent").unwrap(), 0);
+    }
+
+    #[test]
+    fn deleting_a_sessions_last_photo_zeros_the_cached_count() {
+        let db = db();
+        db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
+            .unwrap();
+        let id = db
+            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .unwrap();
+        db.update_session_count("s1", 1).unwrap();
+
+        db.delete_photo(id).unwrap();
+
+        let count: i64 = db
+            .db
+            .query_one(
+                "SELECT photo_count FROM import_sessions WHERE id = $1",
+                ("s1",),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert!(db.all_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recently_deleted_rows_are_separated_from_active_photos() {
+        let db = db();
+        db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
+            .unwrap();
+        let id = db
+            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .unwrap();
+        db.update_session_count("s1", 1).unwrap();
+        assert_eq!(db.all_photos(SortOrder::default()).unwrap().len(), 1);
+
+        db.mark_photo_deleted(id, 1_700_000_000).unwrap();
+
+        let deleted_at: i64 = db
+            .db
+            .query_one("SELECT deleted_at FROM photos WHERE id = $1", (id,))
+            .unwrap();
+        assert_eq!(deleted_at, 1_700_000_000);
+        let active_count: i64 = db
+            .db
+            .query_one("SELECT COUNT(*) FROM photos WHERE deleted_at = 0", ())
+            .unwrap();
+        assert_eq!(active_count, 0);
+        assert!(db.all_photos(SortOrder::default()).unwrap().is_empty());
+        assert_eq!(db.recently_deleted().unwrap().len(), 1);
+
+        db.restore_photo(id).unwrap();
+        assert_eq!(db.all_photos(SortOrder::default()).unwrap().len(), 1);
+        assert!(db.recently_deleted().unwrap().is_empty());
     }
 
     #[test]
@@ -952,6 +1113,7 @@ mod tests {
             .unwrap();
         db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("full"), 10, 10, None)
             .unwrap();
+        db.update_session_count("full", 1).unwrap();
 
         assert_eq!(db.delete_empty_sessions().unwrap(), 1);
         let ids: Vec<String> = db

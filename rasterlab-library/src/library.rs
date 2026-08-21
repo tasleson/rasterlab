@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool},
     time::{SystemTime, UNIX_EPOCH},
@@ -11,7 +12,8 @@ use rasterlab_core::{
 
 use crate::{
     db_trait::{
-        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow, SortOrder,
+        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
+        RecentlyDeletedRow, SortOrder,
     },
     fs_lock,
     import::{self, ImportSession},
@@ -48,11 +50,6 @@ pub struct Library {
     registry: FormatRegistry,
 }
 
-enum DeleteStorageMode {
-    SystemTrash,
-    Permanent,
-}
-
 impl Library {
     /// Open (or create) a library at `path` using the default stoolap backend.
     pub fn open_or_create(path: &Path) -> Result<Self> {
@@ -65,12 +62,15 @@ impl Library {
     pub fn with_db(path: &Path, db: Box<dyn LibraryDb>) -> Result<Self> {
         std::fs::create_dir_all(path.join("files"))?;
         std::fs::create_dir_all(path.join("thumbs"))?;
+        std::fs::create_dir_all(path.join("recently_deleted/files"))?;
         db.init()?;
-        Ok(Self {
+        let library = Self {
             root: path.to_path_buf(),
             db,
             registry: FormatRegistry::with_builtins(),
-        })
+        };
+        library.reconcile_recently_deleted()?;
+        Ok(library)
     }
 
     pub fn root(&self) -> &Path {
@@ -85,6 +85,10 @@ impl Library {
 
     pub fn thumb_path(&self, hash: &str) -> PathBuf {
         import::thumb_path(&self.root, hash)
+    }
+
+    pub fn recently_deleted_path(&self, hash: &str) -> PathBuf {
+        import::rlab_path(&self.root.join("recently_deleted"), hash)
     }
 
     // ── Import ────────────────────────────────────────────────────────────
@@ -154,52 +158,133 @@ impl Library {
         self.db.search(filter, sort)
     }
 
-    /// Move the `.rlab` to OS trash and remove the thumbnail + DB row.
-    pub fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
-        self.delete_photo_with_mode(photo_id, DeleteStorageMode::SystemTrash)
-    }
-
-    /// Permanently remove the `.rlab`, thumbnail, and DB row.
+    /// Move a photo into this library's Recently Deleted area.
     ///
-    /// This is intended for maintenance and headless test environments where
-    /// the platform trash service may be unavailable or blocking.
-    pub fn delete_photo_permanently(&self, photo_id: PhotoId) -> Result<()> {
-        self.delete_photo_with_mode(photo_id, DeleteStorageMode::Permanent)
+    /// The `.rlab` is renamed within the library filesystem, which is fast and
+    /// recoverable on local disks and network mounts alike. Its index metadata
+    /// and thumbnail remain available so the photo can be restored exactly.
+    pub fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
+        let photos = self.db.all_photos(SortOrder::default())?;
+        let Some(row) = photos.iter().find(|r| r.id == photo_id) else {
+            bail!("photo {photo_id} not found");
+        };
+        if row.protected {
+            let name = row.original_filename.as_deref().unwrap_or("photo");
+            bail!("\"{name}\" is protected and cannot be deleted");
+        }
+
+        let active = self.rlab_path(&row.hash);
+        let deleted = self.recently_deleted_path(&row.hash);
+        let moved = move_library_file(&active, &deleted)?;
+        if let Err(error) = self.db.mark_photo_deleted(photo_id, unix_now()) {
+            if moved {
+                let _ = move_library_file(&deleted, &active);
+            }
+            return Err(error.context("record Recently Deleted state"));
+        }
+        Ok(())
     }
 
-    /// Storage first, index second, and every step tolerant of already having
-    /// happened: an interrupted delete leaves a row pointing at a file that is
-    /// gone, which reads as a photo that will not open — recoverable, and
-    /// cleaned up by the next [`Library::rebuild_index`].  The other order
-    /// would drop the row first and leave the file to be re-indexed by that
-    /// same rebuild, resurrecting a photo the user deleted.
-    fn delete_photo_with_mode(&self, photo_id: PhotoId, mode: DeleteStorageMode) -> Result<()> {
-        // Find the hash so we can remove thumbnail
+    /// Permanently remove an active photo's `.rlab`, thumbnail, and DB row.
+    ///
+    /// This is intended for maintenance and headless test environments.
+    pub fn delete_photo_permanently(&self, photo_id: PhotoId) -> Result<()> {
         let photos = self.db.all_photos(SortOrder::default())?;
-        if let Some(row) = photos.iter().find(|r| r.id == photo_id) {
-            if row.protected {
-                let name = row.original_filename.as_deref().unwrap_or("photo");
-                bail!("\"{name}\" is protected and cannot be deleted");
+        let Some(row) = photos.iter().find(|r| r.id == photo_id) else {
+            bail!("photo {photo_id} not found");
+        };
+        if row.protected {
+            let name = row.original_filename.as_deref().unwrap_or("photo");
+            bail!("\"{name}\" is protected and cannot be deleted");
+        }
+        self.permanently_remove(row, &self.rlab_path(&row.hash))?;
+        self.db.delete_empty_sessions()?;
+        Ok(())
+    }
+
+    pub fn recently_deleted(&self) -> Result<Vec<RecentlyDeletedRow>> {
+        self.db.recently_deleted()
+    }
+
+    pub fn restore_photo(&self, photo_id: PhotoId) -> Result<()> {
+        let deleted_rows = self.db.recently_deleted()?;
+        let Some(row) = deleted_rows.iter().find(|r| r.photo.id == photo_id) else {
+            bail!("recently deleted photo {photo_id} not found");
+        };
+        let deleted = self.recently_deleted_path(&row.photo.hash);
+        let active = self.rlab_path(&row.photo.hash);
+        let moved = move_library_file(&deleted, &active)?;
+        if let Err(error) = self.db.restore_photo(photo_id) {
+            if moved {
+                let _ = move_library_file(&active, &deleted);
             }
-            let rlab = self.rlab_path(&row.hash);
-            let thumb = self.thumb_path(&row.hash);
-            if rlab.exists() {
-                match mode {
-                    DeleteStorageMode::SystemTrash => {
-                        trash::delete(&rlab)
-                            .with_context(|| format!("trash {}", rlab.display()))?;
-                    }
-                    DeleteStorageMode::Permanent => {
-                        std::fs::remove_file(&rlab)
-                            .with_context(|| format!("remove {}", rlab.display()))?;
-                    }
-                }
+            return Err(error.context("restore photo index state"));
+        }
+        Ok(())
+    }
+
+    pub fn delete_recently_deleted_permanently(&self, photo_id: PhotoId) -> Result<()> {
+        let deleted_rows = self.db.recently_deleted()?;
+        let Some(row) = deleted_rows.iter().find(|r| r.photo.id == photo_id) else {
+            bail!("recently deleted photo {photo_id} not found");
+        };
+        self.permanently_remove(&row.photo, &self.recently_deleted_path(&row.photo.hash))?;
+        self.db.delete_empty_sessions()?;
+        Ok(())
+    }
+
+    pub fn empty_recently_deleted(&self) -> Result<usize> {
+        let rows = self.db.recently_deleted()?;
+        for row in &rows {
+            self.permanently_remove(&row.photo, &self.recently_deleted_path(&row.photo.hash))?;
+        }
+        self.db.delete_empty_sessions()?;
+        Ok(rows.len())
+    }
+
+    /// Complete a file-first move that was interrupted before its database
+    /// flag committed. Already-indexed deleted files retain their timestamps.
+    fn reconcile_recently_deleted(&self) -> Result<()> {
+        let already_deleted: HashSet<String> = self
+            .db
+            .recently_deleted()?
+            .into_iter()
+            .map(|row| row.photo.hash)
+            .collect();
+        let deleted_files = self.root.join("recently_deleted/files");
+        for entry in walkdir::WalkDir::new(deleted_files)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_type().is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "rlab")
+            })
+        {
+            let Some(hash) = entry.path().file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            if already_deleted.contains(hash) {
+                continue;
             }
-            if thumb.exists() {
-                std::fs::remove_file(&thumb).ok();
+            if let Some(row) = self.db.photo_by_hash(hash)? {
+                self.db.mark_photo_deleted(row.id, unix_now())?;
             }
         }
-        self.db.delete_photo(photo_id)
+        Ok(())
+    }
+
+    /// Storage first, index second: a failed index mutation may leave a stale
+    /// row, but can never resurrect a file the user permanently removed.
+    fn permanently_remove(&self, row: &PhotoRow, rlab: &Path) -> Result<()> {
+        if rlab.exists() {
+            std::fs::remove_file(rlab).with_context(|| format!("remove {}", rlab.display()))?;
+        }
+        let thumb = self.thumb_path(&row.hash);
+        if thumb.exists() {
+            std::fs::remove_file(&thumb).ok();
+        }
+        self.db.delete_photo(row.id)?;
+        Ok(())
     }
 
     /// Write new metadata to the photo's `.rlab` first, then to the index.
@@ -487,6 +572,32 @@ impl Library {
 }
 
 // ── File-level helpers ────────────────────────────────────────────────────────
+
+/// Rename `source` to `destination` within the library. Returns `true` when a
+/// rename occurred and `false` when it had already happened, making the file
+/// step safe to retry after an interrupted operation.
+fn move_library_file(source: &Path, destination: &Path) -> Result<bool> {
+    if source.exists() {
+        if destination.exists() {
+            bail!(
+                "cannot move {}: destination {} already exists",
+                source.display(),
+                destination.display()
+            );
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        std::fs::rename(source, destination)
+            .with_context(|| format!("move {} to {}", source.display(), destination.display()))?;
+        return Ok(true);
+    }
+    if destination.exists() {
+        return Ok(false);
+    }
+    bail!("photo file is missing: {}", source.display())
+}
 
 /// Turn per-photo file failures into one error, raised only after the index has
 /// been brought in line with the files that *were* written.  Reporting before

@@ -17,6 +17,7 @@ use crate::panels::tools::shared::MIN_STACK_FRAMES;
 pub enum LibraryView {
     #[default]
     AllPhotos,
+    RecentlyDeleted,
     Session(String),
     Collection(CollectionId),
 }
@@ -76,6 +77,8 @@ pub struct LibraryState {
     // Sidebar state
     pub sessions: Vec<ImportSessionRow>,
     pub collections: Vec<CollectionRow>,
+    pub all_photo_count: usize,
+    pub recently_deleted_count: usize,
 
     /// Error message to show in a status bar or dialog.
     pub last_error: Option<String>,
@@ -105,8 +108,14 @@ pub struct LibraryState {
     /// When true, show the scrub-errors detail window.
     pub show_scrub_errors: bool,
 
-    /// When true, show the "Move to Trash?" confirmation dialog.
+    /// When true, show the "Move to Recently Deleted?" confirmation dialog.
     pub confirm_delete: bool,
+
+    /// Confirmation for permanently deleting the selected recycle-bin items.
+    pub confirm_permanent_delete: bool,
+
+    /// Confirmation for permanently emptying the library recycle bin.
+    pub confirm_empty_recently_deleted: bool,
 
     // Raw text for exact-value filter inputs (persists across frames)
     pub iso_exact_text: String,
@@ -153,6 +162,8 @@ impl Default for LibraryState {
             thumbs: ThumbCache::new(THUMB_CACHE_CAP),
             sessions: Vec::new(),
             collections: Vec::new(),
+            all_photo_count: 0,
+            recently_deleted_count: 0,
             last_error: None,
             last_import_errors: Vec::new(),
             show_import_errors: false,
@@ -162,6 +173,8 @@ impl Default for LibraryState {
             last_scrub_errors: Vec::new(),
             show_scrub_errors: false,
             confirm_delete: false,
+            confirm_permanent_delete: false,
+            confirm_empty_recently_deleted: false,
             iso_exact_text: String::new(),
             aperture_exact_text: String::new(),
             shutter_exact_text: String::new(),
@@ -181,19 +194,25 @@ impl LibraryState {
     pub fn refresh(&mut self) {
         let Some(lib) = &self.library else { return };
 
-        // Compose the view scope into a copy of the filter so that
-        // session/collection views also honor shutter/ISO/aperture/etc.
-        let mut filter = self.filter.clone();
-        match &self.view {
-            LibraryView::AllPhotos => {}
-            LibraryView::Session(id) => filter.import_session = Some(id.clone()),
-            LibraryView::Collection(id) => filter.collection_id = Some(*id),
-        }
+        let deleted = lib.recently_deleted().unwrap_or_default();
+        self.recently_deleted_count = deleted.len();
 
-        let photos = if filter.is_empty() {
-            lib.all_photos(self.sort).ok()
+        let photos = if self.view == LibraryView::RecentlyDeleted {
+            Some(deleted.into_iter().map(|row| row.photo).collect())
         } else {
-            lib.search(&filter, self.sort).ok()
+            // Compose the view scope into a copy of the filter so that
+            // session/collection views also honor shutter/ISO/aperture/etc.
+            let mut filter = self.filter.clone();
+            match &self.view {
+                LibraryView::AllPhotos | LibraryView::RecentlyDeleted => {}
+                LibraryView::Session(id) => filter.import_session = Some(id.clone()),
+                LibraryView::Collection(id) => filter.collection_id = Some(*id),
+            }
+            if filter.is_empty() {
+                lib.all_photos(self.sort).ok()
+            } else {
+                lib.search(&filter, self.sort).ok()
+            }
         };
 
         if let Some(photos) = photos {
@@ -203,6 +222,11 @@ impl LibraryState {
         // Refresh sidebar lists
         self.sessions = lib.all_sessions().unwrap_or_default();
         self.collections = lib.all_collections().unwrap_or_default();
+        self.all_photo_count = self
+            .sessions
+            .iter()
+            .map(|session| session.photo_count.max(0) as usize)
+            .sum();
     }
 
     /// Human-readable one-liner for a running index rebuild, or `None` when
@@ -272,39 +296,94 @@ impl LibraryState {
         self.selected.clear();
     }
 
-    /// Move all selected photos to the OS trash and remove them from the
-    /// library. Protected photos are skipped so a protected file can never be
-    /// trashed, even if the confirmation dialog is bypassed.
-    pub fn delete_selected(&mut self) {
+    /// Move all selected photos to the library-owned Recently Deleted area.
+    /// Protected photos are skipped even if confirmation is bypassed.
+    pub fn move_selected_to_recently_deleted(&mut self) {
         let Some(lib) = &self.library else { return };
 
-        // Partition the selection into deletable and protected, capturing the
-        // hashes of the deletable ones so we can evict their thumbnails.
-        let mut deletable: Vec<(PhotoId, String)> = Vec::new();
+        let mut deletable: Vec<PhotoId> = Vec::new();
         let mut protected = 0usize;
         for r in &self.results {
             if self.selected.contains(&r.id) {
                 if r.protected {
                     protected += 1;
                 } else {
-                    deletable.push((r.id, r.hash.clone()));
+                    deletable.push(r.id);
                 }
             }
         }
 
-        for (id, _) in &deletable {
+        for id in &deletable {
             if let Err(e) = lib.delete_photo(*id) {
-                self.last_error = Some(format!("Delete failed: {e}"));
+                self.last_error = Some(format!("Move to Recently Deleted failed: {e}"));
+                self.selected.clear();
+                self.refresh();
                 return;
             }
         }
 
-        for (_, hash) in &deletable {
-            self.thumbs.remove(hash);
-        }
         if protected > 0 {
             let noun = if protected == 1 { "photo" } else { "photos" };
             self.last_error = Some(format!("{protected} protected {noun} were not deleted."));
+        }
+        self.selected.clear();
+        self.refresh();
+    }
+
+    pub fn restore_selected(&mut self) {
+        let Some(lib) = self.library.clone() else {
+            return;
+        };
+        for id in self.selected.clone() {
+            if let Err(e) = lib.restore_photo(id) {
+                self.last_error = Some(format!("Restore failed: {e}"));
+                self.selected.clear();
+                self.refresh();
+                return;
+            }
+        }
+        self.selected.clear();
+        self.refresh();
+    }
+
+    pub fn permanently_delete_selected(&mut self) {
+        let Some(lib) = self.library.clone() else {
+            return;
+        };
+        let doomed: Vec<(PhotoId, String)> = self
+            .results
+            .iter()
+            .filter(|row| self.selected.contains(&row.id))
+            .map(|row| (row.id, row.hash.clone()))
+            .collect();
+        for (id, _) in &doomed {
+            if let Err(e) = lib.delete_recently_deleted_permanently(*id) {
+                self.last_error = Some(format!("Permanent delete failed: {e}"));
+                self.selected.clear();
+                self.refresh();
+                return;
+            }
+        }
+        for (_, hash) in &doomed {
+            self.thumbs.remove(hash);
+        }
+        self.selected.clear();
+        self.refresh();
+    }
+
+    pub fn empty_recently_deleted(&mut self) {
+        let Some(lib) = self.library.clone() else {
+            return;
+        };
+        let hashes: Vec<String> = self.results.iter().map(|row| row.hash.clone()).collect();
+        if let Err(e) = lib.empty_recently_deleted() {
+            self.last_error = Some(format!("Empty Recently Deleted failed: {e}"));
+            self.selected.clear();
+            self.refresh();
+            return;
+        }
+        for hash in &hashes {
+            self.thumbs.remove(hash);
         }
         self.selected.clear();
         self.refresh();

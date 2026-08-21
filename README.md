@@ -108,7 +108,7 @@ RasterLab uses several independent mechanisms because no single checksum, undo s
 - Undo/redo, operation enable/disable controls, editable stack entries, and virtual copies make edits reversible without duplicating the source image.
 - Pipeline state is autosaved after changes. Previous unsaved sessions can be restored from **File > Previously Unsaved Work**.
 - Opening another file or library photo while edits are unsaved requires confirmation.
-- Library deletion requires confirmation and moves files to the operating system's trash rather than permanently deleting them.
+- Library deletion requires confirmation and moves photos to RasterLab's **Recently Deleted** view, where they can be restored, deleted permanently, or removed together with **Empty Recently Deleted**.
 - A library photo can be marked **Protected**. RasterLab then excludes it from deletion and applies a best-effort read-only/immutable filesystem lock. The OS-level lock is an extra accident barrier, not a security boundary.
 
 ### Detecting corruption in `.rlab` files
@@ -173,7 +173,7 @@ Current library features include:
 - Sorting by import date, capture date, rating, or filename.
 - Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals.
 - Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
-- Index rebuilding, integrity scrubbing, protected-photo deletion guards, and recoverable move-to-trash behavior.
+- Index rebuilding, integrity scrubbing, protected-photo deletion guards, and a library-owned Recently Deleted area that works consistently on local and network filesystems.
 
 ## Plugins
 

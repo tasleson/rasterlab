@@ -30,6 +30,13 @@ pub struct PhotoRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct RecentlyDeletedRow {
+    pub photo: PhotoRow,
+    /// Wall-clock time when the photo entered the library-owned recycle bin.
+    pub deleted_at: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ImportSessionRow {
     pub id: String,
     pub name: String,
@@ -121,9 +128,19 @@ pub trait LibraryDb: Send + Sync {
 
     fn update_lmta_batch(&self, updates: &[(PhotoId, LibraryMeta)]) -> anyhow::Result<()>;
 
+    /// Hide an active photo from the library while retaining all of its index
+    /// metadata for restoration.
+    fn mark_photo_deleted(&self, photo_id: PhotoId, deleted_at: u64) -> anyhow::Result<()>;
+
+    /// Return a soft-deleted photo to active library queries.
+    fn restore_photo(&self, photo_id: PhotoId) -> anyhow::Result<()>;
+
+    /// Permanently remove a photo row and all dependent metadata.
     fn delete_photo(&self, photo_id: PhotoId) -> anyhow::Result<()>;
 
     fn all_photos(&self, sort: SortOrder) -> anyhow::Result<Vec<PhotoRow>>;
+
+    fn recently_deleted(&self) -> anyhow::Result<Vec<RecentlyDeletedRow>>;
 
     // ── Search ────────────────────────────────────────────────────────────
 

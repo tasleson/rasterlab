@@ -652,7 +652,9 @@ impl eframe::App for RasterLabApp {
                         });
                         ui.add_enabled_ui(
                             self.state.library.library.is_some()
-                                && !self.state.library.selected.is_empty(),
+                                && !self.state.library.selected.is_empty()
+                                && self.state.library.view
+                                    != crate::state::library_state::LibraryView::RecentlyDeleted,
                             |ui| {
                                 if ui.button("Export Selection…").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);
