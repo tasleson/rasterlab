@@ -371,11 +371,20 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             select_view(state, LibraryView::AllPhotos);
         }
 
+        let sessions = state.library.sessions.clone();
+
+        // Recent imports — a flat, newest-first shortcut into the tree below.
+        // A folder of old photographs lands under its capture date, which can
+        // be years back and several collapsed levels down; this is how the
+        // user finds what they just imported without going looking for it.
+        ui.add_space(4.0);
+        ui.strong("Recent Imports");
+        recent_imports_ui(ui, state, &sessions);
+
         // Sessions — grouped into a collapsible Year › Month › session tree so a
         // large library doesn't flood the sidebar with a flat list.
         ui.add_space(4.0);
         ui.strong("Import Sessions");
-        let sessions = state.library.sessions.clone();
         sessions_tree_ui(ui, state, &sessions);
 
         // Collections
@@ -585,6 +594,58 @@ fn select_view(state: &mut AppState, view: LibraryView) {
     state.library.aperture_error = None;
     state.library.shutter_error = None;
     state.library.refresh();
+}
+
+// ── Recent imports ────────────────────────────────────────────────────────────
+
+/// How many sessions the recent-imports shortcut lists.  Long enough to cover
+/// an afternoon of importing several folders, short enough that the tree below
+/// it stays on screen.
+const RECENT_IMPORTS: usize = 10;
+
+/// The `limit` most recently imported sessions, newest first.
+///
+/// Ordered by when photos actually landed rather than by the session's own
+/// date: importing a 2019 shoot today puts it at the top, which is the whole
+/// point of the section.  Sessions whose import time is unknown fall back to
+/// their capture date, so a library that predates the stamp still gets a
+/// sensible list instead of an empty one.
+fn recent_imports(sessions: &[ImportSessionRow], limit: usize) -> Vec<&ImportSessionRow> {
+    let mut recent: Vec<&ImportSessionRow> = sessions.iter().collect();
+    // Stable, so sessions imported in the same second keep the newest-capture
+    // -first order `all_sessions` returned them in.
+    recent.sort_by_key(|s| std::cmp::Reverse(s.last_import_at()));
+    recent.truncate(limit);
+    recent
+}
+
+fn recent_imports_ui(ui: &mut egui::Ui, state: &mut AppState, sessions: &[ImportSessionRow]) {
+    if sessions.is_empty() {
+        ui.weak("No imports yet");
+        return;
+    }
+    for sess in recent_imports(sessions, RECENT_IMPORTS) {
+        let selected = state.library.view == LibraryView::Session(sess.id.clone());
+        let label = format!("{}  ({})", sess.name, sess.photo_count);
+        let mut hover = match sess.imported_at {
+            Some(at) => {
+                let (y, m, d) = ymd_from_unix(at);
+                format!("Imported {} {} {}", MONTH_NAMES[(m - 1) as usize], d, y)
+            }
+            None => "Import date unknown — listed by capture date".to_owned(),
+        };
+        if let Some(dir) = &sess.source_dir {
+            hover.push_str(&format!("\nFrom {}", dir));
+        }
+        if ui
+            .selectable_label(selected, label)
+            .on_hover_text(hover)
+            .clicked()
+        {
+            let id = sess.id.clone();
+            select_view(state, LibraryView::Session(id));
+        }
+    }
 }
 
 // ── Import-session tree ───────────────────────────────────────────────────────
@@ -1117,9 +1178,22 @@ mod tests {
             id: id.to_owned(),
             name: id.to_owned(),
             started_at,
+            imported_at: None,
             source_dir: None,
             photo_count,
         }
+    }
+
+    /// A session dated `started_at` that was imported at `imported_at`.
+    fn imported(id: &str, started_at: u64, imported_at: u64) -> ImportSessionRow {
+        ImportSessionRow {
+            imported_at: Some(imported_at),
+            ..sess(id, started_at, 1)
+        }
+    }
+
+    fn ids(rows: &[&ImportSessionRow]) -> Vec<String> {
+        rows.iter().map(|r| r.id.clone()).collect()
     }
 
     // UTC-midnight Unix timestamps for known dates (see test comments).
@@ -1165,5 +1239,53 @@ mod tests {
     #[test]
     fn group_sessions_empty() {
         assert!(group_sessions(&[]).is_empty());
+    }
+
+    #[test]
+    fn recent_imports_orders_by_import_time_not_capture_date() {
+        // The case the section exists for: an old shoot imported just now must
+        // outrank a recent shoot imported last week, even though the tree puts
+        // it years further down.
+        let sessions = [
+            sess("newest_capture", JUN_15_2025, 1),
+            imported("old_shoot", DEC_20_2024, JUN_15_2025),
+            imported("recent_shoot", JUN_03_2025, JAN_10_2025),
+        ];
+        assert_eq!(
+            ids(&recent_imports(&sessions, 10)),
+            ["newest_capture", "old_shoot", "recent_shoot"],
+            "unstamped sessions fall back to their capture date"
+        );
+    }
+
+    #[test]
+    fn recent_imports_caps_the_list() {
+        let sessions: Vec<_> = (0..25)
+            .map(|i| imported(&format!("s{i}"), JAN_10_2025, JAN_10_2025 + i))
+            .collect();
+        let recent = recent_imports(&sessions, RECENT_IMPORTS);
+        assert_eq!(recent.len(), RECENT_IMPORTS);
+        assert_eq!(recent[0].id, "s24", "newest import first");
+        assert_eq!(recent[RECENT_IMPORTS - 1].id, "s15");
+    }
+
+    #[test]
+    fn recent_imports_keeps_input_order_within_one_import() {
+        // Every group of one folder import shares a timestamp; they should stay
+        // in the newest-capture-first order `all_sessions` returned.
+        let sessions = [
+            imported("jun15", JUN_15_2025, JAN_10_2025),
+            imported("jun03", JUN_03_2025, JAN_10_2025),
+            imported("dec20", DEC_20_2024, JAN_10_2025),
+        ];
+        assert_eq!(
+            ids(&recent_imports(&sessions, 10)),
+            ["jun15", "jun03", "dec20"]
+        );
+    }
+
+    #[test]
+    fn recent_imports_empty() {
+        assert!(recent_imports(&[], RECENT_IMPORTS).is_empty());
     }
 }
