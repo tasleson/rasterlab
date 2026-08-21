@@ -122,6 +122,9 @@ pub fn import_files(
     }
 
     recount_session(db, &session_id)?;
+    if imported > 0 {
+        db.mark_session_imported(&session_id, now)?;
+    }
 
     progress_cb(ImportProgress {
         total: paths.len(),
@@ -164,6 +167,9 @@ pub fn import_folder_grouped(
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Result<Vec<ImportSession>> {
     let total = paths.len();
+    // One clock reading for the whole run, so every group this import creates
+    // sorts together in a recent-imports list.
+    let import_started = unix_now();
 
     // ── Phase 1: scan capture timestamps ──────────────────────────────────
     // A cheap EXIF read (no full RAW demosaic) plus a fallback to filesystem
@@ -267,6 +273,13 @@ pub fn import_folder_grouped(
         }
 
         recount_session(db, &session_id)?;
+        // Stamped with the wall clock, not the back-dated group time, so the
+        // sidebar can answer "where did the folder I just imported go?" for a
+        // shoot whose own date is years back.  Only when something landed: a
+        // group that was entirely duplicates should stay where it was.
+        if group_done > 0 {
+            db.mark_session_imported(&session_id, import_started)?;
+        }
         sessions.push(ImportSession {
             id: session_id,
             name: session_name,

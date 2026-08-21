@@ -33,9 +33,25 @@ pub struct PhotoRow {
 pub struct ImportSessionRow {
     pub id: String,
     pub name: String,
+    /// Capture time the session is dated to.  A folder import back-dates this
+    /// to the shoot, so it says when the photographs were taken, not when they
+    /// were brought into the library.
     pub started_at: u64,
+    /// Wall-clock time photos last actually landed in this session, or `None`
+    /// for a session that predates the stamp or was restored by a rebuild.
+    pub imported_at: Option<u64>,
     pub source_dir: Option<String>,
     pub photo_count: i64,
+}
+
+impl ImportSessionRow {
+    /// Time to order a "most recently imported" list by.  Falls back to the
+    /// capture date when the real import time is unknown, which is the best
+    /// available guess and keeps such sessions in a sensible place rather than
+    /// pinning them to the epoch.
+    pub fn last_import_at(&self) -> u64 {
+        self.imported_at.unwrap_or(self.started_at)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +144,13 @@ pub trait LibraryDb: Send + Sync {
     ) -> anyhow::Result<()>;
 
     fn rename_session(&self, id: &str, name: &str) -> anyhow::Result<()>;
+
+    /// Record that photos landed in this session at wall-clock time `at`.
+    ///
+    /// Kept apart from `insert_session` because a session is reused across
+    /// imports: importing more of a 2019 shoot today should move that session
+    /// to the top of the recent-imports list, not create a second one.
+    fn mark_session_imported(&self, id: &str, at: u64) -> anyhow::Result<()>;
 
     fn update_session_count(&self, id: &str, count: i64) -> anyhow::Result<()>;
 

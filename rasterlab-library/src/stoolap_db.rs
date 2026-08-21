@@ -111,6 +111,7 @@ const SCHEMA_STMTS: &[&str] = &[
         id          TEXT NOT NULL UNIQUE,
         name        TEXT NOT NULL,
         started_at  INTEGER,
+        imported_at INTEGER,
         source_dir  TEXT,
         photo_count INTEGER NOT NULL DEFAULT 0
     )",
@@ -207,6 +208,13 @@ impl LibraryDb for StoolapDb {
         let _ = self
             .db
             .execute("ALTER TABLE photos ADD COLUMN source_mtime INTEGER", ());
+        // Migration: when the import actually ran, as distinct from the capture
+        // date a folder import back-dates the session to.  NULL in existing
+        // rows, which readers treat as "unknown".
+        let _ = self.db.execute(
+            "ALTER TABLE import_sessions ADD COLUMN imported_at INTEGER",
+            (),
+        );
         Ok(())
     }
 
@@ -505,6 +513,14 @@ impl LibraryDb for StoolapDb {
         Ok(())
     }
 
+    fn mark_session_imported(&self, id: &str, at: u64) -> Result<()> {
+        self.db.execute(
+            "UPDATE import_sessions SET imported_at=$1 WHERE id=$2",
+            (at as i64, id),
+        )?;
+        Ok(())
+    }
+
     fn update_session_count(&self, id: &str, count: i64) -> Result<()> {
         self.db.execute(
             "UPDATE import_sessions SET photo_count=$1 WHERE id=$2",
@@ -543,7 +559,7 @@ impl LibraryDb for StoolapDb {
 
     fn all_sessions(&self) -> Result<Vec<ImportSessionRow>> {
         let rows = self.db.query(
-            "SELECT id, name, started_at, source_dir, photo_count
+            "SELECT id, name, started_at, imported_at, source_dir, photo_count
              FROM import_sessions ORDER BY started_at DESC",
             (),
         )?;
@@ -554,8 +570,9 @@ impl LibraryDb for StoolapDb {
                 id: row.get::<String>(0)?,
                 name: row.get::<String>(1)?,
                 started_at: row.get::<i64>(2)? as u64,
-                source_dir: row.get::<Option<String>>(3)?,
-                photo_count: row.get::<i64>(4)?,
+                imported_at: row.get::<Option<i64>>(3)?.map(|t| t as u64),
+                source_dir: row.get::<Option<String>>(4)?,
+                photo_count: row.get::<i64>(5)?,
             });
         }
         Ok(result)

@@ -279,6 +279,40 @@ fn folder_import_groups_by_capture_day_and_back_dates() {
 }
 
 #[test]
+fn folder_import_stamps_the_wall_clock_import_time() {
+    const DAY: i64 = 86_400;
+    const BASE: i64 = 1_600_000_000; // 2020-09-13 UTC
+
+    let tmp_src = tempfile::tempdir().unwrap();
+    write_png_with_mtime(&tmp_src.path().join("old0.png"), 1, BASE);
+    write_png_with_mtime(&tmp_src.path().join("old1.png"), 2, BASE + 5 * DAY);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+
+    let sessions = lib.all_sessions().unwrap();
+    assert_eq!(sessions.len(), 2);
+    for s in &sessions {
+        assert!(
+            s.started_at < BASE as u64 + 6 * DAY as u64,
+            "session stays dated to the 2020 shoot"
+        );
+        let imported_at = s.imported_at.expect("import time recorded");
+        assert!(
+            imported_at >= before,
+            "imported_at must be the wall clock, not the back-dated capture time"
+        );
+        assert_eq!(s.last_import_at(), imported_at);
+    }
+}
+
+#[test]
 fn folder_import_gives_a_heavy_day_its_own_session() {
     use rasterlab_library::import::HEAVY_DAY_PHOTOS;
 
