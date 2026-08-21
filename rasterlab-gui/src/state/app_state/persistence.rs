@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rasterlab_core::{
     Image,
     formats::FormatRegistry,
-    ops::ResizeOp,
+    ops::{MaskedOp, ResizeOp},
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
     traits::operation::Operation,
@@ -227,10 +227,51 @@ impl AppState {
     }
 
     pub fn save_file(&mut self, path: std::path::PathBuf) {
-        let Some(rendered) = &self.rendered else {
-            self.status = "Nothing to save — render first".into();
+        // The canvas is a presentation cache, not an export source. During a
+        // live tool preview it deliberately contains a quarter-resolution
+        // image, and exporting that buffer permanently bakes in the reduced
+        // resolution and its downsampled tonal range. Render the committed
+        // pipeline at source resolution and then apply the current preview op
+        // at full resolution so export matches what the user sees.
+        let preview_op = self.tools.preview_op().map(|preview| {
+            let edit_mask = self.editing.and_then(|session| {
+                self.pipeline()
+                    .and_then(|pipeline| pipeline.ops().get(session.op_index))
+                    .and_then(|entry| entry.operation.as_any())
+                    .and_then(|any| any.downcast_ref::<MaskedOp>())
+                    .map(|masked| masked.mask.clone())
+            });
+            if let Some(mask) = edit_mask {
+                Box::new(MaskedOp {
+                    inner: preview,
+                    mask,
+                }) as Box<dyn Operation>
+            } else {
+                preview
+            }
+        });
+        let Some(pipeline) = self.pipeline_mut() else {
+            self.status = "Nothing to save — open an image first".into();
             return;
         };
+        let mut rendered = match pipeline.render() {
+            Ok(image) => image,
+            Err(e) => {
+                self.status = format!("Export render failed: {e}");
+                return;
+            }
+        };
+        if let Some(preview) = preview_op {
+            let image =
+                Arc::try_unwrap(rendered).unwrap_or_else(|shared| shared.as_ref().deep_clone());
+            rendered = match preview.apply(image) {
+                Ok(image) => Arc::new(image),
+                Err(e) => {
+                    self.status = format!("Export preview render failed: {e}");
+                    return;
+                }
+            };
+        }
         // Captions describe the source exposure. Read them from the immutable
         // pipeline source rather than trusting every pixel operation to carry
         // EXIF through its output buffer.
@@ -526,7 +567,13 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use rasterlab_core::{Image, ops::SaturationOp, pipeline::EditPipeline, project::RlabFile};
+    use rasterlab_core::{
+        Image,
+        formats::FormatRegistry,
+        ops::{BrightnessContrastOp, SaturationOp},
+        pipeline::EditPipeline,
+        project::RlabFile,
+    };
 
     use super::*;
 
@@ -544,6 +591,48 @@ mod tests {
             .pipeline_state
             .entries[0]
             .clone()
+    }
+
+    #[test]
+    fn export_uses_full_resolution_pipeline_and_live_preview_not_canvas_cache() {
+        use crate::panels::tools::brightness_contrast::BrightnessContrastTool;
+
+        let mut source = Image::new(8, 6);
+        for y in 0..source.height {
+            for x in 0..source.width {
+                source.set_pixel(
+                    x,
+                    y,
+                    [(x * 23) as u8, (y * 31) as u8, ((x + y) * 17) as u8, 255],
+                );
+            }
+        }
+        let expected = BrightnessContrastOp::new(0.2, 0.1)
+            .apply(source.deep_clone())
+            .unwrap();
+        let pipeline = EditPipeline::new(source);
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
+
+        // Reproduce the bad state: the canvas currently holds the fast 25%
+        // preview while a tool's unapplied values are visible.
+        state.rendered = Some(Arc::new(Image::new(2, 2)));
+        state.rendered_is_preview = true;
+        state.rendered_scale = rasterlab_render::PREVIEW_SCALE;
+        let tool = state.tools.find_mut::<BrightnessContrastTool>().unwrap();
+        tool.brightness = 0.2;
+        tool.contrast = 0.1;
+        tool.preview_active = true;
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("full-resolution.png");
+        state.save_file(output.clone());
+
+        let exported = FormatRegistry::with_builtins()
+            .decode_file(&output)
+            .unwrap();
+        assert_eq!((exported.width, exported.height), (8, 6));
+        assert_eq!(exported.data, expected.data);
     }
 
     #[test]
