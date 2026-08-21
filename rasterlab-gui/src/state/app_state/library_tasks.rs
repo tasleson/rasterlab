@@ -72,10 +72,10 @@ impl AppState {
                     progress_ctx.request_repaint();
                 });
                 match result {
-                    Ok(session) => BgMessage::ImportComplete {
-                        errors: Vec::new(),
-                        session,
-                    },
+                    Ok(session) => {
+                        let errors = session.errors.clone();
+                        BgMessage::ImportComplete { errors, session }
+                    }
                     Err(e) => BgMessage::ImportFailed(e.to_string()),
                 }
             },
@@ -141,6 +141,14 @@ impl AppState {
     ) {
         self.library.import_progress = None;
         self.library.thumbs.clear();
+        // Always reveal a successful individual-file import. Otherwise a
+        // photo added while viewing a collection or an older session is in the
+        // database but appears to have vanished because the old scope remains
+        // active.
+        if session.photo_count > 0 && !session.id.is_empty() {
+            self.library.view =
+                crate::state::library_state::LibraryView::Session(session.id.clone());
+        }
         self.library.refresh();
         if errors.is_empty() {
             self.status = format!(
