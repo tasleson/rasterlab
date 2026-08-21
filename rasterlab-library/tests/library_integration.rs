@@ -63,6 +63,64 @@ fn import_single_jpeg_creates_rlab_and_thumb() {
 }
 
 #[test]
+fn import_single_rlab_preserves_project_and_indexes_original_photo() {
+    use rasterlab_core::{
+        formats::FormatRegistry,
+        ops::SaturationOp,
+        pipeline::EditPipeline,
+        project::{RlabFile, RlabMeta, SavedCopy},
+    };
+
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().join("edited-photo.rlab");
+    let original_bytes = std::fs::read(png_path()).unwrap();
+    let image = FormatRegistry::with_builtins()
+        .decode_bytes(&original_bytes, Some(&png_path()))
+        .unwrap();
+    let (width, height) = (image.width, image.height);
+    let mut pipeline = EditPipeline::new(image);
+    pipeline.push_op(Box::new(SaturationOp::new(0.4)));
+    let saved_state = pipeline.save_state().unwrap();
+    let source_path = png_path().to_string_lossy().into_owned();
+    let project = RlabFile::new(
+        RlabMeta::new("test", Some(source_path.clone()), width, height),
+        original_bytes.clone(),
+        vec![SavedCopy {
+            name: "Edited copy".into(),
+            pipeline_state: saved_state,
+        }],
+        0,
+        None,
+    );
+    project.write_v5(&project_path).unwrap();
+
+    let library_dir = tempfile::tempdir().unwrap();
+    let lib = open_library(library_dir.path());
+    let session = lib.import_files(&[project_path], |_| {}).unwrap();
+
+    assert!(session.errors.is_empty(), "{:?}", session.errors);
+    assert_eq!(session.photo_count, 1);
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    assert_eq!(photos.len(), 1);
+    assert_eq!(photos[0].width, width);
+    assert_eq!(photos[0].height, height);
+    assert_eq!(
+        photos[0].hash,
+        blake3::hash(&original_bytes).to_hex().to_string()
+    );
+
+    let imported = RlabFile::read(&lib.rlab_path(&photos[0].hash)).unwrap();
+    assert_eq!(imported.original_bytes, original_bytes);
+    assert_eq!(imported.copies.len(), 1);
+    assert_eq!(imported.copies[0].name, "Edited copy");
+    assert_eq!(imported.copies[0].pipeline_state.entries.len(), 1);
+    assert!(imported.thumbnail.is_some());
+    let lmta = imported.lmta.unwrap();
+    assert_eq!(lmta.original_filename.as_deref(), Some("color_patches.png"));
+    assert_eq!(lmta.import_session_id, session.id);
+}
+
+#[test]
 fn import_lmta_round_trips() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = open_library(tmp.path());

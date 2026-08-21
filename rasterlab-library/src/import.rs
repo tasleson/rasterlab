@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use rasterlab_core::{
     formats::{FormatRegistry, exif_util::read_capture_date_from_prefix},
     library_meta::{FileTimeStamp, LibraryExif, LibraryMeta},
+    project::{RlabFile, is_rlab_path},
 };
 use uuid::Uuid;
 
@@ -479,7 +480,24 @@ fn import_one(
         return Ok(None);
     }
 
-    let original_bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let input_bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+
+    // A project import is different from an ordinary image import: ORIG is
+    // already the source image and the container may also hold edits, virtual
+    // copies, a rendered thumbnail, and library metadata.  Treating the whole
+    // `.rlab` byte stream as an image makes format detection fail and, even if
+    // it did not, would create a nested project and discard all of that state.
+    let mut imported_project = if is_rlab_path(path) {
+        let mut project = RlabFile::read_bytes(&input_bytes)
+            .with_context(|| format!("read project {}", path.display()))?;
+        project.resolve_relative_paths(path.parent().unwrap_or_else(|| Path::new(".")));
+        Some(project)
+    } else {
+        None
+    };
+    let original_bytes = imported_project
+        .as_ref()
+        .map_or_else(|| input_bytes, |project| project.original_bytes.clone());
 
     // 2. Compute hash
     let hash = blake3::hash(&original_bytes).to_hex().to_string();
@@ -494,9 +512,16 @@ fn import_one(
     let stack_is_primary = is_primary_in_pair(path);
 
     // 5. Decode image for thumbnail + dimensions + EXIF
-    let image = registry
-        .decode_file(path)
-        .with_context(|| format!("decode {}", path.display()))?;
+    let image = if let Some(project) = imported_project.as_ref() {
+        let hint = project.meta.source_path.as_deref().map(Path::new);
+        registry
+            .decode_bytes(&original_bytes, hint)
+            .with_context(|| format!("decode original image in {}", path.display()))?
+    } else {
+        registry
+            .decode_file(path)
+            .with_context(|| format!("decode {}", path.display()))?
+    };
     let (width, height) = (image.width, image.height);
     let mut exif = LibraryExif::from_image_metadata(&image.metadata);
     // Files without an EXIF capture date (PNGs, scans, …) still need a coherent
@@ -508,7 +533,10 @@ fn import_one(
     }
 
     // 6. Generate 512px thumbnail
-    let thumb_bytes = generate_thumbnail(&image, 512)?;
+    let thumb_bytes = imported_project
+        .as_ref()
+        .and_then(|project| project.thumbnail.clone())
+        .map_or_else(|| generate_thumbnail(&image, 512), Ok)?;
 
     // 8. Build LibraryMeta
     let stack_id = if stack_peer_hash.is_some() {
@@ -520,19 +548,52 @@ fn import_one(
         None
     };
 
-    let lmta = LibraryMeta {
-        original_filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
-        source_path: Some(path.to_string_lossy().into_owned()),
-        source_size: Some(fs_meta.len()),
-        import_session_id: session_id.to_owned(),
-        import_date,
-        stack_peer_hash,
-        stack_is_primary,
-        source_mtime,
-        source_atime,
-        source_ctime,
-        exif: Some(exif),
-        ..Default::default()
+    let lmta = if let Some(project) = imported_project.as_ref() {
+        // Preserve meaningful metadata already carried by a project (rating,
+        // keywords, original source timestamps, etc.), but place it in this
+        // import session. Editor-only projects have no LMTA, so derive their
+        // original identity from META rather than calling the container itself
+        // the original photograph.
+        let mut lmta = project.lmta.clone().unwrap_or_default();
+        if lmta.original_filename.is_none() {
+            lmta.original_filename = project
+                .meta
+                .source_path
+                .as_deref()
+                .and_then(|source| Path::new(source).file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .or_else(|| {
+                    path.file_stem()
+                        .map(|name| name.to_string_lossy().into_owned())
+                });
+        }
+        if lmta.source_path.is_none() {
+            lmta.source_path = project.meta.source_path.clone();
+        }
+        if lmta.source_size.is_none() {
+            lmta.source_size = Some(original_bytes.len() as u64);
+        }
+        if lmta.exif.is_none() {
+            lmta.exif = Some(exif);
+        }
+        lmta.import_session_id = session_id.to_owned();
+        lmta.import_date = import_date;
+        lmta
+    } else {
+        LibraryMeta {
+            original_filename: path.file_name().map(|n| n.to_string_lossy().into_owned()),
+            source_path: Some(path.to_string_lossy().into_owned()),
+            source_size: Some(fs_meta.len()),
+            import_session_id: session_id.to_owned(),
+            import_date,
+            stack_peer_hash,
+            stack_is_primary,
+            source_mtime,
+            source_atime,
+            source_ctime,
+            exif: Some(exif),
+            ..Default::default()
+        }
     };
 
     // 9. Write thumbnail.
@@ -553,14 +614,24 @@ fn import_one(
     if let Some(parent) = rlab_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    write_rlab(
-        &rlab_path,
-        &original_bytes,
-        &lmta,
-        &thumb_bytes,
-        width,
-        height,
-    )?;
+    if let Some(project) = imported_project.as_mut() {
+        project.meta.width = width;
+        project.meta.height = height;
+        project.thumbnail = Some(thumb_bytes.clone());
+        project.set_lmta(Some(lmta.clone()));
+        project
+            .write_v5(&rlab_path)
+            .context("write imported .rlab")?;
+    } else {
+        write_rlab(
+            &rlab_path,
+            &original_bytes,
+            &lmta,
+            &thumb_bytes,
+            width,
+            height,
+        )?;
+    }
 
     // 11. Insert into DB
     db.insert_photo(
