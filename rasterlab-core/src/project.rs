@@ -240,6 +240,24 @@ pub struct RlabFile {
     pub lmta: Option<LibraryMeta>,
 }
 
+/// Small, display-only subset of a managed-library project.
+///
+/// [`read_library_summary`] seeks past the embedded original, preview, and ECC
+/// chunks, so opening the library detail panel does not transfer the whole
+/// project from storage.
+#[derive(Debug, Clone)]
+pub struct RlabLibrarySummary {
+    /// Library metadata, when the project was imported into a library.
+    pub lmta: Option<LibraryMeta>,
+    /// Source path from `META`, used as a fallback for older projects whose
+    /// `LMTA` does not contain one.
+    pub meta_source_path: Option<String>,
+    /// Virtual-copy display names in tab order.
+    pub copy_names: Vec<String>,
+    /// Index of the active virtual copy.
+    pub active_copy_index: usize,
+}
+
 /// Result returned by [`verify_and_repair`].
 #[derive(Debug)]
 pub struct VerifyReport {
@@ -286,6 +304,15 @@ impl RlabFile {
             thumbnail,
             lmta: None,
         }
+    }
+
+    /// Whether any virtual copy carries edits the user would recognise as
+    /// such. An operation stack undone back to the start is not an edit, so a
+    /// library that badges edited photos stops badging this one.
+    pub fn has_edits(&self) -> bool {
+        self.copies
+            .iter()
+            .any(|copy| copy.pipeline_state.cursor > 0)
     }
 
     /// Replace (or clear) the library metadata chunk.
@@ -742,6 +769,140 @@ pub fn read_original_filename(path: &Path) -> RasterResult<Option<String>> {
     }
 
     Ok(from_meta)
+}
+
+/// Read the metadata needed by the managed-library detail panel.
+///
+/// This validates the header and each small chunk it consumes, but deliberately
+/// does not read or verify the large `ORIG`, `PREV`, or `RECC` payloads. Full
+/// integrity verification remains the job of [`RlabFile::read`] and
+/// [`verify_and_repair`].
+pub fn read_library_summary(path: &Path) -> RasterResult<RlabLibrarySummary> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len < (FILE_HEADER_LEN + HASH_LEN) as u64 {
+        return Err(RasterError::decode("rlab", "file too short"));
+    }
+
+    let mut header = [0u8; FILE_HEADER_LEN];
+    file.read_exact(&mut header)?;
+    if !header.starts_with(MAGIC) {
+        return Err(RasterError::decode(
+            "rlab",
+            "invalid magic bytes — not a .rlab project file",
+        ));
+    }
+    let format_version =
+        u16::from_le_bytes(header[MAGIC.len()..].try_into().expect("2-byte version"));
+    if format_version > FORMAT_VERSION_V5 {
+        return Err(RasterError::decode(
+            "rlab",
+            format!(
+                "unsupported format version {format_version} \
+                 (this build supports up to {FORMAT_VERSION_V5})"
+            ),
+        ));
+    }
+
+    let chunks_end = file_len - HASH_LEN as u64;
+    let mut pos = FILE_HEADER_LEN as u64;
+    let mut meta_source_path = None;
+    let mut lmta = None;
+    let mut copy_names: Option<Vec<String>> = None;
+    let mut active_copy_index = 0usize;
+    let mut saw_v1_edit = false;
+
+    while pos + (CHUNK_HEADER_LEN + HASH_LEN) as u64 <= chunks_end {
+        let mut head = [0u8; CHUNK_HEADER_LEN];
+        file.read_exact(&mut head)?;
+        let tag: [u8; 4] = head[..4].try_into().expect("4-byte tag");
+        let len = u64::from_le_bytes(head[4..].try_into().expect("8-byte length"));
+        let Some(next) = pos
+            .checked_add((CHUNK_HEADER_LEN + HASH_LEN) as u64)
+            .and_then(|p| p.checked_add(len))
+            .filter(|next| *next <= chunks_end)
+        else {
+            return Err(RasterError::decode("rlab", "invalid chunk length"));
+        };
+
+        let limit = if tag == *TAG_VCPS {
+            Some(MAX_EDIT_CHUNK_LEN)
+        } else if tag == *TAG_META || tag == *TAG_LMTA {
+            Some(MAX_JSON_CHUNK_LEN)
+        } else {
+            None
+        };
+
+        if let Some(limit) = limit {
+            if len > limit {
+                return Err(RasterError::decode(
+                    "rlab",
+                    format!("chunk '{}' is too large", String::from_utf8_lossy(&tag)),
+                ));
+            }
+            let mut data = vec![0u8; len as usize];
+            file.read_exact(&mut data)?;
+            let mut stored_hash = [0u8; HASH_LEN];
+            file.read_exact(&mut stored_hash)?;
+            if blake3::hash(&data).as_bytes() != &stored_hash {
+                return Err(RasterError::decode(
+                    "rlab",
+                    format!(
+                        "chunk '{}' integrity check failed",
+                        String::from_utf8_lossy(&tag)
+                    ),
+                ));
+            }
+
+            match &tag {
+                b"META" => {
+                    let meta: RlabMeta = serde_json::from_slice(&data)
+                        .map_err(|e| RasterError::Serialization(e.to_string()))?;
+                    meta_source_path = meta.source_path;
+                }
+                b"VCPS" => {
+                    let vcps: VcpsChunk = serde_json::from_slice(&data)
+                        .map_err(|e| RasterError::Serialization(e.to_string()))?;
+                    active_copy_index = vcps.active;
+                    copy_names = Some(vcps.copies.into_iter().map(|copy| copy.name).collect());
+                }
+                b"LMTA" => {
+                    lmta = Some(
+                        serde_json::from_slice(&data)
+                            .map_err(|e| RasterError::Serialization(e.to_string()))?,
+                    );
+                }
+                _ => unreachable!("only selected tags are read"),
+            }
+        } else {
+            saw_v1_edit |= tag == *TAG_EDIT;
+            file.seek(SeekFrom::Start(next))?;
+        }
+
+        pos = next;
+    }
+
+    // Mirror `RlabFile::read`'s chunk requirements exactly: a v1 file is
+    // described by EDIT, everything later by VCPS, and a present-but-empty
+    // copy list is the reader's business rather than this summary's.
+    let copy_names = match copy_names {
+        Some(names) => names,
+        None if format_version == 1 && saw_v1_edit => vec!["Copy 1".to_owned()],
+        None if format_version == 1 => {
+            return Err(RasterError::decode("rlab", "missing EDIT chunk"));
+        }
+        None => return Err(RasterError::decode("rlab", "missing VCPS chunk")),
+    };
+    active_copy_index = active_copy_index.min(copy_names.len().saturating_sub(1));
+
+    Ok(RlabLibrarySummary {
+        lmta,
+        meta_source_path,
+        copy_names,
+        active_copy_index,
+    })
 }
 
 /// Read the Blake3 of the embedded original image out of the `ORIG` chunk.
@@ -1333,6 +1494,77 @@ fn unix_now() -> u64 {
 mod tests {
     use super::*;
     use crate::degraded_read::DegradedRead;
+
+    #[test]
+    fn library_summary_reads_small_display_chunks() {
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let mut project = RlabFile::new(
+            RlabMeta::new("test", Some("/archive/source.tif"), 10, 20),
+            vec![7; 1024 * 1024],
+            vec![
+                SavedCopy {
+                    name: "Original look".into(),
+                    pipeline_state: PipelineState {
+                        entries: vec![],
+                        cursor: 0,
+                    },
+                },
+                SavedCopy {
+                    name: "Monochrome".into(),
+                    pipeline_state: PipelineState {
+                        entries: vec![],
+                        cursor: 0,
+                    },
+                },
+            ],
+            1,
+            Some(vec![3; 128 * 1024]),
+        );
+        let lmta = LibraryMeta {
+            caption: Some("A caption".into()),
+            keywords: vec!["one".into(), "two".into()],
+            rating: 4,
+            source_path: Some("/imports/source.tif".into()),
+            ..LibraryMeta::default()
+        };
+        project.set_lmta(Some(lmta));
+        project.write(output.path()).unwrap();
+
+        let summary = read_library_summary(output.path()).unwrap();
+
+        assert_eq!(
+            summary.meta_source_path.as_deref(),
+            Some("/archive/source.tif")
+        );
+        assert_eq!(summary.copy_names, ["Original look", "Monochrome"]);
+        assert_eq!(summary.active_copy_index, 1);
+        let lmta = summary.lmta.unwrap();
+        assert_eq!(lmta.caption.as_deref(), Some("A caption"));
+        assert_eq!(lmta.keywords, ["one", "two"]);
+        assert_eq!(lmta.rating, 4);
+    }
+
+    #[test]
+    fn library_summary_accepts_whatever_the_project_reader_accepts() {
+        // A copy-less VCPS is degenerate but readable, and the detail panel
+        // must not report a file the editor opens fine as unavailable.
+        let output = tempfile::NamedTempFile::new().unwrap();
+        let project = RlabFile::new(
+            RlabMeta::new("test", None::<String>, 1, 1),
+            vec![0; 16],
+            Vec::new(),
+            0,
+            None,
+        );
+        project.write(output.path()).unwrap();
+
+        let opened = RlabFile::read(output.path()).unwrap();
+        assert!(opened.copies.is_empty());
+
+        let summary = read_library_summary(output.path()).unwrap();
+        assert!(summary.copy_names.is_empty());
+        assert_eq!(summary.active_copy_index, 0);
+    }
 
     #[test]
     fn repair_rejects_header_bearing_region_without_version() {
