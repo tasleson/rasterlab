@@ -132,9 +132,10 @@ Each v5 file contains Reed–Solomon recovery data in two `RECC` chunks, one bef
 
 ### Verifying saves and scrubbing a library
 
-- A v5 save is flushed with `fsync`, read back, and compared byte-for-byte with the in-memory file before RasterLab reports success. Cache-bypass/eviction requests are advisory on platforms that support them, so the exact storage layer exercised by the read-back is OS-dependent.
+- A v5 save is staged in a hidden file beside its destination, flushed with `fsync`, read back, and compared byte-for-byte with the in-memory file before being renamed into place. Cache-bypass/eviction requests are advisory on platforms that support them, so the exact storage layer exercised by the read-back is OS-dependent.
+- Every other file RasterLab writes — exports, preferences, autosaves, pipeline JSON — is staged and renamed the same way, without the read-back. A crash therefore leaves the previous file whole rather than a truncated one. On Unix the containing directory is flushed after the rename, and directories created along the way are flushed into their own parents, so a newly created library shard cannot take a verified file down with it.
 - **File > Start Integrity Scrub** verifies every `.rlab` in the open library. It leaves clean v5 files alone, upgrades clean v3/v4 files to v5, and repairs correctable damage.
-- Before a scrub replaces a damaged file, it copies the damaged original into the library's `recovered/` tree. The repaired temporary file is then renamed over the live file on the same filesystem.
+- Before a scrub replaces a damaged file, it copies the damaged original into the library's `recovered/` tree, verifying that backup the same way a save is verified. The repaired temporary file is then renamed over the live file on the same filesystem.
 - Library files are addressed by the BLAKE3 hash of their embedded original bytes. A scrub also compares that identity with the file's name and directory, detecting a valid but misplaced or misdirected file that internal checksums alone would accept.
 - The Stoolap database is an index, not the only copy of library metadata. Ratings, flags, labels, captions, keywords, collections, EXIF snapshots, and edit state are embedded in `.rlab` files, allowing **File > Rebuild Library Index** to reconstruct the catalog.
 
