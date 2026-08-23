@@ -565,7 +565,9 @@ mod tests {
         let mut image = Image::new(width, height);
         image
             .data
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .for_each(|pixel| pixel.copy_from_slice(&color));
         image
     }
@@ -577,7 +579,14 @@ mod tests {
 
         assert_eq!((output.width, output.height), (700, 350));
         assert_eq!(output.pixel(350, 175), [80, 140, 210, 173]);
-        assert!(output.data.chunks_exact(4).all(|pixel| pixel[3] == 173));
+        assert!(
+            output
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 173)
+        );
     }
 
     #[test]

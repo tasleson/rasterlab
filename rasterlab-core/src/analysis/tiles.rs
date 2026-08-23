@@ -614,7 +614,9 @@ fn tile_stats(image: &Image, luma: &[u8], row_stride: usize, rect: Rect) -> Tile
         let start = y * row_stride + x0 * 4;
         let end = y * row_stride + x1 * 4;
         for p in image.data[start..end]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .step_by(CHROMA_PIXEL_STRIDE)
         {
             let (r, g, b) = (p[0], p[1], p[2]);

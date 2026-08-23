@@ -44,7 +44,7 @@ mod tests {
     /// distinguished from a default-constructed one.
     fn sample_image() -> Image {
         let mut img = Image::new(4, 3);
-        for (i, px) in img.data.chunks_exact_mut(4).enumerate() {
+        for (i, px) in img.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             px[0] = (i * 20) as u8;
             px[1] = 40;
             px[2] = 60;

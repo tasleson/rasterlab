@@ -40,7 +40,7 @@ fn hdr_brackets_merge_preserves_dimensions_and_alpha() {
 
     let out = merge_images(&[&under, &mid, &over]).unwrap();
     assert_eq!((out.width, out.height), (1024, 512));
-    assert!(out.data.chunks_exact(4).all(|p| p[3] == 255));
+    assert!(out.data.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
 }
 
 #[test]

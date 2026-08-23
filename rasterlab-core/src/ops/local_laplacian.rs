@@ -266,7 +266,7 @@ impl Plane {
         data.par_chunks_mut(w)
             .zip(image.data.par_chunks(image.row_stride()))
             .for_each(|(row, px)| {
-                for (l, p) in row.iter_mut().zip(px.chunks_exact(4)) {
+                for (l, p) in row.iter_mut().zip(px.as_chunks::<4>().0) {
                     *l = (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
                         / 255.0;
                 }
@@ -651,7 +651,13 @@ fn apply_luma_gain(image: &mut Image, before: &[f32], after: &[f32]) {
         .zip(before.par_chunks(w))
         .zip(after.par_chunks(w))
         .for_each(|((px_row, old_row), new_row)| {
-            for ((p, &old), &new) in px_row.chunks_exact_mut(4).zip(old_row).zip(new_row) {
+            for ((p, &old), &new) in px_row
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(old_row)
+                .zip(new_row)
+            {
                 let shift = (new - old) * 255.0;
                 if old <= MIN_GAIN_LUMA {
                     for c in p.iter_mut().take(3) {
@@ -912,7 +918,7 @@ mod tests {
         let out = LocalLaplacianOp::with_defaults(0.9, 0.5)
             .apply(src)
             .unwrap();
-        for p in out.data.chunks_exact(4) {
+        for p in out.data.as_chunks::<4>().0 {
             assert!(
                 p[0].abs_diff(p[1]) <= 1 && p[1].abs_diff(p[2]) <= 1,
                 "grey went coloured: {:?}",
@@ -938,7 +944,7 @@ mod tests {
         });
         let excess_before = {
             let mut m = 0i32;
-            for p in src.data.chunks_exact(4) {
+            for p in src.data.as_chunks::<4>().0 {
                 m = m.max(p[0] as i32 - p[1].max(p[2]) as i32);
             }
             m
@@ -949,7 +955,7 @@ mod tests {
             .unwrap();
 
         let mut excess_after = 0i32;
-        for p in out.data.chunks_exact(4) {
+        for p in out.data.as_chunks::<4>().0 {
             excess_after = excess_after.max(p[0] as i32 - p[1].max(p[2]) as i32);
         }
         assert!(
@@ -964,15 +970,15 @@ mod tests {
             let v = noise(x, y);
             [v, v, v]
         });
-        for (i, p) in src.data.chunks_exact_mut(4).enumerate() {
+        for (i, p) in src.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             p[3] = (i % 256) as u8;
         }
-        let alphas: Vec<u8> = src.data.chunks_exact(4).map(|p| p[3]).collect();
+        let alphas: Vec<u8> = src.data.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         let out = LocalLaplacianOp::with_defaults(0.6, 0.3)
             .apply(src)
             .unwrap();
         assert_eq!((out.width, out.height), (70, 50));
-        let got: Vec<u8> = out.data.chunks_exact(4).map(|p| p[3]).collect();
+        let got: Vec<u8> = out.data.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(got, alphas, "alpha must be untouched");
     }
 

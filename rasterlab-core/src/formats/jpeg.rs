@@ -48,7 +48,9 @@ impl FormatHandler for JpegHandler {
         // JPEG does not support alpha — strip to RGB.
         let rgb: Vec<u8> = image
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
 

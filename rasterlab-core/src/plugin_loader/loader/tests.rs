@@ -104,7 +104,12 @@ extern "C" fn op_apply(
     };
     // SAFETY: alloc_cimage returned a buffer of exactly data_len bytes.
     let out_data = unsafe { std::slice::from_raw_parts_mut(out.data, out.data_len) };
-    for (s, d) in src_data.chunks_exact(4).zip(out_data.chunks_exact_mut(4)) {
+    for (s, d) in src_data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(out_data.as_chunks_mut::<4>().0.iter_mut())
+    {
         d[0] = 255 - s[0];
         d[1] = 255 - s[1];
         d[2] = 255 - s[2];

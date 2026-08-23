@@ -132,7 +132,7 @@ fn estimate_cast_gains(image: &Image, amount: f32) -> [f32; 3] {
     }
 
     let mut samples = Vec::new();
-    for px in image.data.chunks_exact(4).step_by(8) {
+    for px in image.data.as_chunks::<4>().0.iter().step_by(8) {
         let r = px[0] as f32 / 255.0;
         let g = px[1] as f32 / 255.0;
         let b = px[2] as f32 / 255.0;

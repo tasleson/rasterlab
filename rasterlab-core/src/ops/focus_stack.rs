@@ -457,7 +457,7 @@ mod tests {
         let w = 32u32;
         let h = 24u32;
         let mut img = Image::new(w, h);
-        for (i, chunk) in img.data.chunks_exact_mut(4).enumerate() {
+        for (i, chunk) in img.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             chunk[0] = (i * 7 % 256) as u8;
             chunk[1] = (i * 11 % 256) as u8;
             chunk[2] = (i * 13 % 256) as u8;

@@ -521,7 +521,7 @@ mod tests {
     }
 
     fn r_channels(data: &[u8]) -> Vec<u8> {
-        data.chunks_exact(4).map(|p| p[0]).collect()
+        data.as_chunks::<4>().0.iter().map(|p| p[0]).collect()
     }
 
     fn subject_distance_tiff_le(num: u32, denom: u32) -> Vec<u8> {

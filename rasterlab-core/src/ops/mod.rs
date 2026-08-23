@@ -121,7 +121,7 @@ where
     }
 
     image.data.par_chunks_mut(row_stride).for_each(|row| {
-        for pixel in row.chunks_exact_mut(4) {
+        for pixel in row.as_chunks_mut::<4>().0 {
             f(pixel);
         }
     });
@@ -133,7 +133,9 @@ where
 pub(super) fn luma_f32(image: &crate::image::Image) -> Vec<f32> {
     image
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
         .collect()
 }

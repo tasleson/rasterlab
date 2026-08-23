@@ -40,7 +40,9 @@ fn compute_hash(data: &[u8]) -> u64 {
 /// Mirrors image_to_egui (serial, before fix).
 /// Returns Vec<[u8;4]> — same layout as Vec<Color32>.
 fn conv_serial(data: &[u8]) -> Vec<[u8; 4]> {
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| [p[0], p[1], p[2], 255])
         .collect()
 }

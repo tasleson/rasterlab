@@ -73,7 +73,9 @@ impl Operation for ClarityTextureOp {
         // Work in linear f32 [0,1] per channel
         let mut pixels: Vec<[f32; 3]> = image
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| {
                 [
                     p[0] as f32 / 255.0,
@@ -125,7 +127,14 @@ impl Operation for ClarityTextureOp {
         // Convert back to Image
         let mut out = Image::new(image.width, image.height);
         out.metadata = image.metadata.clone();
-        for (i, (p, src)) in out.data.chunks_exact_mut(4).zip(pixels.iter()).enumerate() {
+        for (i, (p, src)) in out
+            .data
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(pixels.iter())
+            .enumerate()
+        {
             p[0] = (src[0] * 255.0).clamp(0.0, 255.0) as u8;
             p[1] = (src[1] * 255.0).clamp(0.0, 255.0) as u8;
             p[2] = (src[2] * 255.0).clamp(0.0, 255.0) as u8;

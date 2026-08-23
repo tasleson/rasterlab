@@ -44,7 +44,7 @@ impl HistogramData {
             .data
             .par_chunks_exact(4 * PIXELS_PER_CHUNK)
             .fold(zero, |mut acc, chunk| {
-                for pixel in chunk.chunks_exact(4) {
+                for pixel in chunk.as_chunks::<4>().0 {
                     let (r, g, b) = (pixel[0] as usize, pixel[1] as usize, pixel[2] as usize);
                     acc.0[r] += 1;
                     acc.1[g] += 1;
@@ -65,7 +65,7 @@ impl HistogramData {
                 let mut acc = zero();
                 let remainder =
                     &image.data[image.data.len() - image.data.len() % (4 * PIXELS_PER_CHUNK)..];
-                for pixel in remainder.chunks_exact(4) {
+                for pixel in remainder.as_chunks::<4>().0 {
                     let (r, g, b) = (pixel[0] as usize, pixel[1] as usize, pixel[2] as usize);
                     acc.0[r] += 1;
                     acc.1[g] += 1;

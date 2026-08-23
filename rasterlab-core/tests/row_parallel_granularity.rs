@@ -17,7 +17,7 @@ fn apply_pixel_tasks(data: &mut [u8], lut: &[u8; 256]) {
 
 fn apply_row_tasks(data: &mut [u8], width: usize, lut: &[u8; 256]) {
     data.par_chunks_mut(width * 4).for_each(|row| {
-        for p in row.chunks_exact_mut(4) {
+        for p in row.as_chunks_mut::<4>().0 {
             p[0] = lut[p[0] as usize];
             p[1] = lut[p[1] as usize];
             p[2] = lut[p[2] as usize];

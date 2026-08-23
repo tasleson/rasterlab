@@ -247,7 +247,7 @@ fn luma_plane(image: &Image) -> Option<Vec<u8>> {
     luma.par_chunks_mut(w)
         .zip(image.data.par_chunks(image.row_stride()))
         .for_each(|(luma_row, px_row)| {
-            for (l, p) in luma_row.iter_mut().zip(px_row.chunks_exact(4)) {
+            for (l, p) in luma_row.iter_mut().zip(px_row.as_chunks::<4>().0) {
                 *l = luma_of(p);
             }
         });
@@ -289,7 +289,7 @@ fn histogram_of_rect(image: &Image, rect: Rect) -> HistogramData {
             let mut acc = zero();
             for y in y0..y1 {
                 let row = &image.data[y * row_stride + x0..y * row_stride + x1];
-                for p in row.chunks_exact(4) {
+                for p in row.as_chunks::<4>().0 {
                     acc.0[p[0] as usize] += 1;
                     acc.1[p[1] as usize] += 1;
                     acc.2[p[2] as usize] += 1;
@@ -1277,7 +1277,7 @@ fn sampled_mean_chroma(
             let row = &image.data[y * row_stride + x0..y * row_stride + x1];
             let mut sum = 0u64;
             let mut count = 0u64;
-            for p in row.chunks_exact(4).step_by(PIXEL_STRIDE) {
+            for p in row.as_chunks::<4>().0.iter().step_by(PIXEL_STRIDE) {
                 let r = r_lut[p[0] as usize];
                 let g = g_lut[p[1] as usize];
                 let b = b_lut[p[2] as usize];

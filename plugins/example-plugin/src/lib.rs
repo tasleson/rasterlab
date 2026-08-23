@@ -52,7 +52,12 @@ extern "C" fn sepia_apply(
     // SAFETY: alloc_cimage returned a buffer of exactly out.data_len bytes.
     let out_data = unsafe { std::slice::from_raw_parts_mut(out.data, out.data_len) };
 
-    for (src_pixel, dst_pixel) in src_data.chunks_exact(4).zip(out_data.chunks_exact_mut(4)) {
+    for (src_pixel, dst_pixel) in src_data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(out_data.as_chunks_mut::<4>().0.iter_mut())
+    {
         let (r, g, b) = (
             src_pixel[0] as f32,
             src_pixel[1] as f32,

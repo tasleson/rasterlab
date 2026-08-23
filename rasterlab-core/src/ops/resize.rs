@@ -75,13 +75,13 @@ pub fn reduce_pow2(image: &Image, level: u32) -> Image {
         .for_each(|(dst_y, row)| {
             let y0 = dst_y * step;
             let y1 = (y0 + step).min(src_h);
-            for (dst_x, out_px) in row.chunks_exact_mut(4).enumerate() {
+            for (dst_x, out_px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let x0 = dst_x * step;
                 let x1 = (x0 + step).min(src_w);
                 let mut acc = [0u32; 4];
                 for y in y0..y1 {
                     let start = (y * src_w + x0) * 4;
-                    for src_px in image.data[start..start + (x1 - x0) * 4].chunks_exact(4) {
+                    for src_px in image.data[start..start + (x1 - x0) * 4].as_chunks::<4>().0 {
                         for (a, s) in acc.iter_mut().zip(src_px) {
                             *a += u32::from(*s);
                         }
@@ -401,8 +401,8 @@ mod tests {
         let src = solid(200, 100, 50, 64, 64);
         for level in 0..=6 {
             let out = reduce_pow2(&src, level);
-            for p in out.data.chunks_exact(4) {
-                assert_eq!(p, [200, 100, 50, 255], "level={level}");
+            for p in out.data.as_chunks::<4>().0 {
+                assert_eq!(*p, [200, 100, 50, 255], "level={level}");
             }
         }
     }

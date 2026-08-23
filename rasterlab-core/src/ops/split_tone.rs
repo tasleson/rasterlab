@@ -104,7 +104,7 @@ impl Operation for SplitToneOp {
         // body from the vectorizer behind rayon's trait dispatch boundary.
         let row_stride = image.width as usize * 4;
         image.data.par_chunks_mut(row_stride).for_each(|row| {
-            for p in row.chunks_exact_mut(4) {
+            for p in row.as_chunks_mut::<4>().0 {
                 let r = p[0] as f32 / 255.0;
                 let g = p[1] as f32 / 255.0;
                 let b = p[2] as f32 / 255.0;

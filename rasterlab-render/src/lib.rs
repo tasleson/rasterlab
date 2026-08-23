@@ -769,7 +769,13 @@ fn compare_images(cpu: &Image, gpu: &Image) -> ImageComparison {
     let mut sum_delta = 0u64;
     let mut channel_count = 0u64;
     let mut mismatched_pixels = 0usize;
-    for (cpu_px, gpu_px) in cpu.data.chunks_exact(4).zip(gpu.data.chunks_exact(4)) {
+    for (cpu_px, gpu_px) in cpu
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(gpu.data.as_chunks::<4>().0.iter())
+    {
         let mut pixel_mismatched = false;
         for channel in 0..4 {
             let delta = cpu_px[channel].abs_diff(gpu_px[channel]);

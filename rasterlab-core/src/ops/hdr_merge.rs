@@ -172,7 +172,7 @@ pub fn merge_linear(images: &[&Image]) -> RasterResult<Vec<f32>> {
             let mut lin = Vec::with_capacity(w * h * 3);
             let mut luma_srgb = Vec::with_capacity(w * h);
             let mut luma_lin = Vec::with_capacity(w * h);
-            for px in img.data.chunks_exact(4) {
+            for px in img.data.as_chunks::<4>().0 {
                 let r = px[0] as f32 / 255.0;
                 let g = px[1] as f32 / 255.0;
                 let b = px[2] as f32 / 255.0;
@@ -337,7 +337,7 @@ fn reinhard_auto_key(radiance: &[f32]) -> Vec<f32> {
     // Geometric mean of luminance, excluding exact zeros.
     let mut log_sum = 0.0f64;
     let mut count = 0usize;
-    for rad in radiance.chunks_exact(3) {
+    for rad in radiance.as_chunks::<3>().0 {
         let l = 0.2126 * rad[0] + 0.7152 * rad[1] + 0.0722 * rad[2];
         if l > 1e-6 {
             log_sum += (l as f64).ln();
@@ -381,7 +381,7 @@ mod tests {
     /// scaling every pixel and clipping to [0, 1].
     fn make_exposure(width: u32, height: u32, radiance: &[f32], exposure: f32) -> Image {
         let mut img = Image::new(width, height);
-        for (i, chunk) in img.data.chunks_exact_mut(4).enumerate() {
+        for (i, chunk) in img.data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let r = radiance[i * 3] * exposure;
             let g = radiance[i * 3 + 1] * exposure;
             let b = radiance[i * 3 + 2] * exposure;
@@ -425,7 +425,7 @@ mod tests {
         let w = 32;
         let h = 24;
         let mut img = Image::new(w, h);
-        img.data.chunks_exact_mut(4).for_each(|p| {
+        img.data.as_chunks_mut::<4>().0.iter_mut().for_each(|p| {
             p[0] = 120;
             p[1] = 130;
             p[2] = 140;
@@ -434,7 +434,7 @@ mod tests {
         let out = merge_images(&[&img]).unwrap();
         assert_eq!(out.width, w);
         assert_eq!(out.height, h);
-        assert!(out.data.chunks_exact(4).all(|p| p[3] == 255));
+        assert!(out.data.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
     }
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
             let mut lin = Vec::with_capacity(img.data.len() / 4 * 3);
             let mut luma_srgb = Vec::with_capacity(img.data.len() / 4);
             let mut luma_lin = Vec::with_capacity(img.data.len() / 4);
-            for p in img.data.chunks_exact(4) {
+            for p in img.data.as_chunks::<4>().0 {
                 let r = p[0] as f32 / 255.0;
                 let g = p[1] as f32 / 255.0;
                 let b = p[2] as f32 / 255.0;
@@ -540,7 +540,7 @@ mod tests {
         let w = 16u32;
         let h = 16u32;
         let mut f = Image::new(w, h);
-        f.data.chunks_exact_mut(4).for_each(|p| {
+        f.data.as_chunks_mut::<4>().0.iter_mut().for_each(|p| {
             p[0] = 128;
             p[1] = 64;
             p[2] = 200;

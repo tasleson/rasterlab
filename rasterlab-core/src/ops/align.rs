@@ -747,7 +747,7 @@ mod tests {
         let (w, h) = (320, 240);
         let reference = scene(w, h);
         let mut frame = magnified(&reference, 1.02, 0.0, 0.0);
-        for pixel in frame.data.chunks_exact_mut(4) {
+        for pixel in frame.data.as_chunks_mut::<4>().0 {
             for c in &mut pixel[..3] {
                 *c = c.saturating_add(18);
             }
