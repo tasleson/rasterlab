@@ -1,4 +1,4 @@
-//! Writes that confirm what actually landed on the media.
+//! Durable writes: what actually landed on the media, under a name that stays.
 //!
 //! Every digest in a `.rlab` file is computed over the in-memory buffer *before*
 //! the write, so the file describes what we meant to store.  A write path that
@@ -20,6 +20,23 @@
 //! with it.  The new file is staged beside the destination and renamed into
 //! place, so the old bytes stay reachable until the new ones are complete,
 //! synced and verified.
+//!
+//! # Choosing a primitive
+//!
+//! Every file the application writes should go through one of these, so that no
+//! path leaves a half-written file where a whole one used to be:
+//!
+//! * [`write_verified_atomic`] — for bytes that are the only copy of something:
+//!   `.rlab` files, thumbnails, the scrub's backup of a damaged original.  Pays
+//!   a read-back to confirm the storage stack stored what it was given.
+//! * [`write_atomic`] — same staging, fsync and rename, without the read-back.
+//!   For files that can be produced again from something we still have:
+//!   exports, preferences, autosaves, pipeline JSON.
+//! * [`create_dir_all_synced`] — before writing into a directory that may not
+//!   exist yet.  A file's own directory sync does not make its *parents*
+//!   durable, so a fresh shard can otherwise take its file down with it.
+//! * [`rename_synced`] — to install a file that is already on disk under its
+//!   final name.
 
 use std::{
     ffi::OsString,
@@ -40,6 +57,18 @@ static STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// it alongside the staging suffix.
 const MAX_NAME_LEN: usize = 255;
 
+/// How many links to follow before deciding a symlinked destination is a loop.
+const MAX_SYMLINK_HOPS: usize = 8;
+
+/// Whether a staged file is read back and compared before it is installed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verify {
+    /// Confirm the storage stack returns what it was given.
+    ReadBack,
+    /// Trust the write.  For data that can be regenerated from what we kept.
+    No,
+}
+
 /// Write `bytes` to `path` atomically, confirming what landed before it counts.
 ///
 /// The data is staged in a uniquely named file beside `path`, flushed with
@@ -52,24 +81,79 @@ const MAX_NAME_LEN: usize = 255;
 /// crash — sees either the previous file whole or the new one whole. Every
 /// failure short of the rename leaves the destination exactly as it was, and
 /// takes the staging file with it.
+///
+/// The directory entry is synced afterwards so the *name* survives a power cut
+/// too, but that last step is best-effort (see [`sync_parent_dir`]): `Ok`
+/// promises the bytes are on the device, not that every filesystem agreed to
+/// flush the directory that names them.
 pub fn write_verified_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let staged = staging_path(path)?;
-    let result = stage_and_replace(&staged, path, bytes);
+    write_staged(path, bytes, Verify::ReadBack)
+}
+
+/// Write `bytes` to `path` atomically, without reading them back.
+///
+/// The staging, `fsync`, rename and directory sync of [`write_verified_atomic`]
+/// — so a crash leaves either the old file whole or the new one whole — minus
+/// the read-back verification.
+///
+/// Use this for files that can be produced again from something we still have:
+/// an export re-renders from its `.rlab`, preferences fall back to defaults, an
+/// autosave is superseded by the next one.  Prefer [`write_verified_atomic`]
+/// whenever the bytes being written are the only copy.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_staged(path, bytes, Verify::No)
+}
+
+fn write_staged(path: &Path, bytes: &[u8], verify: Verify) -> io::Result<()> {
+    let dst = resolve_destination(path);
+    let staged = staging_path(&dst)?;
+    let result = stage_and_replace(&staged, &dst, bytes, verify);
     if result.is_err() {
         // A partial or unverifiable file must not be left lying next to the
         // real one, where a later reader could mistake it for a project.
-        let _ = std::fs::remove_file(&staged);
+        remove_staging_file(&staged);
     }
     result
 }
 
-fn stage_and_replace(staged: &Path, dst: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_and_sync(staged, bytes)?;
-    verify_written(staged, bytes)?;
-    inherit_permissions(dst, staged);
+fn stage_and_replace(staged: &Path, dst: &Path, bytes: &[u8], verify: Verify) -> io::Result<()> {
+    write_and_sync(staged, dst, bytes)?;
+    if verify == Verify::ReadBack {
+        verify_written(staged, bytes)?;
+    }
     std::fs::rename(staged, dst)?;
-    sync_dir_of(dst);
+    sync_parent_dir(dst);
     Ok(())
+}
+
+/// Follow a symlinked destination to the file it names.
+///
+/// `rename` replaces the link itself, so saving over a deliberately symlinked
+/// project would silently turn it into a regular file and strand whatever it
+/// pointed at.  Resolving first keeps the link intact, and stages beside the
+/// real file — which is also the only place the rename is guaranteed to be on
+/// one filesystem.
+///
+/// Anything unresolvable (a dangling link, a loop, a path that does not exist
+/// yet) falls back to the path as given, which is the pre-existing behaviour.
+fn resolve_destination(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {}
+            // Not a link, or nothing there yet: this is the file to replace.
+            _ => return current,
+        }
+        let Ok(target) = std::fs::read_link(&current) else {
+            return path.to_path_buf();
+        };
+        current = match current.parent() {
+            // A relative link resolves against the directory holding the link.
+            Some(dir) if target.is_relative() => dir.join(target),
+            _ => target,
+        };
+    }
+    path.to_path_buf()
 }
 
 /// Where a write to `dst` is staged: the destination's own directory, since
@@ -120,13 +204,80 @@ fn staging_path(dst: &Path) -> io::Result<PathBuf> {
 /// otherwise silently revert to the process umask.  Best effort: a filesystem
 /// that cannot express the mode is no reason to fail a save, and a destination
 /// that does not exist yet has nothing to inherit.
+///
+/// Called before the `fsync`, so the mode reaches the device with the data it
+/// applies to rather than trailing behind it.
 fn inherit_permissions(dst: &Path, staged: &Path) {
     if let Ok(meta) = std::fs::metadata(dst) {
         let _ = std::fs::set_permissions(staged, meta.permissions());
     }
 }
 
-/// Flush the directory entry the rename just created.
+/// Discard a staging file that never made it into place.
+fn remove_staging_file(staged: &Path) {
+    clear_readonly(staged);
+    let _ = std::fs::remove_file(staged);
+}
+
+/// Windows refuses to delete a file carrying the read-only attribute, and
+/// [`inherit_permissions`] may have just copied one from the destination —
+/// which would strand the staging file the cleanup exists to remove.
+///
+/// Unix needs no equivalent: unlinking is governed by the *directory's*
+/// permissions, not the file's.
+#[cfg(windows)]
+fn clear_readonly(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+#[cfg(not(windows))]
+fn clear_readonly(_path: &Path) {}
+
+/// Rename `from` over `to` and flush the directory entry that results.
+///
+/// For installing a file that is already complete on disk — the scrub's
+/// repaired copy, a photo moved into Recently Deleted — with the same
+/// durability the staged writers get.  Both paths must be on one filesystem
+/// for the rename to be atomic, which for the callers here means one
+/// directory tree.
+pub fn rename_synced(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::rename(from, to)?;
+    sync_parent_dir(to);
+    Ok(())
+}
+
+/// Create `dir` and any missing parents, making each one durable as it goes.
+///
+/// `create_dir_all` followed by a file write leaves the *directories* unsynced:
+/// [`write_verified_atomic`] flushes the entry it created in the innermost
+/// directory, but nothing has flushed that directory's own entry in its parent.
+/// A power cut after a first import into a fresh `files/ab/cd/` shard can
+/// therefore take the shard — and the verified file inside it — with it.
+///
+/// Each component is synced into its parent before the next one is created
+/// inside it, so a directory exists durably before anything depends on it.
+pub fn create_dir_all_synced(dir: &Path) -> io::Result<()> {
+    if dir.as_os_str().is_empty() || dir.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent() {
+        create_dir_all_synced(parent)?;
+    }
+    match std::fs::create_dir(dir) {
+        Ok(()) => sync_parent_dir(dir),
+        // Another writer got there first, which is as good as doing it here.
+        // Anything else already occupying the name is a real error.
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
+
+/// Flush the directory entry naming `path`.
 ///
 /// The file's own data is already on the device; this is what makes the *name*
 /// still point at it after a power loss.  Best effort: by this point the new
@@ -134,7 +285,7 @@ fn inherit_permissions(dst: &Path, staged: &Path) {
 /// mounts especially) refuse to sync a directory at all — reporting that as a
 /// failed save would be a lie about bytes that are safely stored.
 #[cfg(unix)]
-fn sync_dir_of(path: &Path) {
+pub fn sync_parent_dir(path: &Path) {
     let dir = path.parent().unwrap_or(Path::new(""));
     let dir = if dir.as_os_str().is_empty() {
         Path::new(".")
@@ -149,7 +300,7 @@ fn sync_dir_of(path: &Path) {
 /// Windows has no directory handle to sync; the rename's own metadata update
 /// is the filesystem's business there.
 #[cfg(not(unix))]
-fn sync_dir_of(_path: &Path) {}
+pub fn sync_parent_dir(_path: &Path) {}
 
 /// Read `path` back and compare it against the bytes it should contain.
 pub fn verify_written(path: &Path, expected: &[u8]) -> io::Result<()> {
@@ -191,9 +342,10 @@ pub fn verify_written(path: &Path, expected: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn write_and_sync(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = File::create(path)?;
+fn write_and_sync(staged: &Path, dst: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = File::create(staged)?;
     file.write_all(bytes)?;
+    inherit_permissions(dst, staged);
 
     // Push the data out of our buffers and the kernel's. Without this the
     // read-back is answered from RAM and proves nothing about the device.
@@ -406,6 +558,107 @@ mod tests {
 
         let err = verify_written(tmp.path(), &bytes).unwrap_err().to_string();
         assert!(err.contains("read back 1016"), "{err}");
+    }
+
+    /// `write_atomic` skips the read-back, not the staging: the destination
+    /// still goes from one whole file to the next.
+    #[test]
+    fn unverified_writes_are_still_staged_and_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("prefs.yaml");
+
+        write_atomic(&dst, &payload(40_000)).unwrap();
+        write_atomic(&dst, b"replaced").unwrap();
+
+        assert_eq!(std::fs::read(&dst).unwrap(), b"replaced");
+        assert_eq!(entries(dir.path()), ["prefs.yaml"]);
+    }
+
+    /// Renaming replaces the link, so a save through a symlink has to follow it
+    /// first or it silently converts the link into a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_destination_keeps_its_link_and_updates_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.rlab");
+        let link = dir.path().join("link.rlab");
+        std::fs::write(&target, payload(100)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let bytes = payload(9_000);
+        write_verified_atomic(&link, &bytes).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the save replaced the symlink instead of following it"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert_eq!(entries(dir.path()), ["link.rlab", "real.rlab"]);
+    }
+
+    /// A link pointing at nothing has no target to write through, so the link
+    /// itself is the file to create — the same as any other absent destination.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_written_as_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("dangling.rlab");
+        std::os::unix::fs::symlink(dir.path().join("gone.rlab"), &link).unwrap();
+
+        write_verified_atomic(&link, b"fresh").unwrap();
+        assert_eq!(std::fs::read(&link).unwrap(), b"fresh");
+    }
+
+    /// Two links pointing at each other must not spin the resolver.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_loop_terminates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+
+        // Either outcome is acceptable; hanging or recursing is not.
+        let _ = write_verified_atomic(&a, b"x");
+    }
+
+    #[test]
+    fn missing_directories_are_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let leaf = dir.path().join("files").join("ab").join("cd");
+
+        create_dir_all_synced(&leaf).unwrap();
+        assert!(leaf.is_dir());
+
+        // Idempotent: the library calls this before every import.
+        create_dir_all_synced(&leaf).unwrap();
+    }
+
+    /// A regular file occupying a directory's name is a real error, not a
+    /// directory that happens to already exist.
+    #[test]
+    fn a_file_in_the_way_of_a_directory_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let occupied = dir.path().join("files");
+        std::fs::write(&occupied, b"not a directory").unwrap();
+
+        assert!(create_dir_all_synced(&occupied.join("ab")).is_err());
+    }
+
+    #[test]
+    fn a_synced_rename_installs_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("repaired.tmp");
+        let to = dir.path().join("photo.rlab");
+        std::fs::write(&from, payload(2_000)).unwrap();
+
+        rename_synced(&from, &to).unwrap();
+
+        assert_eq!(std::fs::read(&to).unwrap(), payload(2_000));
+        assert_eq!(entries(dir.path()), ["photo.rlab"]);
     }
 
     #[test]
