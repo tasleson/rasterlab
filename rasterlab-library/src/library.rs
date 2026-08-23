@@ -1,13 +1,16 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use rasterlab_core::{
-    formats::FormatRegistry, library_meta::LibraryMeta, pipeline::EditPipeline, project::RlabFile,
+    formats::FormatRegistry,
+    library_meta::LibraryMeta,
+    pipeline::EditPipeline,
+    project::{RlabFile, read_library_summary},
 };
 
 use crate::{
@@ -48,6 +51,10 @@ pub struct Library {
     root: PathBuf,
     db: Box<dyn LibraryDb>,
     registry: FormatRegistry,
+    /// Serializes read-modify-write operations on authoritative project files.
+    /// Atomic rename prevents torn files, but without this guard two background
+    /// tasks could still overwrite one another's metadata or edit stack.
+    project_write_lock: Mutex<()>,
 }
 
 impl Library {
@@ -68,6 +75,7 @@ impl Library {
             root: path.to_path_buf(),
             db,
             registry: FormatRegistry::with_builtins(),
+            project_write_lock: Mutex::new(()),
         };
         library.reconcile_recently_deleted()?;
         Ok(library)
@@ -89,6 +97,12 @@ impl Library {
 
     pub fn recently_deleted_path(&self, hash: &str) -> PathBuf {
         import::rlab_path(&self.root.join("recently_deleted"), hash)
+    }
+
+    fn lock_project_writes(&self) -> Result<MutexGuard<'_, ()>> {
+        self.project_write_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("project write lock is poisoned"))
     }
 
     // ── Import ────────────────────────────────────────────────────────────
@@ -145,7 +159,12 @@ impl Library {
         cancel: Arc<AtomicBool>,
         progress_cb: impl Fn(crate::ScrubProgress),
     ) -> Result<crate::ScrubOutcome> {
-        crate::scrub::scrub(&self.root, cancel, &progress_cb)
+        crate::scrub::scrub_with_project_lock(
+            &self.root,
+            cancel,
+            &progress_cb,
+            &self.project_write_lock,
+        )
     }
 
     // ── Photos ────────────────────────────────────────────────────────────
@@ -173,6 +192,7 @@ impl Library {
             bail!("\"{name}\" is protected and cannot be deleted");
         }
 
+        let _write_guard = self.lock_project_writes()?;
         let active = self.rlab_path(&row.hash);
         let deleted = self.recently_deleted_path(&row.hash);
         let moved = move_library_file(&active, &deleted)?;
@@ -197,6 +217,7 @@ impl Library {
             let name = row.original_filename.as_deref().unwrap_or("photo");
             bail!("\"{name}\" is protected and cannot be deleted");
         }
+        let _write_guard = self.lock_project_writes()?;
         self.permanently_remove(row, &self.rlab_path(&row.hash))?;
         self.db.delete_empty_sessions()?;
         Ok(())
@@ -211,6 +232,7 @@ impl Library {
         let Some(row) = deleted_rows.iter().find(|r| r.photo.id == photo_id) else {
             bail!("recently deleted photo {photo_id} not found");
         };
+        let _write_guard = self.lock_project_writes()?;
         let deleted = self.recently_deleted_path(&row.photo.hash);
         let active = self.rlab_path(&row.photo.hash);
         let moved = move_library_file(&deleted, &active)?;
@@ -228,6 +250,7 @@ impl Library {
         let Some(row) = deleted_rows.iter().find(|r| r.photo.id == photo_id) else {
             bail!("recently deleted photo {photo_id} not found");
         };
+        let _write_guard = self.lock_project_writes()?;
         self.permanently_remove(&row.photo, &self.recently_deleted_path(&row.photo.hash))?;
         self.db.delete_empty_sessions()?;
         Ok(())
@@ -235,6 +258,7 @@ impl Library {
 
     pub fn empty_recently_deleted(&self) -> Result<usize> {
         let rows = self.db.recently_deleted()?;
+        let _write_guard = self.lock_project_writes()?;
         for row in &rows {
             self.permanently_remove(&row.photo, &self.recently_deleted_path(&row.photo.hash))?;
         }
@@ -328,6 +352,7 @@ impl Library {
             bail!("photo {photo_id} not found");
         };
         let rlab_path = self.rlab_path(&row.hash);
+        let _write_guard = self.lock_project_writes()?;
         if rlab_path.exists() {
             // Keep the old lock in force if reading or rewriting fails. The
             // guard also covers panics, so every exit restores the prior state.
@@ -386,7 +411,16 @@ impl Library {
         let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
         for row in &photos {
             let rlab_path = self.rlab_path(&row.hash);
-            if let Err(e) = rewrite_collection_name_in_file(&rlab_path, &old_name, new_name) {
+            // Taken and released per photo, like the scrub: renaming a
+            // collection across a large library must not hold every other
+            // project write off for the length of the walk.
+            let rewritten = self.lock_project_writes().and_then(|_write_guard| {
+                if !rlab_path.exists() {
+                    return Ok(());
+                }
+                rewrite_collection_name_in_file(&rlab_path, &old_name, new_name)
+            });
+            if let Err(e) = rewritten {
                 failed.push((row.id, e));
             }
         }
@@ -474,6 +508,7 @@ impl Library {
 
     /// Re-render the pipeline for `hash` at 512px and write the new thumbnail.
     pub fn regenerate_thumbnail(&self, hash: &str) -> Result<()> {
+        let _write_guard = self.lock_project_writes()?;
         let rlab_path = self.rlab_path(hash);
         let rlab = RlabFile::read(&rlab_path)?;
         let hint = rlab.meta.source_path.as_deref().map(Path::new);
@@ -501,16 +536,88 @@ impl Library {
             .render()
             .map_err(|e| anyhow::anyhow!("render pipeline: {e}"))?;
         let thumb = generate_thumbnail(&rendered, 512)?;
-        write_thumbnail(&self.thumb_path(hash), &thumb)?;
 
         // Also update PREV chunk in the .rlab
         let mut updated = rlab;
-        updated.thumbnail = Some(thumb);
+        updated.thumbnail = Some(thumb.clone());
         fs_lock::with_unlocked(&rlab_path, || updated.write_v5(&rlab_path))?;
+
+        self.update_thumbnail_cache(hash, &thumb, updated.has_edits())?;
+
+        Ok(())
+    }
+
+    /// Select a virtual copy and rebuild its thumbnail with one container read
+    /// and one container rewrite. The previous GUI path wrote the selection,
+    /// then called [`Library::regenerate_thumbnail`], which repeated both.
+    pub fn set_active_copy_and_regenerate_thumbnail(
+        &self,
+        hash: &str,
+        copy_idx: usize,
+    ) -> Result<Vec<u8>> {
+        let _write_guard = self.lock_project_writes()?;
+        let rlab_path = self.rlab_path(hash);
+        let mut rlab = RlabFile::read(&rlab_path)?;
+        rlab.active_copy_index = copy_idx.min(rlab.copies.len().saturating_sub(1));
+
+        let hint = rlab.meta.source_path.as_deref().map(Path::new);
+        let source = self
+            .registry
+            .decode_bytes(&rlab.original_bytes, hint)
+            .context("decode original for thumbnail")?;
+        let pipeline_state = rlab
+            .copies
+            .get(rlab.active_copy_index)
+            .map(|copy| copy.pipeline_state.clone())
+            .context("rlab has no virtual copies")?;
+        let edited = pipeline_state.cursor > 0;
+        let source = Arc::new(source);
+        let mut pipeline = EditPipeline::new_virtual_copy(Arc::clone(&source));
+        pipeline
+            .load_state(pipeline_state)
+            .map_err(|e| anyhow::anyhow!("load pipeline state: {e}"))?;
+        let rendered = pipeline
+            .render()
+            .map_err(|e| anyhow::anyhow!("render pipeline: {e}"))?;
+        let thumb = generate_thumbnail(&rendered, 512)?;
+
+        rlab.thumbnail = Some(thumb.clone());
+        fs_lock::with_unlocked(&rlab_path, || rlab.write_v5(&rlab_path))?;
+        self.update_thumbnail_cache(hash, &thumb, edited)?;
+        Ok(thumb)
+    }
+
+    /// Save an editor-produced project without allowing an older cached LMTA
+    /// value to overwrite metadata changed in the library view. The selective
+    /// reader transfers only small metadata chunks, and the lock keeps that
+    /// refresh and the following authoritative rewrite indivisible relative to
+    /// other in-process project mutations.
+    pub fn save_edited_project(
+        &self,
+        hash: &str,
+        mut project: RlabFile,
+    ) -> Result<Option<LibraryMeta>> {
+        let _write_guard = self.lock_project_writes()?;
+        let rlab_path = self.rlab_path(hash);
+        let current_lmta = read_library_summary(&rlab_path)?.lmta;
+        project.set_lmta(current_lmta.clone());
+        fs_lock::with_unlocked(&rlab_path, || project.write_v5(&rlab_path))?;
+        Ok(current_lmta)
+    }
+
+    /// Publish already-rendered thumbnail bytes to the rebuildable side cache
+    /// and update the index without touching the authoritative `.rlab`.
+    pub fn update_thumbnail_cache(
+        &self,
+        hash: &str,
+        thumbnail: &[u8],
+        has_edits: bool,
+    ) -> Result<()> {
+        write_thumbnail(&self.thumb_path(hash), thumbnail)?;
 
         // Mark the photo as edited in the DB.
         if let Ok(Some(row)) = self.db.photo_by_hash(hash) {
-            let _ = self.db.set_has_edits(row.id, true);
+            let _ = self.db.set_has_edits(row.id, has_edits);
         }
         Ok(())
     }
@@ -523,6 +630,11 @@ impl Library {
             return Ok(());
         };
         let rlab_path = self.rlab_path(&row.hash);
+        // The guard has to be held across the existence check as well as the
+        // rewrite. Checking first lets a delete move the file out from under
+        // us, turning a photo that is simply gone — which this skips — into a
+        // read error reported to the user as a failed metadata write.
+        let _write_guard = self.lock_project_writes()?;
         if !rlab_path.exists() {
             return Ok(());
         }
@@ -538,6 +650,11 @@ impl Library {
             return Ok(());
         };
         let rlab_path = self.rlab_path(&row.hash);
+        // The guard has to be held across the existence check as well as the
+        // rewrite. Checking first lets a delete move the file out from under
+        // us, turning a photo that is simply gone — which this skips — into a
+        // read error reported to the user as a failed metadata write.
+        let _write_guard = self.lock_project_writes()?;
         if !rlab_path.exists() {
             return Ok(());
         }
@@ -558,6 +675,11 @@ impl Library {
             return Ok(());
         };
         let rlab_path = self.rlab_path(&row.hash);
+        // The guard has to be held across the existence check as well as the
+        // rewrite. Checking first lets a delete move the file out from under
+        // us, turning a photo that is simply gone — which this skips — into a
+        // read error reported to the user as a failed metadata write.
+        let _write_guard = self.lock_project_writes()?;
         if !rlab_path.exists() {
             return Ok(());
         }

@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Barrier},
+};
 
 use rasterlab_library::{
     Library,
@@ -894,6 +897,119 @@ fn collection_membership_survives_a_rebuild() {
     let members = lib.collection_photos(coll.id).unwrap();
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].hash, photos[0].hash);
+}
+
+#[test]
+fn selecting_a_copy_updates_the_project_and_thumbnail_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let project_path = lib.rlab_path(&photo.hash);
+
+    let mut project = rasterlab_core::project::RlabFile::read(&project_path).unwrap();
+    let mut second = project.copies[0].clone();
+    second.name = "Copy 2".into();
+    project.copies.push(second);
+    project.write_v5(&project_path).unwrap();
+
+    let thumbnail = lib
+        .set_active_copy_and_regenerate_thumbnail(&photo.hash, 1)
+        .unwrap();
+
+    let saved = rasterlab_core::project::RlabFile::read(&project_path).unwrap();
+    assert_eq!(saved.active_copy_index, 1);
+    assert_eq!(saved.thumbnail.as_deref(), Some(thumbnail.as_slice()));
+    assert_eq!(
+        std::fs::read(lib.thumb_path(&photo.hash)).unwrap(),
+        thumbnail
+    );
+}
+
+#[test]
+fn metadata_and_active_copy_writes_do_not_overwrite_each_other() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let project_path = lib.rlab_path(&photo.hash);
+
+    let mut project = rasterlab_core::project::RlabFile::read(&project_path).unwrap();
+    let mut second = project.copies[0].clone();
+    second.name = "Copy 2".into();
+    project.copies.push(second);
+    let mut lmta = project.lmta.clone().unwrap();
+    lmta.rating = 5;
+    project.write_v5(&project_path).unwrap();
+
+    let lib = Arc::new(lib);
+    let barrier = Arc::new(Barrier::new(3));
+    let metadata_worker = {
+        let lib = Arc::clone(&lib);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            lib.update_metadata(photo.id, lmta).unwrap();
+        })
+    };
+    let copy_worker = {
+        let lib = Arc::clone(&lib);
+        let barrier = Arc::clone(&barrier);
+        let hash = photo.hash.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            lib.set_active_copy_and_regenerate_thumbnail(&hash, 1)
+                .unwrap();
+        })
+    };
+    barrier.wait();
+    metadata_worker.join().unwrap();
+    copy_worker.join().unwrap();
+
+    let saved = rasterlab_core::project::RlabFile::read(&project_path).unwrap();
+    assert_eq!(saved.active_copy_index, 1);
+    assert_eq!(saved.lmta.unwrap().rating, 5);
+}
+
+#[test]
+fn metadata_write_cannot_recreate_a_deleted_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let active_path = lib.rlab_path(&photo.hash);
+    let deleted_path = lib.recently_deleted_path(&photo.hash);
+    let mut lmta = rasterlab_core::project::RlabFile::read(&active_path)
+        .unwrap()
+        .lmta
+        .unwrap();
+    lmta.rating = 4;
+
+    let lib = Arc::new(lib);
+    let barrier = Arc::new(Barrier::new(3));
+    let metadata_worker = {
+        let lib = Arc::clone(&lib);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            lib.update_metadata(photo.id, lmta).unwrap();
+        })
+    };
+    let delete_worker = {
+        let lib = Arc::clone(&lib);
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            barrier.wait();
+            lib.delete_photo(photo.id).unwrap();
+        })
+    };
+    barrier.wait();
+    metadata_worker.join().unwrap();
+    delete_worker.join().unwrap();
+
+    assert!(!active_path.exists());
+    assert!(deleted_path.exists());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
 }
 
 /// Adding to a collection that is not there used to update the index and

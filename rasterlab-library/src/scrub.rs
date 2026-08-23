@@ -28,7 +28,7 @@
 use std::{
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -89,6 +89,27 @@ pub fn scrub(
     cancel: Arc<AtomicBool>,
     progress_cb: &dyn Fn(ScrubProgress),
 ) -> Result<ScrubOutcome> {
+    scrub_impl(library_root, cancel, progress_cb, None)
+}
+
+/// Library-owned scrub variant that serializes each individual file check with
+/// project mutations. The guard is deliberately released between files so a
+/// large network library never monopolizes the mutation lock for the full walk.
+pub(crate) fn scrub_with_project_lock(
+    library_root: &Path,
+    cancel: Arc<AtomicBool>,
+    progress_cb: &dyn Fn(ScrubProgress),
+    project_write_lock: &Mutex<()>,
+) -> Result<ScrubOutcome> {
+    scrub_impl(library_root, cancel, progress_cb, Some(project_write_lock))
+}
+
+fn scrub_impl(
+    library_root: &Path,
+    cancel: Arc<AtomicBool>,
+    progress_cb: &dyn Fn(ScrubProgress),
+    project_write_lock: Option<&Mutex<()>>,
+) -> Result<ScrubOutcome> {
     let files_dir = library_root.join("files");
     let recovered_dir = library_root.join("recovered");
 
@@ -124,7 +145,15 @@ pub fn scrub(
         progress.current_file = path.clone();
         progress_cb(progress.clone());
 
-        match scrub_one(&files_dir, &recovered_dir, path) {
+        let action = if let Some(lock) = project_write_lock {
+            let _write_guard = lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("project write lock is poisoned"))?;
+            scrub_one(&files_dir, &recovered_dir, path)
+        } else {
+            scrub_one(&files_dir, &recovered_dir, path)
+        };
+        match action {
             Ok(ScrubAction::Clean) => {}
             Ok(ScrubAction::Repaired) => progress.repaired += 1,
             Ok(ScrubAction::Upgraded) => progress.upgraded += 1,
