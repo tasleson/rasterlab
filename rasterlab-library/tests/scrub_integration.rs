@@ -38,6 +38,27 @@ fn flip(bytes: &mut [u8], range: std::ops::Range<usize>, mask: u8) {
     }
 }
 
+/// Every file under `files/`, so a scrub can be checked for the staging and
+/// temp files it must not leave behind.  A leftover is not just clutter: the
+/// next scrub would find it, and a `.rlab`-named one would be treated as a
+/// photo the index has never heard of.
+fn files_left_behind(lib_root: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&lib_root.join("files"), &mut out);
+    out.sort();
+    out
+}
+
 #[test]
 fn scrub_clean_v5_library_makes_no_changes() {
     let tmp = tempfile::tempdir().unwrap();
@@ -85,6 +106,12 @@ fn scrub_repairs_corruption_and_backs_up_original() {
     let backup = tmp.path().join("recovered").join(relative_lib_path(&hash));
     assert!(backup.exists(), "backup missing at {}", backup.display());
     assert_eq!(std::fs::read(&backup).unwrap(), corrupted);
+
+    // The repair stages through a temp beside the photo and renames it into
+    // place; neither that temp nor a staging file may outlive the scrub.
+    let left = files_left_behind(tmp.path());
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].ends_with(".rlab"), "{left:?}");
 }
 
 #[test]
@@ -118,6 +145,12 @@ fn scrub_upgrades_older_formats_to_v5() {
         assert!(post.file_hash_ok && post.recc_present, "{label}: {post:?}");
         assert_eq!(post.format_version, Some(FORMAT_VERSION_V5), "{label}");
         assert!(!tmp.path().join("recovered").exists(), "{label}");
+
+        // The upgrade rewrites the file where it stands; nothing of its own is
+        // staged alongside it.
+        let left = files_left_behind(tmp.path());
+        assert_eq!(left.len(), 1, "{label}: {left:?}");
+        assert!(left[0].ends_with(".rlab"), "{label}: {left:?}");
     }
 }
 

@@ -38,6 +38,7 @@ use anyhow::{Context, Result};
 use rasterlab_core::{
     degraded_read::read_degraded_file,
     project::{FORMAT_VERSION_V5, RlabFile, read_original_hash, verify_and_repair},
+    verified_write::{create_dir_all_synced, rename_synced, write_verified_atomic},
 };
 use walkdir::WalkDir;
 
@@ -212,11 +213,10 @@ fn repair_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scr
         // split placement that survives end truncation. Best-effort — a write
         // failure (e.g. a locked/protected file) leaves the intact original in
         // place and is not a corruption error.
-        match upgrade_to_v5(path, &tmp) {
+        match upgrade_to_v5(path) {
             Ok(()) => Ok(ScrubAction::Upgraded),
             Err(e) => {
                 eprintln!("scrub: could not upgrade {} to v5: {e}", path.display());
-                let _ = std::fs::remove_file(&tmp);
                 Ok(ScrubAction::Clean)
             }
         }
@@ -302,12 +302,16 @@ fn check_identity(files_dir: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Re-save a clean file as v5, staging through `tmp` and renaming over `path`.
-fn upgrade_to_v5(path: &Path, tmp: &Path) -> Result<()> {
+/// Re-save a clean file as v5.
+///
+/// `write_v5` already stages beside `path`, syncs, reads back and renames into
+/// place, so there is nothing for this to add: an intermediate temp of our own
+/// would only stage the same bytes twice and finish on a rename the writer had
+/// no chance to sync.
+fn upgrade_to_v5(path: &Path) -> Result<()> {
     let rlab = RlabFile::read(path).with_context(|| format!("read {}", path.display()))?;
-    rlab.write_v5(tmp)
-        .with_context(|| format!("write v5 {}", tmp.display()))?;
-    replace_atomically(tmp, path)
+    rlab.write_v5(path)
+        .with_context(|| format!("write v5 {}", path.display()))
 }
 
 /// Copy the (corrupted) original to `recovered/`, preserving its relative
@@ -328,18 +332,22 @@ fn backup_to_recovered(files_dir: &Path, recovered_dir: &Path, path: &Path) -> R
         dest.set_file_name(format!("{stem}.{ts}.{ext}"));
     }
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        create_dir_all_synced(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let degraded = read_degraded_file(path).with_context(|| format!("read {}", path.display()))?;
-    std::fs::write(&dest, &degraded.data)
+    // The original is about to be renamed over, so this backup is the only
+    // remaining copy of whatever the repair could not use.  It has to be on the
+    // device before the replace, not merely handed to the page cache.
+    write_verified_atomic(&dest, &degraded.data)
         .with_context(|| format!("back up corrupted file to {}", dest.display()))?;
     Ok(())
 }
 
 /// Rename `tmp` over `dst`. Both live in the same directory (hence the same
-/// filesystem), so the rename is atomic.
+/// filesystem), so the rename is atomic; syncing the directory afterwards is
+/// what keeps the new name pointing at the repaired file across a power cut.
 fn replace_atomically(tmp: &Path, dst: &Path) -> Result<()> {
-    std::fs::rename(tmp, dst).with_context(|| format!("replace {}", dst.display()))
+    rename_synced(tmp, dst).with_context(|| format!("replace {}", dst.display()))
 }
 
 fn unix_now() -> u64 {

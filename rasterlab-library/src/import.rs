@@ -12,6 +12,7 @@ use rasterlab_core::{
     formats::{FormatRegistry, exif_util::read_capture_date_from_prefix},
     library_meta::{FileTimeStamp, LibraryExif, LibraryMeta},
     project::{RlabFile, is_rlab_path},
+    verified_write::create_dir_all_synced,
 };
 use uuid::Uuid;
 
@@ -618,7 +619,7 @@ fn import_one(
     // 10. Write .rlab
     let rlab_path = rlab_path(library_root, &hash);
     if let Some(parent) = rlab_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        create_dir_all_synced(parent)?;
     }
     if let Some(project) = imported_project.as_mut() {
         project.meta.width = width;

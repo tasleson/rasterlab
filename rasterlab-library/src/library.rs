@@ -11,6 +11,7 @@ use rasterlab_core::{
     library_meta::LibraryMeta,
     pipeline::EditPipeline,
     project::{RlabFile, read_library_summary},
+    verified_write::{create_dir_all_synced, rename_synced},
 };
 
 use crate::{
@@ -67,9 +68,9 @@ impl Library {
     /// Open (or create) a library at `path` with an injected DB backend
     /// (useful for testing with a fake/mock DB).
     pub fn with_db(path: &Path, db: Box<dyn LibraryDb>) -> Result<Self> {
-        std::fs::create_dir_all(path.join("files"))?;
-        std::fs::create_dir_all(path.join("thumbs"))?;
-        std::fs::create_dir_all(path.join("recently_deleted/files"))?;
+        create_dir_all_synced(&path.join("files"))?;
+        create_dir_all_synced(&path.join("thumbs"))?;
+        create_dir_all_synced(&path.join("recently_deleted/files"))?;
         db.init()?;
         let library = Self {
             root: path.to_path_buf(),
@@ -708,10 +709,12 @@ fn move_library_file(source: &Path, destination: &Path) -> Result<bool> {
             );
         }
         if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
+            create_dir_all_synced(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        std::fs::rename(source, destination)
+        // Synced: the index row is updated on the strength of this rename
+        // having happened, so the name has to outlive a power cut too.
+        rename_synced(source, destination)
             .with_context(|| format!("move {} to {}", source.display(), destination.display()))?;
         return Ok(true);
     }
