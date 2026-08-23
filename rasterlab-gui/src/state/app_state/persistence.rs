@@ -38,6 +38,7 @@ impl AppState {
         self.is_dirty = false;
         self.clean_edit_state = None;
         self.project_created_at = None;
+        self.project_lmta = None;
         self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
         self.rename_pending = None;
 
@@ -97,6 +98,7 @@ impl AppState {
             .map(std::path::PathBuf::from)
             .or_else(|| Some(path.clone()));
         self.project_created_at = Some(rlab.meta.created_at);
+        self.project_lmta = rlab.lmta.clone();
         self.original_bytes = Some(rlab.original_bytes.clone());
         self.project_path = Some(path.clone());
         self.is_dirty = false;
@@ -389,9 +391,27 @@ impl AppState {
             self.status = "Nothing to save — open an image first".into();
             return;
         };
-        let Some(store) = &self.copies else {
+        let Some(store) = &mut self.copies else {
             self.status = "Nothing to save — no active pipeline".into();
             return;
+        };
+
+        // Render the committed active copy once and carry its thumbnail in the
+        // same authoritative write. Previously the save omitted PREV and then
+        // thumbnail regeneration read and rewrote the whole remote container.
+        let rendered = match store.active_pipeline_mut().render() {
+            Ok(image) => image,
+            Err(e) => {
+                self.status = format!("Save failed (thumbnail render): {e}");
+                return;
+            }
+        };
+        let thumbnail = match rasterlab_library::thumbnail::generate_thumbnail(&rendered, 512) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.status = format!("Save failed (thumbnail): {e}");
+                return;
+            }
         };
 
         let (copies_saved, active_idx) = match store.save_states() {
@@ -419,23 +439,35 @@ impl AppState {
         meta = meta.touch();
 
         let created_at = meta.created_at;
-        // If we're overwriting an existing library `.rlab`, read its current
-        // LMTA chunk so we can carry it forward. Otherwise the save drops the
-        // library metadata (keywords, rating, source-file timestamps, …) and
-        // features that depend on it — like "Export Selection → Original" —
-        // lose ground truth.
-        let existing_lmta = if path.exists() {
-            RlabFile::read(&path).ok().and_then(|r| r.lmta)
-        } else {
-            None
-        };
-        let mut rlab = RlabFile::new(meta, original_bytes, copies_saved, active_idx, None);
-        rlab.set_lmta(existing_lmta);
+        let mut rlab = RlabFile::new(
+            meta,
+            original_bytes,
+            copies_saved,
+            active_idx,
+            Some(thumbnail.clone()),
+        );
+        rlab.set_lmta(self.project_lmta.clone());
+        let has_edits = rlab.has_edits();
         // v4 adds Reed-Solomon parity so the file is repairable by an integrity
         // scrub; this also avoids downgrading a library photo that was imported
         // as v4 when its edits are saved back in place.
-        match rlab.write_v5(&path) {
-            Ok(()) => {
+        let library_target = self
+            .library_context
+            .as_ref()
+            .and_then(|(_, hash)| self.library.library.clone().map(|lib| (lib, hash.clone())))
+            .filter(|(lib, hash)| lib.rlab_path(hash) == path);
+        let write_result = match &library_target {
+            Some((lib, hash)) => lib
+                .save_edited_project(hash, rlab)
+                .map_err(|error| error.to_string()),
+            None => rlab
+                .write_v5(&path)
+                .map(|()| self.project_lmta.clone())
+                .map_err(|error| error.to_string()),
+        };
+        match write_result {
+            Ok(saved_lmta) => {
+                self.project_lmta = saved_lmta;
                 self.project_created_at = Some(created_at);
                 self.project_path = Some(path.clone());
                 self.capture_clean_edit_state();
@@ -445,14 +477,27 @@ impl AppState {
                 }
                 self.status = format!("Saved → {}", path.display());
 
-                // If this file was opened from the library, regenerate its thumbnail.
-                let library_hash = self.library_context.as_ref().map(|(_, hash)| hash.clone());
-                if let Some(hash) = library_hash {
-                    self.spawn_thumbnail_regen(hash);
+                // The PREV bytes were produced from this exact saved pipeline;
+                // publish the same bytes to the library's derived thumbnail
+                // cache without reopening or rewriting the container.
+                //
+                // Only when the write landed on the library's own file for
+                // this hash. `library_context` outlives the document it was
+                // set for — a Save As, or opening an unrelated file, leaves it
+                // pointing at a photo this render has nothing to do with, and
+                // publishing then puts one photo's thumbnail on another.
+                if let Some((lib, hash)) = &library_target {
+                    if let Err(e) = lib.update_thumbnail_cache(hash, &thumbnail, has_edits) {
+                        self.status = format!(
+                            "Saved project, but could not update its library thumbnail: {e}"
+                        );
+                    } else {
+                        self.library.thumbs.remove(hash);
+                    }
                 }
             }
             Err(e) => {
-                self.status = format!("Save failed: {}", e);
+                self.status = format!("Save failed: {e}");
             }
         }
     }
@@ -680,5 +725,51 @@ mod tests {
         assert!(entry["enabled"].as_bool().unwrap());
         assert_eq!(entry["operation"]["saturation"].as_f64().unwrap(), 1.25);
         assert!(!state.is_dirty);
+    }
+
+    #[test]
+    fn save_as_leaves_the_source_photos_library_thumbnail_alone() {
+        // `library_context` survives a Save As, so the only thing separating
+        // "update this photo's thumbnail" from "overwrite an unrelated
+        // photo's" is whether the write actually landed on the library file.
+        let dir = tempfile::tempdir().unwrap();
+        let library = std::sync::Arc::new(
+            rasterlab_library::Library::open_or_create(&dir.path().join("library")).unwrap(),
+        );
+        let hash = "0".repeat(64);
+        let thumb_path = library.thumb_path(&hash);
+        std::fs::create_dir_all(thumb_path.parent().unwrap()).unwrap();
+        std::fs::write(&thumb_path, b"the thumbnail this photo already had").unwrap();
+
+        let mut state = state_with_saturation(0.5);
+        state.library.library = Some(std::sync::Arc::clone(&library));
+        state.library_context = Some((library.root().to_path_buf(), hash.clone()));
+
+        state.save_project(dir.path().join("somewhere-else.rlab"));
+
+        assert_eq!(
+            std::fs::read(&thumb_path).unwrap(),
+            b"the thumbnail this photo already had"
+        );
+    }
+
+    #[test]
+    fn save_uses_cached_lmta_and_embeds_the_current_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached-metadata.rlab");
+        let mut state = state_with_saturation(0.5);
+        state.project_lmta = Some(rasterlab_core::library_meta::LibraryMeta {
+            caption: Some("kept without rereading the destination".into()),
+            ..Default::default()
+        });
+
+        state.save_project(path.clone());
+
+        let saved = RlabFile::read(&path).unwrap();
+        assert_eq!(
+            saved.lmta.and_then(|lmta| lmta.caption),
+            Some("kept without rereading the destination".into())
+        );
+        assert!(saved.thumbnail.is_some());
     }
 }

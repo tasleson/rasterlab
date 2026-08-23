@@ -80,10 +80,6 @@ enum BgMessage {
     /// A background thread failed at loading the open document. Terminal for
     /// the editor's `loading` flag.
     Error(String),
-    /// An auxiliary background task failed — a thumbnail that could not be
-    /// rebuilt, say. Reported without touching `loading`, which belongs to
-    /// whatever render or load is actually in flight.
-    TaskFailed(String),
     /// Progress update from a running import.
     ImportProgress(rasterlab_library::ImportProgress),
     /// Import finished; thumbnail cache should be invalidated.
@@ -96,6 +92,22 @@ enum BgMessage {
     ImportFailed(String),
     /// A thumbnail image was loaded from disk; ready to upload to egui.
     ThumbLoaded { hash: String, bytes: Vec<u8> },
+    LibraryDetailLoaded {
+        id: rasterlab_library::PhotoId,
+        hash: String,
+        request_revision: u64,
+        result: Box<Result<rasterlab_core::project::RlabLibrarySummary, String>>,
+    },
+    LibraryMetadataSaved {
+        id: rasterlab_library::PhotoId,
+        revision: u64,
+        result: Result<(), String>,
+    },
+    ActiveCopySaved {
+        hash: String,
+        copy_idx: usize,
+        result: Result<Vec<u8>, String>,
+    },
     /// Progress update from a running integrity scrub.
     ScrubProgress(rasterlab_library::ScrubProgress),
     /// Progress update from a running index rebuild.
@@ -179,6 +191,10 @@ pub struct AppState {
     /// `created_at` timestamp from the last project load/save, preserved on
     /// in-place re-saves so the original creation date is not lost.
     pub project_created_at: Option<u64>,
+    /// Library metadata carried by the open project. Retained in memory so an
+    /// in-place save does not have to reread the entire (possibly remote)
+    /// `.rlab` merely to preserve its small LMTA chunk.
+    project_lmta: Option<rasterlab_core::library_meta::LibraryMeta>,
     /// Incremented each time a new file is opened. Canvas uses this to know
     /// when to reset zoom/pan vs. just updating the texture.
     pub image_generation: u64,
@@ -315,6 +331,7 @@ impl AppState {
             is_dirty: false,
             clean_edit_state: None,
             project_created_at: None,
+            project_lmta: None,
             image_generation: 0,
             split_view: false,
             split_mode: SplitMode::VsOriginal,
@@ -369,13 +386,48 @@ impl AppState {
                     self.status = format!("Error: {}", e);
                     self.loading = false;
                 }
-                BgMessage::TaskFailed(e) => self.status = format!("Error: {}", e),
                 BgMessage::ImportProgress(p) => self.on_import_progress(p),
                 BgMessage::ImportComplete { session, errors } => {
                     self.on_import_complete(session, errors)
                 }
                 BgMessage::ImportFailed(e) => self.on_import_failed(e),
                 BgMessage::ThumbLoaded { hash, bytes } => self.on_thumb_loaded(hash, bytes),
+                BgMessage::LibraryDetailLoaded {
+                    id,
+                    hash,
+                    request_revision,
+                    result,
+                } => self
+                    .library
+                    .finish_selected_detail(id, &hash, request_revision, *result),
+                BgMessage::LibraryMetadataSaved {
+                    id,
+                    revision,
+                    result,
+                } => {
+                    let succeeded = result.is_ok();
+                    self.library
+                        .finish_selected_detail_commit(id, revision, result);
+                    if succeeded {
+                        self.library.refresh();
+                        self.commit_library_metadata_for(id, true);
+                    }
+                }
+                BgMessage::ActiveCopySaved {
+                    hash,
+                    copy_idx,
+                    result,
+                } => match result {
+                    Ok(bytes) => {
+                        self.library
+                            .finish_cached_active_copy_save(&hash, Some(copy_idx));
+                        self.on_thumb_loaded(hash, bytes);
+                    }
+                    Err(error) => {
+                        self.library.finish_cached_active_copy_save(&hash, None);
+                        self.status = format!("Error: set active copy: {error}");
+                    }
+                },
                 BgMessage::ScrubProgress(p) => self.on_scrub_progress(p),
                 BgMessage::RebuildProgress(p) => self.on_rebuild_progress(p),
                 BgMessage::RebuildComplete {

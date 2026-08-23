@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use egui::ScrollArea;
 use rasterlab_library::PhotoId;
 
@@ -6,6 +8,21 @@ use crate::state::AppState;
 /// Right-side detail / metadata-edit panel for the library view.
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let selected: Vec<PhotoId> = state.library.selected.clone();
+    let detail_selection = (selected.len() == 1)
+        .then(|| {
+            state
+                .library
+                .results
+                .iter()
+                .find(|photo| photo.id == selected[0])
+                .map(|photo| (photo.id, photo.hash.clone()))
+        })
+        .flatten();
+    state.sync_library_detail(
+        detail_selection
+            .as_ref()
+            .map(|(id, hash)| (*id, hash.as_str())),
+    );
 
     match selected.len() {
         0 => {
@@ -73,125 +90,148 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         ui.separator();
         ui.strong("EXIF");
 
-        // Fetch EXIF from the .rlab file if library is open
-        if let Some(lib) = state.library.library.clone() {
-            let rlab_path = lib.rlab_path(&photo.hash);
-            if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
-                && let Some(lmta) = &rlab.lmta
-                && let Some(exif) = &lmta.exif
-            {
-                exif_table(ui, exif);
-            }
+        if let Some(exif) = state
+            .library
+            .selected_detail_metadata()
+            .and_then(|lmta| lmta.exif.as_ref())
+        {
+            exif_table(ui, exif);
         }
 
         ui.separator();
         ui.strong("Metadata");
 
-        // Editable fields — read from .rlab lmta
-        if let Some(lib) = state.library.library.clone() {
-            let rlab_path = lib.rlab_path(&photo.hash);
-            if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
-                && let Some(mut lmta) = rlab.lmta.clone()
-            {
-                let mut dirty = false;
+        // Editable fields use an in-memory draft. The network rewrite is
+        // coalesced and performed by a background worker.
+        if let Some(mut lmta) = state.library.selected_detail_metadata().cloned() {
+            let mut changed = false;
+            let mut commit_now = false;
 
-                // Rating
-                ui.horizontal(|ui| {
-                    ui.label("Rating:");
-                    for star in 0u8..=5 {
-                        let filled = star <= lmta.rating;
-                        let label = if filled { "★" } else { "☆" };
-                        if ui
-                            .selectable_label(filled && star == lmta.rating, label)
-                            .clicked()
-                        {
-                            lmta.rating = if lmta.rating == star { 0 } else { star };
-                            dirty = true;
-                        }
+            // Rating
+            ui.horizontal(|ui| {
+                ui.label("Rating:");
+                for star in 0u8..=5 {
+                    let filled = star <= lmta.rating;
+                    let label = if filled { "★" } else { "☆" };
+                    if ui
+                        .selectable_label(filled && star == lmta.rating, label)
+                        .clicked()
+                    {
+                        lmta.rating = if lmta.rating == star { 0 } else { star };
+                        changed = true;
+                        commit_now = true;
                     }
-                });
+                }
+            });
 
-                // Flag
-                ui.horizontal(|ui| {
-                    ui.label("Flag:");
-                    for flag_opt in [None, Some("pick"), Some("reject")] {
-                        let active = lmta.flag.as_deref() == flag_opt;
-                        if ui
-                            .selectable_label(active, flag_opt.unwrap_or("—"))
-                            .clicked()
-                        {
-                            lmta.flag = flag_opt.map(|s| s.to_owned());
-                            dirty = true;
-                        }
+            // Flag
+            ui.horizontal(|ui| {
+                ui.label("Flag:");
+                for flag_opt in [None, Some("pick"), Some("reject")] {
+                    let active = lmta.flag.as_deref() == flag_opt;
+                    if ui
+                        .selectable_label(active, flag_opt.unwrap_or("—"))
+                        .clicked()
+                    {
+                        lmta.flag = flag_opt.map(|s| s.to_owned());
+                        changed = true;
+                        commit_now = true;
                     }
-                });
+                }
+            });
 
-                // Color label
-                ui.horizontal(|ui| {
-                    ui.label("Color:");
-                    for color in [
-                        None,
-                        Some("red"),
-                        Some("yellow"),
-                        Some("green"),
-                        Some("blue"),
-                        Some("purple"),
-                    ] {
-                        let active = lmta.color_label.as_deref() == color;
-                        let display = color.unwrap_or("—");
-                        if ui.selectable_label(active, display).clicked() {
-                            lmta.color_label = color.map(|s| s.to_owned());
-                            dirty = true;
-                        }
+            // Color label
+            ui.horizontal(|ui| {
+                ui.label("Color:");
+                for color in [
+                    None,
+                    Some("red"),
+                    Some("yellow"),
+                    Some("green"),
+                    Some("blue"),
+                    Some("purple"),
+                ] {
+                    let active = lmta.color_label.as_deref() == color;
+                    let display = color.unwrap_or("—");
+                    if ui.selectable_label(active, display).clicked() {
+                        lmta.color_label = color.map(|s| s.to_owned());
+                        changed = true;
+                        commit_now = true;
                     }
-                });
-
-                // Caption
-                ui.label("Caption:");
-                let mut caption = lmta.caption.clone().unwrap_or_default();
-                if ui.text_edit_multiline(&mut caption).changed() {
-                    lmta.caption = if caption.is_empty() {
-                        None
-                    } else {
-                        Some(caption)
-                    };
-                    dirty = true;
                 }
+            });
 
-                // Keywords
-                ui.label("Keywords:");
-                let kw_str: String = lmta.keywords.join(", ");
-                let mut kw_edit = kw_str.clone();
-                if ui.text_edit_singleline(&mut kw_edit).changed() {
-                    lmta.keywords = kw_edit
-                        .split(',')
-                        .map(|s| s.trim().to_owned())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    dirty = true;
-                }
+            // Caption
+            ui.label("Caption:");
+            let mut caption = lmta.caption.clone().unwrap_or_default();
+            let caption_response = ui.text_edit_multiline(&mut caption);
+            if caption_response.changed() {
+                lmta.caption = if caption.is_empty() {
+                    None
+                } else {
+                    Some(caption)
+                };
+                changed = true;
+            }
+            commit_now |= caption_response.lost_focus();
 
-                if dirty && let Some(lib) = &state.library.library {
-                    lib.update_metadata(id, lmta).ok();
-                    state.library.refresh();
-                }
+            // Keywords
+            ui.label("Keywords:");
+            let mut kw_edit = lmta.keywords.join(", ");
+            let keyword_response = ui.text_edit_singleline(&mut kw_edit);
+            if keyword_response.changed() {
+                lmta.keywords = kw_edit
+                    .split(',')
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                changed = true;
+            }
+            commit_now |= keyword_response.lost_focus()
+                || (keyword_response.has_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter)));
+
+            if changed {
+                state.library.edit_selected_detail_metadata(lmta);
+                ui.ctx().request_repaint_after(Duration::from_millis(750));
+            }
+            if commit_now || state.library.selected_detail_commit_due() {
+                state.commit_library_detail_metadata(true);
             }
         }
 
         // Virtual copies — only shown when there is more than one copy so the
         // user can control which one gets exported without opening the editor.
-        if let Some(lib) = state.library.library.clone() {
-            let rlab_path = lib.rlab_path(&photo.hash);
-            if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
-                && rlab.copies.len() > 1
-            {
+        let copy_state = state.library.selected_detail.as_ref().map(|detail| {
+            (
+                detail.copy_names.clone(),
+                detail.active_copy_index,
+                detail.active_copy_saving,
+                detail.load_error.clone(),
+                detail.loading,
+            )
+        });
+        if let Some((copy_names, active, saving, load_error, loading)) = copy_state {
+            if loading {
+                ui.spinner();
+            } else if let Some(error) = load_error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            if copy_names.len() > 1 {
                 ui.separator();
                 ui.strong("Virtual Copies");
                 ui.label("The active copy is used for export.");
-                let active = rlab.active_copy_index;
                 let mut new_active = active;
-                for (idx, copy) in rlab.copies.iter().enumerate() {
-                    ui.radio_value(&mut new_active, idx, &copy.name);
+                ui.add_enabled_ui(!saving, |ui| {
+                    for (idx, name) in copy_names.iter().enumerate() {
+                        ui.radio_value(&mut new_active, idx, name);
+                    }
+                });
+                if saving {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Saving active copy…");
+                    });
                 }
                 if new_active != active {
                     state.set_active_copy(&photo.hash, new_active);
@@ -207,22 +247,17 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
             .num_columns(2)
             .spacing([8.0, 2.0])
             .show(ui, |ui| {
-                if let Some(lib) = state.library.library.clone() {
-                    let rlab_path = lib.rlab_path(&photo.hash);
-                    if let Ok(rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
-                        && let Some(source_path) = rlab
-                            .lmta
-                            .as_ref()
-                            .and_then(|lmta| lmta.source_path.as_ref())
-                            .or(rlab.meta.source_path.as_ref())
-                    {
-                        ui.label("Original path:");
-                        ui.add(
-                            egui::Label::new(egui::RichText::new(source_path).monospace())
-                                .truncate(),
-                        );
-                        ui.end_row();
-                    }
+                if let Some(source_path) = state
+                    .library
+                    .selected_detail
+                    .as_ref()
+                    .and_then(|detail| detail.source_path.as_ref())
+                {
+                    ui.label("Original path:");
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(source_path).monospace()).truncate(),
+                    );
+                    ui.end_row();
                 }
                 ui.label("Library path:");
                 ui.add(egui::Label::new(egui::RichText::new(&rel_path).monospace()).truncate());
@@ -232,13 +267,14 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         ui.separator();
 
         // Open in editor button
-        if ui.button("Open in Editor").clicked()
-            && let Some(lib) = &state.library.library
-        {
-            let rlab_path = lib.rlab_path(&photo.hash);
-            state.library_context = Some((lib.root().to_path_buf(), photo.hash.clone()));
-            state.open_file(rlab_path);
-            state.mode = crate::state::AppMode::Editor;
+        if ui.button("Open in Editor").clicked() {
+            state.commit_library_detail_metadata(true);
+            if let Some(lib) = &state.library.library {
+                let rlab_path = lib.rlab_path(&photo.hash);
+                state.library_context = Some((lib.root().to_path_buf(), photo.hash.clone()));
+                state.open_file(rlab_path);
+                state.mode = crate::state::AppMode::Editor;
+            }
         }
     });
 }
@@ -383,8 +419,8 @@ fn for_each_lmta(
             .find(|p| p.id == id)
             .map(|p| lib.rlab_path(&p.hash));
         if let Some(rlab_path) = rlab_path_opt
-            && let Ok(mut rlab) = rasterlab_core::project::RlabFile::read(&rlab_path)
-            && let Some(ref mut lmta) = rlab.lmta
+            && let Ok(mut summary) = rasterlab_core::project::read_library_summary(&rlab_path)
+            && let Some(ref mut lmta) = summary.lmta
             && f(lmta)
         {
             lib.update_metadata(id, lmta.clone()).ok();

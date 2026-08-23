@@ -2,11 +2,12 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use rasterlab_library::{
-    CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, PhotoId, PhotoRow,
-    RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
+    CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, LibraryMeta, PhotoId,
+    PhotoRow, RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
 };
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
@@ -56,6 +57,45 @@ fn selected_frames(
         .filter(|p| selected.contains(&p.id))
         .map(|p| (p.hash.clone(), rlab_path(root, &p.hash)))
         .collect()
+}
+
+const DETAIL_METADATA_DEBOUNCE: Duration = Duration::from_millis(750);
+
+/// Small selection-scoped view of an `.rlab` file. The loader seeks over the
+/// original image, preview, and ECC data, and this value is retained across UI
+/// repaints so even those small reads happen only when selection changes.
+pub(crate) struct SelectedPhotoDetail {
+    pub id: PhotoId,
+    pub hash: String,
+    request_revision: u64,
+    pub source_path: Option<String>,
+    pub copy_names: Vec<String>,
+    pub active_copy_index: usize,
+    pub active_copy_saving: bool,
+    pub load_error: Option<String>,
+    pub loading: bool,
+}
+
+pub(crate) struct MetadataDraft {
+    lmta: LibraryMeta,
+    dirty: bool,
+    last_edited: Option<Instant>,
+    revision: u64,
+    in_flight_revision: Option<u64>,
+}
+
+pub(crate) struct DetailLoadRequest {
+    pub id: PhotoId,
+    pub hash: String,
+    pub path: PathBuf,
+    pub request_revision: u64,
+}
+
+pub(crate) struct MetadataCommitRequest {
+    pub id: PhotoId,
+    pub revision: u64,
+    pub lmta: LibraryMeta,
+    pub library: Arc<Library>,
 }
 
 // ── LibraryState ──────────────────────────────────────────────────────────────
@@ -146,6 +186,22 @@ pub struct LibraryState {
     /// built for. Tracked so the grid can detect a scale/DPI change and rebuild
     /// the cache at the new resolution. Zero until the first grid frame.
     pub thumb_target_side: u32,
+
+    /// Detail data for the current single selection. A failed load is cached
+    /// too, preventing a disconnected network share from being retried on each
+    /// frame.
+    pub(crate) selected_detail: Option<SelectedPhotoDetail>,
+
+    /// In-progress metadata text keyed by photo. Dirty drafts survive a failed
+    /// commit and a temporary selection change.
+    pub(crate) metadata_drafts: HashMap<PhotoId, MetadataDraft>,
+
+    /// Active-copy writes keyed by project hash, independent of selection.
+    pub(crate) active_copy_saves: HashSet<String>,
+
+    /// Monotonic token used to reject stale background detail responses even
+    /// when selection returns to the same photo before an old read completes.
+    pub(crate) detail_request_revision: u64,
 }
 
 impl Default for LibraryState {
@@ -185,11 +241,287 @@ impl Default for LibraryState {
             pending_focus_stack: None,
             scroll_to_hash: None,
             thumb_target_side: 0,
+            selected_detail: None,
+            metadata_drafts: HashMap::new(),
+            active_copy_saves: HashSet::new(),
+            detail_request_revision: 0,
         }
     }
 }
 
 impl LibraryState {
+    /// Update the selection-scoped placeholder and return the one background
+    /// read needed for a newly selected photo.
+    pub(crate) fn begin_selected_detail(
+        &mut self,
+        selection: Option<(PhotoId, &str)>,
+    ) -> Option<DetailLoadRequest> {
+        let already_current = match (self.selected_detail.as_ref(), selection) {
+            (None, None) => true,
+            (Some(detail), Some((id, hash))) => detail.id == id && detail.hash == hash,
+            _ => false,
+        };
+        if already_current {
+            return None;
+        }
+        self.selected_detail = None;
+
+        // Drafts outlive the selection deliberately, so an unsaved edit
+        // survives a detour to another photo. A draft with nothing unsaved in
+        // it has no such claim, and keeping one per photo visited would grow
+        // for the length of the session.
+        let keep = selection.map(|(id, _)| id);
+        self.metadata_drafts
+            .retain(|id, draft| draft.dirty || Some(*id) == keep);
+
+        let (id, hash) = selection?;
+        let lib = self.library.as_ref()?;
+        self.detail_request_revision = self.detail_request_revision.wrapping_add(1);
+        let request_revision = self.detail_request_revision;
+        self.selected_detail = Some(SelectedPhotoDetail {
+            id,
+            hash: hash.to_owned(),
+            request_revision,
+            source_path: None,
+            copy_names: Vec::new(),
+            active_copy_index: 0,
+            active_copy_saving: self.active_copy_saves.contains(hash),
+            load_error: None,
+            loading: true,
+        });
+        Some(DetailLoadRequest {
+            id,
+            hash: hash.to_owned(),
+            path: lib.rlab_path(hash),
+            request_revision,
+        })
+    }
+
+    pub(crate) fn finish_selected_detail(
+        &mut self,
+        id: PhotoId,
+        hash: &str,
+        request_revision: u64,
+        result: Result<rasterlab_core::project::RlabLibrarySummary, String>,
+    ) {
+        let is_current = self.selected_detail.as_ref().is_some_and(|detail| {
+            detail.id == id && detail.hash == hash && detail.request_revision == request_revision
+        });
+        if !is_current {
+            return;
+        }
+        match result {
+            Ok(mut summary) => {
+                let source_path = summary
+                    .lmta
+                    .as_ref()
+                    .and_then(|lmta| lmta.source_path.clone())
+                    .or_else(|| summary.meta_source_path.take());
+                if let Some(lmta) = summary.lmta {
+                    let keep_dirty = self
+                        .metadata_drafts
+                        .get(&id)
+                        .is_some_and(|draft| draft.dirty);
+                    if !keep_dirty {
+                        self.metadata_drafts.insert(
+                            id,
+                            MetadataDraft {
+                                lmta,
+                                dirty: false,
+                                last_edited: None,
+                                revision: 0,
+                                in_flight_revision: None,
+                            },
+                        );
+                    }
+                }
+                self.selected_detail = Some(SelectedPhotoDetail {
+                    id,
+                    hash: hash.to_owned(),
+                    request_revision,
+                    source_path,
+                    copy_names: summary.copy_names,
+                    active_copy_index: summary.active_copy_index,
+                    active_copy_saving: self.active_copy_saves.contains(hash),
+                    load_error: None,
+                    loading: false,
+                });
+            }
+            Err(error) => {
+                let message = format!("Photo details unavailable: {error}");
+                self.selected_detail = Some(SelectedPhotoDetail {
+                    id,
+                    hash: hash.to_owned(),
+                    request_revision,
+                    source_path: None,
+                    copy_names: Vec::new(),
+                    active_copy_index: 0,
+                    active_copy_saving: self.active_copy_saves.contains(hash),
+                    load_error: Some(message.clone()),
+                    loading: false,
+                });
+                self.last_error = Some(message);
+            }
+        }
+    }
+
+    pub(crate) fn selected_detail_metadata(&self) -> Option<&LibraryMeta> {
+        let id = self.selected_detail.as_ref()?.id;
+        self.metadata_drafts.get(&id).map(|draft| &draft.lmta)
+    }
+
+    /// Replace the current in-memory edit without touching the network share.
+    pub(crate) fn edit_selected_detail_metadata(&mut self, lmta: LibraryMeta) {
+        let Some(id) = self.selected_detail.as_ref().map(|detail| detail.id) else {
+            return;
+        };
+        if let Some(draft) = self.metadata_drafts.get_mut(&id) {
+            draft.lmta = lmta;
+            draft.dirty = true;
+            draft.last_edited = Some(Instant::now());
+            draft.revision = draft.revision.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn selected_detail_commit_due(&self) -> bool {
+        let Some(id) = self.selected_detail.as_ref().map(|detail| detail.id) else {
+            return false;
+        };
+        self.metadata_drafts.get(&id).is_some_and(|draft| {
+            draft.dirty
+                && draft
+                    .last_edited
+                    .is_some_and(|edited| edited.elapsed() >= DETAIL_METADATA_DEBOUNCE)
+        })
+    }
+
+    /// Snapshot a dirty draft for one background write. `force` is used for
+    /// focus/selection changes; otherwise the idle debounce must have elapsed.
+    pub(crate) fn prepare_selected_detail_commit(
+        &mut self,
+        force: bool,
+    ) -> Option<MetadataCommitRequest> {
+        let id = self.selected_detail.as_ref().map(|detail| detail.id)?;
+        self.prepare_detail_commit(id, force)
+    }
+
+    /// Snapshot a specific photo's dirty draft. Completion handlers use this
+    /// to drain a newer revision even when the user selected another photo
+    /// while the preceding network write was in flight.
+    pub(crate) fn prepare_detail_commit(
+        &mut self,
+        id: PhotoId,
+        force: bool,
+    ) -> Option<MetadataCommitRequest> {
+        let draft = self.metadata_drafts.get_mut(&id)?;
+        let due = draft
+            .last_edited
+            .is_some_and(|edited| edited.elapsed() >= DETAIL_METADATA_DEBOUNCE);
+        if !draft.dirty || draft.in_flight_revision.is_some() || (!force && !due) {
+            return None;
+        }
+        let lib = self.library.clone()?;
+        draft.in_flight_revision = Some(draft.revision);
+        Some(MetadataCommitRequest {
+            id,
+            revision: draft.revision,
+            lmta: draft.lmta.clone(),
+            library: lib,
+        })
+    }
+
+    /// Take every unsaved draft, for a caller that is about to lose the chance
+    /// to write them in the background — app exit, or closing the library.
+    ///
+    /// Drafts already in flight are left alone: that worker still owns them,
+    /// and duplicating the write would race it.
+    pub(crate) fn drain_metadata_drafts(&mut self) -> Vec<(PhotoId, LibraryMeta)> {
+        let mut pending: Vec<(PhotoId, LibraryMeta)> = self
+            .metadata_drafts
+            .iter_mut()
+            .filter(|(_, draft)| draft.dirty && draft.in_flight_revision.is_none())
+            .map(|(id, draft)| {
+                draft.dirty = false;
+                draft.last_edited = None;
+                (*id, draft.lmta.clone())
+            })
+            .collect();
+        pending.sort_by_key(|(id, _)| *id);
+        pending
+    }
+
+    pub(crate) fn finish_selected_detail_commit(
+        &mut self,
+        id: PhotoId,
+        revision: u64,
+        result: Result<(), String>,
+    ) {
+        let Some(draft) = self.metadata_drafts.get_mut(&id) else {
+            return;
+        };
+        if draft.in_flight_revision != Some(revision) {
+            return;
+        }
+        draft.in_flight_revision = None;
+        match result {
+            Ok(()) => {
+                if draft.revision == revision {
+                    draft.dirty = false;
+                    draft.last_edited = None;
+                }
+            }
+            Err(error) => {
+                // Stay dirty but stop the debounce from re-firing: a library on
+                // a share that has gone away must not be retried every 750 ms
+                // for the rest of the session. The draft is still written by
+                // the next forced commit — a selection change, or the flush on
+                // exit — and the user is told it did not land.
+                draft.last_edited = None;
+                self.last_error = Some(format!("Metadata update failed: {error}"));
+            }
+        }
+    }
+
+    pub(crate) fn begin_cached_active_copy_save(&mut self, hash: &str) -> bool {
+        if !self.active_copy_saves.insert(hash.to_owned()) {
+            return false;
+        }
+        if let Some(detail) = self
+            .selected_detail
+            .as_mut()
+            .filter(|detail| detail.hash == hash)
+        {
+            detail.active_copy_saving = true;
+        }
+        true
+    }
+
+    /// Finish an active-copy write. `copy_idx` is `Some` only when the write
+    /// landed, in which case the panel reloads rather than patching its cached
+    /// copy list — the file is the authority on what it now says.
+    pub(crate) fn finish_cached_active_copy_save(&mut self, hash: &str, copy_idx: Option<usize>) {
+        self.active_copy_saves.remove(hash);
+        if copy_idx.is_some()
+            && self
+                .selected_detail
+                .as_ref()
+                .is_some_and(|detail| detail.hash == hash)
+        {
+            // Force a post-write selective reload. Any older detail response is
+            // ignored because no current placeholder matches it.
+            self.selected_detail = None;
+            return;
+        }
+        let Some(detail) = self
+            .selected_detail
+            .as_mut()
+            .filter(|detail| detail.hash == hash)
+        else {
+            return;
+        };
+        detail.active_copy_saving = false;
+    }
+
     /// Reload results from the DB based on the current view + filter + sort.
     pub fn refresh(&mut self) {
         let Some(lib) = &self.library else { return };
@@ -265,6 +597,9 @@ impl LibraryState {
                 self.aperture_error = None;
                 self.shutter_error = None;
                 self.selected.clear();
+                self.selected_detail = None;
+                self.metadata_drafts.clear();
+                self.active_copy_saves.clear();
                 self.thumbs.clear();
                 self.last_error = None;
                 self.refresh();
@@ -581,6 +916,60 @@ mod tests {
             has_edits: false,
             protected: false,
         }
+    }
+
+    fn draft(dirty: bool, in_flight: Option<u64>, rating: u8) -> MetadataDraft {
+        MetadataDraft {
+            lmta: LibraryMeta {
+                rating,
+                ..LibraryMeta::default()
+            },
+            dirty,
+            last_edited: None,
+            revision: 1,
+            in_flight_revision: in_flight,
+        }
+    }
+
+    /// The debounced write is a background worker, which is no use to a caller
+    /// that is about to exit. Draining has to hand back everything still
+    /// unwritten — and nothing a worker is already carrying, or the two race
+    /// to write the same photo.
+    #[test]
+    fn draining_takes_unwritten_drafts_and_leaves_in_flight_ones() {
+        let mut state = LibraryState::default();
+        state.metadata_drafts.insert(1, draft(true, None, 3));
+        state.metadata_drafts.insert(2, draft(false, None, 4));
+        state.metadata_drafts.insert(3, draft(true, Some(1), 5));
+
+        let drained = state.drain_metadata_drafts();
+
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, 1);
+        assert_eq!(drained[0].1.rating, 3);
+        // Taken means taken: a second flush must not write it again.
+        assert!(!state.metadata_drafts[&1].dirty);
+        assert!(state.drain_metadata_drafts().is_empty());
+        // The in-flight draft is still owned by its worker.
+        assert!(state.metadata_drafts[&3].dirty);
+    }
+
+    /// Drafts survive a detour to another photo so an unsaved caption is not
+    /// lost to a stray click, but a clean one has nothing to protect and must
+    /// not accumulate for every photo the user browsed past.
+    #[test]
+    fn selecting_another_photo_keeps_only_unsaved_drafts() {
+        let mut state = LibraryState::default();
+        state.metadata_drafts.insert(1, draft(true, None, 3));
+        state.metadata_drafts.insert(2, draft(false, None, 4));
+        state.metadata_drafts.insert(3, draft(false, None, 5));
+
+        // No library is open, so no load is requested; the pruning still runs.
+        assert!(state.begin_selected_detail(Some((3, "aabbcc03"))).is_none());
+
+        assert!(state.metadata_drafts.contains_key(&1));
+        assert!(!state.metadata_drafts.contains_key(&2));
+        assert!(state.metadata_drafts.contains_key(&3));
     }
 
     /// The frame list follows the grid, not the order the user clicked in, so

@@ -31,24 +31,26 @@ pub(super) const IMAGE_WORKER_STACK: usize = 32 * 1024 * 1024;
 /// `tx` first. `on_failure` builds the terminal message from a description of
 /// what went wrong, and must clear the same state the successful terminal
 /// message would.
-pub(super) fn spawn<F>(
+pub(super) fn spawn<F, E>(
     name: &'static str,
     stack_size: usize,
     tx: Sender<BgMessage>,
     ctx: Context,
-    on_failure: fn(String) -> BgMessage,
+    on_failure: E,
     body: F,
 ) where
     F: FnOnce() -> BgMessage + Send + 'static,
+    E: Fn(String) -> BgMessage + Clone + Send + 'static,
 {
     let failure_tx = tx.clone();
     let failure_ctx = ctx.clone();
+    let thread_failure = on_failure.clone();
     let spawned = std::thread::Builder::new()
         .name(name.into())
         .stack_size(stack_size)
         .spawn(move || {
             let message = panic_guard::guard(body)
-                .unwrap_or_else(|panic| on_failure(format!("{name} panicked: {panic}")));
+                .unwrap_or_else(|panic| thread_failure(format!("{name} panicked: {panic}")));
             // A send error means the app is shutting down and the receiver is
             // already gone; there is nobody left to tell.
             let _ = tx.send(message);
@@ -87,8 +89,8 @@ mod tests {
 
     #[test]
     fn a_completed_worker_delivers_its_own_terminal_message() {
-        let message = terminal_message(|| BgMessage::TaskFailed("done".into()));
-        assert!(matches!(message, BgMessage::TaskFailed(m) if m == "done"));
+        let message = terminal_message(|| BgMessage::Error("done".into()));
+        assert!(matches!(message, BgMessage::Error(m) if m == "done"));
     }
 
     #[test]

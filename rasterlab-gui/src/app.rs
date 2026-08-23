@@ -311,6 +311,9 @@ impl RasterLabApp {
     /// Open a photo from the library, prompting to discard unsaved changes first if needed.
     #[cfg(not(target_arch = "wasm32"))]
     fn request_open_library_photo(&mut self, rlab_path: PathBuf, lib_root: PathBuf, hash: String) {
+        // Leaving for the editor stops the detail panel from being drawn, and
+        // with it the debounce poll that would have written the draft.
+        self.state.commit_library_detail_metadata(true);
         if self.state.is_dirty {
             self.pending_open = Some(PendingOpen::LibraryPhoto {
                 rlab_path,
@@ -440,6 +443,7 @@ impl RasterLabApp {
 
 impl eframe::App for RasterLabApp {
     fn on_exit(&mut self) {
+        self.state.flush_library_metadata_drafts();
         self.state.prefs.save();
     }
 
@@ -457,6 +461,10 @@ impl eframe::App for RasterLabApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.exit_confirm_open = true;
             } else {
+                // `is_dirty` covers the open document, not the library's
+                // metadata drafts, so this branch is reached with unwritten
+                // captions and ratings still in memory.
+                self.state.flush_library_metadata_drafts();
                 self.state.prefs.save();
             }
         }

@@ -42,12 +42,122 @@ impl AppState {
     }
 
     pub fn open_library(&mut self, path: std::path::PathBuf) {
+        self.flush_library_metadata_drafts();
         let scale = self.prefs.library_thumb_scale;
         self.library.open_library(path.clone(), scale);
         self.prefs.push_recent_library(path.clone());
         self.prefs.last_library = Some(path);
         self.prefs.save();
         self.mode = AppMode::Library;
+    }
+
+    /// Keep the selection cache aligned and enqueue at most one seek-only
+    /// metadata read for each newly selected photo.
+    pub(crate) fn sync_library_detail(&mut self, selection: Option<(i64, &str)>) {
+        let changed = match (self.library.selected_detail.as_ref(), selection) {
+            (None, None) => false,
+            (Some(detail), Some((id, hash))) => detail.id != id || detail.hash != hash,
+            _ => true,
+        };
+        if changed {
+            self.commit_library_detail_metadata(true);
+        }
+        let Some(request) = self.library.begin_selected_detail(selection) else {
+            return;
+        };
+        let failure_id = request.id;
+        let failure_hash = request.hash.clone();
+        let failure_revision = request.request_revision;
+        let id = request.id;
+        let hash = request.hash;
+        let path = request.path;
+        let request_revision = request.request_revision;
+        workers::spawn(
+            "rasterlab-detail-load",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            move |error| BgMessage::LibraryDetailLoaded {
+                id: failure_id,
+                hash: failure_hash.clone(),
+                request_revision: failure_revision,
+                result: Box::new(Err(error)),
+            },
+            move || BgMessage::LibraryDetailLoaded {
+                id,
+                hash,
+                request_revision,
+                result: Box::new(
+                    rasterlab_core::project::read_library_summary(&path)
+                        .map_err(|error| error.to_string()),
+                ),
+            },
+        );
+    }
+
+    /// Write every unsaved metadata draft now, on this thread.
+    ///
+    /// The debounced path hands drafts to a background worker, which is right
+    /// while the app keeps running and useless when it is about to stop: the
+    /// worker outlives nothing. Callers are the points past which no further
+    /// commit can happen — the app exiting, or the library closing under the
+    /// drafts. Blocking here is the point; a share that has gone away costs a
+    /// pause on exit rather than the user's last edit.
+    pub(crate) fn flush_library_metadata_drafts(&mut self) {
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        let pending = self.library.drain_metadata_drafts();
+        if pending.is_empty() {
+            return;
+        }
+        if let Err(error) = lib.update_metadata_batch(&pending) {
+            self.library.last_error = Some(format!("Metadata update failed: {error}"));
+        }
+    }
+
+    pub(crate) fn commit_library_detail_metadata(&mut self, force: bool) {
+        let Some(request) = self.library.prepare_selected_detail_commit(force) else {
+            return;
+        };
+        self.spawn_library_metadata_commit(request);
+    }
+
+    pub(super) fn commit_library_metadata_for(&mut self, id: i64, force: bool) {
+        let Some(request) = self.library.prepare_detail_commit(id, force) else {
+            return;
+        };
+        self.spawn_library_metadata_commit(request);
+    }
+
+    fn spawn_library_metadata_commit(
+        &mut self,
+        request: crate::state::library_state::MetadataCommitRequest,
+    ) {
+        let failure_id = request.id;
+        let failure_revision = request.revision;
+        let id = request.id;
+        let revision = request.revision;
+        let lmta = request.lmta;
+        let library = request.library;
+        workers::spawn(
+            "rasterlab-metadata-save",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            move |error| BgMessage::LibraryMetadataSaved {
+                id: failure_id,
+                revision: failure_revision,
+                result: Err(error),
+            },
+            move || BgMessage::LibraryMetadataSaved {
+                id,
+                revision,
+                result: library
+                    .update_metadata(id, lmta)
+                    .map_err(|error| error.to_string()),
+            },
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -364,54 +474,31 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
+        if !self.library.begin_cached_active_copy_save(hash) {
+            return;
+        }
         // Evict the stale thumbnail immediately so the grid shows a placeholder
         // while regen is running.
         self.library.thumbs.remove(hash);
 
         let hash = hash.to_owned();
+        let failure_hash = hash.clone();
         workers::spawn(
             "rasterlab-copy-select",
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            |message| BgMessage::TaskFailed(format!("set active copy: {message}")),
-            move || {
-                let rlab_path = lib.rlab_path(&hash);
-                let result = (|| -> anyhow::Result<Vec<u8>> {
-                    let mut rlab = rasterlab_core::project::RlabFile::read(&rlab_path)?;
-                    rlab.active_copy_index = copy_idx.min(rlab.copies.len().saturating_sub(1));
-                    rlab.write_v5(&rlab_path)?;
-                    lib.regenerate_thumbnail(&hash)?;
-                    Ok(std::fs::read(lib.thumb_path(&hash))?)
-                })();
-                match result {
-                    Ok(bytes) => BgMessage::ThumbLoaded { hash, bytes },
-                    Err(e) => BgMessage::TaskFailed(format!("set active copy: {e}")),
-                }
+            move |message| BgMessage::ActiveCopySaved {
+                hash: failure_hash.clone(),
+                copy_idx,
+                result: Err(message),
             },
-        );
-    }
-
-    /// Rebuild the on-disk thumbnail for `hash` in the background and push the
-    /// new bytes back to the grid. No-op when no library is open.
-    pub(super) fn spawn_thumbnail_regen(&mut self, hash: String) {
-        let Some(lib) = self.library.library.clone() else {
-            return;
-        };
-        workers::spawn(
-            "rasterlab-thumb-regen",
-            workers::IMAGE_WORKER_STACK,
-            self.bg_tx.clone(),
-            self.ctx.clone(),
-            |message| BgMessage::TaskFailed(format!("thumbnail regeneration: {message}")),
-            move || {
-                if let Err(e) = lib.regenerate_thumbnail(&hash) {
-                    return BgMessage::TaskFailed(format!("thumbnail regeneration failed: {e:#}"));
-                }
-                match std::fs::read(lib.thumb_path(&hash)) {
-                    Ok(bytes) => BgMessage::ThumbLoaded { hash, bytes },
-                    Err(e) => BgMessage::TaskFailed(format!("thumbnail read failed: {e}")),
-                }
+            move || BgMessage::ActiveCopySaved {
+                hash: hash.clone(),
+                copy_idx,
+                result: lib
+                    .set_active_copy_and_regenerate_thumbnail(&hash, copy_idx)
+                    .map_err(|error| error.to_string()),
             },
         );
     }
