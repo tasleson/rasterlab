@@ -194,7 +194,7 @@ pub struct AppState {
     /// Library metadata carried by the open project. Retained in memory so an
     /// in-place save does not have to reread the entire (possibly remote)
     /// `.rlab` merely to preserve its small LMTA chunk.
-    project_lmta: Option<rasterlab_core::library_meta::LibraryMeta>,
+    pub(crate) project_lmta: Option<rasterlab_core::library_meta::LibraryMeta>,
     /// Incremented each time a new file is opened. Canvas uses this to know
     /// when to reset zoom/pan vs. just updating the texture.
     pub image_generation: u64,
@@ -306,9 +306,9 @@ impl AppState {
         let (bg_tx, bg_rx) = mpsc::channel();
         let prefs = Prefs::load();
         let mut tools = ToolState::new();
-        tools.encode_opts.jpeg_quality = prefs.jpeg_quality;
-        tools.encode_opts.png_compression = prefs.png_compression;
-        tools.encode_opts.preserve_metadata = prefs.preserve_metadata;
+        tools.export_dialog.jpeg_quality = prefs.jpeg_quality;
+        tools.export_dialog.png_compression = prefs.png_compression;
+        tools.export_dialog.preserve_metadata = prefs.preserve_metadata;
         tools.export_border = prefs.export_border.clone();
         let initial_thumb_scale = prefs.library_thumb_scale;
         Self {

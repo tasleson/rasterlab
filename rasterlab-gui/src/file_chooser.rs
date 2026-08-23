@@ -92,7 +92,6 @@ fn native_filter_exts(exts: &[&'static str]) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DialogKind {
     OpenFile,
-    ExportImage,
     SaveProject,
     ExportEditStack,
     LoadLut,
@@ -124,7 +123,6 @@ struct DialogSpec {
 impl DialogKind {
     const ALL: &[Self] = &[
         Self::OpenFile,
-        Self::ExportImage,
         Self::SaveProject,
         Self::ExportEditStack,
         Self::LoadLut,
@@ -151,12 +149,6 @@ impl DialogKind {
                     ("PNG", vec!["png"]),
                     ("Camera RAW", RAW_EXTENSIONS.to_vec()),
                 ],
-                default_filename: None,
-            },
-            Self::ExportImage => DialogSpec {
-                title: "Export Image",
-                mode: DialogMode::SaveFile,
-                filters: vec![("JPEG", vec!["jpg", "jpeg"]), ("PNG", vec!["png"])],
                 default_filename: None,
             },
             Self::SaveProject => DialogSpec {
@@ -300,10 +292,6 @@ impl FileChooser {
 
     pub fn open_image(&mut self, ctx: &egui::Context) {
         self.open(ctx, DialogKind::OpenFile);
-    }
-
-    pub fn export_image(&mut self, ctx: &egui::Context) {
-        self.open(ctx, DialogKind::ExportImage);
     }
 
     pub fn save_project(&mut self, ctx: &egui::Context) {

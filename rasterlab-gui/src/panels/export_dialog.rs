@@ -6,6 +6,7 @@ use rasterlab_core::{
     formats::FormatRegistry,
     library_meta::{FileTimeStamp, LibraryMeta},
     project::RlabFile,
+    traits::format_handler::EncodeOptions,
 };
 
 use crate::panels::export_border::ExportBorderOptions;
@@ -21,11 +22,51 @@ pub enum SizeConstraint {
     Megapixels(f32),
 }
 
+/// Resolve an export constraint without ever upscaling the rendered image.
+/// Both standalone and library exports call this helper so the same dialog
+/// setting always produces the same output dimensions.
+pub(crate) fn constrained_dimensions(
+    width: u32,
+    height: u32,
+    constraint: SizeConstraint,
+) -> (u32, u32) {
+    match constraint {
+        SizeConstraint::LongSide(max) => {
+            if width <= max && height <= max {
+                (width, height)
+            } else {
+                let scale = max as f32 / width.max(height) as f32;
+                (
+                    ((width as f32 * scale).round() as u32).max(1),
+                    ((height as f32 * scale).round() as u32).max(1),
+                )
+            }
+        }
+        SizeConstraint::Megapixels(mp) => {
+            let target = (mp * 1_000_000.0) as u64;
+            let current = width as u64 * height as u64;
+            if current <= target {
+                (width, height)
+            } else {
+                let scale = ((target as f64) / (current as f64)).sqrt() as f32;
+                (
+                    ((width as f32 * scale).round() as u32).max(1),
+                    ((height as f32 * scale).round() as u32).max(1),
+                )
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExportDialogState {
     pub open: bool,
+    pub scope: ExportScope,
     pub format: ExportFormat,
     pub jpeg_quality: u8,
+    pub png_compression: u8,
+    /// Whether the source EXIF is re-attached to the encoded output.
+    pub preserve_metadata: bool,
     pub size_constraint: Option<SizeConstraint>,
     pub dest_dir: PathBuf,
     /// `Some((done, total))` while an export is running, `None` when idle.
@@ -57,6 +98,29 @@ impl ExportDialogState {
         self.errors.clear();
         *lock_shared(&self.shared) = ExportShared::default();
     }
+
+    /// Encoder options for the current dialog settings. Both the batch worker
+    /// and the standalone path go through here so a preference the user set
+    /// applies to whichever one they happen to use.
+    pub fn encode_options(&self) -> EncodeOptions {
+        EncodeOptions {
+            jpeg_quality: self.jpeg_quality,
+            png_compression: self.png_compression,
+            preserve_metadata: self.preserve_metadata,
+        }
+    }
+
+    pub fn open_for(&mut self, scope: ExportScope) {
+        self.reset_run_state();
+        self.scope = scope;
+        self.open = true;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportScope {
+    CurrentPhoto,
+    LibrarySelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +135,7 @@ pub enum ExportFormat {
 #[derive(Debug, Clone)]
 struct ExportSettings {
     format: ExportFormat,
-    jpeg_quality: u8,
+    encode: EncodeOptions,
     size_constraint: Option<SizeConstraint>,
     border: ExportBorderOptions,
 }
@@ -91,8 +155,11 @@ impl Default for ExportDialogState {
     fn default() -> Self {
         Self {
             open: false,
+            scope: ExportScope::CurrentPhoto,
             format: ExportFormat::Jpeg,
             jpeg_quality: 90,
+            png_compression: 6,
+            preserve_metadata: true,
             size_constraint: Some(SizeConstraint::LongSide(2048)),
             dest_dir: dirs::picture_dir().unwrap_or_else(|| PathBuf::from(".")),
             progress: None,
@@ -133,14 +200,21 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
         }
     }
 
-    let selected_count = state.library.selected.len();
+    let library_export = state.tools.export_dialog.scope == ExportScope::LibrarySelection;
+    let export_count = if library_export {
+        state.library.selected.len()
+    } else {
+        usize::from(state.pipeline().is_some())
+    };
+    let noun = if export_count == 1 { "Photo" } else { "Photos" };
     let mut open = state.tools.export_dialog.open;
     let mut do_export = false;
     let mut do_close = false;
     let mut browse_requested = false;
     let mut border_changed = false;
+    let mut settings_changed = false;
 
-    egui::Window::new(format!("Export {} Photos", selected_count))
+    egui::Window::new(format!("Export {} {}", export_count, noun))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -173,7 +247,26 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
 
                     if export.format == ExportFormat::Jpeg {
                         ui.label("Quality:");
-                        ui.add(egui::Slider::new(&mut export.jpeg_quality, 1u8..=100));
+                        settings_changed |= ui
+                            .add(egui::Slider::new(&mut export.jpeg_quality, 1u8..=100))
+                            .changed();
+                        ui.end_row();
+                    }
+
+                    if export.format == ExportFormat::Png {
+                        ui.label("Compression:");
+                        settings_changed |= ui
+                            .add(egui::Slider::new(&mut export.png_compression, 0u8..=9))
+                            .on_hover_text("Higher is smaller and slower; the pixels are the same.")
+                            .changed();
+                        ui.end_row();
+                    }
+
+                    if export.format != ExportFormat::Original {
+                        ui.label("Metadata:");
+                        settings_changed |= ui
+                            .checkbox(&mut export.preserve_metadata, "Keep EXIF from the original")
+                            .changed();
                         ui.end_row();
                     }
 
@@ -291,12 +384,14 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
             }
 
             let busy = export.progress.is_some();
+            let button_label = if export_count == 1 {
+                "Export photo".to_owned()
+            } else {
+                format!("Export {} photos", export_count)
+            };
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(
-                        !busy && selected_count > 0,
-                        egui::Button::new(format!("Export {} photos", selected_count)),
-                    )
+                    .add_enabled(!busy && export_count > 0, egui::Button::new(button_label))
                     .clicked()
                 {
                     do_export = true;
@@ -307,8 +402,15 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
             });
         });
 
-    if border_changed {
-        state.prefs.export_border = state.tools.export_border.clone();
+    if border_changed || settings_changed {
+        if border_changed {
+            state.prefs.export_border = state.tools.export_border.clone();
+        }
+        if settings_changed {
+            state.prefs.jpeg_quality = state.tools.export_dialog.jpeg_quality;
+            state.prefs.png_compression = state.tools.export_dialog.png_compression;
+            state.prefs.preserve_metadata = state.tools.export_dialog.preserve_metadata;
+        }
         state.prefs.save();
     }
 
@@ -326,6 +428,15 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
 // ── Export worker ─────────────────────────────────────────────────────────────
 
 fn start_export(state: &mut AppState) {
+    if state.tools.export_dialog.scope == ExportScope::CurrentPhoto {
+        start_current_export(state);
+        return;
+    }
+
+    start_library_export(state);
+}
+
+fn start_library_export(state: &mut AppState) {
     let Some(lib) = state.library.library.clone() else {
         return;
     };
@@ -342,7 +453,7 @@ fn start_export(state: &mut AppState) {
     let dest_dir = export.dest_dir.clone();
     let settings = ExportSettings {
         format: export.format,
-        jpeg_quality: export.jpeg_quality,
+        encode: export.encode_options(),
         size_constraint: export.size_constraint,
         border: state.tools.export_border.clone(),
     };
@@ -395,6 +506,104 @@ fn start_export(state: &mut AppState) {
             .push(format!("could not start the export worker: {e}"));
         s.finished = true;
     }
+}
+
+/// Export the active editor document through the same settings surface used
+/// for a library selection. Rendering remains synchronous, as the previous
+/// standalone save path was, but progress/result state is reported through the
+/// dialog just like the batch worker.
+fn start_current_export(state: &mut AppState) {
+    let export = &state.tools.export_dialog;
+    let settings = ExportSettings {
+        format: export.format,
+        encode: export.encode_options(),
+        size_constraint: export.size_constraint,
+        border: state.tools.export_border.clone(),
+    };
+    let dest_dir = export.dest_dir.clone();
+    let shared = Arc::clone(&export.shared);
+
+    state.tools.export_dialog.progress = Some((0, 1));
+    state.tools.export_dialog.done = false;
+    state.tools.export_dialog.errors.clear();
+    *lock_shared(&shared) = ExportShared {
+        done: 0,
+        total: 1,
+        finished: false,
+        errors: Vec::new(),
+    };
+
+    let source_path = state.last_path.clone();
+    let source_name = current_source_name(state, source_path.as_deref());
+    let result = if settings.format == ExportFormat::Original {
+        export_current_original(state, &dest_dir, &source_name, source_path.as_deref())
+            .map_err(|error| error.to_string())
+    } else {
+        let stem = Path::new(&source_name)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("export");
+        let filename = format!("{}.{}", stem, settings.format.ext());
+        let dest = unique_dest_path(&dest_dir, &filename);
+        state
+            .save_file_with_dialog_options(
+                dest,
+                settings.size_constraint,
+                &settings.encode,
+                &settings.border,
+            )
+            .map(|_| ())
+    };
+
+    let mut progress = lock_shared(&shared);
+    progress.done = 1;
+    if let Err(error) = result {
+        state.status = format!("Export failed: {error}");
+        progress.errors.push(format!("{source_name}: {error}"));
+    }
+    progress.finished = true;
+}
+
+/// Name the open document is exported under.
+///
+/// Same priority as the library batch export's [`original_filename_for`], so a
+/// library photo exported from the editor lands under the name it was imported
+/// with rather than the container it happens to live in. A project whose META
+/// has no source path falls back to the `.rlab` path, and writing the original
+/// bytes to `<hash>.rlab` would be actively wrong.
+fn current_source_name(state: &AppState, source_path: Option<&Path>) -> String {
+    if let Some(lmta) = &state.project_lmta
+        && let Some(name) = &lmta.original_filename
+        && !name.is_empty()
+    {
+        return name.clone();
+    }
+    source_path
+        .filter(|path| !rasterlab_core::project::is_rlab_path(path))
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("export")
+        .to_owned()
+}
+
+fn export_current_original(
+    state: &mut AppState,
+    dest_dir: &Path,
+    source_name: &str,
+    source_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let original_bytes = state
+        .original_bytes
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("the original source bytes are unavailable"))?;
+    let dest = unique_dest_path(dest_dir, source_name);
+    std::fs::write(&dest, original_bytes)?;
+    if let Some(source) = source_path {
+        apply_file_timestamps(&dest, source);
+    }
+    state.status = format!("Exported original → {}", dest.display());
+    Ok(())
 }
 
 /// Borrow the shared export state, recovering from a poisoned lock.
@@ -458,32 +667,7 @@ fn export_one(
 
     // Resize if requested
     if let Some(constraint) = settings.size_constraint {
-        let (nw, nh) = match constraint {
-            SizeConstraint::LongSide(max) => {
-                if image.width <= max && image.height <= max {
-                    (image.width, image.height)
-                } else {
-                    let scale = max as f32 / image.width.max(image.height) as f32;
-                    (
-                        ((image.width as f32 * scale).round() as u32).max(1),
-                        ((image.height as f32 * scale).round() as u32).max(1),
-                    )
-                }
-            }
-            SizeConstraint::Megapixels(mp) => {
-                let target = (mp * 1_000_000.0) as u64;
-                let current = image.width as u64 * image.height as u64;
-                if current <= target {
-                    (image.width, image.height)
-                } else {
-                    let scale = ((target as f64) / (current as f64)).sqrt() as f32;
-                    (
-                        ((image.width as f32 * scale).round() as u32).max(1),
-                        ((image.height as f32 * scale).round() as u32).max(1),
-                    )
-                }
-            }
-        };
+        let (nw, nh) = constrained_dimensions(image.width, image.height, constraint);
         if nw != image.width || nh != image.height {
             use rasterlab_core::{ops::ResizeOp, traits::operation::Operation};
             image =
@@ -507,12 +691,7 @@ fn export_one(
         .unwrap_or(hash);
     let filename = format!("{}.{}", stem, settings.format.ext());
     let dest = unique_dest_path(dest_dir, &filename);
-    let opts = rasterlab_core::traits::format_handler::EncodeOptions {
-        jpeg_quality: settings.jpeg_quality,
-        png_compression: 6,
-        preserve_metadata: false,
-    };
-    let bytes = registry.encode_file(&image, &dest, &opts)?;
+    let bytes = registry.encode_file(&image, &dest, &settings.encode)?;
     std::fs::write(&dest, &bytes)?;
     Ok(())
 }
@@ -608,6 +787,98 @@ fn apply_source_timestamps(dest: &Path, lmta: Option<&LibraryMeta>) {
     }
 }
 
+/// Standalone files do not carry a library metadata chunk, so copy timestamps
+/// directly from the source path when it is still available.
+fn apply_file_timestamps(dest: &Path, source: &Path) {
+    let Ok(metadata) = std::fs::metadata(source) else {
+        return;
+    };
+    let atime = filetime::FileTime::from_last_access_time(&metadata);
+    let mtime = filetime::FileTime::from_last_modification_time(&metadata);
+    if let Err(error) = filetime::set_file_times(dest, atime, mtime) {
+        eprintln!(
+            "export: could not restore timestamps on {}: {error}",
+            dest.display()
+        );
+    }
+}
+
 fn filetime_from_stamp(ts: FileTimeStamp) -> filetime::FileTime {
     filetime::FileTime::from_system_time(ts.to_system_time())
+}
+
+#[cfg(test)]
+mod tests {
+    use rasterlab_core::{Image, pipeline::EditPipeline};
+
+    use crate::state::VirtualCopyStore;
+
+    use super::*;
+
+    #[test]
+    fn original_export_of_a_library_photo_uses_its_imported_filename() {
+        // A library photo's last_path is the .rlab container when its META
+        // carries no source path. Writing the original bytes out under that
+        // name would produce a "project" that is really a JPEG.
+        let temp = tempfile::tempdir().unwrap();
+        let dest_dir = temp.path().join("destination");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let original_bytes = vec![1, 2, 3, 4];
+
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new(
+            "Copy 1".into(),
+            EditPipeline::new(Image::new(2, 2)),
+        ));
+        state.last_path = Some(temp.path().join("dead".repeat(16) + ".rlab"));
+        state.original_bytes = Some(original_bytes.clone());
+        state.project_lmta = Some(rasterlab_core::library_meta::LibraryMeta {
+            original_filename: Some("DSC_0001.JPG".into()),
+            ..Default::default()
+        });
+        state.tools.export_dialog.scope = ExportScope::CurrentPhoto;
+        state.tools.export_dialog.format = ExportFormat::Original;
+        state.tools.export_dialog.dest_dir = dest_dir.clone();
+
+        start_current_export(&mut state);
+
+        assert_eq!(
+            std::fs::read(dest_dir.join("DSC_0001.JPG")).unwrap(),
+            original_bytes
+        );
+    }
+
+    #[test]
+    fn standalone_original_export_uses_the_shared_dialog_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_dir = temp.path().join("source");
+        let dest_dir = temp.path().join("destination");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let source_path = source_dir.join("photo.raw");
+        let original_bytes = vec![7, 11, 13, 17];
+        std::fs::write(&source_path, &original_bytes).unwrap();
+
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new(
+            "Copy 1".into(),
+            EditPipeline::new(Image::new(2, 2)),
+        ));
+        state.last_path = Some(source_path);
+        state.original_bytes = Some(original_bytes.clone());
+        state.tools.export_dialog.scope = ExportScope::CurrentPhoto;
+        state.tools.export_dialog.format = ExportFormat::Original;
+        state.tools.export_dialog.dest_dir = dest_dir.clone();
+
+        start_current_export(&mut state);
+
+        assert_eq!(
+            std::fs::read(dest_dir.join("photo.raw")).unwrap(),
+            original_bytes
+        );
+        let progress = lock_shared(&state.tools.export_dialog.shared);
+        assert_eq!(progress.done, 1);
+        assert!(progress.finished);
+        assert!(progress.errors.is_empty());
+    }
 }

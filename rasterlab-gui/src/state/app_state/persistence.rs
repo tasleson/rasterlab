@@ -10,12 +10,23 @@ use rasterlab_core::{
     ops::{MaskedOp, ResizeOp},
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
+    traits::format_handler::EncodeOptions,
     traits::operation::Operation,
 };
 
+use crate::panels::{
+    export_border::ExportBorderOptions,
+    export_dialog::{SizeConstraint, constrained_dimensions},
+};
 use crate::state::VirtualCopyStore;
 
 use super::{AppMode, AppState, BgMessage, workers};
+
+#[derive(Debug, Clone, Copy)]
+enum RenderedExportResize {
+    None,
+    Constraint(SizeConstraint),
+}
 
 impl AppState {
     // -----------------------------------------------------------------------
@@ -228,7 +239,49 @@ impl AppState {
         );
     }
 
-    pub fn save_file(&mut self, path: std::path::PathBuf) {
+    /// Export the current editor document using the options from the shared
+    /// export dialog. This is the standalone-file counterpart to library batch
+    /// export and deliberately uses the same resize, quality, and border rules.
+    pub(crate) fn save_file_with_dialog_options(
+        &mut self,
+        path: std::path::PathBuf,
+        size_constraint: Option<SizeConstraint>,
+        encode_opts: &EncodeOptions,
+        border: &ExportBorderOptions,
+    ) -> Result<usize, String> {
+        let resize = size_constraint.map_or(RenderedExportResize::None, |constraint| {
+            RenderedExportResize::Constraint(constraint)
+        });
+        self.finish_rendered_export(path, resize, border, encode_opts)
+    }
+
+    fn finish_rendered_export(
+        &mut self,
+        path: std::path::PathBuf,
+        resize: RenderedExportResize,
+        border: &ExportBorderOptions,
+        encode_opts: &EncodeOptions,
+    ) -> Result<usize, String> {
+        let result = self.write_rendered_export(&path, resize, border, encode_opts);
+        match &result {
+            Ok(bytes) => {
+                self.status = format!("Saved {} bytes → {}", bytes, path.display());
+                // Exporting a rendered image counts as preserving the user's
+                // work, matching the pre-dialog standalone export behaviour.
+                self.capture_clean_edit_state();
+            }
+            Err(error) => self.status = error.clone(),
+        }
+        result
+    }
+
+    fn write_rendered_export(
+        &mut self,
+        path: &std::path::Path,
+        resize: RenderedExportResize,
+        border: &ExportBorderOptions,
+        encode_opts: &EncodeOptions,
+    ) -> Result<usize, String> {
         // The canvas is a presentation cache, not an export source. During a
         // live tool preview it deliberately contains a quarter-resolution
         // image, and exporting that buffer permanently bakes in the reduced
@@ -253,25 +306,18 @@ impl AppState {
             }
         });
         let Some(pipeline) = self.pipeline_mut() else {
-            self.status = "Nothing to save — open an image first".into();
-            return;
+            return Err("Nothing to save — open an image first".into());
         };
         let mut rendered = match pipeline.render() {
             Ok(image) => image,
-            Err(e) => {
-                self.status = format!("Export render failed: {e}");
-                return;
-            }
+            Err(e) => return Err(format!("Export render failed: {e}")),
         };
         if let Some(preview) = preview_op {
             let image =
                 Arc::try_unwrap(rendered).unwrap_or_else(|shared| shared.as_ref().deep_clone());
             rendered = match preview.apply(image) {
                 Ok(image) => Arc::new(image),
-                Err(e) => {
-                    self.status = format!("Export preview render failed: {e}");
-                    return;
-                }
+                Err(e) => return Err(format!("Export preview render failed: {e}")),
             };
         }
         // Captions describe the source exposure. Read them from the immutable
@@ -279,70 +325,53 @@ impl AppState {
         // EXIF through its output buffer.
         let source_metadata = self.image_metadata().cloned().unwrap_or_default();
 
-        // Optionally resize before encoding.
+        // Optionally resize before encoding using the shared dialog's
+        // long-side / megapixel constraints.
+        let resize_target = match resize {
+            RenderedExportResize::None => None,
+            RenderedExportResize::Constraint(constraint) => {
+                let (width, height) =
+                    constrained_dimensions(rendered.width, rendered.height, constraint);
+                (width != rendered.width || height != rendered.height).then_some((width, height))
+            }
+        };
         let resized_buf;
-        let to_save: &Image = if self.tools.export_resize_enabled
-            && self.tools.export_resize_w > 0
-            && self.tools.export_resize_h > 0
-        {
-            let op = ResizeOp::new(
-                self.tools.export_resize_w,
-                self.tools.export_resize_h,
-                self.tools.export_resize_mode,
-            );
+        let to_save: &Image = if let Some((width, height)) = resize_target {
+            let op = ResizeOp::new(width, height, rasterlab_core::ops::ResampleMode::Bicubic);
             match op.apply(rendered.as_ref().deep_clone()) {
                 Ok(img) => {
                     resized_buf = img;
                     &resized_buf
                 }
-                Err(e) => {
-                    self.status = format!("Export resize failed: {}", e);
-                    return;
-                }
+                Err(e) => return Err(format!("Export resize failed: {e}")),
             }
         } else {
             rendered.as_ref()
         };
 
         let bordered_buf;
-        let to_encode = if self.tools.export_border.enabled {
+        let to_encode = if border.enabled {
             match crate::panels::export_border::apply_export_border(
                 to_save,
                 &source_metadata,
-                &self.tools.export_border,
+                border,
             ) {
                 Ok(image) => {
                     bordered_buf = image;
                     &bordered_buf
                 }
-                Err(e) => {
-                    self.status = format!("Export border failed: {e}");
-                    return;
-                }
+                Err(e) => return Err(format!("Export border failed: {e}")),
             }
         } else {
             to_save
         };
 
-        match self
+        let bytes = self
             .registry
-            .encode_file(to_encode, &path, &self.tools.encode_opts)
-        {
-            Ok(bytes) => {
-                if let Err(e) = std::fs::write(&path, &bytes) {
-                    self.status = format!("Write failed: {}", e);
-                } else {
-                    self.status = format!("Saved {} bytes → {}", bytes.len(), path.display());
-                    // Exporting a rendered image counts as preserving the
-                    // user's work, so clear the dirty flag — this keeps the
-                    // exit confirmation from firing after a successful export.
-                    self.capture_clean_edit_state();
-                }
-            }
-            Err(e) => {
-                self.status = format!("Encode failed: {}", e);
-            }
-        }
+            .encode_file(to_encode, path, encode_opts)
+            .map_err(|e| format!("Encode failed: {e}"))?;
+        std::fs::write(path, &bytes).map_err(|e| format!("Write failed: {e}"))?;
+        Ok(bytes.len())
     }
 
     /// Export the current edit stack to a JSON file consumable by the CLI.
@@ -671,13 +700,94 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("full-resolution.png");
-        state.save_file(output.clone());
+        state
+            .save_file_with_dialog_options(
+                output.clone(),
+                None,
+                &EncodeOptions::default(),
+                &ExportBorderOptions::default(),
+            )
+            .unwrap();
 
         let exported = FormatRegistry::with_builtins()
             .decode_file(&output)
             .unwrap();
         assert_eq!((exported.width, exported.height), (8, 6));
         assert_eq!(exported.data, expected.data);
+    }
+
+    #[test]
+    fn dialog_export_applies_the_library_resize_constraint_to_standalone_files() {
+        let source = Image::new(400, 200);
+        let pipeline = EditPipeline::new(source);
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
+
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("constrained.png");
+        state
+            .save_file_with_dialog_options(
+                output.clone(),
+                Some(SizeConstraint::LongSide(100)),
+                &EncodeOptions::default(),
+                &ExportBorderOptions::default(),
+            )
+            .unwrap();
+
+        let exported = FormatRegistry::with_builtins()
+            .decode_file(&output)
+            .unwrap();
+        assert_eq!((exported.width, exported.height), (100, 50));
+    }
+
+    #[test]
+    fn dialog_export_keeps_exif_when_the_preference_says_to() {
+        // The unified dialog replaced a path that honoured the user's
+        // preserve-metadata preference, so the option has to survive the trip
+        // from the dialog through to the encoder.
+        let mut source = Image::new(8, 8);
+        source.metadata.raw_exif = Some(b"Exif\0\0II*\0\x08\0\0\0\0\0".to_vec());
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new(
+            "Copy 1".into(),
+            EditPipeline::new(source),
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("kept.jpg");
+        let stripped = dir.path().join("stripped.jpg");
+
+        state
+            .save_file_with_dialog_options(
+                kept.clone(),
+                None,
+                &EncodeOptions {
+                    preserve_metadata: true,
+                    ..EncodeOptions::default()
+                },
+                &ExportBorderOptions::default(),
+            )
+            .unwrap();
+        state
+            .save_file_with_dialog_options(
+                stripped.clone(),
+                None,
+                &EncodeOptions {
+                    preserve_metadata: false,
+                    ..EncodeOptions::default()
+                },
+                &ExportBorderOptions::default(),
+            )
+            .unwrap();
+
+        let contains_exif = |path: &std::path::Path| {
+            std::fs::read(path)
+                .unwrap()
+                .windows(4)
+                .any(|w| w == b"Exif")
+        };
+        assert!(contains_exif(&kept));
+        assert!(!contains_exif(&stripped));
     }
 
     #[test]

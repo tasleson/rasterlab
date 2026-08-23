@@ -15,7 +15,6 @@ pub mod color_space;
 pub mod crop;
 pub mod curves;
 pub mod denoise;
-pub mod export;
 pub mod faux_hdr;
 pub mod focus_stack;
 pub mod grain;
@@ -129,10 +128,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         render_tool(ui, state, idx);
         ui.separator();
     }
-
-    // Non-trait panels
-    export::ui(ui, state, has_image);
-    ui.separator();
 
     masking::ui(ui, state, has_image);
     ui.separator();

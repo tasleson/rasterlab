@@ -216,7 +216,21 @@ impl RasterLabApp {
                 self.chooser.save_project(ctx);
             }
             if do_export {
-                self.chooser.export_image(ctx);
+                // Ctrl+E means "export what I am looking at". Keying it off the
+                // open document alone would offer the editor's photo while the
+                // user is standing in front of a library selection.
+                use crate::panels::export_dialog::ExportScope;
+                let (scope, has_subject) = if self.state.mode == AppMode::Library {
+                    (
+                        ExportScope::LibrarySelection,
+                        !self.state.library.selected.is_empty(),
+                    )
+                } else {
+                    (ExportScope::CurrentPhoto, self.state.pipeline().is_some())
+                };
+                if has_subject {
+                    self.state.tools.export_dialog.open_for(scope);
+                }
             }
             if nav_delta != 0 {
                 self.navigate_library(nav_delta);
@@ -379,11 +393,6 @@ impl RasterLabApp {
             DialogKind::OpenFile => {
                 if let Some(p) = first() {
                     self.state.open_file(p)
-                }
-            }
-            DialogKind::ExportImage => {
-                if let Some(p) = first() {
-                    self.state.save_file(p)
                 }
             }
             DialogKind::SaveProject => {
@@ -666,8 +675,9 @@ impl eframe::App for RasterLabApp {
                             |ui| {
                                 if ui.button("Export Selection…").clicked() {
                                     ui.close_kind(egui::UiKind::Menu);
-                                    self.state.tools.export_dialog.reset_run_state();
-                                    self.state.tools.export_dialog.open = true;
+                                    self.state.tools.export_dialog.open_for(
+                                        crate::panels::export_dialog::ExportScope::LibrarySelection,
+                                    );
                                     self.state.mode = AppMode::Library;
                                 }
                             },
@@ -737,7 +747,10 @@ impl eframe::App for RasterLabApp {
                             .clicked()
                         {
                             ui.close_kind(egui::UiKind::Menu);
-                            self.chooser.export_image(&ctx);
+                            self.state
+                                .tools
+                                .export_dialog
+                                .open_for(crate::panels::export_dialog::ExportScope::CurrentPhoto);
                         }
                         if ui
                             .add_enabled(
@@ -900,7 +913,6 @@ impl eframe::App for RasterLabApp {
                 egui::CentralPanel::default().show_inside(ui, |ui| {
                     library_panel::ui(ui, &mut self.state);
                 });
-                export_dialog::ui(&ctx, &mut self.state);
             }
             AppMode::Editor => {
                 // ── Editor mode (original layout) ────────────────────────
@@ -936,6 +948,11 @@ impl eframe::App for RasterLabApp {
                 });
             }
         }
+
+        // Both library selections and standalone files use the same export
+        // surface. Keep it outside the mode-specific layout so Ctrl+E and the
+        // File menu work identically from either view.
+        export_dialog::ui(&ctx, &mut self.state);
 
         // ── Delete confirmation (editor mode) ────────────────────────────
         // The confirmation dialog lives in library_panel but must also appear

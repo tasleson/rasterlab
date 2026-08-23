@@ -1,6 +1,5 @@
 use rasterlab_core::{
-    ops::{FilmStock, LinearMask, MaskShape, RadialMask, ResampleMode, SprocketFilmOp},
-    traits::format_handler::EncodeOptions,
+    ops::{FilmStock, LinearMask, MaskShape, RadialMask, SprocketFilmOp},
     traits::operation::Operation,
 };
 
@@ -49,11 +48,6 @@ pub struct ToolState {
     pub mask_rad_invert: bool,
 
     // ── Export settings ───────────────────────────────────────────────────
-    pub encode_opts: EncodeOptions,
-    pub export_resize_enabled: bool,
-    pub export_resize_w: u32,
-    pub export_resize_h: u32,
-    pub export_resize_mode: ResampleMode,
     pub export_border: crate::panels::export_border::ExportBorderOptions,
 
     // ── Library batch export dialog ───────────────────────────────────────
@@ -88,11 +82,6 @@ impl ToolState {
             mask_rad_radius: 0.3,
             mask_rad_feather: 0.5,
             mask_rad_invert: false,
-            encode_opts: EncodeOptions::default(),
-            export_resize_enabled: false,
-            export_resize_w: 0,
-            export_resize_h: 0,
-            export_resize_mode: ResampleMode::Bicubic,
             export_border: crate::panels::export_border::ExportBorderOptions::default(),
             export_dialog: crate::panels::export_dialog::ExportDialogState::default(),
             pending_dialog: None,
