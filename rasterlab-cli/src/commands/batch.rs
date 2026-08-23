@@ -9,6 +9,7 @@ use rasterlab_core::{
     formats::FormatRegistry,
     pipeline::{EditEntry, EditPipeline, PipelineState},
     traits::format_handler::EncodeOptions,
+    verified_write::{create_dir_all_synced, write_atomic},
 };
 use rayon::prelude::*;
 
@@ -65,7 +66,7 @@ pub struct BatchArgs {
 }
 
 pub fn run(args: BatchArgs) -> Result<()> {
-    std::fs::create_dir_all(&args.output)
+    create_dir_all_synced(&args.output)
         .with_context(|| format!("Cannot create output dir '{}'", args.output.display()))?;
 
     // Collect input files
@@ -226,7 +227,7 @@ fn process_one(
         .encode_file(&rendered, &out_path, options)
         .with_context(|| format!("Encode failed for '{}'", out_path.display()))?;
 
-    std::fs::write(&out_path, bytes)
+    write_atomic(&out_path, &bytes)
         .with_context(|| format!("Write failed for '{}'", out_path.display()))?;
 
     Ok(())
