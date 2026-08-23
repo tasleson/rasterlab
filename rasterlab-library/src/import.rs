@@ -512,16 +512,22 @@ fn import_one(
     let stack_is_primary = is_primary_in_pair(path);
 
     // 5. Decode image for thumbnail + dimensions + EXIF
-    let image = if let Some(project) = imported_project.as_ref() {
-        let hint = project.meta.source_path.as_deref().map(Path::new);
-        registry
-            .decode_bytes(&original_bytes, hint)
-            .with_context(|| format!("decode original image in {}", path.display()))?
-    } else {
-        registry
-            .decode_file(path)
-            .with_context(|| format!("decode {}", path.display()))?
-    };
+    // Decode the bytes we already transferred from the source. Calling
+    // `decode_file` here used to reopen and reread every ordinary import — a
+    // particularly expensive mistake when `path` lives on NFS or CIFS. The
+    // path remains a format hint (important for TIFF-based RAW formats); the
+    // registry stages those bytes in a local temporary file when a decoder
+    // requires seekable file access.
+    let decode_hint = imported_project.as_ref().map_or(Some(path), |project| {
+        project.meta.source_path.as_deref().map(Path::new)
+    });
+    let image = decode_import_bytes(registry, &original_bytes, decode_hint).with_context(|| {
+        if imported_project.is_some() {
+            format!("decode original image in {}", path.display())
+        } else {
+            format!("decode {}", path.display())
+        }
+    })?;
     let (width, height) = (image.width, image.height);
     let mut exif = LibraryExif::from_image_metadata(&image.metadata);
     // Files without an EXIF capture date (PNGs, scans, …) still need a coherent
@@ -644,6 +650,16 @@ fn import_one(
     )?;
 
     Ok(Some(hash))
+}
+
+/// Decode source bytes already loaded by the importer, retaining the source
+/// path solely as a format/extension hint.
+fn decode_import_bytes(
+    registry: &FormatRegistry,
+    bytes: &[u8],
+    hint_path: Option<&Path>,
+) -> rasterlab_core::error::RasterResult<rasterlab_core::image::Image> {
+    registry.decode_bytes(bytes, hint_path)
 }
 
 // ── Write .rlab ───────────────────────────────────────────────────────────────
@@ -898,8 +914,99 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rasterlab_core::{
+        Image, RasterError, RasterResult,
+        traits::format_handler::{EncodeOptions, FormatHandler},
+    };
 
     const DAY: u64 = 86_400;
+
+    struct BytesOnlyTestHandler;
+
+    impl FormatHandler for BytesOnlyTestHandler {
+        fn extensions(&self) -> &[&'static str] {
+            &["netimg"]
+        }
+
+        fn decode(&self, data: &[u8]) -> RasterResult<Image> {
+            assert_eq!(data, b"already loaded image bytes");
+            Image::from_rgba8(1, 1, vec![10, 20, 30, 255])
+        }
+
+        fn encode(&self, _image: &Image, _options: &EncodeOptions) -> RasterResult<Vec<u8>> {
+            Err(RasterError::FormatNotEncodable("test".into()))
+        }
+
+        fn display_name(&self) -> &'static str {
+            "byte-only test image"
+        }
+    }
+
+    struct PathRequiredTestHandler;
+
+    impl FormatHandler for PathRequiredTestHandler {
+        fn extensions(&self) -> &[&'static str] {
+            &["netraw"]
+        }
+
+        fn decode(&self, _data: &[u8]) -> RasterResult<Image> {
+            Err(RasterError::UnsupportedFormat(
+                "test handler requires a path".into(),
+            ))
+        }
+
+        fn decode_file(&self, path: &Path) -> RasterResult<Image> {
+            assert_eq!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("netraw")
+            );
+            let data = std::fs::read(path).map_err(RasterError::Io)?;
+            assert_eq!(data, b"already loaded raw bytes");
+            Image::from_rgba8(1, 1, vec![40, 50, 60, 255])
+        }
+
+        fn encode(&self, _image: &Image, _options: &EncodeOptions) -> RasterResult<Vec<u8>> {
+            Err(RasterError::FormatNotEncodable("test".into()))
+        }
+
+        fn needs_file_path(&self) -> bool {
+            true
+        }
+
+        fn display_name(&self) -> &'static str {
+            "path-required test image"
+        }
+    }
+
+    #[test]
+    fn import_decode_uses_loaded_bytes_after_source_disappears() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("remote.netimg");
+        std::fs::write(&source, b"already loaded image bytes").unwrap();
+        let bytes = std::fs::read(&source).unwrap();
+        std::fs::remove_file(&source).unwrap();
+
+        let registry = FormatRegistry::default();
+        registry.register(Arc::new(BytesOnlyTestHandler));
+        let image = decode_import_bytes(&registry, &bytes, Some(&source)).unwrap();
+
+        assert_eq!((image.width, image.height), (1, 1));
+    }
+
+    #[test]
+    fn import_decode_stages_loaded_bytes_locally_for_path_required_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("remote.netraw");
+        std::fs::write(&source, b"already loaded raw bytes").unwrap();
+        let bytes = std::fs::read(&source).unwrap();
+        std::fs::remove_file(&source).unwrap();
+
+        let registry = FormatRegistry::default();
+        registry.register(Arc::new(PathRequiredTestHandler));
+        let image = decode_import_bytes(&registry, &bytes, Some(&source)).unwrap();
+
+        assert_eq!((image.width, image.height), (1, 1));
+    }
 
     #[test]
     fn civil_date_round_trips() {
