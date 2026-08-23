@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use rasterlab_core::verified_write::{create_dir_all_synced, write_atomic};
 use serde::{Deserialize, Serialize};
 
 use crate::panels::export_border::ExportBorderOptions;
@@ -146,10 +147,13 @@ impl Prefs {
             None => return,
         };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            let _ = create_dir_all_synced(dir);
         }
         if let Ok(yaml) = serde_yaml::to_string(self) {
-            let _ = std::fs::write(&path, yaml);
+            // A truncating write that is interrupted leaves unparseable YAML,
+            // which `load` silently answers with an all-default `Prefs` —
+            // losing the recent-files list rather than reporting anything.
+            let _ = write_atomic(&path, yaml.as_bytes());
         }
     }
 

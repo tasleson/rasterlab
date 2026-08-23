@@ -12,6 +12,7 @@ use rasterlab_core::{
     project::{RlabFile, RlabMeta},
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
+    verified_write::write_atomic,
 };
 
 use crate::panels::{
@@ -370,7 +371,7 @@ impl AppState {
             .registry
             .encode_file(to_encode, path, encode_opts)
             .map_err(|e| format!("Encode failed: {e}"))?;
-        std::fs::write(path, &bytes).map_err(|e| format!("Write failed: {e}"))?;
+        write_atomic(path, &bytes).map_err(|e| format!("Write failed: {e}"))?;
         Ok(bytes.len())
     }
 
@@ -398,7 +399,7 @@ impl AppState {
                 return;
             }
         };
-        match std::fs::write(&path, json) {
+        match write_atomic(&path, json.as_bytes()) {
             Ok(()) => self.status = format!("Edit stack exported → {}", path.display()),
             Err(e) => self.status = format!("Export failed: {}", e),
         }

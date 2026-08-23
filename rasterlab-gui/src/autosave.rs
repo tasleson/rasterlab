@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rasterlab_core::project::SavedCopy;
+use rasterlab_core::verified_write::{create_dir_all_synced, write_atomic};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of autosave sessions retained on disk and shown in the menu.
@@ -84,7 +85,7 @@ pub fn write(
     active: usize,
 ) {
     let Some(dir) = autosave_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
+    if create_dir_all_synced(&dir).is_err() {
         return;
     }
     let file = AutosaveFile {
@@ -99,8 +100,12 @@ pub fn write(
     let Ok(json) = serde_json::to_string_pretty(&file) else {
         return;
     };
+    // Staged and renamed rather than truncated in place: this is the file
+    // whose whole purpose is to survive a crash, and rewriting it directly
+    // would mean every save opened a window where the previous autosave was
+    // already gone and the new one not yet written.
     let path = dir.join(format!("{}.json", session_id));
-    if std::fs::write(path, json).is_ok() {
+    if write_atomic(&path, json.as_bytes()).is_ok() {
         prune_old_entries(&dir, session_id);
     }
 }
