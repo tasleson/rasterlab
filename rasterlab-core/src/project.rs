@@ -337,6 +337,10 @@ impl RlabFile {
     // ── Write ────────────────────────────────────────────────────────────────
 
     /// Serialise and write the project to `path` as format v3 (no ECC).
+    ///
+    /// Staged and renamed like [`write_v5`](Self::write_v5): a legacy layout is
+    /// still a photograph, and there is no version of this where clobbering the
+    /// previous file in place is the right thing to do.
     pub fn write(&self, path: &Path) -> RasterResult<()> {
         let mut buf: Vec<u8> = Vec::new();
 
@@ -348,7 +352,7 @@ impl RlabFile {
         let file_hash = blake3::hash(&buf);
         buf.extend_from_slice(file_hash.as_bytes());
 
-        std::fs::write(path, &buf)?;
+        write_verified_atomic(path, &buf)?;
         Ok(())
     }
 
@@ -382,6 +386,7 @@ impl RlabFile {
     ///
     /// Retained so the v4 layout stays exercised by tests; new files should use
     /// [`write_v5`](Self::write_v5), which survives truncation from either end.
+    /// Staged, synced and verified on the way in, exactly as v5 is.
     ///
     /// The resulting file can be verified and repaired with [`verify_and_repair`].
     pub fn write_v4(&self, path: &Path) -> RasterResult<()> {
@@ -401,7 +406,7 @@ impl RlabFile {
         let file_hash = blake3::hash(&buf);
         buf.extend_from_slice(file_hash.as_bytes());
 
-        std::fs::write(path, &buf)?;
+        write_verified_atomic(path, &buf)?;
         Ok(())
     }
 
@@ -606,6 +611,12 @@ impl RlabFile {
 ///
 /// If the file is clean, no output file is written even when `repair_to` is
 /// `Some`.
+///
+/// A repaired file is written through
+/// [`write_verified_atomic`](crate::verified_write::write_verified_atomic), so
+/// `repair_to` either does not exist or holds the whole repaired file — a
+/// half-written repair of an already-damaged photo would be the worst possible
+/// outcome of trying to save it.
 pub fn verify_and_repair(path: &Path, repair_to: Option<&Path>) -> RasterResult<VerifyReport> {
     verify_and_repair_degraded(&read_degraded_file(path)?, repair_to)
 }
@@ -1339,7 +1350,10 @@ fn attempt_repair(data: &[u8], copies: &[ReccCopy], repair_to: &Path) -> RasterR
                 continue;
             }
 
-            std::fs::write(repair_to, &rebuilt)?;
+            // The repaired bytes are the only surviving form of a photo whose
+            // stored copy is already damaged, so they are staged, synced and
+            // read back like any other write of an irreplaceable file.
+            write_verified_atomic(repair_to, &rebuilt)?;
             return Ok(true);
         }
     }
