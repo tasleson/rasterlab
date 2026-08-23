@@ -1262,6 +1262,16 @@ fn thumb_cell(
             return;
         }
 
+        if ui.button("Open in Editor").clicked() {
+            if let Some(lib) = &state.library.library {
+                let rlab_path = lib.rlab_path(&photo.hash);
+                state.library.pending_open_photo =
+                    Some((rlab_path, lib.root().to_path_buf(), photo.hash.clone()));
+            }
+            ui.close();
+        }
+        ui.separator();
+
         // Focus Stack the whole selection. Shown disabled below the minimum so
         // the action is discoverable from a single-photo right-click too.
         let enabled = n >= MIN_STACK_FRAMES;
