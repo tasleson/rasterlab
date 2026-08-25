@@ -211,8 +211,8 @@ fn repair_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scr
         }
         // Older layout: re-save as v5. v3 gains parity at all; v4 gains the
         // split placement that survives end truncation. Best-effort — a write
-        // failure (e.g. a locked/protected file) leaves the intact original in
-        // place and is not a corruption error.
+        // failure leaves the intact original in place and is not a corruption
+        // error.
         match upgrade_to_v5(path) {
             Ok(()) => Ok(ScrubAction::Upgraded),
             Err(e) => {

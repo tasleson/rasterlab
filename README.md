@@ -109,7 +109,7 @@ RasterLab uses several independent mechanisms because no single checksum, undo s
 - Pipeline state is autosaved after changes. Previous unsaved sessions can be restored from **File > Previously Unsaved Work**.
 - Opening another file or library photo while edits are unsaved requires confirmation.
 - Library deletion requires confirmation and moves photos to RasterLab's **Recently Deleted** view, where they can be restored, deleted permanently, or removed together with **Empty Recently Deleted**.
-- A library photo can be marked **Protected**. RasterLab then excludes it from deletion and applies a best-effort read-only/immutable filesystem lock. The OS-level lock is an extra accident barrier, not a security boundary.
+- A library photo can be marked **Protected**. RasterLab then refuses to delete it (even into Recently Deleted) until it is unprotected.
 
 ### Detecting corruption in `.rlab` files
 

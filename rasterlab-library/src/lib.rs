@@ -51,7 +51,6 @@
 //! reads it hands that reader the old bytes, not an error.
 
 pub mod db_trait;
-pub mod fs_lock;
 pub mod import;
 pub mod library;
 pub mod reconstruct;

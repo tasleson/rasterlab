@@ -200,10 +200,10 @@ fn staging_path(dst: &Path) -> io::Result<PathBuf> {
 /// Give the staged file the destination's permissions.
 ///
 /// The rename installs a new inode, so whatever the old file's mode carried —
-/// a library file's read-only bit, a deliberately restricted project — would
-/// otherwise silently revert to the process umask.  Best effort: a filesystem
-/// that cannot express the mode is no reason to fail a save, and a destination
-/// that does not exist yet has nothing to inherit.
+/// say a deliberately restricted project — would otherwise silently revert to
+/// the process umask.  Best effort: a filesystem that cannot express the mode
+/// is no reason to fail a save, and a destination that does not exist yet has
+/// nothing to inherit.
 ///
 /// Called before the `fsync`, so the mode reaches the device with the data it
 /// applies to rather than trailing behind it.
