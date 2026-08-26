@@ -34,7 +34,7 @@ impl AppState {
     // -----------------------------------------------------------------------
 
     pub fn new_library(&mut self, path: std::path::PathBuf) {
-        if let Err(e) = std::fs::create_dir_all(&path) {
+        if let Err(e) = rasterlab_core::verified_write::create_dir_all_synced(&path) {
             self.library.last_error = Some(format!("Failed to create directory: {e}"));
             return;
         }

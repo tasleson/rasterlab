@@ -11,6 +11,7 @@ use rasterlab_core::{
     library_meta::LibraryMeta,
     pipeline::EditPipeline,
     project::{RlabFile, read_library_summary},
+    verified_write::{create_dir_all_synced, rename_synced},
 };
 
 use crate::{
@@ -18,7 +19,6 @@ use crate::{
         CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
         RecentlyDeletedRow, SortOrder,
     },
-    fs_lock,
     import::{self, ImportSession},
     reconstruct::{self, RebuildProgress},
     search::SearchFilter,
@@ -67,9 +67,9 @@ impl Library {
     /// Open (or create) a library at `path` with an injected DB backend
     /// (useful for testing with a fake/mock DB).
     pub fn with_db(path: &Path, db: Box<dyn LibraryDb>) -> Result<Self> {
-        std::fs::create_dir_all(path.join("files"))?;
-        std::fs::create_dir_all(path.join("thumbs"))?;
-        std::fs::create_dir_all(path.join("recently_deleted/files"))?;
+        create_dir_all_synced(&path.join("files"))?;
+        create_dir_all_synced(&path.join("thumbs"))?;
+        create_dir_all_synced(&path.join("recently_deleted/files"))?;
         db.init()?;
         let library = Self {
             root: path.to_path_buf(),
@@ -343,9 +343,8 @@ impl Library {
     }
 
     /// Mark a photo protected (or not). A protected photo cannot be deleted via
-    /// [`Library::delete_photo`], and its `.rlab` is locked on the filesystem
-    /// (best-effort, per-OS) so it cannot go missing. The flag is recorded both
-    /// in the DB and in the file's `LMTA` chunk so it survives a rebuild.
+    /// [`Library::delete_photo`]. The flag is recorded both in the DB and in
+    /// the file's `LMTA` chunk so it survives a rebuild.
     pub fn set_protected(&self, photo_id: PhotoId, protected: bool) -> Result<()> {
         let photos = self.db.all_photos(SortOrder::default())?;
         let Some(row) = photos.iter().find(|r| r.id == photo_id) else {
@@ -354,19 +353,13 @@ impl Library {
         let rlab_path = self.rlab_path(&row.hash);
         let _write_guard = self.lock_project_writes()?;
         if rlab_path.exists() {
-            // Keep the old lock in force if reading or rewriting fails. The
-            // guard also covers panics, so every exit restores the prior state.
-            fs_lock::with_unlocked(&rlab_path, || {
-                let mut rlab = RlabFile::read(&rlab_path)?;
-                if let Some(ref mut lmta) = rlab.lmta {
-                    lmta.protected = protected;
-                }
-                rlab.meta = rlab.meta.touch();
-                rlab.write_v5(&rlab_path)
-                    .context("rewrite lmta for protect")
-            })?;
-            // Apply (or clear) the on-disk lock to match the new state.
-            let _ = fs_lock::set_locked(&rlab_path, protected);
+            let mut rlab = RlabFile::read(&rlab_path)?;
+            if let Some(ref mut lmta) = rlab.lmta {
+                lmta.protected = protected;
+            }
+            rlab.meta = rlab.meta.touch();
+            rlab.write_v5(&rlab_path)
+                .context("rewrite lmta for protect")?;
         }
         self.db.set_protected(photo_id, protected)
     }
@@ -540,7 +533,7 @@ impl Library {
         // Also update PREV chunk in the .rlab
         let mut updated = rlab;
         updated.thumbnail = Some(thumb.clone());
-        fs_lock::with_unlocked(&rlab_path, || updated.write_v5(&rlab_path))?;
+        updated.write_v5(&rlab_path)?;
 
         self.update_thumbnail_cache(hash, &thumb, updated.has_edits())?;
 
@@ -582,7 +575,7 @@ impl Library {
         let thumb = generate_thumbnail(&rendered, 512)?;
 
         rlab.thumbnail = Some(thumb.clone());
-        fs_lock::with_unlocked(&rlab_path, || rlab.write_v5(&rlab_path))?;
+        rlab.write_v5(&rlab_path)?;
         self.update_thumbnail_cache(hash, &thumb, edited)?;
         Ok(thumb)
     }
@@ -601,7 +594,7 @@ impl Library {
         let rlab_path = self.rlab_path(hash);
         let current_lmta = read_library_summary(&rlab_path)?.lmta;
         project.set_lmta(current_lmta.clone());
-        fs_lock::with_unlocked(&rlab_path, || project.write_v5(&rlab_path))?;
+        project.write_v5(&rlab_path)?;
         Ok(current_lmta)
     }
 
@@ -641,7 +634,7 @@ impl Library {
         let mut rlab = RlabFile::read(&rlab_path)?;
         rlab.set_lmta(Some(lmta.clone()));
         rlab.meta = rlab.meta.touch();
-        fs_lock::with_unlocked(&rlab_path, || rlab.write_v5(&rlab_path)).context("rewrite lmta")
+        rlab.write_v5(&rlab_path).context("rewrite lmta")
     }
 
     fn add_collection_to_file(&self, photo_id: PhotoId, collection_name: &str) -> Result<()> {
@@ -665,7 +658,7 @@ impl Library {
             lmta.collections.push(collection_name.to_owned());
         }
         rlab.meta = rlab.meta.touch();
-        fs_lock::with_unlocked(&rlab_path, || rlab.write_v5(&rlab_path))?;
+        rlab.write_v5(&rlab_path)?;
         Ok(())
     }
 
@@ -688,7 +681,7 @@ impl Library {
             lmta.collections.retain(|c| c != collection_name);
         }
         rlab.meta = rlab.meta.touch();
-        fs_lock::with_unlocked(&rlab_path, || rlab.write_v5(&rlab_path))?;
+        rlab.write_v5(&rlab_path)?;
         Ok(())
     }
 }
@@ -708,10 +701,12 @@ fn move_library_file(source: &Path, destination: &Path) -> Result<bool> {
             );
         }
         if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
+            create_dir_all_synced(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
         }
-        std::fs::rename(source, destination)
+        // Synced: the index row is updated on the strength of this rename
+        // having happened, so the name has to outlive a power cut too.
+        rename_synced(source, destination)
             .with_context(|| format!("move {} to {}", source.display(), destination.display()))?;
         return Ok(true);
     }
@@ -745,9 +740,7 @@ fn rewrite_collection_name_in_file(rlab_path: &Path, old_name: &str, new_name: &
         }
     }
     rlab.meta = rlab.meta.touch();
-    Ok(fs_lock::with_unlocked(rlab_path, || {
-        rlab.write_v5(rlab_path)
-    })?)
+    Ok(rlab.write_v5(rlab_path)?)
 }
 
 fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf> {

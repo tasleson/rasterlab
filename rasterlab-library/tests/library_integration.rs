@@ -593,13 +593,9 @@ fn protected_photo_cannot_be_deleted() {
 
     lib.set_protected(row.id, true).expect("set_protected true");
 
-    // DB mirrors the flag and the file is locked on disk.
+    // DB mirrors the flag.
     let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
     assert!(row.protected, "DB row should be protected");
-    assert!(
-        rasterlab_library::fs_lock::is_locked(&rlab),
-        "rlab should be locked on disk"
-    );
 
     // Both delete modes refuse a protected photo.
     assert!(
@@ -613,15 +609,11 @@ fn protected_photo_cannot_be_deleted() {
     assert!(rlab.exists(), "rlab must still exist");
     assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
 
-    // Unprotect: file is unlocked and deletion is allowed again.
+    // Unprotect: deletion is allowed again.
     lib.set_protected(row.id, false)
         .expect("set_protected false");
     let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
     assert!(!row.protected);
-    assert!(
-        !rasterlab_library::fs_lock::is_locked(&rlab),
-        "rlab should be unlocked after unprotect"
-    );
     lib.delete_photo_permanently(row.id)
         .expect("delete after unprotect");
     assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
@@ -637,8 +629,7 @@ fn metadata_edit_works_while_protected() {
 
     lib.set_protected(row.id, true).unwrap();
 
-    // Editing a protected (locked) file must transparently unlock, write, and
-    // re-lock — protection guards against deletion, not metadata edits.
+    // Protection guards against deletion, not metadata edits.
     let lmta = rasterlab_library::LibraryMeta {
         rating: 5,
         ..Default::default()
@@ -648,16 +639,12 @@ fn metadata_edit_works_while_protected() {
 
     let rlab = rasterlab_core::project::RlabFile::read(&rlab_path).unwrap();
     assert_eq!(rlab.lmta.unwrap().rating, 5);
-    assert!(
-        rasterlab_library::fs_lock::is_locked(&rlab_path),
-        "file should be re-locked after the edit"
-    );
 
     lib.set_protected(row.id, false).unwrap();
 }
 
 #[test]
-fn failed_unprotect_restores_the_file_lock() {
+fn failed_unprotect_keeps_the_db_state() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = open_library(tmp.path());
     lib.import_files(&[jpeg_path()], |_| {}).unwrap();
@@ -666,24 +653,14 @@ fn failed_unprotect_restores_the_file_lock() {
     lib.set_protected(row.id, true).unwrap();
 
     // Make the protected file unreadable as a project so set_protected fails
-    // after temporarily unlocking it.
-    rasterlab_library::fs_lock::with_unlocked(&rlab_path, || {
-        std::fs::write(&rlab_path, b"not an rlab file").unwrap()
-    });
+    // while rewriting the LMTA chunk.
+    std::fs::write(&rlab_path, b"not an rlab file").unwrap();
 
     assert!(lib.set_protected(row.id, false).is_err());
-    assert!(
-        rasterlab_library::fs_lock::is_locked(&rlab_path),
-        "a failed rewrite must restore the old protection"
-    );
     assert!(
         lib.all_photos(SortOrder::default()).unwrap()[0].protected,
         "the DB must retain the old protection state"
     );
-
-    // Keep cleanup portable to systems where deleting a read-only file is
-    // restricted more strongly than it is on Unix.
-    rasterlab_library::fs_lock::set_locked(&rlab_path, false).unwrap();
 }
 
 #[test]

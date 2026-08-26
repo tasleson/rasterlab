@@ -2,7 +2,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use image as img_crate;
-use rasterlab_core::{image::Image, verified_write::write_verified_atomic};
+use rasterlab_core::{
+    image::Image,
+    verified_write::{create_dir_all_synced, write_verified_atomic},
+};
 
 /// Encode `image` as a JPEG thumbnail at most `max_side` pixels wide.
 /// Returns JPEG bytes.
@@ -41,7 +44,7 @@ pub fn generate_thumbnail(image: &Image, max_side: u32) -> Result<Vec<u8>> {
 /// having no way to tell a damaged JPEG from an ugly one.
 pub fn write_thumbnail(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        create_dir_all_synced(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     write_verified_atomic(path, bytes).with_context(|| format!("write {}", path.display()))
 }

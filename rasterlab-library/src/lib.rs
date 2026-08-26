@@ -16,7 +16,11 @@
 //!   through [`rasterlab_core::verified_write::write_verified_atomic`]: staged
 //!   beside the destination, fsynced, read back, compared, then renamed into
 //!   place.  A reader — including the next run after a crash — sees either the
-//!   old file whole or the new one whole, never a half-written one.
+//!   old file whole or the new one whole, never a half-written one.  Shard
+//!   directories are created with
+//!   [`create_dir_all_synced`](rasterlab_core::verified_write::create_dir_all_synced)
+//!   so a first import into a fresh shard cannot lose the directory that names
+//!   the file it just verified.
 //!
 //! * **Each index mutation is a transaction.**  One photo spans six tables, so
 //!   [`db_trait::LibraryDb`] promises that a method's writes all land or none
@@ -47,7 +51,6 @@
 //! reads it hands that reader the old bytes, not an error.
 
 pub mod db_trait;
-pub mod fs_lock;
 pub mod import;
 pub mod library;
 pub mod reconstruct;

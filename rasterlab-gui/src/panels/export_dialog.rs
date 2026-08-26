@@ -7,6 +7,7 @@ use rasterlab_core::{
     library_meta::{FileTimeStamp, LibraryMeta},
     project::RlabFile,
     traits::format_handler::EncodeOptions,
+    verified_write::write_atomic,
 };
 
 use crate::panels::export_border::ExportBorderOptions;
@@ -598,7 +599,7 @@ fn export_current_original(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("the original source bytes are unavailable"))?;
     let dest = unique_dest_path(dest_dir, source_name);
-    std::fs::write(&dest, original_bytes)?;
+    write_atomic(&dest, original_bytes)?;
     if let Some(source) = source_path {
         apply_file_timestamps(&dest, source);
     }
@@ -692,7 +693,7 @@ fn export_one(
     let filename = format!("{}.{}", stem, settings.format.ext());
     let dest = unique_dest_path(dest_dir, &filename);
     let bytes = registry.encode_file(&image, &dest, &settings.encode)?;
-    std::fs::write(&dest, &bytes)?;
+    write_atomic(&dest, &bytes)?;
     Ok(())
 }
 
@@ -706,7 +707,7 @@ fn export_original(
 ) -> anyhow::Result<()> {
     let filename = original_filename_for(rlab, rlab_path, hash);
     let dest = unique_dest_path(dest_dir, &filename);
-    std::fs::write(&dest, &rlab.original_bytes)?;
+    write_atomic(&dest, &rlab.original_bytes)?;
     apply_source_timestamps(&dest, rlab.lmta.as_ref());
     Ok(())
 }

@@ -8,6 +8,7 @@ use rasterlab_core::{
     formats::FormatRegistry,
     pipeline::{EditPipeline, PipelineState},
     traits::format_handler::EncodeOptions,
+    verified_write::write_atomic,
 };
 
 use crate::pipeline_builder::PipelineSpec;
@@ -107,7 +108,7 @@ pub fn run(args: ProcessArgs) -> Result<()> {
             .save_state()
             .context("Failed to serialise pipeline")?;
         let json = serde_json::to_string_pretty(&state).context("JSON serialisation failed")?;
-        std::fs::write(save_path, json)
+        write_atomic(save_path, json.as_bytes())
             .with_context(|| format!("Cannot write pipeline to '{}'", save_path.display()))?;
         eprintln!("Pipeline saved to '{}'", save_path.display());
     }
@@ -126,7 +127,7 @@ pub fn run(args: ProcessArgs) -> Result<()> {
         .encode_file(&rendered, &args.output, &options)
         .with_context(|| format!("Failed to encode output '{}'", args.output.display()))?;
 
-    std::fs::write(&args.output, &bytes)
+    write_atomic(&args.output, &bytes)
         .with_context(|| format!("Cannot write '{}'", args.output.display()))?;
 
     eprintln!("Written {} bytes → {}", bytes.len(), args.output.display());
