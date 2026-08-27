@@ -7,9 +7,11 @@ Before every commit run:
 ```bash
 cargo fmt
 cargo clippy
-cargo bench
 cargo build --release
 ```
+
+Benchmarks are not part of this checklist; run them only when the change
+touches performance-sensitive code, as described below.
 
 ## Performance rules
 
