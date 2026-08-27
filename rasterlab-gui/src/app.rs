@@ -650,6 +650,12 @@ impl eframe::App for RasterLabApp {
                                             self.state.open_library(path.clone());
                                         }
                                     }
+                                    ui.separator();
+                                    if ui.button("Clear Recent Libraries").clicked() {
+                                        ui.close_kind(egui::UiKind::Menu);
+                                        self.state.prefs.recent_libraries.clear();
+                                        self.state.prefs.save();
+                                    }
                                 });
                             });
                         }
