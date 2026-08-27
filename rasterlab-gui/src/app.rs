@@ -583,10 +583,8 @@ impl eframe::App for RasterLabApp {
                         let autosave_entries =
                             crate::autosave::list_previous_entries(current_session);
                         let has_autosave_entries = !autosave_entries.is_empty();
-                        ui.menu_button("Previously Unsaved Work", |ui| {
-                            if !has_autosave_entries {
-                                ui.add_enabled(false, egui::Button::new("No previous work"));
-                            } else {
+                        ui.add_enabled_ui(has_autosave_entries, |ui| {
+                            ui.menu_button("Previously Unsaved Work", |ui| {
                                 for entry in &autosave_entries {
                                     let name = crate::autosave::display_name(&entry.data);
                                     let label = format!(
@@ -604,18 +602,12 @@ impl eframe::App for RasterLabApp {
                                         self.request_restore_autosave(entry.clone());
                                     }
                                 }
-                            }
-                            ui.separator();
-                            if ui
-                                .add_enabled(
-                                    has_autosave_entries,
-                                    egui::Button::new("Clear Previously Unsaved Work"),
-                                )
-                                .clicked()
-                            {
-                                ui.close_kind(egui::UiKind::Menu);
-                                crate::autosave::clear_previous(current_session);
-                            }
+                                ui.separator();
+                                if ui.button("Clear Previously Unsaved Work").clicked() {
+                                    ui.close_kind(egui::UiKind::Menu);
+                                    crate::autosave::clear_previous(current_session);
+                                }
+                            });
                         });
                     }
                     // ── Library ──────────────────────────────────────────────
