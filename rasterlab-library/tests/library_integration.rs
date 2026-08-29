@@ -1309,6 +1309,57 @@ fn adding_an_unknown_photo_adds_no_membership() {
     assert_eq!(members[0].id, photo_id);
 }
 
+/// Membership belongs to the add/remove API, which writes the file and the
+/// index together. Metadata editors hold an LMTA read when their photo was
+/// selected, so one that was read before the photo joined a collection would
+/// otherwise put the photo back out of it the moment the user touched a
+/// rating — leaving the file and the index disagreeing, with the file winning
+/// the next rebuild.
+#[test]
+fn a_metadata_write_leaves_collection_membership_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let read_lmta = || {
+        rasterlab_core::project::RlabFile::read(&lib.rlab_path(&photo.hash))
+            .unwrap()
+            .lmta
+            .unwrap()
+    };
+
+    // What a detail panel would have loaded when the photo was selected.
+    let stale = read_lmta();
+    assert!(stale.collections.is_empty());
+
+    let coll = lib.create_collection("Favorites").unwrap();
+    lib.add_to_collection(coll.id, &[photo.id]).unwrap();
+
+    // A rating edit, carrying the pre-collection list along with it.
+    let mut edit = stale.clone();
+    edit.rating = 4;
+    lib.update_metadata(photo.id, edit).unwrap();
+
+    let after = read_lmta();
+    assert_eq!(after.rating, 4, "the edit itself must still land");
+    assert_eq!(
+        after.collections,
+        ["Favorites"],
+        "the file forgot a collection it had joined"
+    );
+    assert_eq!(lib.collection_photos(coll.id).unwrap().len(), 1);
+
+    // And the mirror image: a stale list must not put a photo back into a
+    // collection it has left.
+    lib.remove_from_collection(coll.id, &[photo.id]).unwrap();
+    lib.update_metadata(photo.id, after).unwrap();
+    assert!(
+        read_lmta().collections.is_empty(),
+        "the file rejoined a collection it had left"
+    );
+}
+
 // ── Batch metadata ────────────────────────────────────────────────────────────
 
 #[test]

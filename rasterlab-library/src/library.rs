@@ -318,6 +318,10 @@ impl Library {
     /// a failure or a crash costs at worst a stale index row — the edit itself
     /// is already durable, and a rebuild recovers it.  The other order loses
     /// the edit outright the next time the index is rebuilt.
+    ///
+    /// `lmta.collections` is ignored: membership is owned by
+    /// [`Library::add_to_collection`] and its mirror, and the file's own list
+    /// is kept.
     pub fn update_metadata(&self, photo_id: PhotoId, lmta: LibraryMeta) -> Result<()> {
         self.rewrite_lmta_in_file(photo_id, &lmta)?;
         self.db.update_lmta(photo_id, &lmta)
@@ -669,7 +673,16 @@ impl Library {
             return Ok(());
         }
         let mut rlab = RlabFile::read(&rlab_path)?;
-        rlab.set_lmta(Some(lmta.clone()));
+        let mut lmta = lmta.clone();
+        // Collection membership is not the caller's to write: it belongs to
+        // add/remove_from_collection, which puts it in the file and the index
+        // together. A metadata editor holds the LMTA it read when its photo
+        // was selected, which may pre-date a collection change, so the file's
+        // own list wins over whatever the caller last saw.
+        if let Some(current) = rlab.lmta.as_ref() {
+            lmta.collections = current.collections.clone();
+        }
+        rlab.set_lmta(Some(lmta));
         rlab.meta = rlab.meta.touch();
         rlab.write_v5(&rlab_path).context("rewrite lmta")
     }
