@@ -63,7 +63,11 @@ impl ImportSessionRow {
 
 #[derive(Debug, Clone)]
 pub struct CollectionRow {
+    /// Index-local row id.  Assigned by the database and reassigned by a
+    /// rebuild, so it is never written into a `.rlab`.
     pub id: CollectionId,
+    /// Stable identity, minted at creation and recorded in every member file.
+    pub uuid: String,
     pub name: String,
     pub created_at: u64,
 }
@@ -189,8 +193,17 @@ pub trait LibraryDb: Send + Sync {
 
     // ── Collections ───────────────────────────────────────────────────────
 
-    fn create_collection(&self, name: &str, created_at: u64) -> anyhow::Result<CollectionId>;
+    /// Create a collection with a caller-minted `uuid`.  The uuid is what
+    /// member files record; `id` is an index detail a rebuild may change.
+    fn create_collection(
+        &self,
+        uuid: &str,
+        name: &str,
+        created_at: u64,
+    ) -> anyhow::Result<CollectionId>;
 
+    /// Rename a collection.  Member files are not touched: they record the
+    /// uuid, and the name they carry is only a hint.
     fn rename_collection(&self, id: CollectionId, name: &str) -> anyhow::Result<()>;
 
     fn delete_collection(&self, id: CollectionId) -> anyhow::Result<()>;

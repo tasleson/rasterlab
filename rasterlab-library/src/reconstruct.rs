@@ -5,11 +5,12 @@ use std::{
 
 use anyhow::Result;
 use rasterlab_core::{formats::FormatRegistry, project::RlabFile};
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
-    db_trait::{LibraryDb, SortOrder},
-    import::{format_session_name, thumb_path},
+    db_trait::{CollectionRow, LibraryDb, PhotoId, SortOrder},
+    import::{format_session_name, thumb_path, unix_now},
     thumbnail::{generate_thumbnail, write_thumbnail},
 };
 
@@ -28,6 +29,43 @@ pub struct RebuildProgress {
 struct SessionAgg {
     min_date: u64,
     max_date: u64,
+}
+
+/// What the files say about one collection, gathered as they are read.
+///
+/// The name is a hint each member file carries, and files that have not been
+/// written since a rename carry an old one, so the most recently written file
+/// wins.  Ties — the stamp has one-second resolution — go to the larger hash
+/// rather than to whatever order the walk happened to take, so a rebuild of
+/// the same library twice gives the same answer.
+#[derive(Debug, Default)]
+struct CollectionAgg {
+    name: String,
+    name_written_at: u64,
+    name_from_hash: String,
+    members: Vec<String>,
+}
+
+impl CollectionAgg {
+    fn offer_name(&mut self, name: &str, written_at: u64, hash: &str) {
+        if name.is_empty() {
+            return;
+        }
+        let newer = (written_at, hash) > (self.name_written_at, self.name_from_hash.as_str());
+        if self.name.is_empty() || newer {
+            self.name = name.to_owned();
+            self.name_written_at = written_at;
+            self.name_from_hash = hash.to_owned();
+        }
+    }
+}
+
+/// Membership as gathered from the files: by uuid, plus whatever pre-uuid
+/// files listed by name alone.
+#[derive(Debug, Default)]
+struct CollectionsFromFiles {
+    by_uuid: HashMap<String, CollectionAgg>,
+    by_legacy_name: HashMap<String, Vec<String>>,
 }
 
 /// Bring the database index back in line with the `.rlab` files on disk.
@@ -71,6 +109,7 @@ pub fn rebuild(
     let total = rlab_paths.len();
     let mut errors: Vec<(std::path::PathBuf, String)> = Vec::new();
     let mut sessions: HashMap<String, SessionAgg> = HashMap::new();
+    let mut collections = CollectionsFromFiles::default();
     let mut indexed: HashSet<String> = HashSet::with_capacity(total);
 
     for (i, rlab_file_path) in rlab_paths.iter().enumerate() {
@@ -81,7 +120,14 @@ pub fn rebuild(
             errors: errors.clone(),
         });
 
-        match reindex_one(library_root, db, registry, rlab_file_path, &mut sessions) {
+        match reindex_one(
+            library_root,
+            db,
+            registry,
+            rlab_file_path,
+            &mut sessions,
+            &mut collections,
+        ) {
             Ok(Some(hash)) => {
                 indexed.insert(hash);
             }
@@ -123,6 +169,8 @@ pub fn rebuild(
     }
     db.delete_empty_sessions()?;
 
+    restore_collections(db, collections)?;
+
     progress_cb(RebuildProgress {
         total,
         done: total,
@@ -130,6 +178,99 @@ pub fn rebuild(
         errors: errors.clone(),
     });
     Ok(())
+}
+
+/// Put collections and their membership back from what the files said.
+///
+/// The index owns collection names while it exists, so a collection this run
+/// recognises by uuid keeps the name it has — otherwise every rebuild would
+/// undo a rename by restoring the stale hints its member files still carry.
+/// Hints name only the collections that have to be created from scratch, which
+/// is the case this is really for: an index that was lost outright.
+fn restore_collections(db: &dyn LibraryDb, found: CollectionsFromFiles) -> Result<()> {
+    let mut known = db.all_collections()?;
+    let photo_id =
+        |hash: &str| -> Result<Option<PhotoId>> { Ok(db.photo_by_hash(hash)?.map(|row| row.id)) };
+
+    // Settled in uuid order so that two collections wanting the same name are
+    // resolved the same way every run.
+    let mut by_uuid: Vec<(String, CollectionAgg)> = found.by_uuid.into_iter().collect();
+    by_uuid.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    for (uuid, agg) in by_uuid {
+        let id = match known.iter().find(|row| row.uuid == uuid) {
+            Some(row) => row.id,
+            None => {
+                let name = unique_name(&agg.name, &uuid, &known);
+                let id = db.create_collection(&uuid, &name, unix_now())?;
+                known.push(CollectionRow {
+                    id,
+                    uuid: uuid.clone(),
+                    name,
+                    created_at: unix_now(),
+                });
+                id
+            }
+        };
+        let members: Vec<PhotoId> = agg
+            .members
+            .iter()
+            .filter_map(|hash| photo_id(hash).transpose())
+            .collect::<Result<_>>()?;
+        db.add_to_collection(id, &members)?;
+    }
+
+    // Pre-uuid files name their collections and nothing else, so they join the
+    // collection that goes by that name — the one a previous rebuild or the
+    // hints above just created — and only start a new one if there is none.
+    for (name, hashes) in found.by_legacy_name {
+        let id = match known.iter().find(|row| row.name == name) {
+            Some(row) => row.id,
+            None => {
+                let uuid = Uuid::new_v4().to_string();
+                let id = db.create_collection(&uuid, &name, unix_now())?;
+                known.push(CollectionRow {
+                    id,
+                    uuid,
+                    name,
+                    created_at: unix_now(),
+                });
+                id
+            }
+        };
+        let members: Vec<PhotoId> = hashes
+            .iter()
+            .filter_map(|hash| photo_id(hash).transpose())
+            .collect::<Result<_>>()?;
+        db.add_to_collection(id, &members)?;
+    }
+
+    Ok(())
+}
+
+/// A name no existing collection is using, since the index requires them to be
+/// distinct.
+///
+/// Two collections can genuinely want one name — a library rebuilt after its
+/// index was lost, whose user made a second collection under a name the files
+/// still remember. Suffixing keeps both, which is recoverable; failing the
+/// rebuild is not.
+fn unique_name(hint: &str, uuid: &str, known: &[CollectionRow]) -> String {
+    let base = if hint.trim().is_empty() {
+        // Nothing in any member file named it. The uuid at least tells the
+        // user which collections are distinct, and can be renamed.
+        format!("Collection {}", &uuid[..uuid.len().min(8)])
+    } else {
+        hint.to_owned()
+    };
+    let taken = |name: &str| known.iter().any(|row| row.name == name);
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base} ({n})"))
+        .find(|name| !taken(name))
+        .unwrap_or(base)
 }
 
 /// Index one `.rlab`, replacing any row that already describes it.  Returns the
@@ -140,6 +281,7 @@ fn reindex_one(
     registry: &FormatRegistry,
     rlab_file_path: &Path,
     sessions: &mut HashMap<String, SessionAgg>,
+    collections: &mut CollectionsFromFiles,
 ) -> Result<Option<String>> {
     let rlab = RlabFile::read(rlab_file_path)?;
 
@@ -193,6 +335,24 @@ fn reindex_one(
                 hash.as_str()
             }),
     )?;
+
+    // Record collection membership for the pass that follows the walk. It
+    // cannot be settled here: which name a collection ends up with is decided
+    // by comparing files with each other, and a name-only membership from a
+    // pre-uuid file can only be matched to a collection once every file that
+    // might name it has been read.
+    for held in &lmta.collection_refs {
+        let agg = collections.by_uuid.entry(held.id.clone()).or_default();
+        agg.offer_name(&held.name, rlab.meta.modified_at, &hash);
+        agg.members.push(hash.clone());
+    }
+    for name in &lmta.legacy_collections {
+        collections
+            .by_legacy_name
+            .entry(name.clone())
+            .or_default()
+            .push(hash.clone());
+    }
 
     // Record session membership; the session rows themselves are restored in
     // one pass after all photos are indexed (see `rebuild`).

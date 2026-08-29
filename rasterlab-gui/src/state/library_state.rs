@@ -1201,6 +1201,7 @@ mod tests {
     fn collection(id: CollectionId, name: &str) -> CollectionRow {
         CollectionRow {
             id,
+            uuid: format!("uuid-{id}"),
             name: name.to_owned(),
             created_at: 0,
         }

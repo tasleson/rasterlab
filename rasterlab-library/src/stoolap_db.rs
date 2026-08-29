@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use rasterlab_core::library_meta::LibraryMeta;
 use stoolap::Value;
 use stoolap::api::{Database, Transaction};
+use uuid::Uuid;
 
 use crate::{
     db_trait::{
@@ -29,6 +30,35 @@ impl StoolapDb {
     pub fn open_in_memory() -> Result<Self> {
         let db = Database::open_in_memory().context("open in-memory db")?;
         Ok(Self { db })
+    }
+
+    /// Mint a uuid for every collection row that predates them.
+    ///
+    /// Runs on every open and is a no-op once done.  A collection without a
+    /// uuid cannot be written into a photo's `.rlab`, so this has to happen
+    /// before anything reads the table, not lazily.
+    fn backfill_collection_uuids(&self) -> Result<()> {
+        let rows = self
+            .db
+            .query("SELECT id, uuid FROM collections", ())
+            .context("read collections for uuid backfill")?;
+        let mut missing = Vec::new();
+        for row in rows {
+            let row = row.context("collection row")?;
+            let has_uuid = row
+                .get::<String>(1)
+                .is_ok_and(|uuid| !uuid.trim().is_empty());
+            if !has_uuid {
+                missing.push(row.get::<i64>(0).context("collection id")?);
+            }
+        }
+        for id in missing {
+            self.db.execute(
+                "UPDATE collections SET uuid = $1 WHERE id = $2",
+                (Uuid::new_v4().to_string(), id),
+            )?;
+        }
+        Ok(())
     }
 
     /// Run `f` in one transaction, committing only if it returns `Ok`.
@@ -119,6 +149,7 @@ const SCHEMA_STMTS: &[&str] = &[
     )",
     "CREATE TABLE IF NOT EXISTS collections (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid       TEXT NOT NULL UNIQUE,
         name       TEXT NOT NULL UNIQUE,
         created_at INTEGER
     )",
@@ -204,6 +235,14 @@ impl LibraryDb for StoolapDb {
             "ALTER TABLE photos ADD COLUMN protected INTEGER NOT NULL DEFAULT 0",
             (),
         );
+        // Migration: collections used to be identified by name.  The column is
+        // added without the UNIQUE the fresh schema carries — the rows that
+        // exist have no uuid yet — and every one of them is given one below.
+        let _ = self
+            .db
+            .execute("ALTER TABLE collections ADD COLUMN uuid TEXT", ());
+        self.backfill_collection_uuids()
+            .context("give existing collections a uuid")?;
         // Migration: source fingerprint columns for fast import resume.
         let _ = self
             .db
@@ -665,10 +704,10 @@ impl LibraryDb for StoolapDb {
 
     // ── Collections ───────────────────────────────────────────────────────
 
-    fn create_collection(&self, name: &str, created_at: u64) -> Result<CollectionId> {
+    fn create_collection(&self, uuid: &str, name: &str, created_at: u64) -> Result<CollectionId> {
         let id: i64 = self.db.query_one(
-            "INSERT INTO collections (name, created_at) VALUES ($1,$2) RETURNING id",
-            (name, created_at as i64),
+            "INSERT INTO collections (uuid, name, created_at) VALUES ($1,$2,$3) RETURNING id",
+            (uuid, name, created_at as i64),
         )?;
         Ok(id)
     }
@@ -692,7 +731,7 @@ impl LibraryDb for StoolapDb {
 
     fn all_collections(&self) -> Result<Vec<CollectionRow>> {
         let rows = self.db.query(
-            "SELECT id, name, created_at FROM collections ORDER BY name ASC",
+            "SELECT id, uuid, name, created_at FROM collections ORDER BY name ASC",
             (),
         )?;
         let mut result = Vec::new();
@@ -700,8 +739,9 @@ impl LibraryDb for StoolapDb {
             let row = row.context("all_collections row")?;
             result.push(CollectionRow {
                 id: row.get::<i64>(0)?,
-                name: row.get::<String>(1)?,
-                created_at: row.get::<i64>(2)? as u64,
+                uuid: row.get::<String>(1)?,
+                name: row.get::<String>(2)?,
+                created_at: row.get::<i64>(3)? as u64,
             });
         }
         Ok(result)
@@ -896,25 +936,11 @@ fn insert_photo_tx(
     )
     .context("insert user_meta")?;
 
-    // Collections
-    for coll_name in &lmta.collections {
-        tx.execute(
-            "INSERT INTO collections (name, created_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            (coll_name.as_str(), unix_now() as i64),
-        )
-        .ok();
-        if let Ok(coll_id) = tx.query_one::<i64, _>(
-            "SELECT id FROM collections WHERE name = $1",
-            (coll_name.as_str(),),
-        ) {
-            tx.execute(
-                "INSERT INTO collection_photos
-                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-                (coll_id, photo_id, unix_now() as i64),
-            )
-            .ok();
-        }
-    }
+    // Collection membership is deliberately not restored here.  A photo's
+    // `.rlab` names its collections only as a hint, and which name wins is a
+    // question about the whole library rather than one photo, so
+    // `reconstruct::rebuild` settles it in a pass of its own once every file
+    // has been read.
 
     Ok(photo_id)
 }
@@ -1171,7 +1197,9 @@ mod tests {
         let b = db
             .insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
             .unwrap();
-        let coll = db.create_collection("Favorites", 1_600_000_000).unwrap();
+        let coll = db
+            .create_collection("uuid-favorites", "Favorites", 1_600_000_000)
+            .unwrap();
 
         db.add_to_collection(coll, &[a]).unwrap();
         // The overlapping case: `a` is already in, `b` is not.
@@ -1179,6 +1207,34 @@ mod tests {
 
         assert_eq!(count(&db, "SELECT COUNT(*) FROM collection_photos"), 2);
         assert_eq!(db.collection_photos(coll).unwrap().len(), 2);
+    }
+
+    /// Libraries made before collections had ids have rows without one, and a
+    /// collection with no uuid cannot be written into a photo's file at all.
+    #[test]
+    fn opening_an_older_index_gives_every_collection_a_uuid() {
+        let db = db();
+        // What the migration finds: a row from before the column existed.
+        db.db
+            .execute(
+                "INSERT INTO collections (uuid, name, created_at) VALUES ('', 'Portfolio', 1)",
+                (),
+            )
+            .unwrap();
+
+        db.init().expect("init must be re-runnable");
+
+        let collections = db.all_collections().unwrap();
+        assert_eq!(collections.len(), 1);
+        assert!(
+            !collections[0].uuid.is_empty(),
+            "the pre-uuid row was left without an id"
+        );
+
+        // Re-running must not mint a second one over the top of the first.
+        let minted = collections[0].uuid.clone();
+        db.init().unwrap();
+        assert_eq!(db.all_collections().unwrap()[0].uuid, minted);
     }
 
     /// A soft-deleted photo keeps its membership row so restoring puts it back
@@ -1193,8 +1249,12 @@ mod tests {
         let b = db
             .insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
             .unwrap();
-        let favorites = db.create_collection("Favorites", 1_600_000_000).unwrap();
-        let portfolio = db.create_collection("Portfolio", 1_600_000_000).unwrap();
+        let favorites = db
+            .create_collection("uuid-favorites", "Favorites", 1_600_000_000)
+            .unwrap();
+        let portfolio = db
+            .create_collection("uuid-portfolio", "Portfolio", 1_600_000_000)
+            .unwrap();
         db.add_to_collection(favorites, &[a, b]).unwrap();
         db.add_to_collection(portfolio, &[a]).unwrap();
 

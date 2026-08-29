@@ -8,11 +8,12 @@ use std::{
 use anyhow::{Context, Result, bail};
 use rasterlab_core::{
     formats::FormatRegistry,
-    library_meta::LibraryMeta,
+    library_meta::{CollectionRef, LibraryMeta},
     pipeline::EditPipeline,
     project::{RlabFile, read_library_summary},
     verified_write::{create_dir_all_synced, rename_synced},
 };
+use uuid::Uuid;
 
 use crate::{
     db_trait::{
@@ -387,43 +388,29 @@ impl Library {
 
     pub fn create_collection(&self, name: &str) -> Result<CollectionRow> {
         let now = unix_now();
-        let id = self.db.create_collection(name, now)?;
+        // Minted here rather than by the index: the uuid goes into every
+        // member file, and must survive the index being thrown away and
+        // rebuilt, which reassigns row ids.
+        let uuid = Uuid::new_v4().to_string();
+        let id = self.db.create_collection(&uuid, name, now)?;
         Ok(CollectionRow {
             id,
+            uuid,
             name: name.to_owned(),
             created_at: now,
         })
     }
 
-    /// Rename a collection in every member `.rlab` first, then in the index.
+    /// Rename a collection.  One index row, whatever its size.
     ///
-    /// Membership lives in each file's `LMTA` chunk, so the files decide what
-    /// the collection is called after a rebuild; renaming them first means an
-    /// interruption leaves the new name already durable.  Files that could not
-    /// be rewritten are reported once the index is updated.
+    /// Member files record the collection's uuid and carry its name only as a
+    /// hint for rebuilding an index that has been lost, so they are left as
+    /// they are: rewriting a large collection's files would be minutes of
+    /// verified writes, and an interruption would leave the rename half done.
+    /// Those hints go stale until something else rewrites the file, which is
+    /// what [`Library::rebuild_index`]'s newest-file-wins rule accounts for.
     pub fn rename_collection(&self, id: CollectionId, new_name: &str) -> Result<()> {
-        let old_name = self.collection_name(id)?;
-        let photos = self.db.collection_photos(id)?;
-
-        let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
-        for row in &photos {
-            let rlab_path = self.rlab_path(&row.hash);
-            // Taken and released per photo, like the scrub: renaming a
-            // collection across a large library must not hold every other
-            // project write off for the length of the walk.
-            let rewritten = self.lock_project_writes().and_then(|_write_guard| {
-                if !rlab_path.exists() {
-                    return Ok(());
-                }
-                rewrite_collection_name_in_file(&rlab_path, &old_name, new_name)
-            });
-            if let Err(e) = rewritten {
-                failed.push((row.id, e));
-            }
-        }
-
-        self.db.rename_collection(id, new_name)?;
-        report_partial("rename collection", failed)
+        self.db.rename_collection(id, new_name)
     }
 
     pub fn delete_collection(&self, id: CollectionId) -> Result<()> {
@@ -479,7 +466,11 @@ impl Library {
         photo_ids: &[PhotoId],
         member: bool,
     ) -> Result<()> {
-        let name = self.collection_name(collection_id)?;
+        let collections = self.db.all_collections()?;
+        let collection = collections
+            .iter()
+            .find(|row| row.id == collection_id)
+            .with_context(|| format!("collection {collection_id} not found"))?;
         // One index read for the whole batch. Resolving each photo separately
         // walked every photo in the library per photo changed, which a grid
         // selection of a few hundred turns into a long stall.
@@ -496,7 +487,7 @@ impl Library {
             let Some(hash) = hashes.get(&pid) else {
                 continue;
             };
-            match self.set_collection_in_file(hash, &name, member) {
+            match self.set_collection_in_file(hash, collection, &collections, member) {
                 Ok(()) => written.push(pid),
                 Err(e) => failed.push((pid, e)),
             }
@@ -513,15 +504,6 @@ impl Library {
             "remove from collection"
         };
         report_partial(what, failed)
-    }
-
-    fn collection_name(&self, id: CollectionId) -> Result<String> {
-        self.db
-            .all_collections()?
-            .into_iter()
-            .find(|c| c.id == id)
-            .map(|c| c.name)
-            .with_context(|| format!("collection {id} not found"))
     }
 
     pub fn collection_photos(&self, id: CollectionId) -> Result<Vec<PhotoRow>> {
@@ -678,24 +660,27 @@ impl Library {
         // add/remove_from_collection, which puts it in the file and the index
         // together. A metadata editor holds the LMTA it read when its photo
         // was selected, which may pre-date a collection change, so the file's
-        // own list wins over whatever the caller last saw.
+        // own membership wins over whatever the caller last saw.
         if let Some(current) = rlab.lmta.as_ref() {
-            lmta.collections = current.collections.clone();
+            lmta.collection_refs = current.collection_refs.clone();
+            lmta.legacy_collections = current.legacy_collections.clone();
         }
         rlab.set_lmta(Some(lmta));
         rlab.meta = rlab.meta.touch();
         rlab.write_v5(&rlab_path).context("rewrite lmta")
     }
 
-    /// Record — or drop — one collection name in a photo's `.rlab`.
+    /// Record — or drop — one collection in a photo's `.rlab`.
     ///
-    /// A file that already says what it should is left untouched: adding a
-    /// selection that overlaps the collection would otherwise rewrite those
-    /// photos for no change.
+    /// A file that already says what it should is left untouched, unless it
+    /// still carries pre-uuid membership that this write can migrate while it
+    /// has the file open: adding a selection that overlaps the collection
+    /// would otherwise rewrite those photos for no change.
     fn set_collection_in_file(
         &self,
         hash: &str,
-        collection_name: &str,
+        collection: &CollectionRow,
+        all: &[CollectionRow],
         member: bool,
     ) -> Result<()> {
         let rlab_path = self.rlab_path(hash);
@@ -713,19 +698,60 @@ impl Library {
             // write; the index still gets the change.
             return Ok(());
         };
-        let listed = lmta.collections.iter().any(|c| c == collection_name);
-        if listed == member {
+        let migrated = migrate_legacy_collections(lmta, all);
+        let listed = lmta
+            .collection_refs
+            .iter()
+            .any(|held| held.id == collection.uuid);
+        if listed == member && !migrated {
             return Ok(());
         }
         if member {
-            lmta.collections.push(collection_name.to_owned());
+            lmta.collection_refs.push(CollectionRef {
+                id: collection.uuid.clone(),
+                name: collection.name.clone(),
+            });
         } else {
-            lmta.collections.retain(|c| c != collection_name);
+            lmta.collection_refs
+                .retain(|held| held.id != collection.uuid);
         }
         rlab.meta = rlab.meta.touch();
         rlab.write_v5(&rlab_path)?;
         Ok(())
     }
+}
+
+/// Turn any pre-uuid membership in `lmta` into proper refs, reporting whether
+/// anything changed.
+///
+/// Done opportunistically, whenever a file is open for a membership change
+/// anyway, so a library converts as it is used instead of needing a pass of its
+/// own.  A name the index has never heard of is left in the legacy list rather
+/// than dropped: it means the index is the incomplete one, and a rebuild can
+/// still recover the membership from it.
+fn migrate_legacy_collections(lmta: &mut LibraryMeta, all: &[CollectionRow]) -> bool {
+    if lmta.legacy_collections.is_empty() {
+        return false;
+    }
+    let mut migrated = false;
+    lmta.legacy_collections.retain(|name| {
+        let Some(known) = all.iter().find(|row| &row.name == name) else {
+            return true;
+        };
+        migrated = true;
+        if !lmta
+            .collection_refs
+            .iter()
+            .any(|held| held.id == known.uuid)
+        {
+            lmta.collection_refs.push(CollectionRef {
+                id: known.uuid.clone(),
+                name: known.name.clone(),
+            });
+        }
+        false
+    });
+    migrated
 }
 
 // ── File-level helpers ────────────────────────────────────────────────────────
@@ -770,19 +796,6 @@ fn report_partial(what: &str, mut failed: Vec<(PhotoId, anyhow::Error)>) -> Resu
     Err(first.context(format!(
         "{what}: {count} photo(s) could not be written, starting with photo {photo_id}"
     )))
-}
-
-fn rewrite_collection_name_in_file(rlab_path: &Path, old_name: &str, new_name: &str) -> Result<()> {
-    let mut rlab = RlabFile::read(rlab_path)?;
-    if let Some(ref mut lmta) = rlab.lmta {
-        for name in &mut lmta.collections {
-            if name == old_name {
-                *name = new_name.to_owned();
-            }
-        }
-    }
-    rlab.meta = rlab.meta.touch();
-    Ok(rlab.write_v5(rlab_path)?)
 }
 
 fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf> {

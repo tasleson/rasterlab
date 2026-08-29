@@ -876,6 +876,145 @@ fn collection_membership_survives_a_rebuild() {
     assert_eq!(members[0].hash, photos[0].hash);
 }
 
+/// The point of keeping the name in the index: a rename must not be undone by
+/// the stale hints every member file still carries.
+#[test]
+fn a_rebuild_keeps_the_renamed_collection_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let coll = lib.create_collection("Portfolio").unwrap();
+    lib.add_to_collection(coll.id, &[photo.id]).unwrap();
+    lib.rename_collection(coll.id, "Best Of").unwrap();
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    let collections = lib.all_collections().unwrap();
+    assert_eq!(
+        collections.len(),
+        1,
+        "the stale hint started a second collection: {collections:?}"
+    );
+    assert_eq!(collections[0].name, "Best Of");
+    assert_eq!(collections[0].uuid, coll.uuid, "identity must survive too");
+    assert_eq!(lib.collection_photos(collections[0].id).unwrap().len(), 1);
+}
+
+/// Losing the index is the case the name hints exist for. Member files
+/// disagree about the name after a rename, so the most recently written one
+/// decides.
+#[test]
+fn a_lost_index_rebuilds_collections_from_the_newest_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let uuid;
+    let hashes: Vec<String>;
+    {
+        let lib = open_library(tmp.path());
+        lib.import_files(&[jpeg_path(), png_path()], |_| {})
+            .unwrap();
+        let photos = lib.all_photos(SortOrder::default()).unwrap();
+        hashes = photos.iter().map(|row| row.hash.clone()).collect();
+        let coll = lib.create_collection("Portfolio").unwrap();
+        uuid = coll.uuid.clone();
+        lib.add_to_collection(coll.id, &[photos[0].id, photos[1].id])
+            .unwrap();
+
+        // Stand in for a rename that only one member file has caught up with,
+        // and stamp them so the newer hint is unambiguous.
+        set_hint(&lib.rlab_path(&hashes[0]), &uuid, "Old Name", 1_000);
+        set_hint(&lib.rlab_path(&hashes[1]), &uuid, "Current Name", 2_000);
+    }
+
+    // The index is gone entirely; only the files remain.
+    let index = tmp.path().join("library.db");
+    if index.is_dir() {
+        std::fs::remove_dir_all(&index).unwrap();
+    } else {
+        std::fs::remove_file(&index).unwrap();
+    }
+    let lib = open_library(tmp.path());
+    assert!(lib.all_collections().unwrap().is_empty());
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    let collections = lib.all_collections().unwrap();
+    assert_eq!(collections.len(), 1, "one id is one collection");
+    assert_eq!(collections[0].uuid, uuid);
+    assert_eq!(
+        collections[0].name, "Current Name",
+        "the most recently written file names the collection"
+    );
+    assert_eq!(lib.collection_photos(collections[0].id).unwrap().len(), 2);
+}
+
+/// Files written before collections had ids list them by name alone, and have
+/// to keep their memberships until something rewrites them.
+#[test]
+fn pre_uuid_files_still_rebuild_into_named_collections() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let path = lib.rlab_path(&photo.hash);
+
+    // What such a file looks like: a bare name, no ref.
+    let mut rlab = rasterlab_core::project::RlabFile::read(&path).unwrap();
+    let mut lmta = rlab.lmta.clone().unwrap();
+    lmta.legacy_collections = vec!["Portfolio".to_owned()];
+    rlab.set_lmta(Some(lmta));
+    rlab.write_v5(&path).unwrap();
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    let collections = lib.all_collections().unwrap();
+    assert_eq!(collections.len(), 1);
+    assert_eq!(collections[0].name, "Portfolio");
+    assert!(
+        !collections[0].uuid.is_empty(),
+        "a rebuilt collection needs an id of its own"
+    );
+    assert_eq!(lib.collection_photos(collections[0].id).unwrap().len(), 1);
+
+    // And a membership change migrates the file to the new shape in passing.
+    // The rebuild reassigned row ids, so the photo has to be looked up again —
+    // which is exactly why a file records a collection's uuid and not its id.
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let other = lib.create_collection("Prints").unwrap();
+    lib.add_to_collection(other.id, &[photo.id]).unwrap();
+    let lmta = rasterlab_core::project::RlabFile::read(&path)
+        .unwrap()
+        .lmta
+        .unwrap();
+    assert!(
+        lmta.legacy_collections.is_empty(),
+        "the legacy list should have been migrated away"
+    );
+    let mut names: Vec<&str> = lmta
+        .collection_refs
+        .iter()
+        .map(|held| held.name.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["Portfolio", "Prints"]);
+}
+
+/// Overwrite a file's collection hint and write stamp, standing in for a
+/// member file that has not caught up with a rename.
+fn set_hint(path: &std::path::Path, uuid: &str, name: &str, modified_at: u64) {
+    let mut rlab = rasterlab_core::project::RlabFile::read(path).unwrap();
+    let mut lmta = rlab.lmta.clone().unwrap();
+    lmta.collection_refs = vec![rasterlab_library::CollectionRef {
+        id: uuid.to_owned(),
+        name: name.to_owned(),
+    }];
+    rlab.set_lmta(Some(lmta));
+    rlab.meta.modified_at = modified_at;
+    rlab.write_v5(path).unwrap();
+}
+
 #[test]
 fn selecting_a_copy_updates_the_project_and_thumbnail_together() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1210,18 +1349,38 @@ fn create_add_rename_delete_collection() {
     let members = lib.collection_photos(coll.id).unwrap();
     assert_eq!(members.len(), 1);
 
-    // Rename rewrites LMTA
-    lib.rename_collection(coll.id, "Best Of").unwrap();
+    // The file records the collection's id, and the name only as a hint.
     let rlab_path = lib.rlab_path(&members[0].hash);
-    let rlab = rasterlab_core::project::RlabFile::read(&rlab_path).unwrap();
-    let lmta = rlab.lmta.unwrap();
-    assert!(
-        lmta.collections.contains(&"Best Of".to_owned()),
-        "LMTA should have new collection name"
+    let held = |path: &std::path::Path| {
+        rasterlab_core::project::RlabFile::read(path)
+            .unwrap()
+            .lmta
+            .unwrap()
+            .collection_refs
+    };
+    assert_eq!(held(&rlab_path).len(), 1);
+    assert_eq!(held(&rlab_path)[0].id, coll.uuid);
+    assert_eq!(held(&rlab_path)[0].name, "Favorites");
+
+    // A rename is the index's business alone: the member file is not even
+    // opened, which is what keeps renaming a large collection instant.
+    let untouched = std::fs::metadata(&rlab_path).unwrap().modified().unwrap();
+    lib.rename_collection(coll.id, "Best Of").unwrap();
+    assert_eq!(
+        std::fs::metadata(&rlab_path).unwrap().modified().unwrap(),
+        untouched,
+        "renaming rewrote a member file"
     );
-    assert!(
-        !lmta.collections.contains(&"Favorites".to_owned()),
-        "LMTA should not have old name"
+    assert_eq!(lib.all_collections().unwrap()[0].name, "Best Of");
+    assert_eq!(
+        lib.collection_photos(coll.id).unwrap().len(),
+        1,
+        "membership follows the id, not the name"
+    );
+    assert_eq!(
+        held(&rlab_path)[0].name,
+        "Favorites",
+        "the hint in the file is allowed to go stale"
     );
 
     // Delete collection — photo is unaffected
@@ -1248,8 +1407,8 @@ fn remove_from_collection_updates_lmta() {
     let rlab = rasterlab_core::project::RlabFile::read(&lib.rlab_path(&hash)).unwrap();
     let lmta = rlab.lmta.unwrap();
     assert!(
-        !lmta.collections.contains(&"ToRemove".to_owned()),
-        "collection name should be removed from LMTA"
+        lmta.collection_refs.is_empty(),
+        "collection should be removed from LMTA"
     );
 }
 
@@ -1331,7 +1490,7 @@ fn a_metadata_write_leaves_collection_membership_alone() {
 
     // What a detail panel would have loaded when the photo was selected.
     let stale = read_lmta();
-    assert!(stale.collections.is_empty());
+    assert!(stale.collection_refs.is_empty());
 
     let coll = lib.create_collection("Favorites").unwrap();
     lib.add_to_collection(coll.id, &[photo.id]).unwrap();
@@ -1344,7 +1503,11 @@ fn a_metadata_write_leaves_collection_membership_alone() {
     let after = read_lmta();
     assert_eq!(after.rating, 4, "the edit itself must still land");
     assert_eq!(
-        after.collections,
+        after
+            .collection_refs
+            .iter()
+            .map(|held| held.name.as_str())
+            .collect::<Vec<_>>(),
         ["Favorites"],
         "the file forgot a collection it had joined"
     );
@@ -1355,7 +1518,7 @@ fn a_metadata_write_leaves_collection_membership_alone() {
     lib.remove_from_collection(coll.id, &[photo.id]).unwrap();
     lib.update_metadata(photo.id, after).unwrap();
     assert!(
-        read_lmta().collections.is_empty(),
+        read_lmta().collection_refs.is_empty(),
         "the file rejoined a collection it had left"
     );
 }

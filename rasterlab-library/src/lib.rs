@@ -33,6 +33,14 @@
 //!   first. Recently Deleted renames the file inside the library and then marks
 //!   its row hidden, rolling the rename back if the index update fails.
 //!
+//! * **Names are the index's, identities are the files'.**  A photo's `.rlab`
+//!   records the uuid of each collection it is in, so
+//!   [`library::Library::rename_collection`] is one index row rather than a
+//!   rewrite of every member file.  Each file also carries the name it last
+//!   saw, used only when [`reconstruct::rebuild`] has to recreate a collection
+//!   the index no longer knows — losing the index therefore costs a name's
+//!   freshness, not the name.
+//!
 //! * **Multi-step operations are idempotent.**  Imports are keyed by content
 //!   hash and skip what is already there, so a cancelled or crashed import
 //!   resumes by simply being run again.  Session photo counts are recomputed
