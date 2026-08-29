@@ -24,6 +24,10 @@
 //!
 //! # Print image metadata and histogram
 //! rasterlab info photo.jpg
+//!
+//! # Maintain a library on a headless machine
+//! rasterlab library rebuild /srv/photos
+//! rasterlab library scrub /srv/photos
 //! ```
 
 mod commands;
@@ -54,6 +58,9 @@ enum Commands {
 
     /// Print metadata and channel histograms for an image.
     Info(commands::info::InfoArgs),
+
+    /// Maintain a managed photo library: rebuild its index, scrub its files.
+    Library(commands::library::LibraryArgs),
 }
 
 fn main() -> Result<()> {
@@ -68,5 +75,6 @@ fn main() -> Result<()> {
         Commands::Process(args) => commands::process::run(args),
         Commands::Batch(args) => commands::batch::run(args),
         Commands::Info(args) => commands::info::run(args),
+        Commands::Library(args) => commands::library::run(args),
     }
 }

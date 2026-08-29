@@ -81,6 +81,7 @@ libc            = "0.2"
 
 # CLI
 clap            = { version = "4", features = ["derive"] }
+ctrlc           = "3"
 
 # GUI
 eframe          = "0.34"

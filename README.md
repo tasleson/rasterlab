@@ -218,7 +218,7 @@ cargo test -p rasterlab-gpu -- --ignored
 
 ## Command-line interface
 
-The `rasterlab` CLI provides single-image processing, parallel directory batches, metadata/histogram inspection, and JSON pipeline save/load. Its direct operation flags currently cover crop, rotate, black and white, Airplane Window correction, and sharpen; loading a saved pipeline can apply a broader serialized edit stack.
+The `rasterlab` CLI provides single-image processing, parallel directory batches, metadata/histogram inspection, JSON pipeline save/load, and library maintenance. Its direct operation flags currently cover crop, rotate, black and white, Airplane Window correction, and sharpen; loading a saved pipeline can apply a broader serialized edit stack.
 
 ```sh
 # Show all commands and options
@@ -232,6 +232,34 @@ cargo run --release -p rasterlab-cli -- process photo.nef \
 cargo run --release -p rasterlab-cli -- info photo.jpg
 ```
 
+### Library maintenance
+
+The index rebuild and integrity scrub the GUI runs in the background are also
+CLI commands, so a library on a headless machine can be maintained over ssh or
+from cron rather than being mounted on a desktop first. Both take the library
+root and stop cleanly on Ctrl-C after the file they are on; a second Ctrl-C
+quits immediately, which is safe because every `.rlab` write is staged and
+renamed into place.
+
+On a terminal they show a spinner with the counts the GUI shows — files done
+of total, repaired, upgraded, errors, and an estimate of the time left — over
+the file currently being read. Redirected to a log or a cron mail that becomes
+one whole line every thirty seconds instead, and `--quiet` leaves only the
+final tally.
+
+```sh
+# Re-index the .rlab files on disk, recovering rows the index has lost
+rasterlab library rebuild /srv/photos
+
+# Verify every file and repair what its parity can recover
+rasterlab library scrub /srv/photos --quiet
+```
+
+Both exit non-zero if any file failed, so a scheduled scrub is worth running
+under a job that reports failures. Uncorrectable corruption is listed on stderr
+with the file that carries it; the damaged original of anything repaired is
+kept under `recovered/`.
+
 ## Architecture
 
 ```text
@@ -240,7 +268,7 @@ rasterlab-render/     Background rendering, preview scheduling, GPU/CPU routing
 rasterlab-gpu/        wgpu compute kernels for supported operations
 rasterlab-gui/        egui/eframe desktop application
 rasterlab-library/    Managed library, Stoolap index, import/export, integrity scrub
-rasterlab-cli/        Headless single-image, batch, and inspection commands
+rasterlab-cli/        Headless single-image, batch, inspection, and library maintenance
 rasterlab-plugin-api/ Stable C-ABI types for external operations
 plugins/              Example plugin
 ```
