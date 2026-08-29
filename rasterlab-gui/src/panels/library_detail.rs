@@ -200,6 +200,10 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
             }
         }
 
+        ui.separator();
+        ui.strong("Collections");
+        collections_ui(ui, state, id);
+
         // Virtual copies — only shown when there is more than one copy so the
         // user can control which one gets exported without opening the editor.
         let copy_state = state.library.selected_detail.as_ref().map(|detail| {
@@ -277,6 +281,24 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
             }
         }
     });
+}
+
+// ── Collections ───────────────────────────────────────────────────────────────
+
+/// The collections this photo belongs to.
+///
+/// Read-only: membership is changed from the grid's right-click menu, which
+/// can act on a whole selection rather than just the photo shown here.
+fn collections_ui(ui: &mut egui::Ui, state: &AppState, id: PhotoId) {
+    let names = state.library.collections_for(id);
+    if names.is_empty() {
+        ui.weak("Not in any collection")
+            .on_hover_text("Right-click the photo in the grid to add it to one");
+        return;
+    }
+    for name in names {
+        ui.label(name);
+    }
 }
 
 // ── EXIF table ────────────────────────────────────────────────────────────────

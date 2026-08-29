@@ -828,6 +828,24 @@ impl LibraryState {
         self.collection_members.get(&id).map_or(0, HashSet::len)
     }
 
+    /// Names of the collections a photo is in, in the sidebar's order.
+    ///
+    /// Read from the index rather than the photo's own `LMTA`, so that adding
+    /// a collection shows up while the photo stays selected: the detail
+    /// panel's copy of the file is loaded once per selection and knows nothing
+    /// of a change made from the grid afterwards.
+    pub fn collections_for(&self, photo: PhotoId) -> Vec<&str> {
+        self.collections
+            .iter()
+            .filter(|collection| {
+                self.collection_members
+                    .get(&collection.id)
+                    .is_some_and(|members| members.contains(&photo))
+            })
+            .map(|collection| collection.name.as_str())
+            .collect()
+    }
+
     /// How much of the current selection collection `id` already holds.
     pub fn selection_membership(&self, id: CollectionId) -> Membership {
         if self.selected.is_empty() {
@@ -1238,6 +1256,29 @@ mod tests {
             .create_collection("Landscapes", &[])
             .expect_err("no library is open");
         assert!(no_library.contains("No library"), "{no_library}");
+    }
+
+    /// The detail panel lists a photo's collections in the same order the
+    /// sidebar does, so the two read as one list rather than two.
+    #[test]
+    fn collections_for_a_photo_follow_the_sidebar_order() {
+        let mut state = LibraryState {
+            // `all_collections` returns them by name; the panel must not
+            // re-order them by id.
+            collections: vec![
+                collection(3, "Archive"),
+                collection(1, "Portfolio"),
+                collection(2, "Prints"),
+            ],
+            ..Default::default()
+        };
+        state.collection_members.insert(1, HashSet::from([10, 20]));
+        state.collection_members.insert(2, HashSet::from([20]));
+        state.collection_members.insert(3, HashSet::from([10]));
+
+        assert_eq!(state.collections_for(10), ["Archive", "Portfolio"]);
+        assert_eq!(state.collections_for(20), ["Portfolio", "Prints"]);
+        assert!(state.collections_for(30).is_empty());
     }
 
     #[test]
