@@ -600,7 +600,10 @@ impl Library {
             .get(rlab.active_copy_index)
             .map(|copy| copy.pipeline_state.clone())
             .context("rlab has no virtual copies")?;
-        let edited = pipeline_state.cursor > 0;
+        // Any copy having edits is what makes the photo an edited one, so
+        // selecting the untouched Copy 1 of a photo whose second copy is
+        // edited must not take it out of the edited-only filter.
+        let edited = rlab.has_edits();
         let source = Arc::new(source);
         let mut pipeline = EditPipeline::new_virtual_copy(Arc::clone(&source));
         pipeline

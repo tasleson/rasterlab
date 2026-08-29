@@ -1815,6 +1815,36 @@ fn an_imported_project_with_edits_is_indexed_as_edited() {
     assert_eq!(edited_hashes(&lib), vec![photos[0].hash.clone()]);
 }
 
+/// A photo is edited when *any* of its virtual copies is, so selecting the
+/// untouched Copy 1 must not take it out of the filter.
+#[test]
+fn selecting_an_unedited_copy_keeps_the_photo_edited() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+
+    let project_path = lib.rlab_path(&photo.hash);
+    let mut project = rasterlab_core::project::RlabFile::read(&project_path).unwrap();
+    let mut edited_copy = project.copies[0].clone();
+    edited_copy.name = "Copy 2".into();
+    edited_copy.pipeline_state = edited_pipeline_state(&jpeg_path());
+    project.copies.push(edited_copy);
+    project.write_v5(&project_path).unwrap();
+    lib.set_active_copy_and_regenerate_thumbnail(&photo.hash, 1)
+        .unwrap();
+    assert_eq!(edited_hashes(&lib), vec![photo.hash.clone()]);
+
+    lib.set_active_copy_and_regenerate_thumbnail(&photo.hash, 0)
+        .unwrap();
+
+    assert_eq!(
+        edited_hashes(&lib),
+        vec![photo.hash],
+        "going back to the untouched copy dropped the photo's edits"
+    );
+}
+
 /// Hashes the edited-only filter returns, scoped to the photos' own import
 /// session the way the library sidebar scopes it.
 fn edited_hashes(lib: &Library) -> Vec<String> {
