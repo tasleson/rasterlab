@@ -197,6 +197,15 @@ pub trait LibraryDb: Send + Sync {
 
     fn all_collections(&self) -> anyhow::Result<Vec<CollectionRow>>;
 
+    /// Every `(collection, photo)` pair, for callers that need membership for
+    /// many photos at once rather than one collection's photos at a time.
+    ///
+    /// Soft-deleted photos are left out: they keep their membership rows so a
+    /// restore puts them back in their collections, but until then they are not
+    /// in the library and must not be counted or shown as members.
+    fn collection_memberships(&self) -> anyhow::Result<Vec<(CollectionId, PhotoId)>>;
+
+    /// Add photos to a collection, ignoring any that are already members.
     fn add_to_collection(
         &self,
         collection_id: CollectionId,

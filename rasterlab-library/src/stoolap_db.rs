@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use rasterlab_core::library_meta::LibraryMeta;
@@ -707,13 +707,49 @@ impl LibraryDb for StoolapDb {
         Ok(result)
     }
 
+    fn collection_memberships(&self) -> Result<Vec<(CollectionId, PhotoId)>> {
+        let rows = self.db.query(
+            "SELECT cp.collection_id, cp.photo_id, p.deleted_at
+             FROM collection_photos cp JOIN photos p ON p.id = cp.photo_id",
+            (),
+        )?;
+        let mut result = Vec::new();
+        for row in rows {
+            let row = row.context("collection_memberships row")?;
+            if row.get::<i64>(2).context("deleted_at")? != 0 {
+                continue;
+            }
+            result.push((
+                row.get::<i64>(0).context("collection_id")?,
+                row.get::<i64>(1).context("photo_id")?,
+            ));
+        }
+        Ok(result)
+    }
+
     fn add_to_collection(&self, collection_id: CollectionId, photo_ids: &[PhotoId]) -> Result<()> {
         let now = unix_now() as i64;
         self.in_transaction(|tx| {
+            // `collection_photos` has no key to conflict on, so re-adding a
+            // photo would insert a second membership row and the collection
+            // would list it twice.  Skipping the photos already there is what
+            // makes adding a selection that partly overlaps the collection —
+            // the common case — do the obvious thing.
+            let mut existing = HashSet::new();
+            let rows = tx.query(
+                "SELECT photo_id FROM collection_photos WHERE collection_id = $1",
+                (collection_id,),
+            )?;
+            for row in rows {
+                existing.insert(row.context("collection member row")?.get::<i64>(0)?);
+            }
             for &pid in photo_ids {
+                if !existing.insert(pid) {
+                    continue;
+                }
                 tx.execute(
                     "INSERT INTO collection_photos
-                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3)",
                     (collection_id, pid, now),
                 )?;
             }
@@ -1123,5 +1159,55 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(ids, ["full"]);
+    }
+    /// `collection_photos` joins on the membership rows, so a second add would
+    /// otherwise show the photo twice in the collection it is already in.
+    #[test]
+    fn re_adding_a_photo_leaves_one_membership_row() {
+        let db = db();
+        let a = db
+            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .unwrap();
+        let b = db
+            .insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
+            .unwrap();
+        let coll = db.create_collection("Favorites", 1_600_000_000).unwrap();
+
+        db.add_to_collection(coll, &[a]).unwrap();
+        // The overlapping case: `a` is already in, `b` is not.
+        db.add_to_collection(coll, &[a, b]).unwrap();
+
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM collection_photos"), 2);
+        assert_eq!(db.collection_photos(coll).unwrap().len(), 2);
+    }
+
+    /// A soft-deleted photo keeps its membership row so restoring puts it back
+    /// in the collection, but while it is in Recently Deleted it is not one of
+    /// the collection's photos.
+    #[test]
+    fn collection_memberships_skip_deleted_photos() {
+        let db = db();
+        let a = db
+            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .unwrap();
+        let b = db
+            .insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
+            .unwrap();
+        let favorites = db.create_collection("Favorites", 1_600_000_000).unwrap();
+        let portfolio = db.create_collection("Portfolio", 1_600_000_000).unwrap();
+        db.add_to_collection(favorites, &[a, b]).unwrap();
+        db.add_to_collection(portfolio, &[a]).unwrap();
+
+        let mut pairs = db.collection_memberships().unwrap();
+        pairs.sort_unstable();
+        assert_eq!(pairs, [(favorites, a), (favorites, b), (portfolio, a)]);
+
+        db.mark_photo_deleted(b, 1_700_000_000).unwrap();
+        let mut pairs = db.collection_memberships().unwrap();
+        pairs.sort_unstable();
+        assert_eq!(pairs, [(favorites, a), (portfolio, a)]);
+
+        db.restore_photo(b).unwrap();
+        assert_eq!(db.collection_memberships().unwrap().len(), 3);
     }
 }

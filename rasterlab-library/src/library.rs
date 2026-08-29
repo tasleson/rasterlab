@@ -430,10 +430,22 @@ impl Library {
         self.db.all_collections()
     }
 
+    /// Every `(collection, photo)` pair in the library, in one query.
+    ///
+    /// The grid needs to know which collections a whole selection is already
+    /// in; asking per collection would be a joined query each time the sidebar
+    /// refreshes.
+    pub fn collection_memberships(&self) -> Result<Vec<(CollectionId, PhotoId)>> {
+        self.db.collection_memberships()
+    }
+
     /// Add photos to a collection, recording membership in each `.rlab` before
     /// the index.  Only the photos whose file was actually rewritten are added
     /// to the index, so the two never disagree about a photo; the rest are
     /// reported as an error and simply stay out of the collection.
+    ///
+    /// Photos already in the collection are left alone, so adding a selection
+    /// that partly overlaps it adds only what is missing.
     pub fn add_to_collection(
         &self,
         collection_id: CollectionId,
