@@ -5,7 +5,7 @@ use rasterlab_library::{
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
 use crate::state::library_state::thumb_target_side;
-use crate::state::{AppState, LibraryView};
+use crate::state::{AppState, CollectionPrompt, LibraryView, Membership, NewCollection};
 
 /// Scroll-margin multiple for the resident texture cap: keep roughly this many
 /// screens of thumbnails so scrolling in either direction rarely hits a cold
@@ -34,8 +34,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // Scrub-errors detail window
     scrub_errors_dialog(ui.ctx(), state);
 
+    // New-collection / delete-collection windows
+    collection_dialogs(ui.ctx(), state);
+
     // Toolbar (import button, sort, scale slider)
     toolbar_ui(ui, state);
+    error_banner_ui(ui, state);
     ui.separator();
 
     // Main body: sidebar + grid
@@ -218,6 +222,29 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.label(format!("Loading thumbs… {}/{}", cached, cached + loading));
             }
         }
+    });
+}
+
+// ── Error banner ──────────────────────────────────────────────────────────────
+
+/// The last failed library action, shown until dismissed.
+///
+/// Given its own row rather than a slot in the toolbar because these messages
+/// carry the reason a write failed, which is worth the width. Most of what
+/// raises one — a collection change, protect, delete — has no other way to say
+/// it did not happen.
+fn error_banner_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(error) = state.library.last_error.clone() else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
+            state.library.last_error = None;
+        }
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 140, 140),
+            format!("⚠ {}", error),
+        );
     });
 }
 
@@ -443,6 +470,155 @@ pub(crate) fn scrub_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
+// ── Collection dialogs ────────────────────────────────────────────────────────
+
+fn collection_dialogs(ctx: &egui::Context, state: &mut AppState) {
+    match state.library.collection_prompt {
+        Some(CollectionPrompt::New(_)) => new_collection_dialog(ctx, state),
+        Some(CollectionPrompt::Delete { .. }) => delete_collection_dialog(ctx, state),
+        None => {}
+    }
+}
+
+fn new_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(CollectionPrompt::New(prompt)) = &state.library.collection_prompt else {
+        return;
+    };
+    let photo_count = prompt.photos.len();
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        state.library.collection_prompt = None;
+        return;
+    }
+
+    let mut create = false;
+    let mut cancel = false;
+    let mut open = true;
+    egui::Window::new("New Collection")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            // Borrow the prompt only for the text field, so the buttons below
+            // are free to touch the rest of the state.
+            let (response, error) = {
+                let Some(CollectionPrompt::New(prompt)) = &mut state.library.collection_prompt
+                else {
+                    return;
+                };
+                let response = ui
+                    .add(egui::TextEdit::singleline(&mut prompt.name).hint_text("Collection name"));
+                if !prompt.focused {
+                    prompt.focused = true;
+                    response.request_focus();
+                }
+                (response, prompt.error.clone())
+            };
+
+            if photo_count > 0 {
+                let noun = if photo_count == 1 { "photo" } else { "photos" };
+                ui.weak(format!("{photo_count} selected {noun} will be added."));
+            }
+            if let Some(error) = error {
+                ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
+            }
+
+            let pressed_enter =
+                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Create").clicked() || pressed_enter {
+                    create = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if create {
+        let Some(CollectionPrompt::New(prompt)) = state.library.collection_prompt.take() else {
+            return;
+        };
+        // A rejected name puts the dialog back with what was typed still in
+        // it — retyping the name to fix one character would be a poor trade —
+        // and with the cursor back in the field, which is where the fix has to
+        // be made.
+        if let Err(error) = state
+            .library
+            .create_collection(&prompt.name, &prompt.photos)
+        {
+            state.library.collection_prompt = Some(CollectionPrompt::New(NewCollection {
+                error: Some(error),
+                focused: false,
+                ..prompt
+            }));
+        }
+    } else if cancel || !open {
+        state.library.collection_prompt = None;
+    }
+}
+
+fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(CollectionPrompt::Delete { id, name }) = &state.library.collection_prompt else {
+        return;
+    };
+    let (id, name) = (*id, name.clone());
+    let photo_count = state.library.collection_len(id);
+
+    let (enter, esc) = ctx.input_mut(|i| {
+        (
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+        )
+    });
+    if esc {
+        state.library.collection_prompt = None;
+        return;
+    }
+    if enter {
+        state.library.collection_prompt = None;
+        state.library.delete_collection(id);
+        return;
+    }
+
+    let mut delete = false;
+    let mut cancel = false;
+    let mut open = true;
+    egui::Window::new(format!("Delete the collection “{name}”?"))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            if photo_count == 0 {
+                ui.label("The collection is empty.");
+            } else {
+                let noun = if photo_count == 1 { "photo" } else { "photos" };
+                ui.label(format!(
+                    "Its {photo_count} {noun} stay in the library — only the collection goes."
+                ));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Delete Collection").clicked() {
+                    delete = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if delete {
+        state.library.collection_prompt = None;
+        state.library.delete_collection(id);
+    } else if cancel || !open {
+        state.library.collection_prompt = None;
+    }
+}
+
 fn sort_label(s: SortOrder) -> &'static str {
     match s {
         SortOrder::ImportDateDesc => "Import date (newest)",
@@ -499,16 +675,21 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         ui.strong("Import Sessions");
         sessions_tree_ui(ui, state, &sessions);
 
-        // Collections
+        // Collections — user-made groupings, filled from the grid's right-click
+        // menu. Membership is per photo, so a photo can be in several.
         ui.add_space(4.0);
-        ui.strong("Collections");
-        let collections = state.library.collections.clone();
-        for coll in &collections {
-            let selected = state.library.view == LibraryView::Collection(coll.id);
-            if ui.selectable_label(selected, &coll.name).clicked() {
-                select_view(state, LibraryView::Collection(coll.id));
+        ui.horizontal(|ui| {
+            ui.strong("Collections");
+            if ui
+                .small_button("➕")
+                .on_hover_text("Create an empty collection")
+                .clicked()
+            {
+                state.library.collection_prompt =
+                    Some(CollectionPrompt::New(NewCollection::default()));
             }
-        }
+        });
+        collections_ui(ui, state);
 
         ui.add_space(8.0);
         ui.separator();
@@ -714,6 +895,34 @@ fn select_view(state: &mut AppState, view: LibraryView) {
     state.library.aperture_error = None;
     state.library.shutter_error = None;
     state.library.refresh();
+}
+
+// ── Collections ───────────────────────────────────────────────────────────────
+
+fn collections_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    if state.library.collections.is_empty() {
+        ui.weak("No collections yet")
+            .on_hover_text("Right-click photos in the grid to put them in one");
+        return;
+    }
+
+    for coll in state.library.collections.clone() {
+        let selected = state.library.view == LibraryView::Collection(coll.id);
+        let label = format!("{}  ({})", coll.name, state.library.collection_len(coll.id));
+        let response = ui.selectable_label(selected, label);
+        if response.clicked() {
+            select_view(state, LibraryView::Collection(coll.id));
+        }
+        response.context_menu(|ui| {
+            if ui.button("Delete Collection…").clicked() {
+                state.library.collection_prompt = Some(CollectionPrompt::Delete {
+                    id: coll.id,
+                    name: coll.name.clone(),
+                });
+                ui.close();
+            }
+        });
+    }
 }
 
 // ── Recent imports ────────────────────────────────────────────────────────────
@@ -970,6 +1179,7 @@ fn keyboard_nav(ui: &mut egui::Ui, state: &mut AppState, cols: usize) {
         || state.library.confirm_delete
         || state.library.confirm_permanent_delete
         || state.library.confirm_empty_recently_deleted
+        || state.library.collection_prompt.is_some()
         || state.library.results.is_empty()
     {
         return;
@@ -1293,6 +1503,9 @@ fn thumb_cell(
         }
         ui.separator();
 
+        collections_menu(ui, state, n);
+        ui.separator();
+
         // Protect / Unprotect toggle for the whole selection.
         let all_protected = state.library.all_selected_protected();
         let protect_label = if all_protected {
@@ -1312,6 +1525,51 @@ fn thumb_cell(
         };
         if ui.button(label).clicked() {
             state.library.confirm_delete = true;
+            ui.close();
+        }
+    });
+}
+
+/// The grid context menu's Collections submenu.
+///
+/// One row per collection, marked with how much of the selection it already
+/// holds, and clicking a row moves the selection the way that mark implies: a
+/// collection holding all of it lets the selection out, any other takes in the
+/// photos it is missing. One list rather than separate add and remove menus,
+/// because with the marks in front of the names it is also the answer to
+/// "which collections is this photo in?".
+fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
+    ui.menu_button("Collections", |ui| {
+        for coll in state.library.collections.clone() {
+            let membership = state.library.selection_membership(coll.id);
+            let (mark, hover) = match membership {
+                Membership::All if selection == 1 => ("✔", "Remove this photo".to_owned()),
+                Membership::All => ("✔", format!("Remove these {selection} photos")),
+                Membership::Partial => ("–", "Add the rest of the selection".to_owned()),
+                Membership::None if selection == 1 => (" ", "Add this photo".to_owned()),
+                Membership::None => (" ", format!("Add these {selection} photos")),
+            };
+            if ui
+                .button(format!("{mark}  {}", coll.name))
+                .on_hover_text(hover)
+                .clicked()
+            {
+                if membership == Membership::All {
+                    state.library.remove_selected_from_collection(coll.id);
+                } else {
+                    state.library.add_selected_to_collection(coll.id);
+                }
+                ui.close();
+            }
+        }
+
+        if !state.library.collections.is_empty() {
+            ui.separator();
+        }
+        if ui.button("New Collection…").clicked() {
+            let photos = state.library.selected.clone();
+            state.library.collection_prompt =
+                Some(CollectionPrompt::New(NewCollection::for_photos(photos)));
             ui.close();
         }
     });

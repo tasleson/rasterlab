@@ -23,6 +23,56 @@ pub enum LibraryView {
     Collection(CollectionId),
 }
 
+// ── Collections ───────────────────────────────────────────────────────────────
+
+/// How much of the grid selection a collection already holds.
+///
+/// Drives the mark shown beside each collection in the grid's Collections
+/// menu, and what clicking it does: a collection that holds the whole
+/// selection removes it, anything else takes the photos it is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Membership {
+    /// No selected photo is in the collection — an empty selection included.
+    None,
+    /// Some of the selection is in it, some is not.
+    Partial,
+    /// Every selected photo is in it.
+    All,
+}
+
+/// The collection dialog currently on screen, if any.
+pub enum CollectionPrompt {
+    /// Naming a new collection.
+    New(NewCollection),
+    /// Confirming that a collection should go.
+    Delete { id: CollectionId, name: String },
+}
+
+/// In-progress "New Collection" dialog.
+#[derive(Default)]
+pub struct NewCollection {
+    pub name: String,
+    /// Photos to put in the collection once it exists. Captured when the
+    /// dialog opens, so a click in the grid's Collections menu still lands on
+    /// the photos the user right-clicked even if the selection moves on.
+    pub photos: Vec<PhotoId>,
+    /// Why the name was rejected. The dialog stays open showing this rather
+    /// than closing and making the user type the name again.
+    pub error: Option<String>,
+    /// Set once the name field has been given keyboard focus, so it is claimed
+    /// on the first frame only and the user can then tab away from it.
+    pub focused: bool,
+}
+
+impl NewCollection {
+    pub fn for_photos(photos: Vec<PhotoId>) -> Self {
+        Self {
+            photos,
+            ..Default::default()
+        }
+    }
+}
+
 // ── FocusStackRequest ─────────────────────────────────────────────────────────
 
 /// A focus stack started from a multi-selection in the library grid.
@@ -117,6 +167,14 @@ pub struct LibraryState {
     // Sidebar state
     pub sessions: Vec<ImportSessionRow>,
     pub collections: Vec<CollectionRow>,
+
+    /// Which photos are in each collection, refreshed alongside `collections`.
+    /// Held rather than queried on demand because the grid asks about the
+    /// current selection for every collection, every frame a menu is open.
+    pub collection_members: HashMap<CollectionId, HashSet<PhotoId>>,
+
+    /// The open collection dialog (new / delete confirmation), if any.
+    pub collection_prompt: Option<CollectionPrompt>,
     pub all_photo_count: usize,
     pub recently_deleted_count: usize,
 
@@ -218,6 +276,8 @@ impl Default for LibraryState {
             thumbs: ThumbCache::new(THUMB_CACHE_CAP),
             sessions: Vec::new(),
             collections: Vec::new(),
+            collection_members: HashMap::new(),
+            collection_prompt: None,
             all_photo_count: 0,
             recently_deleted_count: 0,
             last_error: None,
@@ -554,6 +614,13 @@ impl LibraryState {
         // Refresh sidebar lists
         self.sessions = lib.all_sessions().unwrap_or_default();
         self.collections = lib.all_collections().unwrap_or_default();
+        self.collection_members.clear();
+        for (collection, photo) in lib.collection_memberships().unwrap_or_default() {
+            self.collection_members
+                .entry(collection)
+                .or_default()
+                .insert(photo);
+        }
         self.all_photo_count = self
             .sessions
             .iter()
@@ -752,6 +819,118 @@ impl LibraryState {
             base_hash,
             frame_paths: frames.into_iter().map(|(_, path)| path).collect(),
         });
+    }
+
+    // ── Collections ───────────────────────────────────────────────────────
+
+    /// How many photos are in a collection.
+    pub fn collection_len(&self, id: CollectionId) -> usize {
+        self.collection_members.get(&id).map_or(0, HashSet::len)
+    }
+
+    /// How much of the current selection collection `id` already holds.
+    pub fn selection_membership(&self, id: CollectionId) -> Membership {
+        if self.selected.is_empty() {
+            return Membership::None;
+        }
+        let empty = HashSet::new();
+        let members = self.collection_members.get(&id).unwrap_or(&empty);
+        let in_collection = self
+            .selected
+            .iter()
+            .filter(|photo| members.contains(photo))
+            .count();
+        match in_collection {
+            0 => Membership::None,
+            n if n == self.selected.len() => Membership::All,
+            _ => Membership::Partial,
+        }
+    }
+
+    /// Create a collection and put `photos` in it.
+    ///
+    /// The message in `Err` belongs in the dialog next to the name field: it
+    /// says the name cannot be used, and the dialog stays open so the user can
+    /// change it. Failures past that point are the library's rather than the
+    /// name's, and are reported through `last_error` like every other one.
+    pub fn create_collection(&mut self, name: &str, photos: &[PhotoId]) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Enter a name for the collection.".to_owned());
+        }
+        // The index rejects an exact duplicate itself; catching it here — and
+        // case-insensitively — turns a raw SQL error into an answer, and keeps
+        // "Portfolio" and "portfolio" from sitting next to each other in the
+        // sidebar looking like the same thing.
+        if self
+            .collections
+            .iter()
+            .any(|existing| existing.name.eq_ignore_ascii_case(name))
+        {
+            return Err(format!("A collection named “{name}” already exists."));
+        }
+        let Some(lib) = self.library.clone() else {
+            return Err("No library is open.".to_owned());
+        };
+
+        let collection = lib
+            .create_collection(name)
+            .map_err(|e| format!("Could not create the collection: {e}"))?;
+        if !photos.is_empty()
+            && let Err(e) = lib.add_to_collection(collection.id, photos)
+        {
+            self.last_error = Some(format!("Add to collection failed: {e}"));
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// Delete a collection. The photos that were in it are left alone.
+    pub fn delete_collection(&mut self, id: CollectionId) {
+        let Some(lib) = self.library.clone() else {
+            return;
+        };
+        if let Err(e) = lib.delete_collection(id) {
+            self.last_error = Some(format!("Delete collection failed: {e}"));
+            return;
+        }
+        // The grid cannot stay pointed at a collection that is gone.
+        if self.view == LibraryView::Collection(id) {
+            self.view = LibraryView::AllPhotos;
+            self.select_none();
+        }
+        self.refresh();
+    }
+
+    /// Add every selected photo to a collection; the ones already in it stay
+    /// as they are.
+    pub fn add_selected_to_collection(&mut self, id: CollectionId) {
+        self.change_collection_membership(id, true);
+    }
+
+    /// Take every selected photo out of a collection.
+    pub fn remove_selected_from_collection(&mut self, id: CollectionId) {
+        self.change_collection_membership(id, false);
+    }
+
+    fn change_collection_membership(&mut self, id: CollectionId, member: bool) {
+        let Some(lib) = self.library.clone() else {
+            return;
+        };
+        let photos = self.selected.clone();
+        if photos.is_empty() {
+            return;
+        }
+        let result = if member {
+            lib.add_to_collection(id, &photos)
+        } else {
+            lib.remove_from_collection(id, &photos)
+        };
+        if let Err(e) = result {
+            let what = if member { "Add to" } else { "Remove from" };
+            self.last_error = Some(format!("{what} collection failed: {e}"));
+        }
+        self.refresh();
     }
 
     /// True if every selected photo is currently protected (and there is at
@@ -999,6 +1178,66 @@ mod tests {
 
         assert!(selected_frames(&results, &[], root).is_empty());
         assert_eq!(selected_frames(&results, &[2], root).len(), 1);
+    }
+
+    fn collection(id: CollectionId, name: &str) -> CollectionRow {
+        CollectionRow {
+            id,
+            name: name.to_owned(),
+            created_at: 0,
+        }
+    }
+
+    /// The mark beside each collection in the grid menu, and what clicking it
+    /// does, both come from this: a selection the collection holds entirely is
+    /// taken out, anything less is added.
+    #[test]
+    fn selection_membership_measures_the_whole_selection() {
+        let mut state = LibraryState::default();
+        state.collection_members.insert(1, HashSet::from([10, 20]));
+
+        assert_eq!(state.collection_len(1), 2);
+        assert_eq!(state.collection_len(2), 0, "unknown collection is empty");
+
+        // Nothing selected is nothing to add or remove.
+        assert_eq!(state.selection_membership(1), Membership::None);
+
+        state.selected = vec![10, 20];
+        assert_eq!(state.selection_membership(1), Membership::All);
+
+        state.selected = vec![10, 30];
+        assert_eq!(state.selection_membership(1), Membership::Partial);
+
+        state.selected = vec![30];
+        assert_eq!(state.selection_membership(1), Membership::None);
+        assert_eq!(
+            state.selection_membership(2),
+            Membership::None,
+            "a collection with no members holds no selection"
+        );
+    }
+
+    /// Both name rules are checked before the library is touched, so the
+    /// dialog can say what is wrong with the name rather than reporting
+    /// whatever the index made of it.
+    #[test]
+    fn a_new_collection_needs_a_name_that_is_not_already_taken() {
+        let mut state = LibraryState {
+            collections: vec![collection(1, "Portfolio")],
+            ..Default::default()
+        };
+
+        assert!(state.create_collection("   ", &[]).is_err());
+        let taken = state
+            .create_collection("portfolio", &[])
+            .expect_err("a name differing only in case is the same name");
+        assert!(taken.contains("already exists"), "{taken}");
+
+        // A usable name gets past both rules and only then wants a library.
+        let no_library = state
+            .create_collection("Landscapes", &[])
+            .expect_err("no library is open");
+        assert!(no_library.contains("No library"), "{no_library}");
     }
 
     #[test]
