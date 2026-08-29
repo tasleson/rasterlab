@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, atomic::AtomicBool},
 };
 
 use rasterlab_library::{
@@ -697,7 +697,8 @@ fn protection_survives_rebuild_index() {
     let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
     lib.set_protected(row.id, true).unwrap();
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
     let row = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
     assert!(
         row.protected,
@@ -733,7 +734,8 @@ fn rebuild_index_restores_rows_after_db_delete() {
     // Before rebuild the DB is empty
     assert_eq!(lib2.all_photos(SortOrder::default()).unwrap().len(), 0);
 
-    lib2.rebuild_index(|_| {}).expect("rebuild_index");
+    lib2.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
     let photos = lib2.all_photos(SortOrder::default()).unwrap();
     assert_eq!(photos.len(), 2, "should have 2 photos after rebuild");
 }
@@ -749,7 +751,8 @@ fn rebuild_index_restores_session_counts_and_names() {
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].photo_count, 2);
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     let after = lib.all_sessions().unwrap();
     assert_eq!(after.len(), 1, "session row should survive a rebuild");
@@ -789,7 +792,8 @@ fn rebuild_index_drops_rows_whose_file_is_gone() {
     let doomed = photos[0].clone();
     std::fs::remove_file(lib.rlab_path(&doomed.hash)).unwrap();
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     let after = lib.all_photos(SortOrder::default()).unwrap();
     assert_eq!(
@@ -805,6 +809,72 @@ fn rebuild_index_drops_rows_whose_file_is_gone() {
     );
 }
 
+/// A rebuild the user stops has walked only part of the library, so the rows it
+/// never reached are not evidence of missing files.  Pruning them would delete
+/// photos that are still on disk.
+#[test]
+fn cancelled_rebuild_keeps_rows_it_never_reached() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 2);
+
+    // Cancelled before the first file, so nothing is re-indexed at all — the
+    // worst case for a pass that decides what to drop from what it saw.
+    let outcome = lib
+        .rebuild_index(Arc::new(AtomicBool::new(true)), |_| {})
+        .expect("rebuild_index");
+
+    assert!(outcome.cancelled, "the outcome should report the stop");
+    assert_eq!(outcome.done, 0, "no file should have been re-indexed");
+    assert_eq!(outcome.total, 2, "the walk still counted both files");
+    assert_eq!(
+        lib.all_photos(SortOrder::default()).unwrap().len(),
+        2,
+        "a stopped rebuild must not drop rows it never looked at"
+    );
+}
+
+/// Membership lives in a join table keyed by photo id, and re-indexing replaces
+/// the row (and its id).  A stop between the walk and the restore pass would
+/// therefore empty the collection, so the restore has to run either way.
+#[test]
+fn cancelled_rebuild_keeps_collection_membership() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let ids: Vec<_> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    let collection = lib.create_collection("Trip").unwrap();
+    lib.add_to_collection(collection.id, &ids).unwrap();
+
+    // Stop the walk once it is under way, so it re-indexes the first file and
+    // never reaches the second.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let outcome = lib
+        .rebuild_index(cancel.clone(), |_| {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        })
+        .expect("rebuild_index");
+
+    assert!(outcome.cancelled, "the outcome should report the stop");
+    assert_eq!(outcome.done, 1, "one file re-indexed before the stop");
+    let members = lib.collection_photos(collection.id).unwrap();
+    assert_eq!(
+        members.len(),
+        2,
+        "a stopped rebuild must not strip the collections it re-indexed"
+    );
+}
+
 /// An empty `files/` is far more often an unmounted volume than a library the
 /// user emptied, so a rebuild that finds nothing must not wipe the index.
 #[test]
@@ -817,7 +887,8 @@ fn rebuild_index_does_not_prune_when_it_finds_no_files() {
     std::fs::remove_dir_all(tmp.path().join("files")).unwrap();
     std::fs::create_dir_all(tmp.path().join("files")).unwrap();
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     assert_eq!(
         lib.all_photos(SortOrder::default()).unwrap().len(),
@@ -837,7 +908,8 @@ fn rebuild_index_keeps_a_renamed_session() {
     let session = lib.all_sessions().unwrap()[0].clone();
     lib.rename_session(&session.id, "Kate's wedding").unwrap();
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     let after = lib.all_sessions().unwrap();
     assert_eq!(after.len(), 1);
@@ -889,7 +961,8 @@ fn collection_membership_survives_a_rebuild() {
     let coll = lib.create_collection("Portfolio").unwrap();
     lib.add_to_collection(coll.id, &[photos[0].id]).unwrap();
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     let coll = lib
         .all_collections()
@@ -915,7 +988,8 @@ fn a_rebuild_keeps_the_renamed_collection_name() {
     lib.add_to_collection(coll.id, &[photo.id]).unwrap();
     lib.rename_collection(coll.id, "Best Of").unwrap();
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     let collections = lib.all_collections().unwrap();
     assert_eq!(
@@ -963,7 +1037,8 @@ fn a_lost_index_rebuilds_collections_from_the_newest_hint() {
     let lib = open_library(tmp.path());
     assert!(lib.all_collections().unwrap().is_empty());
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     let collections = lib.all_collections().unwrap();
     assert_eq!(collections.len(), 1, "one id is one collection");
@@ -1058,7 +1133,8 @@ fn a_deleted_collection_does_not_return_with_a_rebuild() {
         "the photo still claims to be in the deleted collection"
     );
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
     assert!(
         lib.all_collections().unwrap().is_empty(),
         "a deleted collection came back from the files"
@@ -1084,7 +1160,8 @@ fn pre_uuid_files_still_rebuild_into_named_collections() {
     rlab.set_lmta(Some(lmta));
     rlab.write_v5(&path).unwrap();
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     let collections = lib.all_collections().unwrap();
     assert_eq!(collections.len(), 1);
@@ -1770,7 +1847,8 @@ fn the_edited_flag_survives_a_rebuild() {
     give_the_photo_an_edit(&lib, &edited.hash, &jpeg_path());
     assert!(edited_hashes(&lib) == vec![edited.hash.clone()]);
 
-    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
 
     assert_eq!(
         edited_hashes(&lib),

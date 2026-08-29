@@ -21,7 +21,7 @@ use crate::{
         RecentlyDeletedRow, SortOrder,
     },
     import::{self, ImportSession},
-    reconstruct::{self, RebuildProgress},
+    reconstruct::{self, RebuildOutcome, RebuildProgress},
     search::SearchFilter,
     stoolap_db::StoolapDb,
     thumbnail::{generate_thumbnail, write_thumbnail},
@@ -532,8 +532,21 @@ impl Library {
 
     // ── Maintenance ───────────────────────────────────────────────────────
 
-    pub fn rebuild_index(&self, progress_cb: impl Fn(RebuildProgress)) -> Result<()> {
-        reconstruct::rebuild(&self.root, self.db.as_ref(), &self.registry, &progress_cb)
+    /// Bring the index back in line with the `.rlab` files on disk. `cancel` is
+    /// polled between files so a rebuild over a large library can be stopped;
+    /// [`reconstruct::rebuild`] documents what a stopped run leaves behind.
+    pub fn rebuild_index(
+        &self,
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(RebuildProgress),
+    ) -> Result<RebuildOutcome> {
+        reconstruct::rebuild(
+            &self.root,
+            self.db.as_ref(),
+            &self.registry,
+            cancel,
+            &progress_cb,
+        )
     }
 
     /// Re-render the pipeline for `hash` at 512px and write the new thumbnail.

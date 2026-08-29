@@ -1,6 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use anyhow::Result;
@@ -20,6 +24,18 @@ pub struct RebuildProgress {
     pub done: usize,
     pub current: std::path::PathBuf,
     pub errors: Vec<(std::path::PathBuf, String)>,
+}
+
+/// Final tally returned once a rebuild finishes (or is cancelled).
+#[derive(Debug, Clone, Default)]
+pub struct RebuildOutcome {
+    /// `.rlab` files the walk found.
+    pub total: usize,
+    /// Files re-indexed before the walk ended.
+    pub done: usize,
+    /// Per-file failures: `(path, message)`.
+    pub errors: Vec<(std::path::PathBuf, String)>,
+    pub cancelled: bool,
 }
 
 /// Per-session aggregates gathered while re-indexing photos, used afterwards to
@@ -87,15 +103,22 @@ struct CollectionsFromFiles {
 ///   actually found photos.  An empty `files/` directory is far more often an
 ///   unmounted volume than a library the user emptied, and wiping the index
 ///   over a mount failure is not recoverable from.
+///
+/// `cancel` is polled before each file so a rebuild over a large or slow
+/// library can be stopped.  A cancelled run keeps the rows it refreshed and
+/// leaves the rest of the reconciliation to the next full pass; see the
+/// pruning and restore steps below for why one of them is skipped and the
+/// others are not.
 pub fn rebuild(
     library_root: &Path,
     db: &dyn LibraryDb,
     registry: &FormatRegistry,
+    cancel: Arc<AtomicBool>,
     progress_cb: &dyn Fn(RebuildProgress),
-) -> Result<()> {
+) -> Result<RebuildOutcome> {
     let files_dir = library_root.join("files");
     if !files_dir.exists() {
-        return Ok(());
+        return Ok(RebuildOutcome::default());
     }
 
     // Collect all .rlab paths first so we can report total
@@ -112,7 +135,14 @@ pub fn rebuild(
     let mut collections = CollectionsFromFiles::default();
     let mut indexed: HashSet<String> = HashSet::with_capacity(total);
 
+    let mut cancelled = false;
+    let mut done = 0usize;
+
     for (i, rlab_file_path) in rlab_paths.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
         progress_cb(RebuildProgress {
             total,
             done: i,
@@ -134,13 +164,19 @@ pub fn rebuild(
             Ok(None) => {}
             Err(e) => errors.push((rlab_file_path.clone(), e.to_string())),
         }
+        done = i + 1;
     }
 
     // Drop rows whose file is no longer there — a photo deleted outside the
     // app, or a delete that stopped after removing the file. A file that
     // failed to re-index is not evidence that it is gone, so anything that
     // errored above keeps its row.
-    if !indexed.is_empty() {
+    //
+    // A cancelled walk never reached most of the library, so a row missing
+    // from `indexed` says nothing about whether its file exists.  Pruning on
+    // that evidence would delete photos that are still on disk, which is the
+    // one thing this pass must never do.
+    if !cancelled && !indexed.is_empty() {
         let unreadable: HashSet<&Path> = errors.iter().map(|(p, _)| p.as_path()).collect();
         for row in db.all_photos(SortOrder::default())? {
             if indexed.contains(&row.hash) {
@@ -153,6 +189,13 @@ pub fn rebuild(
         }
     }
 
+    // Restore the session and collection rows.  These run even for a cancelled
+    // walk: `reindex_one` replaces a photo's row rather than updating it, and
+    // the new row joins no collections, so stopping before the restore would
+    // silently strip collection membership from every photo this run touched.
+    // Both passes only add what the files they read described, so a partial
+    // walk restores part of it and the next run finishes the job.
+    //
     // Restore the session rows now that every photo's session membership and
     // import date are known.  `insert_session` is a no-op for a session that
     // still exists, which is what preserves a user's rename; the count comes
@@ -173,11 +216,16 @@ pub fn rebuild(
 
     progress_cb(RebuildProgress {
         total,
-        done: total,
+        done,
         current: std::path::PathBuf::new(),
         errors: errors.clone(),
     });
-    Ok(())
+    Ok(RebuildOutcome {
+        total,
+        done,
+        errors,
+        cancelled,
+    })
 }
 
 /// Put collections and their membership back from what the files said.

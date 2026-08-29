@@ -194,6 +194,15 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             ui.separator();
             ui.spinner();
             ui.label(text);
+            // A rebuild walks every file in the library, so the progress line
+            // is where a user who started one by mistake looks for the way out.
+            if ui
+                .add_enabled(!state.library.rebuild_stopping, egui::Button::new("Stop"))
+                .on_hover_text("Stop after the current file; what has been re-indexed is kept")
+                .clicked()
+            {
+                state.stop_rebuild();
+            }
         }
 
         // Persistent indicator for the most recent scrub's uncorrectable

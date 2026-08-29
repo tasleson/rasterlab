@@ -214,9 +214,12 @@ pub struct LibraryState {
     /// Progress of a running index rebuild, or `None` when idle.
     pub rebuild_progress: Option<RebuildProgress>,
 
+    /// True once the user has asked a running rebuild to stop, until the
+    /// worker actually reports back. Only the status line reads it; the
+    /// authoritative "is one running" answer is `AppState::rebuild_running`.
+    pub rebuild_stopping: bool,
+
     /// When the running index rebuild started; used to estimate time left.
-    /// Also serves as the "rebuild in flight" guard, since it is set before
-    /// the first progress message arrives.
     pub rebuild_started: Option<std::time::Instant>,
 
     /// Per-file `(path, message)` uncorrectable failures from the most recent
@@ -305,6 +308,7 @@ impl Default for LibraryState {
             show_import_errors: false,
             scrub_progress: None,
             rebuild_progress: None,
+            rebuild_stopping: false,
             rebuild_started: None,
             last_scrub_errors: Vec::new(),
             show_scrub_errors: false,
@@ -661,6 +665,14 @@ impl LibraryState {
     /// has elapsed for it to be meaningful, and a running error count.
     pub fn rebuild_status_text(&self) -> Option<String> {
         let p = self.rebuild_progress.as_ref()?;
+        if self.rebuild_stopping {
+            // No estimate: what is left is the current file, not the rest of
+            // the walk.
+            return Some(format!(
+                "Stopping index rebuild… {}/{} indexed",
+                p.done, p.total
+            ));
+        }
         let mut s = format!("Rebuilding library index… {}/{}", p.done, p.total);
         if let Some(started) = self.rebuild_started
             && p.done > 0

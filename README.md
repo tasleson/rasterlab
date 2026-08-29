@@ -137,7 +137,7 @@ Each v5 file contains Reed–Solomon recovery data in two `RECC` chunks, one bef
 - **File > Start Integrity Scrub** verifies every `.rlab` in the open library. It leaves clean v5 files alone, upgrades clean v3/v4 files to v5, and repairs correctable damage.
 - Before a scrub replaces a damaged file, it copies the damaged original into the library's `recovered/` tree, verifying that backup the same way a save is verified. The repaired temporary file is then renamed over the live file on the same filesystem.
 - Library files are addressed by the BLAKE3 hash of their embedded original bytes. A scrub also compares that identity with the file's name and directory, detecting a valid but misplaced or misdirected file that internal checksums alone would accept.
-- The Stoolap database is an index, not the only copy of library metadata. Ratings, flags, labels, captions, keywords, collections, EXIF snapshots, and edit state are embedded in `.rlab` files, allowing **File > Rebuild Library Index** to reconstruct the catalog.
+- The Stoolap database is an index, not the only copy of library metadata. Ratings, flags, labels, captions, keywords, collections, EXIF snapshots, and edit state are embedded in `.rlab` files, allowing **File > Rebuild Library Index** to reconstruct the catalog. A rebuild walks every photo, so it can be stopped from the same menu item or from the progress line in the library toolbar; it keeps whatever it re-indexed, and running it again finishes the job.
 
 To verify an individual project from the source tree:
 

@@ -112,11 +112,10 @@ enum BgMessage {
     ScrubProgress(rasterlab_library::ScrubProgress),
     /// Progress update from a running index rebuild.
     RebuildProgress(rasterlab_library::RebuildProgress),
-    /// Index rebuild finished. `fatal` is set if the rebuild aborted early;
-    /// `errors` are per-file failures from a run that otherwise completed.
+    /// Index rebuild finished (completed, stopped, or died). `fatal` is set if
+    /// the rebuild aborted early, in which case `outcome` carries nothing.
     RebuildComplete {
-        total: usize,
-        errors: Vec<(StdPathBuf, String)>,
+        outcome: rasterlab_library::RebuildOutcome,
         fatal: Option<String>,
     },
     /// Scrub finished (completed or cancelled).
@@ -267,6 +266,10 @@ pub struct AppState {
     /// Cancellation flag for a running integrity scrub. `Some` while a scrub is
     /// in flight (drives the File-menu Start/Stop toggle); cleared on completion.
     scrub_cancel: Option<Arc<AtomicBool>>,
+
+    /// Cancellation flag for a running index rebuild, on the same terms as
+    /// `scrub_cancel`.
+    rebuild_cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Largest centred 2:1 rectangle that fits inside the image.
@@ -361,6 +364,7 @@ impl AppState {
             },
             library_context: None,
             scrub_cancel: None,
+            rebuild_cancel: None,
         }
     }
 
@@ -430,11 +434,9 @@ impl AppState {
                 },
                 BgMessage::ScrubProgress(p) => self.on_scrub_progress(p),
                 BgMessage::RebuildProgress(p) => self.on_rebuild_progress(p),
-                BgMessage::RebuildComplete {
-                    total,
-                    errors,
-                    fatal,
-                } => self.on_rebuild_complete(total, errors, fatal),
+                BgMessage::RebuildComplete { outcome, fatal } => {
+                    self.on_rebuild_complete(outcome, fatal)
+                }
                 BgMessage::ScrubComplete { outcome } => self.on_scrub_complete(outcome),
                 BgMessage::ScrubFailed(e) => self.on_scrub_failed(e),
             }

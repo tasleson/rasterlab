@@ -385,8 +385,15 @@ impl AppState {
     // Index rebuild
     // -----------------------------------------------------------------------
 
+    /// True while a background index rebuild is running.
+    pub fn rebuild_running(&self) -> bool {
+        self.rebuild_cancel.is_some()
+    }
+
+    /// Spawn a background rebuild of the open library's index. No-op if one is
+    /// already running or no library is open.
     pub fn rebuild_library_index(&mut self) {
-        if self.library.rebuild_started.is_some() {
+        if self.rebuild_running() {
             return;
         }
         let Some(lib) = self.library.library.clone() else {
@@ -394,38 +401,51 @@ impl AppState {
         };
         let progress_tx = self.bg_tx.clone();
         let progress_ctx = self.ctx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.rebuild_cancel = Some(cancel.clone());
         self.library.rebuild_started = Some(std::time::Instant::now());
+        self.library.rebuild_stopping = false;
         self.status = "Rebuilding library index…".into();
         workers::spawn(
             "rasterlab-rebuild",
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            // A rebuild that dies has no total to report; the fatal message is
+            // A rebuild that dies has no tally to report; the fatal message is
             // what clears `rebuild_started` and unblocks a retry.
             |message| BgMessage::RebuildComplete {
-                total: 0,
-                errors: Vec::new(),
+                outcome: rasterlab_library::RebuildOutcome::default(),
                 fatal: Some(message),
             },
             move || {
-                // Track the last progress report so the completion message can
-                // carry the final total and per-file errors (rebuild_index only
-                // exposes them through the callback).
-                let last = std::cell::RefCell::new((0usize, Vec::new()));
-                let result = lib.rebuild_index(|p| {
-                    *last.borrow_mut() = (p.total, p.errors.clone());
+                let result = lib.rebuild_index(cancel, |p| {
                     let _ = progress_tx.send(BgMessage::RebuildProgress(p));
                     progress_ctx.request_repaint();
                 });
-                let (total, errors) = last.into_inner();
-                BgMessage::RebuildComplete {
-                    total,
-                    errors,
-                    fatal: result.err().map(|e| e.to_string()),
+                match result {
+                    Ok(outcome) => BgMessage::RebuildComplete {
+                        outcome,
+                        fatal: None,
+                    },
+                    Err(e) => BgMessage::RebuildComplete {
+                        outcome: rasterlab_library::RebuildOutcome::default(),
+                        fatal: Some(e.to_string()),
+                    },
                 }
             },
         );
+    }
+
+    /// Request that a running rebuild stop after the current file.
+    ///
+    /// The walk it interrupts has still refreshed every row it reached, so the
+    /// index is left usable and running the rebuild again finishes the job.
+    pub fn stop_rebuild(&mut self) {
+        if let Some(cancel) = &self.rebuild_cancel {
+            cancel.store(true, Ordering::Relaxed);
+            self.library.rebuild_stopping = true;
+            self.status = "Stopping index rebuild…".into();
+        }
     }
 
     pub(super) fn on_rebuild_progress(&mut self, progress: rasterlab_library::RebuildProgress) {
@@ -435,18 +455,37 @@ impl AppState {
         }
     }
 
+    /// Terminal handler for a rebuild that has finished, been stopped, or died.
+    ///
+    /// Releasing `rebuild_cancel` is what [`Self::rebuild_running`] reports, so
+    /// leaving it set would pin the File menu to "Stop Index Rebuild".
     pub(super) fn on_rebuild_complete(
         &mut self,
-        total: usize,
-        errors: Vec<(StdPathBuf, String)>,
+        outcome: rasterlab_library::RebuildOutcome,
         fatal: Option<String>,
     ) {
+        let rasterlab_library::RebuildOutcome {
+            total,
+            done,
+            errors,
+            cancelled,
+        } = outcome;
+        self.rebuild_cancel = None;
         self.library.rebuild_progress = None;
         self.library.rebuild_started = None;
+        self.library.rebuild_stopping = false;
         self.library.thumbs.clear();
         self.library.refresh();
         if let Some(e) = fatal {
             self.status = format!("Rebuild failed: {e}");
+        } else if cancelled {
+            // The files it did not reach are not errors, so report how far it
+            // got rather than a photo count that looks like the whole library.
+            self.status = format!("Index rebuild stopped: {done} of {total} photos indexed");
+            if !errors.is_empty() {
+                self.status
+                    .push_str(&format!(", {} error(s)", errors.len()));
+            }
         } else if errors.is_empty() {
             self.status = format!("Index rebuild complete: {total} photos");
         } else {

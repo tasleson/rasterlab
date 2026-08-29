@@ -681,9 +681,27 @@ impl eframe::App for RasterLabApp {
                             },
                         );
                         ui.add_enabled_ui(self.state.library.library.is_some(), |ui| {
-                            if ui.button("Rebuild Library Index").clicked() {
+                            let running = self.state.rebuild_running();
+                            let label = if running {
+                                "Stop Index Rebuild"
+                            } else {
+                                "Rebuild Library Index"
+                            };
+                            if ui
+                                .button(label)
+                                .on_hover_text(
+                                    "Bring the index back in line with the photo files on \
+                                     disk. Stopping keeps whatever it has re-indexed; run \
+                                     it again to finish.",
+                                )
+                                .clicked()
+                            {
                                 ui.close_kind(egui::UiKind::Menu);
-                                self.state.rebuild_library_index();
+                                if running {
+                                    self.state.stop_rebuild();
+                                } else {
+                                    self.state.rebuild_library_index();
+                                }
                             }
                         });
                         ui.add_enabled_ui(self.state.library.library.is_some(), |ui| {
