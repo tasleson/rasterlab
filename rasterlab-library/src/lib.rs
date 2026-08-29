@@ -71,7 +71,7 @@ pub use db_trait::{
     CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
     RecentlyDeletedRow, SortOrder,
 };
-pub use import::{ImportSession, MONTH_NAMES, ymd_from_unix};
+pub use import::{ImportCollection, ImportSession, MONTH_NAMES, ymd_from_unix};
 pub use library::{ImportProgress, Library};
 pub use rasterlab_core::library_meta::{CollectionRef, LibraryExif, LibraryMeta};
 pub use reconstruct::{RebuildOutcome, RebuildProgress};

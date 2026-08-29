@@ -4,7 +4,7 @@ use std::{
 };
 
 use rasterlab_library::{
-    Library,
+    ImportCollection, Library,
     db_trait::{PhotoId, SortOrder},
     search::SearchFilter,
 };
@@ -470,6 +470,224 @@ fn folder_import_groups_jpeg_by_exif_capture_date_not_mtime() {
         photos[0].import_date, EXIF_CAPTURE,
         "import_date must come from EXIF, not the filesystem mtime"
     );
+}
+
+// ── Import collections ──────────────────────────────────────────────────────
+
+/// A folder of shoot directories, each holding one distinct photo, plus one
+/// photo loose at the top.  Returns the source directory (kept alive by the
+/// caller) so the tests below share one shape.
+fn shoot_tree() -> tempfile::TempDir {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    for (dir, tag) in [("Sunrise", 1u8), ("Harbour", 2)] {
+        let sub = src.path().join(dir);
+        std::fs::create_dir_all(&sub).unwrap();
+        write_png_with_mtime(&sub.join("shot.png"), tag, BASE);
+    }
+    write_png_with_mtime(&src.path().join("loose.png"), 3, BASE);
+    src
+}
+
+/// Collection names in the library, sorted, so assertions do not depend on
+/// index row order.
+fn collection_names(lib: &Library) -> Vec<String> {
+    let mut names: Vec<String> = lib
+        .all_collections()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn per_folder_import_makes_one_collection_per_directory() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_folder_into_collection(src.path(), ImportCollection::PerFolder, |_| {})
+        .unwrap();
+
+    let root_name = src
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let mut expected = vec!["Harbour".to_owned(), "Sunrise".to_owned(), root_name];
+    expected.sort();
+    assert_eq!(
+        collection_names(&lib),
+        expected,
+        "each directory that directly holds photos gets its own collection"
+    );
+
+    for row in lib.all_collections().unwrap() {
+        assert_eq!(
+            lib.collection_photos(row.id).unwrap().len(),
+            1,
+            "collection “{}” should hold only its own directory's photo",
+            row.name
+        );
+    }
+}
+
+#[test]
+fn named_import_files_the_whole_run_into_one_collection() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_folder_into_collection(
+        src.path(),
+        ImportCollection::Named("  Iceland 2024  ".to_owned()),
+        |_| {},
+    )
+    .unwrap();
+
+    assert_eq!(
+        collection_names(&lib),
+        ["Iceland 2024"],
+        "the name is trimmed and used once for the whole import"
+    );
+    let collection = lib.all_collections().unwrap().remove(0);
+    assert_eq!(
+        lib.collection_photos(collection.id).unwrap().len(),
+        3,
+        "every photo in the tree joins it, whichever directory it came from"
+    );
+}
+
+#[test]
+fn plain_folder_import_creates_no_collections() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_folder(src.path(), |_| {}).unwrap();
+
+    assert!(
+        lib.all_collections().unwrap().is_empty(),
+        "an import that was not asked to file anything must not"
+    );
+}
+
+/// Re-importing a folder the user has added to must extend the collection the
+/// first import made, not stand up a second one beside it.
+#[test]
+fn reimporting_a_folder_reuses_its_collection() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    let sub = src.path().join("Harbour");
+    std::fs::create_dir_all(&sub).unwrap();
+    write_png_with_mtime(&sub.join("one.png"), 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_folder_into_collection(src.path(), ImportCollection::PerFolder, |_| {})
+        .unwrap();
+    let first = lib.all_collections().unwrap();
+    assert_eq!(first.len(), 1);
+    let collection_id = first[0].id;
+
+    write_png_with_mtime(&sub.join("two.png"), 2, BASE);
+    lib.import_folder_into_collection(src.path(), ImportCollection::PerFolder, |_| {})
+        .unwrap();
+
+    let after = lib.all_collections().unwrap();
+    assert_eq!(after.len(), 1, "the second run must reuse the collection");
+    assert_eq!(after[0].id, collection_id);
+    assert_eq!(
+        lib.collection_photos(collection_id).unwrap().len(),
+        2,
+        "the newly added photo joins; the duplicate is skipped whole"
+    );
+}
+
+/// The user's own "Harbour" is the collection the import should join, even
+/// though the directory is spelt differently — the UI refuses to let two
+/// collections differ only by case, so an import must not create the pair.
+#[test]
+fn import_joins_an_existing_collection_ignoring_case() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    let sub = src.path().join("HARBOUR");
+    std::fs::create_dir_all(&sub).unwrap();
+    write_png_with_mtime(&sub.join("one.png"), 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    let existing = lib.create_collection("Harbour").unwrap();
+
+    lib.import_folder_into_collection(src.path(), ImportCollection::PerFolder, |_| {})
+        .unwrap();
+
+    assert_eq!(collection_names(&lib), ["Harbour"]);
+    assert_eq!(lib.collection_photos(existing.id).unwrap().len(), 1);
+}
+
+/// A folder whose photographs are all already in the library must not leave an
+/// empty collection named after it: the collection is created only once a file
+/// turns out to be a genuinely new photograph.
+#[test]
+fn a_folder_of_only_duplicates_creates_no_collection() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    let sub = src.path().join("Harbour");
+    std::fs::create_dir_all(&sub).unwrap();
+    write_png_with_mtime(&sub.join("one.png"), 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_folder(src.path(), |_| {}).unwrap();
+    assert!(lib.all_collections().unwrap().is_empty());
+
+    lib.import_folder_into_collection(src.path(), ImportCollection::PerFolder, |_| {})
+        .unwrap();
+
+    assert!(
+        lib.all_collections().unwrap().is_empty(),
+        "nothing was imported, so there is nothing to file and no collection to make"
+    );
+}
+
+/// Membership is written into the `.rlab` at import time, so it is a property
+/// of the photograph rather than of the index — a rebuild after total index
+/// loss has to bring it back.
+#[test]
+fn import_collection_membership_survives_index_loss() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    let sub = src.path().join("Harbour");
+    std::fs::create_dir_all(&sub).unwrap();
+    write_png_with_mtime(&sub.join("one.png"), 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder_into_collection(src.path(), ImportCollection::PerFolder, |_| {})
+        .unwrap();
+    drop(lib);
+
+    let db_path = tmp_lib.path().join("library.db");
+    if db_path.is_dir() {
+        std::fs::remove_dir_all(&db_path).unwrap();
+    } else if db_path.exists() {
+        std::fs::remove_file(&db_path).unwrap();
+    }
+
+    let lib = open_library(tmp_lib.path());
+    assert!(lib.all_collections().unwrap().is_empty());
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
+
+    assert_eq!(collection_names(&lib), ["Harbour"]);
+    let collection = lib.all_collections().unwrap().remove(0);
+    assert_eq!(lib.collection_photos(collection.id).unwrap().len(), 1);
 }
 
 // ── Delete ────────────────────────────────────────────────────────────────────

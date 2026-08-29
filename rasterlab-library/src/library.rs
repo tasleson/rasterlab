@@ -20,7 +20,7 @@ use crate::{
         CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
         RecentlyDeletedRow, SortOrder,
     },
-    import::{self, ImportSession},
+    import::{self, ImportCollection, ImportSession},
     reconstruct::{self, RebuildOutcome, RebuildProgress},
     search::SearchFilter,
     stoolap_db::StoolapDb,
@@ -136,6 +136,23 @@ impl Library {
         folder: &Path,
         progress_cb: impl Fn(ImportProgress) + Send + 'static,
     ) -> Result<Vec<ImportSession>> {
+        self.import_folder_into_collection(folder, ImportCollection::None, progress_cb)
+    }
+
+    /// [`Library::import_folder`], additionally filing every photo it imports
+    /// into a collection as `collection` describes.
+    ///
+    /// Collections are created on demand and an existing one of the same name
+    /// is reused, so importing a folder a second time adds whatever is new to
+    /// the collection the first import made rather than starting another one.
+    /// Only new photos are filed: a duplicate is skipped whole, memberships
+    /// included.
+    pub fn import_folder_into_collection(
+        &self,
+        folder: &Path,
+        collection: ImportCollection,
+        progress_cb: impl Fn(ImportProgress) + Send + 'static,
+    ) -> Result<Vec<ImportSession>> {
         let paths = collect_image_paths(folder, &self.registry);
         let cancelled = Arc::new(AtomicBool::new(false));
         import::import_folder_grouped(
@@ -145,6 +162,7 @@ impl Library {
             &paths,
             cancelled,
             Some(folder),
+            collection,
             &progress_cb,
         )
     }
