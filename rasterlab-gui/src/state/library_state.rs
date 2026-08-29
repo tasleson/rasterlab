@@ -6,9 +6,11 @@ use std::{
 };
 
 use rasterlab_library::{
-    CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, LibraryMeta, PhotoId,
-    PhotoRow, RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
+    CollectionId, CollectionRow, ImportCollection, ImportProgress, ImportSessionRow, Library,
+    LibraryMeta, PhotoId, PhotoRow, RebuildProgress, ScrubProgress, SearchFilter, SortOrder,
+    import::rlab_path,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
 
@@ -68,6 +70,66 @@ impl CollectionPrompt {
         Self::Rename {
             id,
             entry: NameEntry::seeded(current_name),
+        }
+    }
+}
+
+// ── Folder import options ─────────────────────────────────────────────────────
+
+/// Which of the three collection choices the folder-import dialog is on.
+///
+/// Kept apart from [`rasterlab_library::ImportCollection`] so the name the user
+/// typed survives switching to another choice and back, and so the choice
+/// itself can be remembered in the prefs file between runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportCollectionChoice {
+    /// Import without touching collections.
+    #[default]
+    None,
+    /// One collection per directory, named after it.
+    PerFolder,
+    /// One collection, named by the user, for the whole import.
+    Named,
+}
+
+/// The question asked after a folder is picked and before its import starts:
+/// what collection, if any, should the photos be filed into.
+pub struct FolderImportPrompt {
+    pub folder: PathBuf,
+    pub choice: ImportCollectionChoice,
+    /// The name for [`ImportCollectionChoice::Named`], seeded with the folder's
+    /// own name so the common case needs no typing.
+    pub name: String,
+    /// Set once the name field has claimed keyboard focus, so it is taken on
+    /// the frame the user picks `Named` and not on every frame after.
+    pub focused: bool,
+}
+
+impl FolderImportPrompt {
+    pub fn new(folder: PathBuf, choice: ImportCollectionChoice) -> Self {
+        let name = folder
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self {
+            folder,
+            choice,
+            name,
+            focused: false,
+        }
+    }
+
+    /// What the library should be asked to do, or `None` when the dialog is not
+    /// answerable yet — a named collection with nothing typed in it.
+    pub fn to_import_collection(&self) -> Option<ImportCollection> {
+        match self.choice {
+            ImportCollectionChoice::None => Some(ImportCollection::None),
+            ImportCollectionChoice::PerFolder => Some(ImportCollection::PerFolder),
+            ImportCollectionChoice::Named => {
+                let name = self.name.trim();
+                (!name.is_empty()).then(|| ImportCollection::Named(name.to_owned()))
+            }
         }
     }
 }
@@ -195,6 +257,10 @@ pub struct LibraryState {
 
     /// The open collection dialog (new / delete confirmation), if any.
     pub collection_prompt: Option<CollectionPrompt>,
+
+    /// A folder waiting on the user's answer about collections before its
+    /// import starts, if any.
+    pub folder_import_prompt: Option<FolderImportPrompt>,
     pub all_photo_count: usize,
     pub recently_deleted_count: usize,
 
@@ -301,6 +367,7 @@ impl Default for LibraryState {
             collections: Vec::new(),
             collection_members: HashMap::new(),
             collection_prompt: None,
+            folder_import_prompt: None,
             all_photo_count: 0,
             recently_deleted_count: 0,
             last_error: None,

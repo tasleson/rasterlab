@@ -438,7 +438,7 @@ impl RasterLabApp {
             DialogKind::ImportFiles => self.state.import_into_library(paths),
             DialogKind::ImportFolder => {
                 if let Some(p) = first() {
-                    self.state.import_folder_into_library(p)
+                    self.state.prompt_folder_import(p)
                 }
             }
             DialogKind::ExportDestination => {
@@ -969,6 +969,10 @@ impl eframe::App for RasterLabApp {
         // surface. Keep it outside the mode-specific layout so Ctrl+E and the
         // File menu work identically from either view.
         export_dialog::ui(&ctx, &mut self.state);
+
+        // The folder-import question is asked from the File menu, which is
+        // reachable in either mode, so it cannot live inside the library panel.
+        library_panel::folder_import_dialog(&ctx, &mut self.state);
 
         // ── Delete confirmation (editor mode) ────────────────────────────
         // The confirmation dialog lives in library_panel but must also appear

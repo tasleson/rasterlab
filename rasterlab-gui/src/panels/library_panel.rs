@@ -5,7 +5,7 @@ use rasterlab_library::{
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
 use crate::state::library_state::thumb_target_side;
-use crate::state::{AppState, CollectionPrompt, LibraryView, Membership};
+use crate::state::{AppState, CollectionPrompt, ImportCollectionChoice, LibraryView, Membership};
 
 /// Scroll-margin multiple for the resident texture cap: keep roughly this many
 /// screens of thumbnails so scrolling in either direction rarely hits a cold
@@ -477,6 +477,122 @@ pub(crate) fn scrub_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
     if !open {
         state.library.show_scrub_errors = false;
     }
+}
+
+// ── Folder import options ─────────────────────────────────────────────────────
+
+/// Ask what collection a folder import should file its photos into.
+///
+/// Shown between picking the folder and starting the import, because neither
+/// file-picker backend has room for the question.  The choice is remembered in
+/// the prefs so a photographer who always wants a collection per shoot answers
+/// once; the name is not, being particular to the import.
+pub(crate) fn folder_import_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if state.library.folder_import_prompt.is_none() {
+        return;
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        state.library.folder_import_prompt = None;
+        return;
+    }
+
+    let mut start = false;
+    let mut cancel = false;
+    let mut open = true;
+    egui::Window::new("Import Folder")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let Some(prompt) = state.library.folder_import_prompt.as_mut() else {
+                return;
+            };
+            ui.label(
+                egui::RichText::new(prompt.folder.display().to_string())
+                    .strong()
+                    .monospace(),
+            );
+            ui.add_space(8.0);
+            ui.label("Add the imported photos to:");
+
+            ui.radio_value(&mut prompt.choice, ImportCollectionChoice::None, "Nothing")
+                .on_hover_text("Import the photos without putting them in a collection.");
+            ui.radio_value(
+                &mut prompt.choice,
+                ImportCollectionChoice::PerFolder,
+                "A collection per folder",
+            )
+            .on_hover_text(
+                "Each folder that directly holds photos gets a collection named after it.",
+            );
+            ui.horizontal(|ui| {
+                ui.radio_value(
+                    &mut prompt.choice,
+                    ImportCollectionChoice::Named,
+                    "One collection:",
+                );
+                let response = ui
+                    .add(egui::TextEdit::singleline(&mut prompt.name).hint_text("Collection name"));
+                if response.gained_focus() {
+                    prompt.choice = ImportCollectionChoice::Named;
+                }
+                if prompt.choice == ImportCollectionChoice::Named && !prompt.focused {
+                    prompt.focused = true;
+                    response.request_focus();
+                }
+                if prompt.choice != ImportCollectionChoice::Named {
+                    prompt.focused = false;
+                }
+            });
+
+            if prompt.choice != ImportCollectionChoice::None {
+                ui.add_space(4.0);
+                ui.weak(
+                    "A collection that already goes by the name is used as it is, so \
+                     importing the same folder again adds only what is new.",
+                );
+            }
+
+            let ready = prompt.to_import_collection().is_some();
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(ready, egui::Button::new("Import"))
+                    .on_disabled_hover_text("Enter a name for the collection.")
+                    .clicked()
+                {
+                    start = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+            // Enter starts the import from anywhere in the dialog, including
+            // straight out of the name field, which drops focus on Enter.
+            if ready && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                start = true;
+            }
+        });
+
+    if cancel || !open {
+        state.library.folder_import_prompt = None;
+        return;
+    }
+    if !start {
+        return;
+    }
+    let Some(prompt) = state.library.folder_import_prompt.take() else {
+        return;
+    };
+    let Some(collection) = prompt.to_import_collection() else {
+        return;
+    };
+    if state.prefs.import_collection != prompt.choice {
+        state.prefs.import_collection = prompt.choice;
+        state.prefs.save();
+    }
+    state.import_folder_into_library(prompt.folder, collection);
 }
 
 // ── Collection dialogs ────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ use rasterlab_core::verified_write::{create_dir_all_synced, write_atomic};
 use serde::{Deserialize, Serialize};
 
 use crate::panels::export_border::ExportBorderOptions;
+use crate::state::library_state::ImportCollectionChoice;
 
 /// User-selectable theme preference, stored in the prefs file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -97,6 +98,11 @@ pub struct Prefs {
     /// Thumbnail display scale in the library grid (0.25–1.0; 1.0 = 512px).
     #[serde(default = "default_thumb_scale")]
     pub library_thumb_scale: f32,
+    /// Collection choice the folder-import dialog opens on.  Someone who files
+    /// every shoot into a collection of its own should not have to say so on
+    /// each import; the name itself is not remembered, being import-specific.
+    #[serde(default)]
+    pub import_collection: ImportCollectionChoice,
 }
 
 fn default_true() -> bool {

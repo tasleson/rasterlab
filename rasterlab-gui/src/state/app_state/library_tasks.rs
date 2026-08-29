@@ -192,9 +192,32 @@ impl AppState {
         );
     }
 
+    /// Ask what collection a folder import should file its photos into, rather
+    /// than starting the import straight away.
+    ///
+    /// The folder picker — native or built-in — has nowhere to put the
+    /// question, so it is asked in a dialog of its own once the folder is
+    /// known.  That also lets the dialog seed the collection name with the
+    /// folder's, which is what the user almost always wants.
+    pub fn prompt_folder_import(&mut self, folder: std::path::PathBuf) {
+        if self.library.library.is_none() {
+            return;
+        }
+        self.library.folder_import_prompt =
+            Some(crate::state::library_state::FolderImportPrompt::new(
+                folder,
+                self.prefs.import_collection,
+            ));
+    }
+
     /// Recursively import `folder`, grouping photos into back-dated import
-    /// sessions by capture date (see [`rasterlab_library::Library::import_folder`]).
-    pub fn import_folder_into_library(&mut self, folder: std::path::PathBuf) {
+    /// sessions by capture date (see [`rasterlab_library::Library::import_folder`]),
+    /// filing what it imports as `collection` says.
+    pub fn import_folder_into_library(
+        &mut self,
+        folder: std::path::PathBuf,
+        collection: rasterlab_library::ImportCollection,
+    ) {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
@@ -207,7 +230,7 @@ impl AppState {
             self.ctx.clone(),
             BgMessage::ImportFailed,
             move || {
-                let result = lib.import_folder(&folder, move |p| {
+                let result = lib.import_folder_into_collection(&folder, collection, move |p| {
                     let _ = progress_tx.send(BgMessage::ImportProgress(p));
                     progress_ctx.request_repaint();
                 });
