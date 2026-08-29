@@ -1253,6 +1253,62 @@ fn remove_from_collection_updates_lmta() {
     );
 }
 
+/// The membership the app reads back is the whole point of the two-step write,
+/// so a repeated add must leave one membership — and must not rewrite a file
+/// that already says the right thing, which would churn every overlapping
+/// photo's mtime for nothing.
+#[test]
+fn re_adding_a_photo_changes_neither_the_index_nor_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let (first, second) = (&photos[0], &photos[1]);
+
+    let coll = lib.create_collection("Favorites").unwrap();
+    lib.add_to_collection(coll.id, &[first.id]).unwrap();
+    let written = std::fs::metadata(lib.rlab_path(&first.hash))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    // The ordinary case once the UI exists: a selection that is partly in the
+    // collection already.
+    lib.add_to_collection(coll.id, &[first.id, second.id])
+        .unwrap();
+
+    let members = lib.collection_photos(coll.id).unwrap();
+    assert_eq!(members.len(), 2, "re-added photo listed twice");
+    assert_eq!(
+        std::fs::metadata(lib.rlab_path(&first.hash))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        written,
+        "a file that already lists the collection was rewritten"
+    );
+}
+
+/// A membership row for a photo the index has never heard of would survive
+/// every cleanup path, since they all key off the photo.
+#[test]
+fn adding_an_unknown_photo_adds_no_membership() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo_id = lib.all_photos(SortOrder::default()).unwrap()[0].id;
+    let coll = lib.create_collection("Favorites").unwrap();
+
+    lib.add_to_collection(coll.id, &[photo_id, 9999]).unwrap();
+
+    let members = lib.collection_photos(coll.id).unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].id, photo_id);
+}
+
 // ── Batch metadata ────────────────────────────────────────────────────────────
 
 #[test]

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
     time::{SystemTime, UNIX_EPOCH},
@@ -451,18 +451,7 @@ impl Library {
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
-        let name = self.collection_name(collection_id)?;
-        let mut written = Vec::with_capacity(photo_ids.len());
-        let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
-        for &pid in photo_ids {
-            match self.add_collection_to_file(pid, &name) {
-                Ok(()) => written.push(pid),
-                Err(e) => failed.push((pid, e)),
-            }
-        }
-
-        self.db.add_to_collection(collection_id, &written)?;
-        report_partial("add to collection", failed)
+        self.set_collection_membership(collection_id, photo_ids, true)
     }
 
     /// Mirror of [`Library::add_to_collection`]: the `.rlab` files lose the
@@ -472,18 +461,54 @@ impl Library {
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
+        self.set_collection_membership(collection_id, photo_ids, false)
+    }
+
+    /// Body of both directions: rewrite every `.rlab` first, then apply the
+    /// same change to the index for the photos whose file was written.
+    ///
+    /// Photo ids the index doesn't know are skipped rather than added to the
+    /// collection, which would leave a membership row pointing at nothing.
+    fn set_collection_membership(
+        &self,
+        collection_id: CollectionId,
+        photo_ids: &[PhotoId],
+        member: bool,
+    ) -> Result<()> {
         let name = self.collection_name(collection_id)?;
+        // One index read for the whole batch. Resolving each photo separately
+        // walked every photo in the library per photo changed, which a grid
+        // selection of a few hundred turns into a long stall.
+        let hashes: HashMap<PhotoId, String> = self
+            .db
+            .all_photos(SortOrder::default())?
+            .into_iter()
+            .map(|row| (row.id, row.hash))
+            .collect();
+
         let mut written = Vec::with_capacity(photo_ids.len());
         let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
         for &pid in photo_ids {
-            match self.remove_collection_from_file(pid, &name) {
+            let Some(hash) = hashes.get(&pid) else {
+                continue;
+            };
+            match self.set_collection_in_file(hash, &name, member) {
                 Ok(()) => written.push(pid),
                 Err(e) => failed.push((pid, e)),
             }
         }
 
-        self.db.remove_from_collection(collection_id, &written)?;
-        report_partial("remove from collection", failed)
+        if member {
+            self.db.add_to_collection(collection_id, &written)?;
+        } else {
+            self.db.remove_from_collection(collection_id, &written)?;
+        }
+        let what = if member {
+            "add to collection"
+        } else {
+            "remove from collection"
+        };
+        report_partial(what, failed)
     }
 
     fn collection_name(&self, id: CollectionId) -> Result<String> {
@@ -649,12 +674,18 @@ impl Library {
         rlab.write_v5(&rlab_path).context("rewrite lmta")
     }
 
-    fn add_collection_to_file(&self, photo_id: PhotoId, collection_name: &str) -> Result<()> {
-        let photos = self.db.all_photos(SortOrder::default())?;
-        let Some(row) = photos.iter().find(|r| r.id == photo_id) else {
-            return Ok(());
-        };
-        let rlab_path = self.rlab_path(&row.hash);
+    /// Record — or drop — one collection name in a photo's `.rlab`.
+    ///
+    /// A file that already says what it should is left untouched: adding a
+    /// selection that overlaps the collection would otherwise rewrite those
+    /// photos for no change.
+    fn set_collection_in_file(
+        &self,
+        hash: &str,
+        collection_name: &str,
+        member: bool,
+    ) -> Result<()> {
+        let rlab_path = self.rlab_path(hash);
         // The guard has to be held across the existence check as well as the
         // rewrite. Checking first lets a delete move the file out from under
         // us, turning a photo that is simply gone — which this skips — into a
@@ -664,32 +695,18 @@ impl Library {
             return Ok(());
         }
         let mut rlab = RlabFile::read(&rlab_path)?;
-        if let Some(ref mut lmta) = rlab.lmta
-            && !lmta.collections.contains(&collection_name.to_owned())
-        {
+        let Some(ref mut lmta) = rlab.lmta else {
+            // Nothing in the file records membership, so there is nothing to
+            // write; the index still gets the change.
+            return Ok(());
+        };
+        let listed = lmta.collections.iter().any(|c| c == collection_name);
+        if listed == member {
+            return Ok(());
+        }
+        if member {
             lmta.collections.push(collection_name.to_owned());
-        }
-        rlab.meta = rlab.meta.touch();
-        rlab.write_v5(&rlab_path)?;
-        Ok(())
-    }
-
-    fn remove_collection_from_file(&self, photo_id: PhotoId, collection_name: &str) -> Result<()> {
-        let photos = self.db.all_photos(SortOrder::default())?;
-        let Some(row) = photos.iter().find(|r| r.id == photo_id) else {
-            return Ok(());
-        };
-        let rlab_path = self.rlab_path(&row.hash);
-        // The guard has to be held across the existence check as well as the
-        // rewrite. Checking first lets a delete move the file out from under
-        // us, turning a photo that is simply gone — which this skips — into a
-        // read error reported to the user as a failed metadata write.
-        let _write_guard = self.lock_project_writes()?;
-        if !rlab_path.exists() {
-            return Ok(());
-        }
-        let mut rlab = RlabFile::read(&rlab_path)?;
-        if let Some(ref mut lmta) = rlab.lmta {
+        } else {
             lmta.collections.retain(|c| c != collection_name);
         }
         rlab.meta = rlab.meta.touch();
