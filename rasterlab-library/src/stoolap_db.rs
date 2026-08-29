@@ -32,6 +32,48 @@ impl StoolapDb {
         Ok(Self { db })
     }
 
+    /// A collection's photos, in the caller's order.
+    ///
+    /// Two tables is the limit: a third turns this into the join that comes
+    /// back empty. See `search` on this type, and STOOLAP_BUG.md.
+    fn collection_photos_sorted(
+        &self,
+        collection_id: CollectionId,
+        sort: SortOrder,
+    ) -> Result<Vec<PhotoRow>> {
+        let rows = self.db.query(
+            &format!(
+                "{} JOIN collection_photos cp ON cp.photo_id = p.id
+                 WHERE cp.collection_id = $1 {}",
+                PHOTO_SELECT,
+                sort_clause(sort)
+            ),
+            (collection_id,),
+        )?;
+        let mut result = Vec::new();
+        for row in rows {
+            let row = row.context("collection_photos row")?;
+            if row_is_active(&row)? {
+                result.push(row_to_photo(&row)?);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Every photo id a collection holds, deleted ones included — the caller
+    /// is filtering rows it has already decided are visible.
+    fn collection_member_ids(&self, collection_id: CollectionId) -> Result<HashSet<PhotoId>> {
+        let rows = self.db.query(
+            "SELECT photo_id FROM collection_photos WHERE collection_id = $1",
+            (collection_id,),
+        )?;
+        let mut ids = HashSet::new();
+        for row in rows {
+            ids.insert(row.context("collection member row")?.get::<i64>(0)?);
+        }
+        Ok(ids)
+    }
+
     /// Mint a uuid for every collection row that predates them.
     ///
     /// Runs on every open and is a no-op once done.  A collection without a
@@ -395,6 +437,33 @@ impl LibraryDb for StoolapDb {
     // ── Search ────────────────────────────────────────────────────────────
 
     fn search(&self, filter: &SearchFilter, sort: SortOrder) -> Result<Vec<PhotoRow>> {
+        // A collection scope cannot go into the statement below. Stoolap
+        // returns *no rows at all*, silently, from a join of three or more
+        // tables when the join column of one of them carries an index and the
+        // rows are read back in a later session. `collection_photos(photo_id)`
+        // is indexed and `photo_id` is what the join is on, so putting that
+        // table in with the metadata tables empties the whole result.
+        // STOOLAP_BUG.md has the reproduction. Membership is resolved with a
+        // query of its own instead, and applied to the rows here.
+        let members = match filter.collection_id {
+            Some(id) => Some(self.collection_member_ids(id)?),
+            None => None,
+        };
+
+        // A collection and nothing else is what clicking one in the sidebar
+        // asks for, and a join on its own is a shape the database does handle.
+        // Worth its own path: it reads a collection's handful of rows instead
+        // of every photo in the library.
+        let others = SearchFilter {
+            collection_id: None,
+            ..filter.clone()
+        };
+        if let Some(id) = filter.collection_id
+            && others.is_empty()
+        {
+            return self.collection_photos_sorted(id, sort);
+        }
+
         let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<Value> = Vec::new();
 
@@ -498,12 +567,6 @@ impl LibraryDb for StoolapDb {
         if let Some(ref session) = filter.import_session {
             push!("p.import_session = {}", Value::text(session.clone()));
         }
-        if let Some(coll_id) = filter.collection_id {
-            push!(
-                "p.id IN (SELECT photo_id FROM collection_photos WHERE collection_id = {})",
-                Value::integer(coll_id)
-            );
-        }
         if let Some(ref label) = filter.color_label {
             push!("r.color_label = {}", Value::text(label.clone()));
         }
@@ -536,8 +599,12 @@ impl LibraryDb for StoolapDb {
         let mut result = Vec::new();
         for row in rows {
             let row = row.context("search row")?;
-            if row_is_active(&row)? {
-                result.push(row_to_photo(&row)?);
+            if !row_is_active(&row)? {
+                continue;
+            }
+            let photo = row_to_photo(&row)?;
+            if members.as_ref().is_none_or(|ids| ids.contains(&photo.id)) {
+                result.push(photo);
             }
         }
         Ok(result)
@@ -563,23 +630,7 @@ impl LibraryDb for StoolapDb {
     }
 
     fn collection_photos(&self, collection_id: CollectionId) -> Result<Vec<PhotoRow>> {
-        let rows = self.db.query(
-            &format!(
-                "{} JOIN collection_photos cp ON cp.photo_id = p.id
-                 WHERE cp.collection_id = $1
-                 ORDER BY p.capture_date DESC, p.id DESC",
-                PHOTO_SELECT
-            ),
-            (collection_id,),
-        )?;
-        let mut result = Vec::new();
-        for row in rows {
-            let row = row.context("collection_photos row")?;
-            if row_is_active(&row)? {
-                result.push(row_to_photo(&row)?);
-            }
-        }
-        Ok(result)
+        self.collection_photos_sorted(collection_id, SortOrder::CaptureDateDesc)
     }
 
     // ── Import sessions ───────────────────────────────────────────────────

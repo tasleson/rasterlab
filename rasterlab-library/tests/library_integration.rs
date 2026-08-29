@@ -949,6 +949,64 @@ fn a_lost_index_rebuilds_collections_from_the_newest_hint() {
     assert_eq!(lib.collection_photos(collections[0].id).unwrap().len(), 2);
 }
 
+/// Clicking a collection in the sidebar is a search scoped to it, so the
+/// filter has to actually return its photos.
+#[test]
+fn searching_by_collection_returns_its_photos() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let coll = lib.create_collection("Portfolio").unwrap();
+    lib.add_to_collection(coll.id, &[photos[0].id]).unwrap();
+
+    let filter = SearchFilter {
+        collection_id: Some(coll.id),
+        ..Default::default()
+    };
+    let found = lib.search(&filter, SortOrder::default()).unwrap();
+
+    assert_eq!(found.len(), 1, "collection scope returned {found:?}");
+    assert_eq!(found[0].hash, photos[0].hash);
+
+    // The sidebar's filters apply on top of the collection, so the scope has
+    // to combine with the rest rather than replace them. Rating the photo
+    // outside the collection proves the scope is still doing its job.
+    let rate = |photo: &rasterlab_library::PhotoRow, rating: u8| {
+        let path = lib.rlab_path(&photo.hash);
+        let mut lmta = rasterlab_core::project::RlabFile::read(&path)
+            .unwrap()
+            .lmta
+            .unwrap();
+        lmta.rating = rating;
+        lib.update_metadata(photo.id, lmta).unwrap();
+    };
+    rate(&photos[0], 3);
+    rate(&photos[1], 5);
+
+    let scoped = SearchFilter {
+        collection_id: Some(coll.id),
+        rating_min: Some(5),
+        ..Default::default()
+    };
+    assert!(
+        lib.search(&scoped, SortOrder::default())
+            .unwrap()
+            .is_empty(),
+        "the five-star photo is not in the collection"
+    );
+
+    let scoped = SearchFilter {
+        rating_min: Some(3),
+        ..scoped
+    };
+    let found = lib.search(&scoped, SortOrder::default()).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].hash, photos[0].hash);
+}
+
 /// A deleted collection must not come back: the files are what a rebuild
 /// believes, so they have to stop claiming membership before the index rows
 /// go.
