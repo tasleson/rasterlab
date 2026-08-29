@@ -43,31 +43,51 @@ pub enum Membership {
 /// The collection dialog currently on screen, if any.
 pub enum CollectionPrompt {
     /// Naming a new collection.
-    New(NewCollection),
+    New {
+        entry: NameEntry,
+        /// Photos to put in it once it exists. Captured when the dialog opens,
+        /// so a click in the grid's Collections menu still lands on the photos
+        /// the user right-clicked even if the selection moves on.
+        photos: Vec<PhotoId>,
+    },
+    /// Renaming an existing one.
+    Rename { id: CollectionId, entry: NameEntry },
     /// Confirming that a collection should go.
     Delete { id: CollectionId, name: String },
 }
 
-/// In-progress "New Collection" dialog.
+impl CollectionPrompt {
+    pub fn new_collection(photos: Vec<PhotoId>) -> Self {
+        Self::New {
+            entry: NameEntry::default(),
+            photos,
+        }
+    }
+
+    pub fn rename(id: CollectionId, current_name: &str) -> Self {
+        Self::Rename {
+            id,
+            entry: NameEntry::seeded(current_name),
+        }
+    }
+}
+
+/// The name being typed into one of the collection dialogs.
 #[derive(Default)]
-pub struct NewCollection {
+pub struct NameEntry {
     pub name: String,
-    /// Photos to put in the collection once it exists. Captured when the
-    /// dialog opens, so a click in the grid's Collections menu still lands on
-    /// the photos the user right-clicked even if the selection moves on.
-    pub photos: Vec<PhotoId>,
     /// Why the name was rejected. The dialog stays open showing this rather
     /// than closing and making the user type the name again.
     pub error: Option<String>,
-    /// Set once the name field has been given keyboard focus, so it is claimed
-    /// on the first frame only and the user can then tab away from it.
+    /// Set once the field has been given keyboard focus, so it is claimed on
+    /// the first frame only and the user can then tab away from it.
     pub focused: bool,
 }
 
-impl NewCollection {
-    pub fn for_photos(photos: Vec<PhotoId>) -> Self {
+impl NameEntry {
+    fn seeded(name: &str) -> Self {
         Self {
-            photos,
+            name: name.to_owned(),
             ..Default::default()
         }
     }
@@ -590,7 +610,7 @@ impl LibraryState {
         self.recently_deleted_count = deleted.len();
 
         let photos = if self.view == LibraryView::RecentlyDeleted {
-            Some(deleted.into_iter().map(|row| row.photo).collect())
+            Ok(deleted.into_iter().map(|row| row.photo).collect())
         } else {
             // Compose the view scope into a copy of the filter so that
             // session/collection views also honor shutter/ISO/aperture/etc.
@@ -601,14 +621,22 @@ impl LibraryState {
                 LibraryView::Collection(id) => filter.collection_id = Some(*id),
             }
             if filter.is_empty() {
-                lib.all_photos(self.sort).ok()
+                lib.all_photos(self.sort)
             } else {
-                lib.search(&filter, self.sort).ok()
+                lib.search(&filter, self.sort)
             }
         };
 
-        if let Some(photos) = photos {
-            self.results = photos;
+        match photos {
+            Ok(photos) => self.results = photos,
+            // Leaving the previous view's photos on screen is worse than an
+            // empty grid: they read as the answer to the query that just
+            // failed, which is how a collection view that could not be
+            // queried at all looked like one holding the wrong photos.
+            Err(e) => {
+                self.results.clear();
+                self.last_error = Some(format!("Could not list photos: {e}"));
+            }
         }
 
         // Refresh sidebar lists
@@ -873,20 +901,7 @@ impl LibraryState {
     /// name's, and are reported through `last_error` like every other one.
     pub fn create_collection(&mut self, name: &str, photos: &[PhotoId]) -> Result<(), String> {
         let name = name.trim();
-        if name.is_empty() {
-            return Err("Enter a name for the collection.".to_owned());
-        }
-        // The index rejects an exact duplicate itself; catching it here — and
-        // case-insensitively — turns a raw SQL error into an answer, and keeps
-        // "Portfolio" and "portfolio" from sitting next to each other in the
-        // sidebar looking like the same thing.
-        if self
-            .collections
-            .iter()
-            .any(|existing| existing.name.eq_ignore_ascii_case(name))
-        {
-            return Err(format!("A collection named “{name}” already exists."));
-        }
+        self.check_collection_name(name, None)?;
         let Some(lib) = self.library.clone() else {
             return Err("No library is open.".to_owned());
         };
@@ -900,6 +915,46 @@ impl LibraryState {
             self.last_error = Some(format!("Add to collection failed: {e}"));
         }
         self.refresh();
+        Ok(())
+    }
+
+    /// Rename a collection, under the same name rules as creating one.
+    ///
+    /// One index row however many photos are in it: the files record the
+    /// collection's id, not its name.
+    pub fn rename_collection(&mut self, id: CollectionId, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        self.check_collection_name(name, Some(id))?;
+        let Some(lib) = self.library.clone() else {
+            return Err("No library is open.".to_owned());
+        };
+        lib.rename_collection(id, name)
+            .map_err(|e| format!("Could not rename the collection: {e}"))?;
+        self.refresh();
+        Ok(())
+    }
+
+    /// Reject a name no collection can be given, before any of it reaches the
+    /// library.
+    ///
+    /// `keep` is the collection being renamed, whose own name is not a clash —
+    /// otherwise correcting the capitalisation of a name would be refused as a
+    /// duplicate of itself.
+    fn check_collection_name(&self, name: &str, keep: Option<CollectionId>) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("Enter a name for the collection.".to_owned());
+        }
+        // The index rejects an exact duplicate itself; catching it here — and
+        // case-insensitively — turns a raw SQL error into an answer, and keeps
+        // "Portfolio" and "portfolio" from sitting next to each other in the
+        // sidebar looking like the same thing.
+        let clash = self
+            .collections
+            .iter()
+            .any(|existing| Some(existing.id) != keep && existing.name.eq_ignore_ascii_case(name));
+        if clash {
+            return Err(format!("A collection named “{name}” already exists."));
+        }
         Ok(())
     }
 
@@ -1257,6 +1312,79 @@ mod tests {
             .create_collection("Landscapes", &[])
             .expect_err("no library is open");
         assert!(no_library.contains("No library"), "{no_library}");
+    }
+
+    /// What clicking a collection in the sidebar does, end to end: the view
+    /// scopes the filter, and the filter has to come back with that
+    /// collection's photos and nothing else.
+    ///
+    /// The library-side test for this drives `search` directly, which is one
+    /// branch further along than the panel gets — this goes through the same
+    /// `refresh` the sidebar calls.
+    #[test]
+    fn selecting_a_collection_shows_its_photos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = LibraryState::default();
+        state.open_library(tmp.path().to_path_buf(), 0.5);
+        let lib = state.library.clone().expect("library should open");
+
+        let images = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("test_images");
+        lib.import_files(
+            &[
+                images.join("meta_test.jpg"),
+                images.join("color_patches.png"),
+            ],
+            |_| {},
+        )
+        .unwrap();
+        state.refresh();
+        assert_eq!(state.results.len(), 2, "both photos are in All Photos");
+
+        let coll = lib.create_collection("Portfolio").unwrap();
+        let first = state.results[0].clone();
+        state.select_only(first.id);
+        state.add_selected_to_collection(coll.id);
+
+        state.view = LibraryView::Collection(coll.id);
+        state.refresh();
+
+        assert_eq!(state.last_error, None, "the query failed");
+        assert_eq!(
+            state.results.len(),
+            1,
+            "collection view listed {:?}",
+            state
+                .results
+                .iter()
+                .map(|row| row.hash.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(state.results[0].hash, first.hash);
+        assert_eq!(state.collection_len(coll.id), 1, "sidebar count");
+    }
+
+    /// Renaming has the same name rules as creating, except that a collection
+    /// is not a clash with itself — correcting the capitalisation of a name
+    /// would otherwise be refused as a duplicate of the thing being renamed.
+    #[test]
+    fn renaming_a_collection_does_not_clash_with_its_own_name() {
+        let state = LibraryState {
+            collections: vec![collection(1, "Portfolio"), collection(2, "Prints")],
+            ..Default::default()
+        };
+
+        // Its own name, in any case, is free; another collection's is not.
+        assert!(state.check_collection_name("Portfolio", Some(1)).is_ok());
+        assert!(state.check_collection_name("PORTFOLIO", Some(1)).is_ok());
+        assert!(state.check_collection_name("Prints", Some(1)).is_err());
+        assert!(state.check_collection_name("Portfolio", None).is_err());
+
+        // And an empty name is no name at all, whichever dialog is asking.
+        assert!(state.check_collection_name("", Some(1)).is_err());
+        assert!(state.check_collection_name("", None).is_err());
     }
 
     /// The detail panel lists a photo's collections in the same order the

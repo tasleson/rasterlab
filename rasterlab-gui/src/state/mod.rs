@@ -7,7 +7,7 @@ mod virtual_copies;
 pub use app_state::{AppMode, AppState, SplitMode};
 pub use edit_session::{EditSession, EditingTool, editing_tool_for_op, load_op_into_tools};
 pub use library_state::{
-    CollectionPrompt, FocusStackRequest, LibraryState, LibraryView, Membership, NewCollection,
+    CollectionPrompt, FocusStackRequest, LibraryState, LibraryView, Membership,
 };
 pub use tool_state::ToolState;
 pub use virtual_copies::VirtualCopyStore;

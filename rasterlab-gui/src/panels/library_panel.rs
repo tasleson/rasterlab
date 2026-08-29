@@ -5,7 +5,7 @@ use rasterlab_library::{
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
 use crate::state::library_state::thumb_target_side;
-use crate::state::{AppState, CollectionPrompt, LibraryView, Membership, NewCollection};
+use crate::state::{AppState, CollectionPrompt, LibraryView, Membership};
 
 /// Scroll-margin multiple for the resident texture cap: keep roughly this many
 /// screens of thumbnails so scrolling in either direction rarely hits a cold
@@ -474,46 +474,59 @@ pub(crate) fn scrub_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
 
 fn collection_dialogs(ctx: &egui::Context, state: &mut AppState) {
     match state.library.collection_prompt {
-        Some(CollectionPrompt::New(_)) => new_collection_dialog(ctx, state),
+        Some(CollectionPrompt::New { .. } | CollectionPrompt::Rename { .. }) => {
+            collection_name_dialog(ctx, state)
+        }
         Some(CollectionPrompt::Delete { .. }) => delete_collection_dialog(ctx, state),
         None => {}
     }
 }
 
-fn new_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
-    let Some(CollectionPrompt::New(prompt)) = &state.library.collection_prompt else {
-        return;
+/// The dialog for naming a collection, whether it is being created or renamed.
+///
+/// Both are the same question — one line of text, and a name the library may
+/// refuse — so a rejected name keeps the dialog open with what was typed still
+/// in it and the cursor back in the field, rather than making the user start
+/// again.
+fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let (title, action, photo_count) = match &state.library.collection_prompt {
+        Some(CollectionPrompt::New { photos, .. }) => ("New Collection", "Create", photos.len()),
+        Some(CollectionPrompt::Rename { .. }) => ("Rename Collection", "Rename", 0),
+        _ => return,
     };
-    let photo_count = prompt.photos.len();
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         state.library.collection_prompt = None;
         return;
     }
 
-    let mut create = false;
+    let mut commit = false;
     let mut cancel = false;
     let mut open = true;
-    egui::Window::new("New Collection")
+    egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            // Borrow the prompt only for the text field, so the buttons below
+            // Borrow the entry only for the text field, so the buttons below
             // are free to touch the rest of the state.
             let (response, error) = {
-                let Some(CollectionPrompt::New(prompt)) = &mut state.library.collection_prompt
+                let Some(entry) = state
+                    .library
+                    .collection_prompt
+                    .as_mut()
+                    .and_then(name_entry)
                 else {
                     return;
                 };
                 let response = ui
-                    .add(egui::TextEdit::singleline(&mut prompt.name).hint_text("Collection name"));
-                if !prompt.focused {
-                    prompt.focused = true;
+                    .add(egui::TextEdit::singleline(&mut entry.name).hint_text("Collection name"));
+                if !entry.focused {
+                    entry.focused = true;
                     response.request_focus();
                 }
-                (response, prompt.error.clone())
+                (response, entry.error.clone())
             };
 
             if photo_count > 0 {
@@ -528,8 +541,8 @@ fn new_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
                 response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Create").clicked() || pressed_enter {
-                    create = true;
+                if ui.button(action).clicked() || pressed_enter {
+                    commit = true;
                 }
                 if ui.button("Cancel").clicked() {
                     cancel = true;
@@ -537,26 +550,41 @@ fn new_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
             });
         });
 
-    if create {
-        let Some(CollectionPrompt::New(prompt)) = state.library.collection_prompt.take() else {
-            return;
-        };
-        // A rejected name puts the dialog back with what was typed still in
-        // it — retyping the name to fix one character would be a poor trade —
-        // and with the cursor back in the field, which is where the fix has to
-        // be made.
-        if let Err(error) = state
-            .library
-            .create_collection(&prompt.name, &prompt.photos)
-        {
-            state.library.collection_prompt = Some(CollectionPrompt::New(NewCollection {
-                error: Some(error),
-                focused: false,
-                ..prompt
-            }));
-        }
-    } else if cancel || !open {
+    if cancel || !open {
         state.library.collection_prompt = None;
+        return;
+    }
+    if !commit {
+        return;
+    }
+
+    let (result, mut prompt) = match state.library.collection_prompt.take() {
+        Some(CollectionPrompt::New { entry, photos }) => (
+            state.library.create_collection(&entry.name, &photos),
+            CollectionPrompt::New { entry, photos },
+        ),
+        Some(CollectionPrompt::Rename { id, entry }) => (
+            state.library.rename_collection(id, &entry.name),
+            CollectionPrompt::Rename { id, entry },
+        ),
+        _ => return,
+    };
+    if let Err(message) = result
+        && let Some(entry) = name_entry(&mut prompt)
+    {
+        entry.error = Some(message);
+        entry.focused = false;
+        state.library.collection_prompt = Some(prompt);
+    }
+}
+
+/// The text being typed, for the two prompts that ask for a name.
+fn name_entry(
+    prompt: &mut CollectionPrompt,
+) -> Option<&mut crate::state::library_state::NameEntry> {
+    match prompt {
+        CollectionPrompt::New { entry, .. } | CollectionPrompt::Rename { entry, .. } => Some(entry),
+        CollectionPrompt::Delete { .. } => None,
     }
 }
 
@@ -686,7 +714,7 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 .clicked()
             {
                 state.library.collection_prompt =
-                    Some(CollectionPrompt::New(NewCollection::default()));
+                    Some(CollectionPrompt::new_collection(Vec::new()));
             }
         });
         collections_ui(ui, state);
@@ -914,6 +942,11 @@ fn collections_ui(ui: &mut egui::Ui, state: &mut AppState) {
             select_view(state, LibraryView::Collection(coll.id));
         }
         response.context_menu(|ui| {
+            if ui.button("Rename…").clicked() {
+                state.library.collection_prompt =
+                    Some(CollectionPrompt::rename(coll.id, &coll.name));
+                ui.close();
+            }
             if ui.button("Delete Collection…").clicked() {
                 state.library.collection_prompt = Some(CollectionPrompt::Delete {
                     id: coll.id,
@@ -1568,8 +1601,7 @@ fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
         }
         if ui.button("New Collection…").clicked() {
             let photos = state.library.selected.clone();
-            state.library.collection_prompt =
-                Some(CollectionPrompt::New(NewCollection::for_photos(photos)));
+            state.library.collection_prompt = Some(CollectionPrompt::new_collection(photos));
             ui.close();
         }
     });
