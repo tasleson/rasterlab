@@ -413,7 +413,21 @@ impl Library {
         self.db.rename_collection(id, new_name)
     }
 
+    /// Delete a collection, taking it out of every member `.rlab` first.
+    ///
+    /// The files are what a rebuild believes, so a collection dropped from the
+    /// index alone would come back the next time one ran.  This is the one
+    /// collection operation whose cost is unavoidably per member: unlike a
+    /// rename, there is nothing left in the index afterwards for the files to
+    /// refer to.
     pub fn delete_collection(&self, id: CollectionId) -> Result<()> {
+        let members: Vec<PhotoId> = self
+            .db
+            .collection_photos(id)?
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        self.remove_from_collection(id, &members)?;
         self.db.delete_collection(id)
     }
 

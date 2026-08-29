@@ -949,6 +949,39 @@ fn a_lost_index_rebuilds_collections_from_the_newest_hint() {
     assert_eq!(lib.collection_photos(collections[0].id).unwrap().len(), 2);
 }
 
+/// A deleted collection must not come back: the files are what a rebuild
+/// believes, so they have to stop claiming membership before the index rows
+/// go.
+#[test]
+fn a_deleted_collection_does_not_return_with_a_rebuild() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let coll = lib.create_collection("Portfolio").unwrap();
+    lib.add_to_collection(coll.id, &[photo.id]).unwrap();
+
+    lib.delete_collection(coll.id).unwrap();
+    assert!(lib.all_collections().unwrap().is_empty());
+    assert!(
+        rasterlab_core::project::RlabFile::read(&lib.rlab_path(&photo.hash))
+            .unwrap()
+            .lmta
+            .unwrap()
+            .collection_refs
+            .is_empty(),
+        "the photo still claims to be in the deleted collection"
+    );
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+    assert!(
+        lib.all_collections().unwrap().is_empty(),
+        "a deleted collection came back from the files"
+    );
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+}
+
 /// Files written before collections had ids list them by name alone, and have
 /// to keep their memberships until something rewrites them.
 #[test]
