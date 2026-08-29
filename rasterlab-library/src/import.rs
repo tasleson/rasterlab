@@ -17,7 +17,7 @@ use rasterlab_core::{
 use uuid::Uuid;
 
 use crate::{
-    db_trait::LibraryDb,
+    db_trait::{LibraryDb, NewPhoto},
     library::ImportProgress,
     thumbnail::{generate_thumbnail, write_thumbnail},
 };
@@ -641,14 +641,21 @@ fn import_one(
     }
 
     // 11. Insert into DB
-    db.insert_photo(
-        &hash,
-        &relative_lib_path(&hash),
-        &lmta,
+    db.insert_photo(NewPhoto {
+        hash: &hash,
+        lib_path: &relative_lib_path(&hash),
+        lmta: &lmta,
         width,
         height,
-        stack_id.as_deref(),
-    )?;
+        stack_id: stack_id.as_deref(),
+        // An imported project arrives with its edit history intact, so the
+        // index has to say so from the start: a photo imported already edited
+        // is one the edited-only filter should find straight away rather than
+        // after the next save happens to rewrite its thumbnail.
+        has_edits: imported_project
+            .as_ref()
+            .is_some_and(|project| project.has_edits()),
+    })?;
 
     Ok(Some(hash))
 }

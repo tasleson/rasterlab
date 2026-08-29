@@ -7,6 +7,29 @@ pub type CollectionId = i64;
 
 // ── Row types returned by the DB ──────────────────────────────────────────────
 
+/// One photo as it is handed to [`LibraryDb::insert_photo`].
+///
+/// A struct rather than a row of positional arguments because most of what an
+/// insert needs comes from the photo's `.rlab`, and `has_edits` in particular
+/// is easy to leave out: no `LMTA` field backs it — it is derived from the
+/// virtual copies' undo cursors — and a row inserted without it silently drops
+/// out of the library's edited-only filter until something happens to rewrite
+/// the photo's thumbnail.
+#[derive(Debug, Clone, Copy)]
+pub struct NewPhoto<'a> {
+    /// Blake3 hex of the original file bytes.
+    pub hash: &'a str,
+    /// Relative path inside `files/`: e.g. `"ab/cd/abc123….rlab"`.
+    pub lib_path: &'a str,
+    pub lmta: &'a LibraryMeta,
+    pub width: u32,
+    pub height: u32,
+    /// UUID shared by all files in a RAW+JPEG stack.
+    pub stack_id: Option<&'a str>,
+    /// True when any of the photo's virtual copies carries edits.
+    pub has_edits: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PhotoRow {
     pub id: PhotoId,
@@ -101,15 +124,7 @@ pub trait LibraryDb: Send + Sync {
 
     // ── Photos ────────────────────────────────────────────────────────────
 
-    fn insert_photo(
-        &self,
-        hash: &str,
-        lib_path: &str,
-        lmta: &LibraryMeta,
-        width: u32,
-        height: u32,
-        stack_id: Option<&str>,
-    ) -> anyhow::Result<PhotoId>;
+    fn insert_photo(&self, photo: NewPhoto<'_>) -> anyhow::Result<PhotoId>;
 
     fn photo_by_hash(&self, hash: &str) -> anyhow::Result<Option<PhotoRow>>;
 

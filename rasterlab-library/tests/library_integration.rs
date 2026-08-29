@@ -28,6 +28,32 @@ fn open_library(dir: &std::path::Path) -> Library {
     Library::open_or_create(dir).expect("open_or_create")
 }
 
+/// A saved pipeline holding one real operation, for the tests about which
+/// photos count as edited.  What makes a photo edited is the undo cursor, so
+/// the state has to come from a pipeline that actually ran an op rather than
+/// from a hand-built struct.
+fn edited_pipeline_state(image_path: &std::path::Path) -> rasterlab_core::pipeline::PipelineState {
+    use rasterlab_core::{formats::FormatRegistry, ops::SaturationOp, pipeline::EditPipeline};
+
+    let bytes = std::fs::read(image_path).unwrap();
+    let image = FormatRegistry::with_builtins()
+        .decode_bytes(&bytes, Some(image_path))
+        .unwrap();
+    let mut pipeline = EditPipeline::new(image);
+    pipeline.push_op(Box::new(SaturationOp::new(0.4)));
+    pipeline.save_state().unwrap()
+}
+
+/// Give an already-imported photo an edited virtual copy, the way saving from
+/// the editor would, and hand back its hash.
+fn give_the_photo_an_edit(lib: &Library, hash: &str, source: &std::path::Path) {
+    let path = lib.rlab_path(hash);
+    let mut project = rasterlab_core::project::RlabFile::read(&path).unwrap();
+    project.copies[0].pipeline_state = edited_pipeline_state(source);
+    project.write_v5(&path).unwrap();
+    lib.regenerate_thumbnail(hash).unwrap();
+}
+
 // ── Import ────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1721,4 +1747,86 @@ fn focus_stack_fuses_imported_library_photos() {
             "x={x} lost the in-focus detail: {a} vs {b}",
         );
     }
+}
+
+// ── Edited-only filter ────────────────────────────────────────────────────────
+
+/// The edited-only filter reads a column of the index that no `LMTA` field
+/// backs, so every path that writes a photo row has to derive it from the
+/// file's virtual copies.  A rebuild that let the column default to zero took
+/// every previously edited photo out of the filter.
+#[test]
+fn the_edited_flag_survives_a_rebuild() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let edited = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .find(|row| row.original_filename.as_deref() == Some("meta_test.jpg"))
+        .expect("imported jpeg");
+    give_the_photo_an_edit(&lib, &edited.hash, &jpeg_path());
+    assert!(edited_hashes(&lib) == vec![edited.hash.clone()]);
+
+    lib.rebuild_index(|_| {}).expect("rebuild_index");
+
+    assert_eq!(
+        edited_hashes(&lib),
+        vec![edited.hash],
+        "the rebuild lost the edited flag the .rlab still records"
+    );
+}
+
+/// Importing a project that already carries edits — an editor `.rlab`, or a
+/// photo moved between libraries — has to index it as edited straight away.
+#[test]
+fn an_imported_project_with_edits_is_indexed_as_edited() {
+    use rasterlab_core::project::{RlabFile, RlabMeta, SavedCopy};
+
+    let project_dir = tempfile::tempdir().unwrap();
+    let project_path = project_dir.path().join("edited-photo.rlab");
+    let original_bytes = std::fs::read(png_path()).unwrap();
+    let project = RlabFile::new(
+        RlabMeta::new(
+            "test",
+            Some(png_path().to_string_lossy().into_owned()),
+            0,
+            0,
+        ),
+        original_bytes,
+        vec![SavedCopy {
+            name: "Edited copy".into(),
+            pipeline_state: edited_pipeline_state(&png_path()),
+        }],
+        0,
+        None,
+    );
+    project.write_v5(&project_path).unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let session = lib.import_files(&[project_path], |_| {}).unwrap();
+    assert!(session.errors.is_empty(), "{:?}", session.errors);
+
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    assert!(photos[0].has_edits, "an edited import was indexed as clean");
+    assert_eq!(edited_hashes(&lib), vec![photos[0].hash.clone()]);
+}
+
+/// Hashes the edited-only filter returns, scoped to the photos' own import
+/// session the way the library sidebar scopes it.
+fn edited_hashes(lib: &Library) -> Vec<String> {
+    let session = lib.all_sessions().unwrap();
+    let filter = SearchFilter {
+        import_session: session.first().map(|row| row.id.clone()),
+        has_edits_only: true,
+        ..Default::default()
+    };
+    lib.search(&filter, SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .map(|row| row.hash)
+        .collect()
 }

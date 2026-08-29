@@ -9,7 +9,7 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::{
-    db_trait::{CollectionRow, LibraryDb, PhotoId, SortOrder},
+    db_trait::{CollectionRow, LibraryDb, NewPhoto, PhotoId, SortOrder},
     import::{format_session_name, thumb_path, unix_now},
     thumbnail::{generate_thumbnail, write_thumbnail},
 };
@@ -320,13 +320,14 @@ fn reindex_one(
         db.delete_photo(existing.id)?;
     }
 
-    db.insert_photo(
-        &hash,
-        &lib_path,
-        &lmta,
-        rlab.meta.width,
-        rlab.meta.height,
-        lmta.stack_peer_hash
+    db.insert_photo(NewPhoto {
+        hash: &hash,
+        lib_path: &lib_path,
+        lmta: &lmta,
+        width: rlab.meta.width,
+        height: rlab.meta.height,
+        stack_id: lmta
+            .stack_peer_hash
             .as_deref()
             .map(|_| hash.as_str())
             .map(|_| {
@@ -334,7 +335,12 @@ fn reindex_one(
                 // (same logic used during import)
                 hash.as_str()
             }),
-    )?;
+        // Whether a photo carries edits lives in its virtual copies rather
+        // than in the LMTA chunk, so it has to be read back off the file like
+        // everything else here.  Left to the column default, a rebuild would
+        // quietly empty the edited-only filter for the whole library.
+        has_edits: rlab.has_edits(),
+    })?;
 
     // Record collection membership for the pass that follows the walk. It
     // cannot be settled here: which name a collection ends up with is decided

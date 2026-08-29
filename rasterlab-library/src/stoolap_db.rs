@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     db_trait::{
-        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
+        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, NewPhoto, PhotoId, PhotoRow,
         RecentlyDeletedRow, SortOrder,
     },
     search::SearchFilter,
@@ -317,16 +317,8 @@ impl LibraryDb for StoolapDb {
 
     // ── Photos ────────────────────────────────────────────────────────────
 
-    fn insert_photo(
-        &self,
-        hash: &str,
-        lib_path: &str,
-        lmta: &LibraryMeta,
-        width: u32,
-        height: u32,
-        stack_id: Option<&str>,
-    ) -> Result<PhotoId> {
-        self.in_transaction(|tx| insert_photo_tx(tx, hash, lib_path, lmta, width, height, stack_id))
+    fn insert_photo(&self, photo: NewPhoto<'_>) -> Result<PhotoId> {
+        self.in_transaction(|tx| insert_photo_tx(tx, photo))
     }
 
     fn photo_by_hash(&self, hash: &str) -> Result<Option<PhotoRow>> {
@@ -872,22 +864,23 @@ impl LibraryDb for StoolapDb {
 
 /// Insert a photo row and every row that hangs off it.
 #[allow(clippy::too_many_arguments)]
-fn insert_photo_tx(
-    tx: &mut Transaction,
-    hash: &str,
-    lib_path: &str,
-    lmta: &LibraryMeta,
-    width: u32,
-    height: u32,
-    stack_id: Option<&str>,
-) -> Result<PhotoId> {
+fn insert_photo_tx(tx: &mut Transaction, photo: NewPhoto<'_>) -> Result<PhotoId> {
+    let NewPhoto {
+        hash,
+        lib_path,
+        lmta,
+        width,
+        height,
+        stack_id,
+        has_edits,
+    } = photo;
     let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
 
     let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
     let opt_int = |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
     let opt_f64 = |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
 
-    // 14 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
+    // 15 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
     let photo_params: Vec<Value> = vec![
         Value::text(hash),
         Value::text(lib_path),
@@ -903,14 +896,15 @@ fn insert_photo_tx(
         opt_text(lmta.source_path.as_deref()),
         opt_int(lmta.source_size.map(|s| s as i64)),
         opt_int(lmta.source_mtime.map(|t| t.secs)),
+        Value::integer(has_edits as i64),
     ];
     let photo_id: i64 = tx
         .query_one(
             "INSERT INTO photos
              (hash, lib_path, width, height, import_date, import_session,
               capture_date, original_filename, stack_id, stack_is_primary, protected,
-              source_path, source_size, source_mtime)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+              source_path, source_size, source_mtime, has_edits)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
              RETURNING id",
             photo_params,
         )
@@ -1115,6 +1109,19 @@ mod tests {
         }
     }
 
+    /// A photo to insert, with everything a test does not care about filled in.
+    fn new_photo<'a>(hash: &'a str, lib_path: &'a str, lmta: &'a LibraryMeta) -> NewPhoto<'a> {
+        NewPhoto {
+            hash,
+            lib_path,
+            lmta,
+            width: 10,
+            height: 10,
+            stack_id: None,
+            has_edits: false,
+        }
+    }
+
     fn count(db: &StoolapDb, sql: &str) -> i64 {
         db.db.query_one::<i64, _>(sql, ()).unwrap()
     }
@@ -1126,11 +1133,11 @@ mod tests {
     #[test]
     fn a_failed_insert_leaves_no_rows_behind() {
         let db = db();
-        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 100, 50, None)
+        db.insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
 
         let before = count(&db, "SELECT COUNT(*) FROM keywords");
-        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 100, 50, None)
+        db.insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .expect_err("duplicate hash must be rejected");
 
         assert_eq!(count(&db, "SELECT COUNT(*) FROM photos"), 1);
@@ -1143,6 +1150,40 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM user_meta"), 1);
     }
 
+    /// The edited-only filter reads one column, and only an insert can put a
+    /// photo that arrived already edited into it.
+    #[test]
+    fn an_edited_photo_is_indexed_as_edited_and_found_by_the_filter() {
+        let db = db();
+        db.insert_photo(NewPhoto {
+            has_edits: true,
+            ..new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"))
+        })
+        .unwrap();
+        db.insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1")))
+            .unwrap();
+
+        assert!(
+            db.all_photos(SortOrder::default()).unwrap()[0].has_edits
+                ^ db.all_photos(SortOrder::default()).unwrap()[1].has_edits
+        );
+
+        let filter = SearchFilter {
+            import_session: Some("s1".into()),
+            has_edits_only: true,
+            ..Default::default()
+        };
+        let found = db.search(&filter, SortOrder::default()).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|row| row.hash.as_str())
+                .collect::<Vec<_>>(),
+            ["aabbcc"],
+            "the session's edited photo is the only one the filter should return"
+        );
+    }
+
     #[test]
     fn session_photo_count_reflects_the_rows() {
         let db = db();
@@ -1151,9 +1192,9 @@ mod tests {
         assert_eq!(db.session_photo_count("s1").unwrap(), 0);
 
         let id = db
-            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
-        db.insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
+        db.insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1")))
             .unwrap();
         assert_eq!(db.session_photo_count("s1").unwrap(), 2);
 
@@ -1169,7 +1210,7 @@ mod tests {
         db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
             .unwrap();
         let id = db
-            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
         db.update_session_count("s1", 1).unwrap();
 
@@ -1192,7 +1233,7 @@ mod tests {
         db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
             .unwrap();
         let id = db
-            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
         db.update_session_count("s1", 1).unwrap();
         assert_eq!(db.all_photos(SortOrder::default()).unwrap().len(), 1);
@@ -1224,7 +1265,7 @@ mod tests {
             .unwrap();
         db.insert_session("empty", "Jun 4 2025", 1_600_100_000, None)
             .unwrap();
-        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("full"), 10, 10, None)
+        db.insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("full")))
             .unwrap();
         db.update_session_count("full", 1).unwrap();
 
@@ -1243,10 +1284,10 @@ mod tests {
     fn re_adding_a_photo_leaves_one_membership_row() {
         let db = db();
         let a = db
-            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
         let b = db
-            .insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1")))
             .unwrap();
         let coll = db
             .create_collection("uuid-favorites", "Favorites", 1_600_000_000)
@@ -1295,10 +1336,10 @@ mod tests {
     fn collection_memberships_skip_deleted_photos() {
         let db = db();
         let a = db
-            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
         let b = db
-            .insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1")))
             .unwrap();
         let favorites = db
             .create_collection("uuid-favorites", "Favorites", 1_600_000_000)
