@@ -1,7 +1,7 @@
 use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
-use rasterlab_core::library_meta::LibraryMeta;
+use rasterlab_core::library_meta::{LibraryExif, LibraryMeta};
 use stoolap::Value;
 use stoolap::api::{Database, Transaction};
 use uuid::Uuid;
@@ -319,6 +319,10 @@ impl LibraryDb for StoolapDb {
 
     fn insert_photo(&self, photo: NewPhoto<'_>) -> Result<PhotoId> {
         self.in_transaction(|tx| insert_photo_tx(tx, photo))
+    }
+
+    fn replace_photo(&self, photo_id: PhotoId, photo: NewPhoto<'_>) -> Result<()> {
+        self.in_transaction(|tx| replace_photo_tx(tx, photo_id, photo))
     }
 
     fn photo_by_hash(&self, hash: &str) -> Result<Option<PhotoRow>> {
@@ -878,7 +882,6 @@ fn insert_photo_tx(tx: &mut Transaction, photo: NewPhoto<'_>) -> Result<PhotoId>
 
     let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
     let opt_int = |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
-    let opt_f64 = |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
 
     // 15 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
     let photo_params: Vec<Value> = vec![
@@ -910,76 +913,7 @@ fn insert_photo_tx(tx: &mut Transaction, photo: NewPhoto<'_>) -> Result<PhotoId>
         )
         .context("insert photo")?;
 
-    // EXIF — 17 params exceeds tuple impl limit; use Vec<Value>
-    if let Some(exif) = &lmta.exif {
-        let params: Vec<Value> = vec![
-            Value::integer(photo_id),
-            opt_text(exif.camera_make.as_deref()),
-            opt_text(exif.camera_model.as_deref()),
-            opt_text(exif.lens_make.as_deref()),
-            opt_text(exif.lens_model.as_deref()),
-            opt_int(exif.iso.map(|v| v as i64)),
-            opt_f64(exif.shutter_sec),
-            opt_text(exif.shutter_display.as_deref()),
-            opt_f64(exif.aperture.map(|v| v as f64)),
-            opt_f64(exif.focal_length.map(|v| v as f64)),
-            opt_f64(exif.focal_length_35mm.map(|v| v as f64)),
-            opt_f64(exif.exposure_bias.map(|v| v as f64)),
-            opt_text(exif.exposure_program.as_deref()),
-            opt_text(exif.metering_mode.as_deref()),
-            opt_int(exif.flash.map(|v| if v { 1i64 } else { 0i64 })),
-            opt_f64(exif.gps_lat),
-            opt_f64(exif.gps_lon),
-            opt_f64(exif.gps_alt.map(|v| v as f64)),
-        ];
-        tx.execute(
-            "INSERT INTO exif
-                 (photo_id, camera_make, camera_model, lens_make, lens_model, iso,
-                  shutter_sec, shutter_display, aperture, focal_length,
-                  focal_length_35mm, exposure_bias, exposure_program,
-                  metering_mode, flash, gps_lat, gps_lon, gps_alt)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
-            params,
-        )
-        .context("insert exif")?;
-    }
-
-    // Ratings row
-    tx.execute(
-        "INSERT INTO ratings (photo_id, rating, color_label, flag) VALUES ($1,$2,$3,$4)",
-        (
-            photo_id,
-            lmta.rating as i64,
-            lmta.color_label.as_deref(),
-            lmta.flag.as_deref(),
-        ),
-    )
-    .context("insert rating")?;
-
-    // Keywords
-    for kw in &lmta.keywords {
-        tx.execute(
-            "INSERT INTO keywords (photo_id, keyword) VALUES ($1, $2)",
-            (photo_id, kw.as_str()),
-        )
-        .context("insert keyword")?;
-    }
-
-    // user_meta
-    tx.execute(
-        "INSERT INTO user_meta
-             (photo_id, caption, copyright, creator, location_city, location_country)
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        (
-            photo_id,
-            lmta.caption.as_deref(),
-            lmta.copyright.as_deref(),
-            lmta.creator.as_deref(),
-            lmta.location_city.as_deref(),
-            lmta.location_country.as_deref(),
-        ),
-    )
-    .context("insert user_meta")?;
+    write_photo_dependents_tx(tx, photo_id, lmta)?;
 
     // Collection membership is deliberately not restored here.  A photo's
     // `.rlab` names its collections only as a hint, and which name wins is a
@@ -988,6 +922,221 @@ fn insert_photo_tx(tx: &mut Transaction, photo: NewPhoto<'_>) -> Result<PhotoId>
     // has been read.
 
     Ok(photo_id)
+}
+
+/// Rewrite one photo's row in place from what its `.rlab` says, keeping its id
+/// and therefore its collection membership. See [`LibraryDb::replace_photo`].
+fn replace_photo_tx(tx: &mut Transaction, photo_id: PhotoId, photo: NewPhoto<'_>) -> Result<()> {
+    let NewPhoto {
+        hash: _,
+        lib_path,
+        lmta,
+        width,
+        height,
+        stack_id,
+        has_edits,
+    } = photo;
+    let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
+
+    let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+    let opt_int = |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
+
+    // `deleted_at` is reset along with everything else: the caller found this
+    // row by the hash of a file sitting in `files/`, and a photo whose file is
+    // there is an active one however the index came to think otherwise.
+    let params: Vec<Value> = vec![
+        Value::text(lib_path),
+        Value::integer(width as i64),
+        Value::integer(height as i64),
+        Value::integer(lmta.import_date as i64),
+        Value::text(lmta.import_session_id.as_str()),
+        opt_text(capture_date),
+        opt_text(lmta.original_filename.as_deref()),
+        opt_text(stack_id),
+        Value::integer(if lmta.stack_is_primary { 1 } else { 0 }),
+        Value::integer(if lmta.protected { 1 } else { 0 }),
+        opt_text(lmta.source_path.as_deref()),
+        opt_int(lmta.source_size.map(|s| s as i64)),
+        opt_int(lmta.source_mtime.map(|t| t.secs)),
+        Value::integer(has_edits as i64),
+        Value::integer(photo_id),
+    ];
+    // No row means the caller is working from an id the index no longer has;
+    // writing the dependent rows anyway would attach them to nothing.
+    if tx
+        .execute(
+            "UPDATE photos SET
+             lib_path=$1, width=$2, height=$3, import_date=$4, import_session=$5,
+             capture_date=$6, original_filename=$7, stack_id=$8, stack_is_primary=$9,
+             protected=$10, source_path=$11, source_size=$12, source_mtime=$13,
+             has_edits=$14, deleted_at=0
+         WHERE id=$15",
+            params,
+        )
+        .context("update photo")?
+        == 0
+    {
+        anyhow::bail!("photo {photo_id} is not in the index");
+    }
+
+    write_photo_dependents_tx(tx, photo_id, lmta)?;
+
+    // Keep the sidebar's cached count in step with the row just written, the
+    // way every other photo mutation here does. A photo whose file moved it to
+    // another session leaves the old session's count to the pass that ends a
+    // rebuild.
+    tx.execute(
+        "UPDATE import_sessions
+         SET photo_count = (
+             SELECT COUNT(*) FROM photos
+             WHERE import_session = import_sessions.id AND deleted_at = 0
+         )
+         WHERE id = (SELECT import_session FROM photos WHERE id = $1)",
+        (photo_id,),
+    )?;
+
+    Ok(())
+}
+
+/// Write the rows that hang off a photo — EXIF, rating, keywords, user
+/// metadata — from what its `.rlab` says.
+///
+/// Each row is updated where it exists and inserted where it does not, rather
+/// than being cleared and rewritten: stoolap rejects an insert of a primary key
+/// that was deleted earlier in the same transaction, and `exif`, `ratings` and
+/// `user_meta` are all keyed by `photo_id`.  That is also what lets inserting a
+/// photo and rewriting one in place share this.
+fn write_photo_dependents_tx(
+    tx: &mut Transaction,
+    photo_id: PhotoId,
+    lmta: &LibraryMeta,
+) -> Result<()> {
+    write_exif_tx(tx, photo_id, lmta.exif.as_ref())?;
+
+    let rating_params = vec![
+        Value::integer(photo_id),
+        Value::integer(lmta.rating as i64),
+        lmta.color_label
+            .as_deref()
+            .map_or_else(Value::null_unknown, Value::text),
+        lmta.flag
+            .as_deref()
+            .map_or_else(Value::null_unknown, Value::text),
+    ];
+    if tx.execute(
+        "UPDATE ratings SET rating=$2, color_label=$3, flag=$4 WHERE photo_id=$1",
+        rating_params.clone(),
+    )? == 0
+    {
+        tx.execute(
+            "INSERT INTO ratings (photo_id, rating, color_label, flag) VALUES ($1,$2,$3,$4)",
+            rating_params,
+        )
+        .context("insert rating")?;
+    }
+
+    let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+    let user_meta_params = vec![
+        Value::integer(photo_id),
+        opt_text(lmta.caption.as_deref()),
+        opt_text(lmta.copyright.as_deref()),
+        opt_text(lmta.creator.as_deref()),
+        opt_text(lmta.location_city.as_deref()),
+        opt_text(lmta.location_country.as_deref()),
+    ];
+    if tx.execute(
+        "UPDATE user_meta SET caption=$2, copyright=$3, creator=$4,
+             location_city=$5, location_country=$6
+         WHERE photo_id=$1",
+        user_meta_params.clone(),
+    )? == 0
+    {
+        tx.execute(
+            "INSERT INTO user_meta
+             (photo_id, caption, copyright, creator, location_city, location_country)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+            user_meta_params,
+        )
+        .context("insert user_meta")?;
+    }
+
+    // Keywords have no key to update against, so the list is replaced whole.
+    // Both statements are in this transaction, so a failure between them cannot
+    // leave the photo with none.
+    tx.execute("DELETE FROM keywords WHERE photo_id = $1", (photo_id,))?;
+    for kw in &lmta.keywords {
+        tx.execute(
+            "INSERT INTO keywords (photo_id, keyword) VALUES ($1, $2)",
+            (photo_id, kw.as_str()),
+        )
+        .context("insert keyword")?;
+    }
+
+    Ok(())
+}
+
+/// Write a photo's EXIF row, or drop it for a file that carries no snapshot.
+///
+/// The parameters are ordered `photo_id` first so one vector serves both the
+/// update and the insert.
+fn write_exif_tx(
+    tx: &mut Transaction,
+    photo_id: PhotoId,
+    exif: Option<&LibraryExif>,
+) -> Result<()> {
+    let Some(exif) = exif else {
+        tx.execute("DELETE FROM exif WHERE photo_id = $1", (photo_id,))?;
+        return Ok(());
+    };
+
+    let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+    let opt_int = |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
+    let opt_f64 = |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
+
+    // 18 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
+    let params: Vec<Value> = vec![
+        Value::integer(photo_id),
+        opt_text(exif.camera_make.as_deref()),
+        opt_text(exif.camera_model.as_deref()),
+        opt_text(exif.lens_make.as_deref()),
+        opt_text(exif.lens_model.as_deref()),
+        opt_int(exif.iso.map(|v| v as i64)),
+        opt_f64(exif.shutter_sec),
+        opt_text(exif.shutter_display.as_deref()),
+        opt_f64(exif.aperture.map(|v| v as f64)),
+        opt_f64(exif.focal_length.map(|v| v as f64)),
+        opt_f64(exif.focal_length_35mm.map(|v| v as f64)),
+        opt_f64(exif.exposure_bias.map(|v| v as f64)),
+        opt_text(exif.exposure_program.as_deref()),
+        opt_text(exif.metering_mode.as_deref()),
+        opt_int(exif.flash.map(|v| if v { 1i64 } else { 0i64 })),
+        opt_f64(exif.gps_lat),
+        opt_f64(exif.gps_lon),
+        opt_f64(exif.gps_alt.map(|v| v as f64)),
+    ];
+
+    if tx.execute(
+        "UPDATE exif SET
+             camera_make=$2, camera_model=$3, lens_make=$4, lens_model=$5, iso=$6,
+             shutter_sec=$7, shutter_display=$8, aperture=$9, focal_length=$10,
+             focal_length_35mm=$11, exposure_bias=$12, exposure_program=$13,
+             metering_mode=$14, flash=$15, gps_lat=$16, gps_lon=$17, gps_alt=$18
+         WHERE photo_id=$1",
+        params.clone(),
+    )? == 0
+    {
+        tx.execute(
+            "INSERT INTO exif
+             (photo_id, camera_make, camera_model, lens_make, lens_model, iso,
+              shutter_sec, shutter_display, aperture, focal_length,
+              focal_length_35mm, exposure_bias, exposure_program,
+              metering_mode, flash, gps_lat, gps_lon, gps_alt)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+            params,
+        )
+        .context("insert exif")?;
+    }
+    Ok(())
 }
 
 /// Rewrite the mutable metadata of one photo: rating, user fields, keywords.
@@ -1148,6 +1297,70 @@ mod tests {
         );
         assert_eq!(count(&db, "SELECT COUNT(*) FROM ratings"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM user_meta"), 1);
+    }
+
+    /// What a rebuild needs from `replace_photo`: the row keeps its id and its
+    /// collection membership, and the rows hanging off it are rewritten from
+    /// the file rather than accumulating alongside what was already there.
+    #[test]
+    fn replacing_a_photo_keeps_its_id_and_collections_and_rewrites_the_rest() {
+        let db = db();
+        let id = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        let collection = db
+            .create_collection("uuid-1", "Trip", 1_600_000_000)
+            .unwrap();
+        db.add_to_collection(collection, &[id]).unwrap();
+
+        let updated = LibraryMeta {
+            rating: 4,
+            keywords: vec!["gamma".into()],
+            caption: Some("after".into()),
+            ..lmta("s1")
+        };
+        db.replace_photo(id, new_photo("aabbcc", "aa/bb/aabbcc.rlab", &updated))
+            .unwrap();
+
+        let row = db.photo_by_hash("aabbcc").unwrap().expect("photo row");
+        assert_eq!(row.id, id, "the row must keep the id its members refer to");
+        assert_eq!(
+            db.collection_photos(collection).unwrap().len(),
+            1,
+            "membership hangs off the id, so it must survive the rewrite"
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM keywords"),
+            1,
+            "keywords should be replaced by the file's, not added to them"
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM ratings"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM user_meta"), 1);
+        assert_eq!(count(&db, "SELECT rating FROM ratings"), 4);
+    }
+
+    /// A rebuild replaces rows one at a time with no delete in between, so the
+    /// session's cached count — which the sidebar shows and `all_sessions`
+    /// filters on — must never dip while it runs.
+    #[test]
+    fn replacing_a_photo_leaves_its_session_count_alone() {
+        let db = db();
+        db.insert_session("s1", "Session", 1_600_000_000, None)
+            .unwrap();
+        let id = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        db.update_session_count("s1", db.session_photo_count("s1").unwrap())
+            .unwrap();
+
+        db.replace_photo(id, new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+
+        assert_eq!(
+            db.all_sessions().unwrap()[0].photo_count,
+            1,
+            "a session of one photo must not vanish mid-rebuild"
+        );
     }
 
     /// The edited-only filter reads one column, and only an insert can put a

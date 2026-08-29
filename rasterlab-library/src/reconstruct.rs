@@ -104,11 +104,14 @@ struct CollectionsFromFiles {
 ///   unmounted volume than a library the user emptied, and wiping the index
 ///   over a mount failure is not recoverable from.
 ///
+/// * An existing row is updated in place rather than deleted and re-inserted,
+///   so it keeps the id its collection membership hangs off, and no photo is
+///   ever momentarily without a row.
+///
 /// `cancel` is polled before each file so a rebuild over a large or slow
 /// library can be stopped.  A cancelled run keeps the rows it refreshed and
 /// leaves the rest of the reconciliation to the next full pass; see the
-/// pruning and restore steps below for why one of them is skipped and the
-/// others are not.
+/// pruning step below for the one thing it must not do on partial evidence.
 pub fn rebuild(
     library_root: &Path,
     db: &dyn LibraryDb,
@@ -189,12 +192,11 @@ pub fn rebuild(
         }
     }
 
-    // Restore the session and collection rows.  These run even for a cancelled
-    // walk: `reindex_one` replaces a photo's row rather than updating it, and
-    // the new row joins no collections, so stopping before the restore would
-    // silently strip collection membership from every photo this run touched.
-    // Both passes only add what the files they read described, so a partial
-    // walk restores part of it and the next run finishes the job.
+    // Restore the session and collection rows.  Both run even for a cancelled
+    // walk: they only add what the files already read described, so a partial
+    // walk restores that much and the next run finishes the job.  Photos the
+    // walk re-indexed keep the memberships they had either way, since their
+    // rows are updated in place.
     //
     // Restore the session rows now that every photo's session membership and
     // import date are known.  `insert_session` is a no-op for a session that
@@ -360,15 +362,12 @@ fn reindex_one(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| format!("{}/{}/{}.rlab", &hash[0..2], &hash[2..4], hash));
 
-    // Replace rather than skip: the file is the record, so whatever it says now
-    // wins over whatever the index remembers.  Delete-then-insert leaves the
-    // photo missing if the process dies between the two, which the next run
-    // repairs — the reason this pass has to stay re-runnable.
-    if let Some(existing) = db.photo_by_hash(&hash)? {
-        db.delete_photo(existing.id)?;
-    }
-
-    db.insert_photo(NewPhoto {
+    // Rewrite rather than skip: the file is the record, so whatever it says now
+    // wins over whatever the index remembers.  An existing row is updated in
+    // place instead of being deleted and re-inserted, which keeps its id — what
+    // collection membership is keyed by — and leaves no window in which a photo
+    // that is on disk has no row at all.
+    let photo = NewPhoto {
         hash: &hash,
         lib_path: &lib_path,
         lmta: &lmta,
@@ -388,7 +387,13 @@ fn reindex_one(
         // everything else here.  Left to the column default, a rebuild would
         // quietly empty the edited-only filter for the whole library.
         has_edits: rlab.has_edits(),
-    })?;
+    };
+    match db.photo_by_hash(&hash)? {
+        Some(existing) => db.replace_photo(existing.id, photo)?,
+        None => {
+            db.insert_photo(photo)?;
+        }
+    }
 
     // Record collection membership for the pass that follows the walk. It
     // cannot be settled here: which name a collection ends up with is decided

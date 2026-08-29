@@ -775,6 +775,71 @@ fn rebuild_index_restores_session_counts_and_names() {
     assert_eq!(photos.len(), 2);
 }
 
+/// Collection membership is keyed by photo id, so a rebuild that reassigned
+/// ids would break every collection in the library.  Refreshing rows in place
+/// is what keeps them stable.
+#[test]
+fn rebuild_index_keeps_photo_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let before: Vec<(String, PhotoId)> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.hash, row.id))
+        .collect();
+
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
+
+    let after: Vec<(String, PhotoId)> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.hash, row.id))
+        .collect();
+    assert_eq!(before, after, "a rebuild must not renumber the photo rows");
+}
+
+/// The pass that restores collections runs over memberships that a rebuild no
+/// longer clears, so it has to be idempotent: two rebuilds must not leave a
+/// photo listed twice.
+#[test]
+fn repeated_rebuilds_leave_one_collection_membership() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let ids: Vec<_> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    let collection = lib.create_collection("Trip").unwrap();
+    lib.add_to_collection(collection.id, &ids).unwrap();
+
+    for _ in 0..2 {
+        lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+            .expect("rebuild_index");
+    }
+
+    assert_eq!(
+        lib.collection_photos(collection.id).unwrap().len(),
+        2,
+        "each photo should be in the collection exactly once"
+    );
+    assert_eq!(
+        lib.all_collections().unwrap().len(),
+        1,
+        "the collection should not be recreated alongside itself"
+    );
+}
+
 // ── Recovery: bringing the index back in line with the files ──────────────────
 
 /// A delete that stopped after trashing the file — or a photo removed from

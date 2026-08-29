@@ -126,6 +126,17 @@ pub trait LibraryDb: Send + Sync {
 
     fn insert_photo(&self, photo: NewPhoto<'_>) -> anyhow::Result<PhotoId>;
 
+    /// Rewrite an existing photo's row, and every row that hangs off it, from
+    /// what its `.rlab` now says — keeping the row's id.
+    ///
+    /// This is what a rebuild uses instead of deleting the row and inserting a
+    /// fresh one.  The id is what collection membership is keyed by, so
+    /// replacing the row would silently drop the photo out of its collections;
+    /// and a process killed between the delete and the insert would leave the
+    /// photo with no row at all.  One statement per table in one transaction
+    /// has neither problem.
+    fn replace_photo(&self, photo_id: PhotoId, photo: NewPhoto<'_>) -> anyhow::Result<()>;
+
     fn photo_by_hash(&self, hash: &str) -> anyhow::Result<Option<PhotoRow>>;
 
     /// True if a photo with this exact source fingerprint — same path, byte
