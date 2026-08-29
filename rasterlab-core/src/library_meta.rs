@@ -2,6 +2,26 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+/// One collection a photo belongs to, as recorded in its `.rlab`.
+///
+/// Membership is keyed on [`id`](Self::id) rather than on the name, so that
+/// renaming a collection is a single index update instead of a rewrite of
+/// every file in it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CollectionRef {
+    /// UUID minted when the collection was created.  Two files are in the same
+    /// collection exactly when this matches.
+    pub id: String,
+    /// The collection's name as of the last time this file was written.
+    ///
+    /// Not authoritative, and stale in every member file that has not been
+    /// touched since a rename — the library index owns the name.  It is here
+    /// so that rebuilding an index that has been lost outright restores named
+    /// collections rather than anonymous groups of photos.
+    #[serde(default)]
+    pub name: String,
+}
+
 /// User-defined and EXIF metadata embedded in the `LMTA` chunk of a `.rlab`
 /// library file. All fields are optional so existing `.rlab` files that were
 /// created before the library feature will deserialize cleanly with defaults.
@@ -38,10 +58,18 @@ pub struct LibraryMeta {
     /// the filesystem (best-effort, per-OS) so it cannot go missing.
     #[serde(default)]
     pub protected: bool,
-    /// Collection names this photo belongs to (denormalised for reconstruction;
-    /// rewritten in all affected files when a collection is renamed).
+    /// Collections this photo belongs to.
     #[serde(default)]
-    pub collections: Vec<String>,
+    pub collection_refs: Vec<CollectionRef>,
+    /// Collection names as written by versions that identified a collection by
+    /// its name alone.
+    ///
+    /// Read so that a file which has not been touched since keeps its
+    /// memberships through a rebuild, and migrated into
+    /// [`collection_refs`](Self::collection_refs) the next time the file is
+    /// written for any other reason.  Never written back.
+    #[serde(default, rename = "collections", skip_serializing_if = "Vec::is_empty")]
+    pub legacy_collections: Vec<String>,
     /// User-supplied caption / description.
     pub caption: Option<String>,
     /// Copyright notice (e.g. `"© 2025 Jane Smith"`).
@@ -122,7 +150,8 @@ impl Default for LibraryMeta {
             color_label: None,
             flag: None,
             protected: false,
-            collections: Vec::new(),
+            collection_refs: Vec::new(),
+            legacy_collections: Vec::new(),
             caption: None,
             copyright: None,
             creator: None,
@@ -273,6 +302,46 @@ mod tests {
         assert_eq!(back.keywords, vec!["travel", "sunset"]);
         assert!(back.stack_is_primary); // default_true
         assert!(!back.protected); // defaults to false
+    }
+
+    /// Files written before collections had ids carry a bare list of names.
+    /// They have to keep their memberships — a rebuild reads the legacy list —
+    /// and the field must not be written back out, or a migrated file would
+    /// carry its membership twice.
+    #[test]
+    fn legacy_collection_names_are_read_but_never_rewritten() {
+        let json = r#"{"original_filename":null,"import_session_id":"s",
+            "import_date":0,"stack_peer_hash":null,"exif":null,
+            "collections":["Portfolio","Prints"]}"#;
+        let meta: LibraryMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.legacy_collections, ["Portfolio", "Prints"]);
+        assert!(meta.collection_refs.is_empty());
+
+        let migrated = LibraryMeta {
+            collection_refs: vec![CollectionRef {
+                id: "d1f7c0de-0000-4000-8000-000000000001".to_owned(),
+                name: "Portfolio".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&migrated).unwrap();
+        assert!(
+            !json.contains("\"collections\""),
+            "the legacy list must not be written back: {json}"
+        );
+
+        let back: LibraryMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.collection_refs, migrated.collection_refs);
+        assert!(back.legacy_collections.is_empty());
+    }
+
+    /// A name hint is only a hint, so a file written by a version that did not
+    /// record one still names its collection something.
+    #[test]
+    fn a_collection_ref_without_a_name_defaults_to_empty() {
+        let refs: Vec<CollectionRef> =
+            serde_json::from_str(r#"[{"id":"d1f7c0de-0000-4000-8000-000000000001"}]"#).unwrap();
+        assert_eq!(refs[0].name, "");
     }
 
     #[test]

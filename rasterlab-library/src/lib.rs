@@ -65,7 +65,7 @@ pub use db_trait::{
 };
 pub use import::{ImportSession, MONTH_NAMES, ymd_from_unix};
 pub use library::{ImportProgress, Library};
-pub use rasterlab_core::library_meta::{LibraryExif, LibraryMeta};
+pub use rasterlab_core::library_meta::{CollectionRef, LibraryExif, LibraryMeta};
 pub use reconstruct::RebuildProgress;
 pub use scrub::{ScrubOutcome, ScrubProgress};
 pub use search::SearchFilter;
