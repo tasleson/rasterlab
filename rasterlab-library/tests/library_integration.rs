@@ -810,6 +810,95 @@ fn opening_library_finishes_an_interrupted_recently_deleted_move() {
     assert_eq!(deleted[0].photo.hash, photo.hash);
 }
 
+/// A rebuild reads the files to decide what the library holds, and Recently
+/// Deleted is part of it.  Walking `files/` alone left a library whose index
+/// was lost with no trace of the photos waiting there: no row to restore, to
+/// empty, or even to show, while their files stayed on disk for good.
+#[test]
+fn rebuild_index_keeps_and_recovers_recently_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let kept = photos[0].clone();
+    let deleted = photos[1].clone();
+    let collection = lib.create_collection("Portfolio").unwrap();
+    lib.add_to_collection(collection.id, &[deleted.id]).unwrap();
+    lib.delete_photo(deleted.id)
+        .expect("move to Recently Deleted");
+    let deleted_at = lib.recently_deleted().unwrap()[0].deleted_at;
+
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
+    assert_eq!(
+        lib.recently_deleted().unwrap()[0].deleted_at,
+        deleted_at,
+        "a rebuild restarted the photo's stay in Recently Deleted"
+    );
+
+    // Now the case a rebuild is really for: the index is gone, and everything
+    // the library holds has to come back from the files themselves.
+    drop(lib);
+    std::fs::remove_dir_all(tmp.path().join("library.db")).unwrap();
+    let lib = open_library(tmp.path());
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
+
+    let recovered = lib.recently_deleted().unwrap();
+    assert_eq!(recovered.len(), 1, "the deleted photo was not recovered");
+    assert_eq!(recovered[0].photo.hash, deleted.hash);
+    assert!(recovered[0].deleted_at > 0);
+    let active = lib.all_photos(SortOrder::default()).unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].hash, kept.hash);
+    assert!(
+        lib.collection_photos(lib.all_collections().unwrap()[0].id)
+            .unwrap()
+            .is_empty(),
+        "a deleted photo is not shown among a collection's photos"
+    );
+
+    // The point of getting the row back: the photo can still be restored, to
+    // the collection its own file remembers it belongs to.
+    lib.restore_photo(recovered[0].photo.id)
+        .expect("restore photo");
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 2);
+    let collections = lib.all_collections().unwrap();
+    assert_eq!(collections.len(), 1);
+    assert_eq!(collections[0].name, "Portfolio");
+    assert_eq!(
+        lib.collection_photos(collections[0].id).unwrap()[0].hash,
+        deleted.hash
+    );
+}
+
+/// The files are the record on this too: a photo whose file is back in
+/// `files/` is an active one, however the index came to think otherwise.
+#[test]
+fn rebuild_index_reactivates_a_photo_whose_file_came_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    lib.delete_photo(photo.id).unwrap();
+
+    // A restore that moved the file and then died before the index caught up.
+    std::fs::rename(
+        lib.recently_deleted_path(&photo.hash),
+        lib.rlab_path(&photo.hash),
+    )
+    .unwrap();
+
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
+
+    assert!(lib.recently_deleted().unwrap().is_empty());
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+}
+
 #[test]
 fn empty_recently_deleted_permanently_removes_files_and_rows() {
     let tmp = tempfile::tempdir().unwrap();

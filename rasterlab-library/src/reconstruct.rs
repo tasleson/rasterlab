@@ -84,6 +84,38 @@ struct CollectionsFromFiles {
     by_legacy_name: HashMap<String, Vec<String>>,
 }
 
+/// A `.rlab` the walk found, and which side of Recently Deleted it was on.
+struct FoundPhoto {
+    path: std::path::PathBuf,
+    stored: StoredIn,
+}
+
+impl FoundPhoto {
+    /// The photo's hash, which is the file's own name.
+    fn hash(&self) -> Option<&str> {
+        self.path.file_stem().and_then(|stem| stem.to_str())
+    }
+}
+
+/// Where a photo's file was found, which is what says whether the photo is in
+/// Recently Deleted — the file is the record, and the index follows it.
+#[derive(Clone, Copy)]
+enum StoredIn {
+    Files,
+    /// Carries when the index last said the photo was deleted, if it knew.
+    RecentlyDeleted(Option<u64>),
+}
+
+/// Every `.rlab` under `dir`, or nothing at all when it does not exist.
+fn walk_rlab_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rlab"))
+        .map(|e| e.into_path())
+        .collect()
+}
+
 /// Bring the database index back in line with the `.rlab` files on disk.
 ///
 /// This is the reconciliation pass for everything the two-step writes elsewhere
@@ -103,6 +135,11 @@ struct CollectionsFromFiles {
 ///   actually found photos.  An empty `files/` directory is far more often an
 ///   unmounted volume than a library the user emptied, and wiping the index
 ///   over a mount failure is not recoverable from.
+/// * Recently Deleted is walked too, and a photo found there keeps both its
+///   row and the day it was deleted.  Walking `files/` alone left the photos
+///   waiting there out of the library this pass rebuilds, so an index that was
+///   lost outright came back without them: their files stayed on disk with
+///   nothing to restore, empty, or even show them by.
 ///
 /// * An existing row is updated in place rather than deleted and re-inserted,
 ///   so it keeps the id its collection membership hangs off, and no photo is
@@ -123,13 +160,40 @@ pub fn rebuild(
     if !files_dir.exists() {
         return Ok(RebuildOutcome::default());
     }
+    let deleted_dir = library_root.join("recently_deleted/files");
 
-    // Collect all .rlab paths first so we can report total
-    let rlab_paths: Vec<_> = WalkDir::new(&files_dir)
+    // When a photo was deleted is only in the index — the file it was written
+    // to says nothing about it — so the timestamps have to be remembered
+    // across the rewrite that follows, or a rebuild would silently restart
+    // every photo's stay in Recently Deleted.
+    let deleted_at: HashMap<String, u64> = db
+        .recently_deleted()?
         .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rlab"))
-        .map(|e| e.into_path())
+        .map(|row| (row.photo.hash, row.deleted_at))
+        .collect();
+
+    // Collect all .rlab paths first so we can report total.  Recently Deleted
+    // is walked as well and second: a photo whose file is on both sides is one
+    // whose move was interrupted, and where it ended up is what counts.
+    let rlab_paths: Vec<FoundPhoto> = walk_rlab_files(&files_dir)
+        .into_iter()
+        .map(|path| FoundPhoto {
+            path,
+            stored: StoredIn::Files,
+        })
+        .chain(walk_rlab_files(&deleted_dir).into_iter().map(|path| {
+            // A photo the index still knows keeps the moment it was deleted;
+            // one it has never heard of starts its stay now, the earliest this
+            // run can know of.
+            let when = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|hash| deleted_at.get(hash).copied());
+            FoundPhoto {
+                path,
+                stored: StoredIn::RecentlyDeleted(when),
+            }
+        }))
         .collect();
 
     let total = rlab_paths.len();
@@ -141,7 +205,7 @@ pub fn rebuild(
     let mut cancelled = false;
     let mut done = 0usize;
 
-    for (i, rlab_file_path) in rlab_paths.iter().enumerate() {
+    for (i, found) in rlab_paths.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             cancelled = true;
             break;
@@ -149,7 +213,7 @@ pub fn rebuild(
         progress_cb(RebuildProgress {
             total,
             done: i,
-            current: rlab_file_path.clone(),
+            current: found.path.clone(),
             errors: errors.clone(),
         });
 
@@ -157,7 +221,7 @@ pub fn rebuild(
             library_root,
             db,
             registry,
-            rlab_file_path,
+            found,
             &mut sessions,
             &mut collections,
         ) {
@@ -165,7 +229,7 @@ pub fn rebuild(
                 indexed.insert(hash);
             }
             Ok(None) => {}
-            Err(e) => errors.push((rlab_file_path.clone(), e.to_string())),
+            Err(e) => errors.push((found.path.clone(), e.to_string())),
         }
         done = i + 1;
     }
@@ -181,11 +245,19 @@ pub fn rebuild(
     // one thing this pass must never do.
     if !cancelled && !indexed.is_empty() {
         let unreadable: HashSet<&Path> = errors.iter().map(|(p, _)| p.as_path()).collect();
-        for row in db.all_photos(SortOrder::default())? {
+        let rows = db
+            .all_photos(SortOrder::default())?
+            .into_iter()
+            .chain(db.recently_deleted()?.into_iter().map(|row| row.photo));
+        for row in rows {
             if indexed.contains(&row.hash) {
                 continue;
             }
-            if unreadable.contains(files_dir.join(&row.lib_path).as_path()) {
+            // `lib_path` is relative to whichever side the photo's file is on,
+            // so a file that failed to re-index has to be recognised on both.
+            if unreadable.contains(files_dir.join(&row.lib_path).as_path())
+                || unreadable.contains(deleted_dir.join(&row.lib_path).as_path())
+            {
                 continue;
             }
             db.delete_photo(row.id)?;
@@ -329,18 +401,15 @@ fn reindex_one(
     library_root: &Path,
     db: &dyn LibraryDb,
     registry: &FormatRegistry,
-    rlab_file_path: &Path,
+    found: &FoundPhoto,
     sessions: &mut HashMap<String, SessionAgg>,
     collections: &mut CollectionsFromFiles,
 ) -> Result<Option<String>> {
+    let rlab_file_path = found.path.as_path();
     let rlab = RlabFile::read(rlab_file_path)?;
 
     // Derive hash from the path stem (files/ab/cd/{hash}.rlab)
-    let hash = rlab_file_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_owned();
+    let hash = found.hash().unwrap_or("").to_owned();
 
     if hash.is_empty() {
         return Ok(None);
@@ -357,8 +426,15 @@ fn reindex_one(
         write_thumbnail(&tpath, &thumb).ok();
     }
 
+    // Both sides mirror the same `ab/cd/{hash}.rlab` layout, so a path
+    // relative to the side the file is on describes a photo the same way
+    // either way — and goes on describing it after a restore moves the file.
+    let walk_root = match found.stored {
+        StoredIn::Files => library_root.join("files"),
+        StoredIn::RecentlyDeleted(_) => library_root.join("recently_deleted/files"),
+    };
     let lib_path = rlab_file_path
-        .strip_prefix(library_root.join("files"))
+        .strip_prefix(&walk_root)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| format!("{}/{}/{}.rlab", &hash[0..2], &hash[2..4], hash));
 
@@ -388,11 +464,20 @@ fn reindex_one(
         // quietly empty the edited-only filter for the whole library.
         has_edits: rlab.has_edits(),
     };
-    match db.photo_by_hash(&hash)? {
-        Some(existing) => db.replace_photo(existing.id, photo)?,
-        None => {
-            db.insert_photo(photo)?;
+    let photo_id = match db.photo_by_hash(&hash)? {
+        Some(existing) => {
+            db.replace_photo(existing.id, photo)?;
+            existing.id
         }
+        None => db.insert_photo(photo)?,
+    };
+
+    // Which side the file is on is what says whether the photo is deleted, and
+    // it has to be applied after the row is written: writing a row clears the
+    // deleted flag, which is already the right answer for a file in `files/`
+    // — including one a restore left there before the index caught up.
+    if let StoredIn::RecentlyDeleted(when) = found.stored {
+        db.mark_photo_deleted(photo_id, when.unwrap_or_else(unix_now))?;
     }
 
     // Record collection membership for the pass that follows the walk. It
