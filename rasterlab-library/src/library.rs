@@ -29,6 +29,18 @@ use crate::{
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+/// Opening the library failed because another process already has it open.
+///
+/// The index takes an exclusive `flock` on `library.db` and holds it for as
+/// long as the library is open, so one library means one process.  A long CLI
+/// run is the case that matters: `rasterlab library rebuild` over a large
+/// network library can take hours, and for all of them the GUI cannot open
+/// that library.  Callers get this as its own type so they can say "busy, try
+/// later" rather than reporting a library that is perfectly healthy as broken.
+#[derive(Debug, thiserror::Error)]
+#[error("the library is already open in another RasterLab process")]
+pub struct LibraryBusy;
+
 #[derive(Debug, Clone, Default)]
 pub struct ImportProgress {
     pub total: usize,

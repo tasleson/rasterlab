@@ -11,6 +11,7 @@ use crate::{
         CollectionId, CollectionRow, ImportSessionRow, LibraryDb, NewPhoto, PhotoId, PhotoRow,
         RecentlyDeletedRow, SortOrder,
     },
+    library::LibraryBusy,
     search::SearchFilter,
 };
 
@@ -22,7 +23,12 @@ impl StoolapDb {
     pub fn open(library_root: &Path) -> Result<Self> {
         let db_path = library_root.join("library.db");
         let dsn = format!("file://{}", db_path.display());
-        let db = Database::open(&dsn).context("open library.db")?;
+        // A held lock is not a broken library, so it keeps its own type all
+        // the way up rather than arriving as one more opaque open failure.
+        let db = Database::open(&dsn).map_err(|e| match e {
+            stoolap::Error::DatabaseLocked => anyhow::Error::new(LibraryBusy),
+            other => anyhow::Error::new(other).context("open library.db"),
+        })?;
         Ok(Self { db })
     }
 
