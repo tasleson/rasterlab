@@ -472,13 +472,13 @@ impl Library {
     /// collection operation whose cost is unavoidably per member: unlike a
     /// rename, there is nothing left in the index afterwards for the files to
     /// refer to.
+    ///
+    /// Members waiting in Recently Deleted are written too, for the same
+    /// reason: their files record the collection just as firmly as an active
+    /// photo's, and the photo is one restore away from carrying that record
+    /// back into the library.
     pub fn delete_collection(&self, id: CollectionId) -> Result<()> {
-        let members: Vec<PhotoId> = self
-            .db
-            .collection_photos(id)?
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
+        let members = self.db.collection_member_ids(id)?;
         self.remove_from_collection(id, &members)?;
         self.db.delete_collection(id)
     }
@@ -540,10 +540,15 @@ impl Library {
         // One index read for the whole batch. Resolving each photo separately
         // walked every photo in the library per photo changed, which a grid
         // selection of a few hundred turns into a long stall.
+        //
+        // Recently Deleted is read as well: a photo waiting there still has a
+        // file recording its collections, and dropping a collection has to
+        // reach it or a restore would bring the collection back with it.
         let hashes: HashMap<PhotoId, String> = self
             .db
             .all_photos(SortOrder::default())?
             .into_iter()
+            .chain(self.db.recently_deleted()?.into_iter().map(|row| row.photo))
             .map(|row| (row.id, row.hash))
             .collect();
 
@@ -786,12 +791,13 @@ impl Library {
         all: &[CollectionRow],
         member: bool,
     ) -> Result<()> {
-        let rlab_path = self.rlab_path(hash);
-        // The guard has to be held across the existence check as well as the
-        // rewrite. Checking first lets a delete move the file out from under
-        // us, turning a photo that is simply gone — which this skips — into a
-        // read error reported to the user as a failed metadata write.
+        // The guard has to be held across resolving the path and the existence
+        // check as well as the rewrite. Checking first lets a delete move the
+        // file out from under us, turning a photo that is simply gone — which
+        // this skips — into a read error reported to the user as a failed
+        // metadata write.
         let _write_guard = self.lock_project_writes()?;
+        let rlab_path = self.photo_rlab_path(hash);
         if !rlab_path.exists() {
             return Ok(());
         }

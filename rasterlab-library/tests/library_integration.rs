@@ -1564,6 +1564,50 @@ fn a_deleted_collection_does_not_return_with_a_rebuild() {
     assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
 }
 
+/// Deleting a collection has to reach the files of members waiting in Recently
+/// Deleted as well.  Skipping them left the collection recorded in a file that
+/// a rebuild reads, so the collection came back — and a restored photo turned
+/// up in a collection the user had thrown away.
+#[test]
+fn deleting_a_collection_reaches_members_in_recently_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let (kept, deleted) = (photos[0].clone(), photos[1].clone());
+    let collection = lib.create_collection("Portfolio").unwrap();
+    lib.add_to_collection(collection.id, &[kept.id, deleted.id])
+        .unwrap();
+    lib.delete_photo(deleted.id)
+        .expect("move to Recently Deleted");
+
+    lib.delete_collection(collection.id)
+        .expect("delete_collection");
+
+    assert!(
+        rasterlab_core::project::RlabFile::read(&lib.recently_deleted_path(&deleted.hash))
+            .unwrap()
+            .lmta
+            .unwrap()
+            .collection_refs
+            .is_empty(),
+        "a photo in Recently Deleted still claims the deleted collection"
+    );
+
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
+    assert!(
+        lib.all_collections().unwrap().is_empty(),
+        "a deleted collection came back from a deleted photo's file"
+    );
+
+    let restored = lib.recently_deleted().unwrap()[0].photo.id;
+    lib.restore_photo(restored).expect("restore photo");
+    assert!(lib.all_collections().unwrap().is_empty());
+}
+
 /// Files written before collections had ids list them by name alone, and have
 /// to keep their memberships until something rewrites them.
 #[test]

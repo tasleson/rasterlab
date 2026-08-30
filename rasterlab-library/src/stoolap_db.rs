@@ -66,18 +66,12 @@ impl StoolapDb {
         Ok(result)
     }
 
-    /// Every photo id a collection holds, deleted ones included — the caller
-    /// is filtering rows it has already decided are visible.
-    fn collection_member_ids(&self, collection_id: CollectionId) -> Result<HashSet<PhotoId>> {
-        let rows = self.db.query(
-            "SELECT photo_id FROM collection_photos WHERE collection_id = $1",
-            (collection_id,),
-        )?;
-        let mut ids = HashSet::new();
-        for row in rows {
-            ids.insert(row.context("collection member row")?.get::<i64>(0)?);
-        }
-        Ok(ids)
+    /// [`LibraryDb::collection_member_ids`] as a set, for the caller that is
+    /// filtering rows it has already decided are visible.
+    fn collection_member_id_set(&self, collection_id: CollectionId) -> Result<HashSet<PhotoId>> {
+        Ok(LibraryDb::collection_member_ids(self, collection_id)?
+            .into_iter()
+            .collect())
     }
 
     /// Mint a uuid for every collection row that predates them.
@@ -448,7 +442,7 @@ impl LibraryDb for StoolapDb {
         // STOOLAP_BUG.md has the reproduction. Membership is resolved with a
         // query of its own instead, and applied to the rows here.
         let members = match filter.collection_id {
-            Some(id) => Some(self.collection_member_ids(id)?),
+            Some(id) => Some(self.collection_member_id_set(id)?),
             None => None,
         };
 
@@ -798,6 +792,18 @@ impl LibraryDb for StoolapDb {
             });
         }
         Ok(result)
+    }
+
+    fn collection_member_ids(&self, collection_id: CollectionId) -> Result<Vec<PhotoId>> {
+        let rows = self.db.query(
+            "SELECT photo_id FROM collection_photos WHERE collection_id = $1",
+            (collection_id,),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.context("collection member row")?.get::<i64>(0)?);
+        }
+        Ok(ids)
     }
 
     fn collection_memberships(&self) -> Result<Vec<(CollectionId, PhotoId)>> {

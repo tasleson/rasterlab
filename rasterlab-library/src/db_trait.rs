@@ -236,6 +236,14 @@ pub trait LibraryDb: Send + Sync {
 
     fn all_collections(&self) -> anyhow::Result<Vec<CollectionRow>>;
 
+    /// Every photo a collection holds, deleted ones included.
+    ///
+    /// [`LibraryDb::collection_photos`] answers what the library should show,
+    /// which leaves out photos in Recently Deleted.  This answers which files
+    /// record the collection, which is what a write that has to reach every
+    /// member needs.
+    fn collection_member_ids(&self, collection_id: CollectionId) -> anyhow::Result<Vec<PhotoId>>;
+
     /// Every `(collection, photo)` pair, for callers that need membership for
     /// many photos at once rather than one collection's photos at a time.
     ///
