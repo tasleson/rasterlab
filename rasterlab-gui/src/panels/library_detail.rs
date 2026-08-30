@@ -439,7 +439,7 @@ fn for_each_lmta(
             .results
             .iter()
             .find(|p| p.id == id)
-            .map(|p| lib.rlab_path(&p.hash));
+            .map(|p| lib.photo_rlab_path(&p.hash));
         if let Some(rlab_path) = rlab_path_opt
             && let Ok(mut summary) = rasterlab_core::project::read_library_summary(&rlab_path)
             && let Some(ref mut lmta) = summary.lmta

@@ -112,6 +112,28 @@ impl Library {
         import::rlab_path(&self.root.join("recently_deleted"), hash)
     }
 
+    /// Where a photo's `.rlab` is right now, whichever side of Recently
+    /// Deleted it is on.
+    ///
+    /// [`Library::rlab_path`] names where an *active* photo's file belongs; a
+    /// deleted one has been moved out from under it, so reading a photo at
+    /// that path turns "this photo is in Recently Deleted" into an I/O error
+    /// on a file that is sitting safely somewhere else.  Anything that reads a
+    /// photo the user can still see — its metadata, its collections — wants
+    /// this instead.
+    ///
+    /// A photo whose file is on neither side resolves to the active path, so
+    /// the error a caller reports names where the file belongs rather than
+    /// where it was last put.
+    pub fn photo_rlab_path(&self, hash: &str) -> PathBuf {
+        let active = self.rlab_path(hash);
+        if active.exists() {
+            return active;
+        }
+        let deleted = self.recently_deleted_path(hash);
+        if deleted.exists() { deleted } else { active }
+    }
+
     fn lock_project_writes(&self) -> Result<MutexGuard<'_, ()>> {
         self.project_write_lock
             .lock()
@@ -700,17 +722,38 @@ impl Library {
 
     // ── Internal LMTA rewrite helpers ─────────────────────────────────────
 
+    /// A photo row by id, from either side of Recently Deleted.
+    ///
+    /// A deleted photo is still one the user can select and edit, so the
+    /// active-photo query alone would drop those edits on the floor.
+    fn photo_row(&self, photo_id: PhotoId) -> Result<Option<PhotoRow>> {
+        if let Some(row) = self
+            .db
+            .all_photos(SortOrder::default())?
+            .into_iter()
+            .find(|row| row.id == photo_id)
+        {
+            return Ok(Some(row));
+        }
+        Ok(self
+            .db
+            .recently_deleted()?
+            .into_iter()
+            .map(|row| row.photo)
+            .find(|row| row.id == photo_id))
+    }
+
     fn rewrite_lmta_in_file(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> Result<()> {
-        let photos = self.db.all_photos(SortOrder::default())?;
-        let Some(row) = photos.iter().find(|r| r.id == photo_id) else {
+        let Some(row) = self.photo_row(photo_id)? else {
             return Ok(());
         };
-        let rlab_path = self.rlab_path(&row.hash);
-        // The guard has to be held across the existence check as well as the
-        // rewrite. Checking first lets a delete move the file out from under
-        // us, turning a photo that is simply gone — which this skips — into a
-        // read error reported to the user as a failed metadata write.
+        // The guard has to be held across resolving the path and the existence
+        // check as well as the rewrite. Checking first lets a delete move the
+        // file out from under us, turning a photo that is simply gone — which
+        // this skips — into a read error reported to the user as a failed
+        // metadata write.
         let _write_guard = self.lock_project_writes()?;
+        let rlab_path = self.photo_rlab_path(&row.hash);
         if !rlab_path.exists() {
             return Ok(());
         }

@@ -735,6 +735,56 @@ fn recently_deleted_photo_can_be_restored_with_its_session() {
     assert_eq!(restored_session.name, "Keep this name");
 }
 
+/// The detail panel reads a selected photo's `.rlab` for its collections and
+/// the rest of its metadata.  A photo in Recently Deleted has been moved out of
+/// `files/`, so looking for it where an active photo's file lives reported the
+/// photo as unreadable instead.
+#[test]
+fn a_deleted_photos_metadata_is_still_read_and_written_where_the_file_now_is() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let collection = lib.create_collection("Portfolio").unwrap();
+    lib.add_to_collection(collection.id, &[photo.id]).unwrap();
+    lib.delete_photo(photo.id)
+        .expect("move to Recently Deleted");
+
+    let path = lib.photo_rlab_path(&photo.hash);
+    assert_eq!(path, lib.recently_deleted_path(&photo.hash));
+    let summary = rasterlab_core::project::read_library_summary(&path)
+        .expect("read a deleted photo's metadata");
+    let lmta = summary.lmta.expect("lmta");
+    assert_eq!(
+        lmta.collection_refs
+            .iter()
+            .map(|held| held.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Portfolio"],
+        "the photo keeps its collections while it waits in Recently Deleted"
+    );
+
+    // And an edit made from that panel reaches the file, rather than the index
+    // alone — a restore followed by a rebuild would otherwise lose it.
+    let mut edited = lmta.clone();
+    edited.rating = 4;
+    lib.update_metadata(photo.id, edited)
+        .expect("update_metadata");
+    let written = rasterlab_core::project::read_library_summary(&path)
+        .unwrap()
+        .lmta
+        .unwrap();
+    assert_eq!(written.rating, 4);
+
+    lib.restore_photo(photo.id).expect("restore photo");
+    assert_eq!(
+        lib.photo_rlab_path(&photo.hash),
+        lib.rlab_path(&photo.hash),
+        "a restored photo is read from files/ again"
+    );
+}
+
 #[test]
 fn opening_library_finishes_an_interrupted_recently_deleted_move() {
     let tmp = tempfile::tempdir().unwrap();

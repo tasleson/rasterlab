@@ -476,7 +476,10 @@ impl LibraryState {
         Some(DetailLoadRequest {
             id,
             hash: hash.to_owned(),
-            path: lib.rlab_path(hash),
+            // A photo shown in Recently Deleted has its file elsewhere, and
+            // reading it where an active photo's would be fails the whole
+            // detail load — collections included.
+            path: lib.photo_rlab_path(hash),
             request_revision,
         })
     }
