@@ -10,11 +10,10 @@ use std::{
 use anyhow::Result;
 use rasterlab_core::{formats::FormatRegistry, project::RlabFile};
 use uuid::Uuid;
-use walkdir::WalkDir;
 
 use crate::{
     db_trait::{CollectionRow, LibraryDb, NewPhoto, PhotoId, SortOrder},
-    import::{format_session_name, thumb_path, unix_now},
+    import::{format_session_name, thumb_path, unix_now, walk_rlab_files},
     thumbnail::{generate_thumbnail, write_thumbnail},
 };
 
@@ -104,16 +103,6 @@ enum StoredIn {
     Files,
     /// Carries when the index last said the photo was deleted, if it knew.
     RecentlyDeleted(Option<u64>),
-}
-
-/// Every `.rlab` under `dir`, or nothing at all when it does not exist.
-fn walk_rlab_files(dir: &Path) -> Vec<std::path::PathBuf> {
-    WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rlab"))
-        .map(|e| e.into_path())
-        .collect()
 }
 
 /// Bring the database index back in line with the `.rlab` files on disk.

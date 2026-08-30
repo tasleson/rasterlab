@@ -876,6 +876,22 @@ pub fn rlab_path(library_root: &Path, hash: &str) -> PathBuf {
     library_root.join("files").join(relative_lib_path(hash))
 }
 
+/// Every `.rlab` under `dir`, or nothing at all when it does not exist.
+///
+/// A library keeps them under two roots — `files/` and
+/// `recently_deleted/files/` — and the passes that read the library back off
+/// the disk have to cover both.
+pub(crate) fn walk_rlab_files(dir: &Path) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_type().is_file() && entry.path().extension().is_some_and(|x| x == "rlab")
+        })
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
 pub fn thumb_path(library_root: &Path, hash: &str) -> PathBuf {
     library_root
         .join("thumbs")

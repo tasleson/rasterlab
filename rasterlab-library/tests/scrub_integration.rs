@@ -114,6 +114,47 @@ fn scrub_repairs_corruption_and_backs_up_original() {
     assert!(left[0].ends_with(".rlab"), "{left:?}");
 }
 
+/// A photo waiting in Recently Deleted rots at the same rate as any other, and
+/// is one restore away from being the user's photo again — so the scrub that
+/// repairs bitrot has to cover it too.
+#[test]
+fn scrub_repairs_a_photo_waiting_in_recently_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open_or_create(tmp.path()).unwrap();
+    let (hash, _) = import_one(&lib);
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    lib.delete_photo(photo.id)
+        .expect("move to Recently Deleted");
+    let path = lib.recently_deleted_path(&hash);
+
+    let original = RlabFile::read(&path).unwrap().original_bytes;
+    let mut corrupted = std::fs::read(&path).unwrap();
+    flip(&mut corrupted, 200..216, 0xAB);
+    std::fs::write(&path, &corrupted).unwrap();
+
+    let out = run_scrub(&lib);
+    assert_eq!(out.checked, 1, "the deleted photo was not checked: {out:?}");
+    assert_eq!(out.repaired, 1, "{out:?}");
+    assert!(out.errors.is_empty(), "{out:?}");
+
+    let post = verify_and_repair(&path, None).unwrap();
+    assert!(
+        post.file_hash_ok && post.damaged_chunks.is_empty(),
+        "{post:?}"
+    );
+    assert_eq!(RlabFile::read(&path).unwrap().original_bytes, original);
+
+    // Its `ab/cd` placement is judged against the root it was found under, so
+    // a correctly filed photo is not reported as misplaced, and the backup of
+    // the damaged original keeps that same layout under `recovered/`.
+    let backup = tmp.path().join("recovered").join(relative_lib_path(&hash));
+    assert_eq!(std::fs::read(&backup).unwrap(), corrupted);
+
+    // And the repaired file is still the photo the library can restore.
+    lib.restore_photo(photo.id).expect("restore photo");
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+}
+
 #[test]
 fn scrub_upgrades_older_formats_to_v5() {
     // v3 has no parity at all; v4 has parity but keeps both copies at the tail,
