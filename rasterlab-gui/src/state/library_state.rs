@@ -7,8 +7,8 @@ use std::{
 
 use rasterlab_library::{
     CollectionId, CollectionRow, ImportCollection, ImportProgress, ImportSessionRow, Library,
-    LibraryMeta, PhotoId, PhotoRow, RebuildProgress, ScrubProgress, SearchFilter, SortOrder,
-    import::rlab_path,
+    LibraryBusy, LibraryMeta, PhotoId, PhotoRow, RebuildProgress, ScrubProgress, SearchFilter,
+    SortOrder, import::rlab_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -230,6 +230,32 @@ pub(crate) struct MetadataCommitRequest {
     pub library: Arc<Library>,
 }
 
+// ── Open failures ─────────────────────────────────────────────────────────────
+
+/// The banner text for a failed open, plus the path to offer a retry for.
+///
+/// A busy library is the one open failure that is not a fault: the library is
+/// fine and the answer is to wait, so it says so in those terms and names what
+/// is likely holding it, instead of showing `flock` wording no one asked
+/// about.
+fn open_failure(path: &Path, err: &anyhow::Error) -> (String, Option<PathBuf>) {
+    if err.downcast_ref::<LibraryBusy>().is_none() {
+        return (format!("Failed to open library: {err}"), None);
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    (
+        format!(
+            "\"{name}\" is in use by another RasterLab process — a \
+             command-line rebuild or scrub, most likely. It will open once \
+             that finishes."
+        ),
+        Some(path.to_path_buf()),
+    )
+}
+
 // ── LibraryState ──────────────────────────────────────────────────────────────
 
 pub struct LibraryState {
@@ -266,6 +292,12 @@ pub struct LibraryState {
 
     /// Error message to show in a status bar or dialog.
     pub last_error: Option<String>,
+
+    /// The library an open failed on because another process holds it, if the
+    /// last open failed that way.  Kept so the error banner can offer to open
+    /// it again: waiting is the whole remedy, and the wait can be long enough
+    /// that being handed a button beats retracing the Open Library dialog.
+    pub busy_library: Option<PathBuf>,
 
     /// Per-file `(path, message)` failures from the most recent import. Retained
     /// after the import finishes so the user can review what went wrong.
@@ -371,6 +403,7 @@ impl Default for LibraryState {
             all_photo_count: 0,
             recently_deleted_count: 0,
             last_error: None,
+            busy_library: None,
             last_import_errors: Vec::new(),
             show_import_errors: false,
             scrub_progress: None,
@@ -776,10 +809,13 @@ impl LibraryState {
                 self.active_copy_saves.clear();
                 self.thumbs.clear();
                 self.last_error = None;
+                self.busy_library = None;
                 self.refresh();
             }
             Err(e) => {
-                self.last_error = Some(format!("Failed to open library: {e}"));
+                let (message, busy) = open_failure(&path, &e);
+                self.last_error = Some(message);
+                self.busy_library = busy;
             }
         }
     }
@@ -1230,6 +1266,27 @@ impl ThumbCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A held library and a broken one are different messages, and only the
+    /// held one is worth a Retry — retrying anything else just fails again.
+    #[test]
+    fn open_failure_separates_busy_from_broken() {
+        let path = Path::new("/photos/Main Library");
+
+        let (message, retry) = open_failure(path, &anyhow::Error::new(LibraryBusy));
+        assert_eq!(retry.as_deref(), Some(path), "a busy library is retryable");
+        assert!(
+            message.contains("Main Library") && message.contains("another RasterLab process"),
+            "busy message names the library and the reason: {message}"
+        );
+
+        let (message, retry) = open_failure(path, &anyhow::anyhow!("index is corrupt"));
+        assert_eq!(retry, None, "a broken library is not retryable");
+        assert!(
+            message.contains("index is corrupt"),
+            "other failures keep their own text: {message}"
+        );
+    }
 
     fn row(id: PhotoId, hash: &str) -> PhotoRow {
         PhotoRow {

@@ -54,11 +54,25 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
 
 // ── No-library placeholder ────────────────────────────────────────────────────
 
-fn no_library_ui(ui: &mut egui::Ui, _state: &mut AppState) {
-    ui.centered_and_justified(|ui| {
+/// Shown in place of the grid when no library is open.
+///
+/// Carries the error banner too, because a failed open lands here: the toolbar
+/// that normally holds the banner is not drawn without a library, so this is
+/// the only place the reason for the failure can appear.
+fn no_library_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() * NO_LIBRARY_TOP_FRACTION);
         ui.label("No library open.\nUse File > New Library… or File > Open Library…");
+        ui.add_space(NO_LIBRARY_MESSAGE_GAP);
+        error_banner_ui(ui, state);
     });
 }
+
+/// How far down the empty panel its message sits, as a fraction of the height.
+const NO_LIBRARY_TOP_FRACTION: f32 = 0.4;
+
+/// Gap between that message and the error banner under it.
+const NO_LIBRARY_MESSAGE_GAP: f32 = 8.0;
 
 // ── Toolbar ───────────────────────────────────────────────────────────────────
 
@@ -242,6 +256,9 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 /// carry the reason a write failed, which is worth the width. Most of what
 /// raises one — a collection change, protect, delete — has no other way to say
 /// it did not happen.
+///
+/// A library held open by another process gets a Retry alongside, since there
+/// the message is only telling the user to come back later.
 fn error_banner_ui(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(error) = state.library.last_error.clone() else {
         return;
@@ -249,11 +266,20 @@ fn error_banner_ui(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
             state.library.last_error = None;
+            state.library.busy_library = None;
         }
         ui.colored_label(
             egui::Color32::from_rgb(255, 140, 140),
             format!("⚠ {}", error),
         );
+        if let Some(path) = state.library.busy_library.clone()
+            && ui
+                .small_button("Retry")
+                .on_hover_text(format!("Try opening {} again", path.display()))
+                .clicked()
+        {
+            state.open_library(path);
+        }
     });
 }
 
