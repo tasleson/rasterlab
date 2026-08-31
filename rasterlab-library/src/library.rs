@@ -188,16 +188,83 @@ impl Library {
         progress_cb: impl Fn(ImportProgress) + Send + 'static,
     ) -> Result<Vec<ImportSession>> {
         let paths = collect_image_paths(folder, &self.registry);
-        let cancelled = Arc::new(AtomicBool::new(false));
+        self.import_expanded(
+            &paths,
+            Some(folder),
+            collection,
+            Arc::new(AtomicBool::new(false)),
+            &progress_cb,
+        )
+    }
+
+    /// [`Library::import_folder_into_collection`] over a mixed list of files
+    /// and folders, stopping when `cancel` is set.
+    ///
+    /// Each folder is walked for supported images and the whole run — loose
+    /// files included — is grouped into back-dated sessions together, so a
+    /// command line naming a shoot folder and the two stragglers next to it
+    /// lands them in the sessions their capture dates ask for rather than in
+    /// one pile per argument.  A path named twice, or named alongside a folder
+    /// that contains it, is imported once.
+    ///
+    /// Setting `cancel` stops the run after the file it is on. Nothing has to
+    /// be undone: imports are keyed by content hash, so re-running the same
+    /// command picks up where this one left off.
+    pub fn import_paths(
+        &self,
+        paths: &[PathBuf],
+        collection: ImportCollection,
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(ImportProgress),
+    ) -> Result<Vec<ImportSession>> {
+        let mut files = Vec::new();
+        let mut seen = HashSet::new();
+        let mut folders = Vec::new();
+        let mut loose = 0usize;
+        for path in paths {
+            if path.is_dir() {
+                folders.push(path.as_path());
+                files.extend(
+                    collect_image_paths(path, &self.registry)
+                        .into_iter()
+                        .filter(|file| seen.insert(file.clone())),
+                );
+            } else {
+                // Not extension-filtered: a file the user named explicitly is a
+                // file they meant, and an unreadable one is worth an error
+                // naming it rather than a silent omission from the tally.
+                loose += 1;
+                if seen.insert(path.clone()) {
+                    files.push(path.clone());
+                }
+            }
+        }
+        // The session's recorded source is only meaningful when the whole run
+        // came from one place.
+        let source = match (loose, folders.as_slice()) {
+            (0, [only]) => Some(*only),
+            _ => None,
+        };
+        self.import_expanded(&files, source, collection, cancel, &progress_cb)
+    }
+
+    fn import_expanded(
+        &self,
+        files: &[PathBuf],
+        source_dir: Option<&Path>,
+        collection: ImportCollection,
+        cancel: Arc<AtomicBool>,
+        progress_cb: &dyn Fn(ImportProgress),
+    ) -> Result<Vec<ImportSession>> {
         import::import_folder_grouped(
             &self.root,
             self.db.as_ref(),
             &self.registry,
-            &paths,
-            cancelled,
-            Some(folder),
+            files,
+            cancel,
+            source_dir,
             collection,
-            &progress_cb,
+            progress_cb,
         )
     }
 

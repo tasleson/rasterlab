@@ -24,6 +24,10 @@ fn png_path() -> PathBuf {
     test_images_dir().join("color_patches.png")
 }
 
+fn no_cancel() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
 fn open_library(dir: &std::path::Path) -> Library {
     Library::open_or_create(dir).expect("open_or_create")
 }
@@ -533,6 +537,55 @@ fn per_folder_import_makes_one_collection_per_directory() {
             row.name
         );
     }
+}
+
+/// A cancel flag that is already set has to stop the run before it writes
+/// anything: the CLI arms it from SIGINT and a "stopped" tally that had
+/// quietly imported half the folder anyway would be a lie.
+#[test]
+fn a_cancelled_import_stops_without_importing() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let cancel = Arc::new(AtomicBool::new(true));
+    let sessions = lib
+        .import_paths(
+            &[src.path().to_path_buf()],
+            ImportCollection::None,
+            cancel,
+            |_| {},
+        )
+        .unwrap();
+
+    assert!(sessions.is_empty(), "a cancelled run made a session");
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+}
+
+/// Naming a folder and a file inside it is an easy thing to type, and has to
+/// cost one import rather than two attempts at the same photo.
+#[test]
+fn import_paths_takes_each_file_once() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let inside = src.path().join("Sunrise").join("shot.png");
+    assert!(inside.is_file(), "shoot tree changed shape");
+    let paths = vec![src.path().to_path_buf(), inside];
+
+    let totals = std::cell::RefCell::new(Vec::new());
+    let sessions = lib
+        .import_paths(&paths, ImportCollection::None, no_cancel(), |p| {
+            totals.borrow_mut().push(p.total)
+        })
+        .unwrap();
+
+    let totals = totals.into_inner();
+    assert!(totals.iter().all(|&t| t == 3), "double-counted: {totals:?}");
+    let imported: usize = sessions.iter().map(|s| s.photo_count).sum();
+    assert_eq!(imported, 3);
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 3);
 }
 
 #[test]
