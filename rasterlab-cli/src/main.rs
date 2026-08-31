@@ -25,7 +25,9 @@
 //! # Print image metadata and histogram
 //! rasterlab info photo.jpg
 //!
-//! # Maintain a library on a headless machine
+//! # Fill and maintain a library on a headless machine
+//! rasterlab library create /srv/photos
+//! rasterlab library import /srv/photos ~/cards/DCIM --collection-per-folder
 //! rasterlab library rebuild /srv/photos
 //! rasterlab library scrub /srv/photos
 //! ```
@@ -59,7 +61,8 @@ enum Commands {
     /// Print metadata and channel histograms for an image.
     Info(commands::info::InfoArgs),
 
-    /// Maintain a managed photo library: rebuild its index, scrub its files.
+    /// Manage a photo library: create it, import into it, rebuild its index,
+    /// scrub its files.
     Library(commands::library::LibraryArgs),
 }
 

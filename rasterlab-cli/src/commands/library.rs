@@ -1,11 +1,11 @@
-//! `rasterlab library` — maintenance for a managed photo library.
+//! `rasterlab library` — create, fill and maintain a managed photo library.
 //!
-//! Both commands here are the headless equivalents of what the GUI runs in a
-//! background thread, so a library that lives on a server can be rebuilt and
-//! scrubbed over ssh instead of being mounted on a desktop first.
+//! These are the headless equivalents of what the GUI runs in a background
+//! thread, so a library that lives on a server can be created, imported into,
+//! rebuilt and scrubbed over ssh instead of being mounted on a desktop first.
 //!
-//! Neither needs the library to be idle in any special way, but neither expects
-//! a second process to be writing to it at the same time.
+//! None of them needs the library to be idle in any special way, but none
+//! expects a second process to be writing to it at the same time.
 
 use std::{
     cell::RefCell,
@@ -20,7 +20,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use rasterlab_library::{Library, RebuildOutcome, ScrubOutcome};
+use rasterlab_library::{
+    ImportCollection, ImportProgress, ImportSession, Library, RebuildOutcome, ScrubOutcome,
+};
 
 /// Exit status for a run the user interrupted, following the shell convention
 /// of 128 + SIGINT.
@@ -34,6 +36,19 @@ pub struct LibraryArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum LibraryCommand {
+    /// Create an empty library, ready to import into.
+    Create(CreateArgs),
+
+    /// Import files and folders into a library.
+    ///
+    /// Folders are searched recursively for supported images. Everything the
+    /// run brings in is grouped into back-dated import sessions by capture
+    /// date, the same way the GUI groups a folder import, so importing an
+    /// existing archive reconstructs its history rather than landing it all
+    /// under today. Photos already in the library are skipped, which makes a
+    /// re-run over the same source cheap and safe.
+    Import(ImportArgs),
+
     /// Rebuild the index from the `.rlab` files on disk.
     ///
     /// The files are the record and the index is a cache of them, so this
@@ -61,11 +76,139 @@ pub struct MaintenanceArgs {
     pub quiet: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Where to create the library. The directory is created if it does not
+    /// exist, and must be empty if it does.
+    pub library: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ImportArgs {
+    /// Library root — the directory holding `files/` and `library.db`.
+    pub library: PathBuf,
+
+    /// Files and folders to import. Folders are searched recursively.
+    #[arg(required = true)]
+    pub sources: Vec<PathBuf>,
+
+    /// File everything this run imports into one collection of this name,
+    /// creating it if it does not exist.
+    #[arg(short, long, value_name = "NAME")]
+    pub collection: Option<String>,
+
+    /// File each photo into a collection named after the folder it came from,
+    /// so a tree of shoot folders arrives as one collection per shoot.
+    #[arg(long, conflicts_with = "collection")]
+    pub collection_per_folder: bool,
+
+    /// Create the library first if there is not one at that path yet.
+    #[arg(long)]
+    pub create: bool,
+
+    /// Print only the final tally, no running progress.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+impl ImportArgs {
+    fn collection(&self) -> ImportCollection {
+        match &self.collection {
+            _ if self.collection_per_folder => ImportCollection::PerFolder,
+            Some(name) => ImportCollection::Named(name.clone()),
+            None => ImportCollection::None,
+        }
+    }
+}
+
 pub fn run(args: LibraryArgs) -> Result<()> {
     match args.command {
+        LibraryCommand::Create(args) => create(args),
+        LibraryCommand::Import(args) => import(args),
         LibraryCommand::Rebuild(args) => rebuild(args),
         LibraryCommand::Scrub(args) => scrub(args),
     }
+}
+
+fn create(args: CreateArgs) -> Result<()> {
+    let path = &args.library;
+    if path.join("files").is_dir() {
+        bail!("{} is already a library", path.display());
+    }
+    if path.exists() {
+        if !path.is_dir() {
+            bail!("{} exists and is not a directory", path.display());
+        }
+        if path.read_dir()?.next().is_some() {
+            bail!(
+                "{} is not empty — pass a new or empty directory",
+                path.display()
+            );
+        }
+    }
+    // Opening a library is what lays out `files/`, `thumbs/` and the index, so
+    // there is nothing else to do; dropping it releases the lock immediately.
+    let library =
+        Library::open_or_create(path).with_context(|| format!("create {}", path.display()))?;
+    println!("Created library at {}", library.root().display());
+    Ok(())
+}
+
+fn import(args: ImportArgs) -> Result<()> {
+    // Checked before `library_root`, whose complaint is about the path rather
+    // than about what the user can do next.
+    if !args.library.join("files").is_dir() {
+        if !args.create {
+            bail!(
+                "{} is not a library — create one with `rasterlab library create`, or pass --create",
+                args.library.display()
+            );
+        }
+        create(CreateArgs {
+            library: args.library.clone(),
+        })?;
+    }
+    let root = library_root(&args.library)?;
+    let library = Library::open_or_create(&root)
+        .with_context(|| format!("open library at {}", root.display()))?;
+
+    println!("Importing into {}", root.display());
+    let cancel = cancel_on_interrupt();
+    let progress = RefCell::new(Progress::importing(&root, args.quiet));
+    // The walk's closing callback carries the run's totals, so the tally is
+    // simply the last one it sent rather than a count kept alongside it.
+    let last = RefCell::new(ImportProgress::default());
+
+    let sessions = library.import_paths(&args.sources, args.collection(), cancel.clone(), |p| {
+        let mut progress = progress.borrow_mut();
+        if p.scanning {
+            // Reading capture dates, not importing: a separate phase with a
+            // count of its own, because it walks the whole run before the
+            // first photo lands and otherwise looks like a stalled import.
+            progress.phase("Scanning", "scanned");
+            progress.update(Status {
+                done: p.done,
+                total: p.total,
+                tallies: &[],
+                errors: p.errors.len(),
+                current: &p.current_file,
+            });
+            return;
+        }
+        progress.phase("Importing", "files");
+        progress.update(Status {
+            done: p.done,
+            total: p.total,
+            tallies: &[("imported", p.imported), ("skipped", p.skipped_duplicates)],
+            errors: p.errors.len(),
+            current: &p.current_file,
+        });
+        drop(progress);
+        *last.borrow_mut() = p;
+    })?;
+
+    progress.borrow_mut().finish();
+    report_import(&root, &sessions, &last.into_inner(), &cancel)
 }
 
 fn rebuild(args: MaintenanceArgs) -> Result<()> {
@@ -116,6 +259,45 @@ fn scrub(args: MaintenanceArgs) -> Result<()> {
 }
 
 // ── Reporting ────────────────────────────────────────────────────────────────
+
+/// Report what an import brought in, and which sessions it landed in.
+///
+/// The sessions are worth naming: a run is grouped by capture date rather than
+/// by argument, so "where did the folder I just imported go?" is a real
+/// question, and the answer is a list of library dates rather than one.
+fn report_import(
+    root: &Path,
+    sessions: &[ImportSession],
+    tally: &ImportProgress,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let cancelled = cancel.load(Ordering::Relaxed);
+    let verb = if cancelled {
+        "Import stopped"
+    } else {
+        "Import complete"
+    };
+    println!(
+        "{verb}: {} of {} imported, {} already in the library, {}",
+        tally.imported,
+        tally.total,
+        tally.skipped_duplicates,
+        count(tally.errors.len(), "error")
+    );
+    for session in sessions.iter().filter(|s| s.photo_count > 0) {
+        println!(
+            "  {}: {}",
+            session.name,
+            count(session.photo_count, "photo")
+        );
+    }
+    if cancelled {
+        // Imports are keyed by content hash, so the same command finishes the
+        // job rather than importing the first half twice.
+        println!("Run the same command again to import the rest.");
+    }
+    finish(root, &tally.errors, cancelled)
+}
 
 fn report_rebuild(root: &Path, outcome: &RebuildOutcome) -> Result<()> {
     let verb = if outcome.cancelled {
@@ -307,6 +489,13 @@ impl Progress {
         Self::new("Scrubbing", "checked", root, quiet, true)
     }
 
+    fn importing(root: &Path, quiet: bool) -> Self {
+        // An import collects its failures and reports them only at the end.
+        // The labels here are placeholders: an import moves between phases and
+        // sets them itself as it goes.
+        Self::new("Importing", "files", root, quiet, false)
+    }
+
     fn rebuilding(root: &Path, quiet: bool) -> Self {
         // A rebuild collects its failures and reports them only at the end.
         Self::new("Rebuilding", "indexed", root, quiet, false)
@@ -338,6 +527,20 @@ impl Progress {
             walk_reports_errors,
             errors_seen: 0,
         }
+    }
+
+    /// Name the phase the walk has reached, for a walk that has more than one.
+    ///
+    /// The estimate restarts with the phase: an import's capture-date scan and
+    /// its actual import run at wildly different speeds, so carrying the
+    /// scan's average into the import would predict minutes for an hour.
+    fn phase(&mut self, label: &'static str, unit: &'static str) {
+        if self.label == label {
+            return;
+        }
+        self.label = label;
+        self.unit = unit;
+        self.started = Instant::now();
     }
 
     fn update(&mut self, status: Status) {
