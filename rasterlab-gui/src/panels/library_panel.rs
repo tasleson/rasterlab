@@ -1,6 +1,7 @@
 use egui::{ScrollArea, Sense, Vec2};
 use rasterlab_library::{
-    ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, SearchFilter, SortOrder, ymd_from_unix,
+    CollectionId, ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, SearchFilter, SortOrder,
+    ymd_from_unix,
 };
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
@@ -838,11 +839,17 @@ fn name_entry(
 }
 
 fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
-    let Some(CollectionPrompt::Delete { id, name }) = &state.library.collection_prompt else {
+    let Some(CollectionPrompt::Delete { ids }) = &state.library.collection_prompt else {
         return;
     };
-    let (id, name) = (*id, name.clone());
-    let photo_count = state.library.collection_len(id);
+    let ids = ids.clone();
+    let names: Vec<String> = ids
+        .iter()
+        .filter_map(|&id| state.library.collection_name(id).map(str::to_owned))
+        .collect();
+    let photo_count = ids
+        .first()
+        .map_or(0, |&id| state.library.collection_len(id));
 
     let (enter, esc) = ctx.input_mut(|i| {
         (
@@ -856,20 +863,38 @@ fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
     if enter {
         state.library.collection_prompt = None;
-        state.library.delete_collection(id);
+        state.library.delete_collections(&ids);
         return;
     }
+
+    let title = match names.as_slice() {
+        [name] => format!("Delete the collection “{name}”?"),
+        _ => format!("Delete {} collections?", ids.len()),
+    };
+    let button = if ids.len() == 1 {
+        "Delete Collection".to_owned()
+    } else {
+        format!("Delete {} Collections", ids.len())
+    };
 
     let mut delete = false;
     let mut cancel = false;
     let mut open = true;
-    egui::Window::new(format!("Delete the collection “{name}”?"))
+    egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            if photo_count == 0 {
+            // With several going at once the names are the only way to check
+            // that the marked set is the one the user meant.
+            if names.len() > 1 {
+                for name in &names {
+                    ui.label(format!("• {name}"));
+                }
+                ui.add_space(4.0);
+                ui.label("The photos in them stay in the library — only the collections go.");
+            } else if photo_count == 0 {
                 ui.label("The collection is empty.");
             } else {
                 let noun = if photo_count == 1 { "photo" } else { "photos" };
@@ -879,7 +904,7 @@ fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Delete Collection").clicked() {
+                if ui.button(&button).clicked() {
                     delete = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -890,7 +915,7 @@ fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
 
     if delete {
         state.library.collection_prompt = None;
-        state.library.delete_collection(id);
+        state.library.delete_collections(&ids);
     } else if cancel || !open {
         state.library.collection_prompt = None;
     }
@@ -1164,6 +1189,9 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 fn select_view(state: &mut AppState, view: LibraryView) {
     state.library.view = view;
     state.library.select_none();
+    // Marks belong to the sidebar list, not to the grid: moving off the
+    // collections leaves nothing marked behind to act on by accident.
+    state.library.marked_collections.clear();
     state.library.filter = SearchFilter::default();
     state.library.iso_exact_text.clear();
     state.library.aperture_exact_text.clear();
@@ -1184,26 +1212,84 @@ fn collections_ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
 
     for coll in state.library.collections.clone() {
-        let selected = state.library.view == LibraryView::Collection(coll.id);
+        // Marked collections read as selected too, so a ctrl-click set looks
+        // the same as the one collection the grid is showing.
+        let selected = state.library.view == LibraryView::Collection(coll.id)
+            || state.library.marked_collections.contains(&coll.id);
         let label = format!("{}  ({})", coll.name, state.library.collection_len(coll.id));
         let response = ui.selectable_label(selected, label);
         if response.clicked() {
-            select_view(state, LibraryView::Collection(coll.id));
+            // Same modifiers as the grid: ctrl toggles one, shift takes the
+            // run up to it, a plain click opens the collection on its own.
+            let (ctrl, shift) = ui.input(|i| (i.modifiers.ctrl, i.modifiers.shift));
+            if ctrl {
+                toggle_collection_mark(state, coll.id);
+            } else if shift {
+                extend_collection_marks(state, coll.id);
+            } else {
+                select_view(state, LibraryView::Collection(coll.id));
+                state.library.marked_collections = vec![coll.id];
+            }
         }
         response.context_menu(|ui| {
-            if ui.button("Rename…").clicked() {
+            // Right-clicking outside the marked set acts on what was clicked,
+            // matching the grid's right-click.
+            if !state.library.marked_collections.contains(&coll.id) {
+                state.library.marked_collections = vec![coll.id];
+            }
+            let marked = state.library.marked_collections.clone();
+            let n = marked.len();
+
+            if ui
+                .add_enabled(n == 1, egui::Button::new("Rename…"))
+                .on_disabled_hover_text("Renaming takes one collection at a time.")
+                .clicked()
+            {
                 state.library.collection_prompt =
                     Some(CollectionPrompt::rename(coll.id, &coll.name));
                 ui.close();
             }
-            if ui.button("Delete Collection…").clicked() {
-                state.library.collection_prompt = Some(CollectionPrompt::Delete {
-                    id: coll.id,
-                    name: coll.name.clone(),
-                });
+            let label = if n == 1 {
+                "Delete Collection…".to_owned()
+            } else {
+                format!("Delete {n} Collections…")
+            };
+            if ui.button(label).clicked() {
+                state.library.collection_prompt = Some(CollectionPrompt::Delete { ids: marked });
                 ui.close();
             }
         });
+    }
+}
+
+/// Add a collection to the marked set, or take it back out.
+fn toggle_collection_mark(state: &mut AppState, id: CollectionId) {
+    let marked = &mut state.library.marked_collections;
+    if let Some(pos) = marked.iter().position(|&x| x == id) {
+        marked.remove(pos);
+    } else {
+        marked.push(id);
+    }
+}
+
+/// Mark every collection between the one marked last and `id`, in the order
+/// the sidebar lists them.
+fn extend_collection_marks(state: &mut AppState, id: CollectionId) {
+    let Some(&last) = state.library.marked_collections.last() else {
+        state.library.marked_collections = vec![id];
+        return;
+    };
+    let order = &state.library.collections;
+    let position = |target| order.iter().position(|c| c.id == target);
+    let (Some(a), Some(b)) = (position(last), position(id)) else {
+        return;
+    };
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let run: Vec<CollectionId> = order[lo..=hi].iter().map(|c| c.id).collect();
+    for id in run {
+        if !state.library.marked_collections.contains(&id) {
+            state.library.marked_collections.push(id);
+        }
     }
 }
 

@@ -113,8 +113,10 @@ pub enum CollectionPrompt {
     },
     /// Renaming an existing one.
     Rename { id: CollectionId, entry: NameEntry },
-    /// Confirming that a collection should go.
-    Delete { id: CollectionId, name: String },
+    /// Confirming that collections should go.  Several at once when several
+    /// are marked in the sidebar, so a clean-up doesn't need one dialog per
+    /// collection.
+    Delete { ids: Vec<CollectionId> },
 }
 
 impl CollectionPrompt {
@@ -335,6 +337,11 @@ pub struct LibraryState {
     pub sessions: Vec<ImportSessionRow>,
     pub collections: Vec<CollectionRow>,
 
+    /// Collections ticked in the sidebar with ctrl- or shift-click, for the
+    /// actions that can take more than one.  Kept apart from `view`, which is
+    /// the single collection whose photos the grid is showing.
+    pub marked_collections: Vec<CollectionId>,
+
     /// Which photos are in each collection, refreshed alongside `collections`.
     /// Held rather than queried on demand because the grid asks about the
     /// current selection for every collection, every frame a menu is open.
@@ -470,6 +477,7 @@ impl Default for LibraryState {
             thumbs: ThumbCache::new(THUMB_CACHE_CAP),
             sessions: Vec::new(),
             collections: Vec::new(),
+            marked_collections: Vec::new(),
             collection_members: HashMap::new(),
             collection_prompt: None,
             folder_import_prompt: None,
@@ -825,6 +833,10 @@ impl LibraryState {
         // Refresh sidebar lists
         self.sessions = lib.all_sessions().unwrap_or_default();
         self.collections = lib.all_collections().unwrap_or_default();
+        // A mark on a collection that is gone — deleted here, or dropped by a
+        // rebuild — must not linger and take part in the next bulk action.
+        let live: HashSet<CollectionId> = self.collections.iter().map(|c| c.id).collect();
+        self.marked_collections.retain(|id| live.contains(id));
         self.collection_members.clear();
         for (collection, photo) in lib.collection_memberships().unwrap_or_default() {
             self.collection_members
@@ -883,6 +895,7 @@ impl LibraryState {
                 self.aperture_error = None;
                 self.shutter_error = None;
                 self.selected.clear();
+                self.marked_collections.clear();
                 self.selected_detail = None;
                 self.metadata_drafts.clear();
                 self.active_copy_saves.clear();
@@ -1079,19 +1092,40 @@ impl LibraryState {
         Ok(())
     }
 
-    /// Delete a collection. The photos that were in it are left alone.
-    pub fn delete_collection(&mut self, id: CollectionId) {
+    /// The name of a collection the sidebar currently lists.
+    pub fn collection_name(&self, id: CollectionId) -> Option<&str> {
+        self.collections
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.as_str())
+    }
+
+    /// Delete collections. The photos that were in them are left alone.
+    ///
+    /// Every id is attempted even when one fails: deleting a collection has to
+    /// reach each member's file, so one unwritable photo would otherwise
+    /// strand the rest of the batch half done.  What failed is reported
+    /// together at the end, and what succeeded is gone.
+    pub fn delete_collections(&mut self, ids: &[CollectionId]) {
         let Some(lib) = self.library.clone() else {
             return;
         };
-        if let Err(e) = lib.delete_collection(id) {
-            self.last_error = Some(format!("Delete collection failed: {e}"));
-            return;
+        let mut failures = Vec::new();
+        for &id in ids {
+            let name = self.collection_name(id).unwrap_or("collection").to_owned();
+            if let Err(e) = lib.delete_collection(id) {
+                failures.push(format!("{name}: {e}"));
+            } else if self.view == LibraryView::Collection(id) {
+                // The grid cannot stay pointed at a collection that is gone.
+                self.view = LibraryView::AllPhotos;
+                self.select_none();
+            }
         }
-        // The grid cannot stay pointed at a collection that is gone.
-        if self.view == LibraryView::Collection(id) {
-            self.view = LibraryView::AllPhotos;
-            self.select_none();
+        if !failures.is_empty() {
+            self.last_error = Some(format!(
+                "Delete collection failed — {}",
+                failures.join("; ")
+            ));
         }
         self.refresh();
     }
@@ -1506,6 +1540,60 @@ mod tests {
         );
         assert_eq!(state.results[0].hash, first.hash);
         assert_eq!(state.collection_len(coll.id), 1, "sidebar count");
+    }
+
+    /// Deleting a marked set takes every one of them, leaves the photos alone,
+    /// and cannot leave the grid pointed at a collection that is gone.
+    #[test]
+    fn deleting_marked_collections_takes_them_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = LibraryState::default();
+        state.open_library(tmp.path().to_path_buf(), 0.5);
+        let lib = state.library.clone().expect("library should open");
+
+        let images = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("test_images");
+        lib.import_files(&[images.join("meta_test.jpg")], |_| {})
+            .unwrap();
+        state.refresh();
+
+        let keep = lib.create_collection("Archive").unwrap();
+        let doomed: Vec<CollectionId> = ["Portfolio", "Prints"]
+            .iter()
+            .map(|name| lib.create_collection(name).unwrap().id)
+            .collect();
+        state.refresh();
+
+        // The photo is in one of the collections being deleted, and the grid
+        // is showing that collection.
+        let photo = state.results[0].id;
+        state.select_only(photo);
+        state.add_selected_to_collection(doomed[0]);
+        state.view = LibraryView::Collection(doomed[0]);
+        state.marked_collections = doomed.clone();
+        state.refresh();
+
+        state.delete_collections(&doomed);
+
+        assert_eq!(state.last_error, None);
+        let left: Vec<CollectionId> = state.collections.iter().map(|c| c.id).collect();
+        assert_eq!(left, [keep.id], "only the unmarked collection is left");
+        assert!(
+            state.marked_collections.is_empty(),
+            "marks on deleted collections must not survive"
+        );
+        assert_eq!(
+            state.view,
+            LibraryView::AllPhotos,
+            "the grid cannot stay on a deleted collection"
+        );
+        assert_eq!(
+            state.results.len(),
+            1,
+            "the photo itself stays in the library"
+        );
     }
 
     /// Renaming has the same name rules as creating, except that a collection
