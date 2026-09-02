@@ -34,6 +34,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // Scrub-errors detail window
     scrub_errors_dialog(ui.ctx(), state);
 
+    // Recently-Deleted-errors detail window
+    delete_errors_dialog(ui.ctx(), state);
+
     // New-collection / delete-collection windows
     collection_dialogs(ui.ctx(), state);
 
@@ -120,14 +123,20 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
         let count = state.library.results.len();
         let selected = state.library.selected.len();
+        // Every one of these starts a bulk operation, and only one may be in
+        // flight; a second would fight the first over the same files.
+        let idle = !state.delete_running();
         if in_recently_deleted {
             if selected > 0 {
                 ui.label(format!("{} selected / {} items", selected, count));
                 ui.separator();
-                if ui.button("Restore").clicked() {
-                    state.library.restore_selected();
+                if ui.add_enabled(idle, egui::Button::new("Restore")).clicked() {
+                    state.restore_selected();
                 }
-                if ui.button("Delete Permanently").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Delete Permanently"))
+                    .clicked()
+                {
                     state.library.confirm_permanent_delete = true;
                 }
             } else {
@@ -135,18 +144,45 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
             if state.library.recently_deleted_count > 0 {
                 ui.separator();
-                if ui.button("Empty Recently Deleted").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Empty Recently Deleted"))
+                    .clicked()
+                {
                     state.library.confirm_empty_recently_deleted = true;
                 }
             }
         } else if selected > 0 {
             ui.label(format!("{} selected / {} photos", selected, count));
             ui.separator();
-            if ui.button("Move to Recently Deleted").clicked() {
+            if ui
+                .add_enabled(idle, egui::Button::new("Move to Recently Deleted"))
+                .clicked()
+            {
                 state.library.confirm_delete = true;
             }
         } else {
             ui.label(format!("{} photos", count));
+        }
+
+        // Bulk Recently Deleted progress. Like the rebuild line it carries its
+        // own way out: on a network share this is where a user who selected
+        // more than they meant to looks for one.
+        if let Some(text) = state.library.delete_status_text() {
+            ui.separator();
+            ui.spinner();
+            ui.label(text);
+            let stopping = state
+                .library
+                .delete_task
+                .as_ref()
+                .is_some_and(|task| task.stopping);
+            if ui
+                .add_enabled(!stopping, egui::Button::new("Stop"))
+                .on_hover_text("Stop after the current photo; what is already done is kept")
+                .clicked()
+            {
+                state.stop_delete();
+            }
         }
 
         // Import progress
@@ -236,6 +272,23 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
+        // Persistent indicator for the most recent bulk Recently Deleted
+        // operation's failures. Clicking it lists the photos that did not move.
+        let delete_errors = state.library.last_delete_errors.len();
+        if delete_errors > 0 {
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("⚠ {delete_errors} delete error(s)"))
+                        .color(egui::Color32::RED),
+                )
+                .on_hover_text("Click to see which photos could not be moved")
+                .clicked()
+            {
+                state.library.show_delete_errors = true;
+            }
+        }
+
         // Thumbnail load diagnostics — remove once thumbnails confirmed working
         {
             let cached = state.library.thumbs.cached_len();
@@ -285,6 +338,11 @@ fn error_banner_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
 // ── Confirmation dialog ───────────────────────────────────────────────────────
 
+/// Why a confirm button is unavailable. Only one bulk Recently Deleted
+/// operation runs at a time, and a dialog can be sitting open when another
+/// route starts one.
+const BUSY_HINT: &str = "Another Recently Deleted operation is still running";
+
 pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
     move_to_recently_deleted_dialog(ctx, state);
     permanent_delete_dialog(ctx, state);
@@ -296,16 +354,21 @@ fn move_to_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
 
-    // Keyboard shortcuts: Enter = confirm, Escape = cancel.
+    let idle = !state.delete_running();
+
+    // Keyboard shortcuts: Enter = confirm, Escape = cancel. Enter is left
+    // unconsumed while another operation runs, so it is not swallowed by a
+    // confirmation this dialog is in no position to act on.  Escape always
+    // works: backing out is safe whatever else is going on.
     let (enter, esc) = ctx.input_mut(|i| {
         (
-            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            idle && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
             i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
         )
     });
     if enter {
         state.library.confirm_delete = false;
-        state.library.move_selected_to_recently_deleted();
+        state.move_selected_to_recently_deleted();
         return;
     }
     if esc {
@@ -346,9 +409,13 @@ fn move_to_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Move to Recently Deleted").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Move to Recently Deleted"))
+                    .on_disabled_hover_text(BUSY_HINT)
+                    .clicked()
+                {
                     state.library.confirm_delete = false;
-                    state.library.move_selected_to_recently_deleted();
+                    state.move_selected_to_recently_deleted();
                 }
                 if ui.button("Cancel").clicked() {
                     state.library.confirm_delete = false;
@@ -365,6 +432,7 @@ fn permanent_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
     let n = state.library.selected.len();
+    let idle = !state.delete_running();
     let title = if n == 1 {
         "Delete Photo Permanently?".to_owned()
     } else {
@@ -384,9 +452,13 @@ fn permanent_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
             ui.label("The selected photos and their RasterLab edits will be permanently removed.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Delete Permanently").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Delete Permanently"))
+                    .on_disabled_hover_text(BUSY_HINT)
+                    .clicked()
+                {
                     state.library.confirm_permanent_delete = false;
-                    state.library.permanently_delete_selected();
+                    state.permanently_delete_selected();
                 }
                 if ui.button("Cancel").clicked() {
                     state.library.confirm_permanent_delete = false;
@@ -403,6 +475,7 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
     let n = state.library.recently_deleted_count;
+    let idle = !state.delete_running();
     let mut open = true;
     egui::Window::new("Empty Recently Deleted?")
         .collapsible(false)
@@ -419,9 +492,13 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
             ));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Empty Recently Deleted").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Empty Recently Deleted"))
+                    .on_disabled_hover_text(BUSY_HINT)
+                    .clicked()
+                {
                     state.library.confirm_empty_recently_deleted = false;
-                    state.library.empty_recently_deleted();
+                    state.empty_recently_deleted();
                 }
                 if ui.button("Cancel").clicked() {
                     state.library.confirm_empty_recently_deleted = false;
@@ -434,74 +511,95 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
 }
 
 pub(crate) fn import_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
-    if !state.library.show_import_errors {
-        return;
-    }
-    if state.library.last_import_errors.is_empty() {
-        state.library.show_import_errors = false;
-        return;
-    }
-
-    let n = state.library.last_import_errors.len();
-    let mut open = true;
-    egui::Window::new(format!("Import errors ({n})"))
-        .collapsible(false)
-        .resizable(true)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.label("These files could not be imported:");
-            ui.add_space(6.0);
-            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                for (path, msg) in &state.library.last_import_errors {
-                    ui.label(egui::RichText::new(path.display().to_string()).strong());
-                    ui.colored_label(egui::Color32::RED, msg);
-                    ui.add_space(4.0);
-                }
-            });
-            ui.add_space(8.0);
-            if ui.button("Close").clicked() {
-                state.library.show_import_errors = false;
-            }
-        });
-    if !open {
-        state.library.show_import_errors = false;
-    }
+    let entries: Vec<(String, String)> = state
+        .library
+        .last_import_errors
+        .iter()
+        .map(|(path, msg)| (path.display().to_string(), msg.clone()))
+        .collect();
+    errors_dialog(
+        ctx,
+        "Import errors",
+        "These files could not be imported:",
+        &entries,
+        &mut state.library.show_import_errors,
+    );
 }
 
 pub(crate) fn scrub_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
-    if !state.library.show_scrub_errors {
+    let entries: Vec<(String, String)> = state
+        .library
+        .last_scrub_errors
+        .iter()
+        .map(|(path, msg)| (path.display().to_string(), msg.clone()))
+        .collect();
+    errors_dialog(
+        ctx,
+        "Scrub errors",
+        "These files are corrupted and could not be repaired:",
+        &entries,
+        &mut state.library.show_scrub_errors,
+    );
+}
+
+pub(crate) fn delete_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
+    // Cloned rather than borrowed: `errors_dialog` needs the open flag from the
+    // same state the list lives in.
+    let entries = state.library.last_delete_errors.clone();
+    errors_dialog(
+        ctx,
+        "Recently Deleted errors",
+        "These photos could not be moved:",
+        &entries,
+        &mut state.library.show_delete_errors,
+    );
+}
+
+/// One `(subject, message)` list, rendered the same way whichever background
+/// task produced it.
+///
+/// `open` is cleared when the list is empty as well as when the window is
+/// dismissed: a stale flag would otherwise reopen an empty window the next time
+/// its task ran.
+fn errors_dialog(
+    ctx: &egui::Context,
+    title: &str,
+    blurb: &str,
+    entries: &[(String, String)],
+    open: &mut bool,
+) {
+    if !*open {
         return;
     }
-    if state.library.last_scrub_errors.is_empty() {
-        state.library.show_scrub_errors = false;
+    if entries.is_empty() {
+        *open = false;
         return;
     }
 
-    let n = state.library.last_scrub_errors.len();
-    let mut open = true;
-    egui::Window::new(format!("Scrub errors ({n})"))
+    let mut window_open = true;
+    let mut close = false;
+    egui::Window::new(format!("{title} ({})", entries.len()))
         .collapsible(false)
         .resizable(true)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
+        .open(&mut window_open)
         .show(ctx, |ui| {
-            ui.label("These files are corrupted and could not be repaired:");
+            ui.label(blurb);
             ui.add_space(6.0);
             ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                for (path, msg) in &state.library.last_scrub_errors {
-                    ui.label(egui::RichText::new(path.display().to_string()).strong());
+                for (subject, msg) in entries {
+                    ui.label(egui::RichText::new(subject).strong());
                     ui.colored_label(egui::Color32::RED, msg);
                     ui.add_space(4.0);
                 }
             });
             ui.add_space(8.0);
             if ui.button("Close").clicked() {
-                state.library.show_scrub_errors = false;
+                close = true;
             }
         });
-    if !open {
-        state.library.show_scrub_errors = false;
+    if close || !window_open {
+        *open = false;
     }
 }
 
@@ -1638,10 +1736,13 @@ fn thumb_cell(
             state.library.select_only(id);
         }
         let n = state.library.selected.len();
+        // Matches the toolbar: one bulk operation at a time, and an entry that
+        // would only be ignored is better shown as unavailable than as working.
+        let idle = !state.delete_running();
 
         if state.library.view == LibraryView::RecentlyDeleted {
-            if ui.button("Restore").clicked() {
-                state.library.restore_selected();
+            if ui.add_enabled(idle, egui::Button::new("Restore")).clicked() {
+                state.restore_selected();
                 ui.close();
             }
             let label = if n == 1 {
@@ -1649,7 +1750,7 @@ fn thumb_cell(
             } else {
                 format!("Delete {n} Permanently")
             };
-            if ui.button(label).clicked() {
+            if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
                 state.library.confirm_permanent_delete = true;
                 ui.close();
             }
@@ -1707,7 +1808,7 @@ fn thumb_cell(
         } else {
             format!("Move {n} to Recently Deleted")
         };
-        if ui.button(label).clicked() {
+        if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
             state.library.confirm_delete = true;
             ui.close();
         }

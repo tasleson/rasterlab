@@ -1,6 +1,6 @@
-//! Library background tasks: imports, integrity scrubs, index rebuilds,
-//! thumbnail loading/regeneration, and the handlers that fold their progress
-//! reports back into [`AppState`].
+//! Library background tasks: imports, bulk Recently Deleted operations,
+//! integrity scrubs, index rebuilds, thumbnail loading/regeneration, and the
+//! handlers that fold their progress reports back into [`AppState`].
 
 use std::{
     path::PathBuf as StdPathBuf,
@@ -15,6 +15,7 @@ use image as img_crate;
 use rasterlab_core::panic_guard;
 
 use super::{AppMode, AppState, BgMessage, workers};
+use crate::state::library_state::{DeleteKind, DeleteTask, photo_count};
 
 /// Number of worker threads servicing thumbnail loads. Fixed and small so a
 /// large library grid can't spawn thousands of threads at once.
@@ -313,6 +314,176 @@ impl AppState {
         self.library.thumbs.clear();
         self.library.refresh();
         self.status = format!("Import failed: {message}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Recently Deleted
+    // -----------------------------------------------------------------------
+
+    /// True while a bulk Recently Deleted operation is running.
+    pub fn delete_running(&self) -> bool {
+        self.delete_cancel.is_some()
+    }
+
+    /// Move the selection into the library-owned Recently Deleted area.
+    pub fn move_selected_to_recently_deleted(&mut self) {
+        self.start_delete_task(DeleteKind::ToRecentlyDeleted);
+    }
+
+    /// Move the selection back out of Recently Deleted.
+    pub fn restore_selected(&mut self) {
+        self.start_delete_task(DeleteKind::Restore);
+    }
+
+    /// Erase the selected Recently Deleted photos for good.
+    pub fn permanently_delete_selected(&mut self) {
+        self.start_delete_task(DeleteKind::Permanent);
+    }
+
+    /// Erase everything in Recently Deleted for good.
+    pub fn empty_recently_deleted(&mut self) {
+        self.start_delete_task(DeleteKind::Empty);
+    }
+
+    /// Request that a running bulk operation stop after the current photo.
+    pub fn stop_delete(&mut self) {
+        if let Some(cancel) = &self.delete_cancel {
+            cancel.store(true, Ordering::Relaxed);
+            if let Some(task) = &mut self.library.delete_task {
+                task.stopping = true;
+            }
+        }
+    }
+
+    /// Spawn the worker for one bulk Recently Deleted operation.
+    ///
+    /// The selection is cleared as the task starts rather than when it
+    /// finishes: those photos are on their way out, and leaving them selected
+    /// invites a second run at them while the first is still going.
+    fn start_delete_task(&mut self, kind: DeleteKind) {
+        if self.delete_running() {
+            return;
+        }
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        let photos = std::mem::take(&mut self.library.selected);
+        if kind != DeleteKind::Empty && photos.is_empty() {
+            return;
+        }
+        // Empty takes no photo list, so seed its bar from the sidebar count
+        // until the worker's first report replaces it with the real total.
+        let total = if kind == DeleteKind::Empty {
+            self.library.recently_deleted_count
+        } else {
+            photos.len()
+        };
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.delete_cancel = Some(cancel.clone());
+        self.library.delete_task = Some(DeleteTask {
+            kind,
+            progress: rasterlab_library::DeleteProgress {
+                total,
+                ..Default::default()
+            },
+            stopping: false,
+        });
+        self.library.last_delete_errors.clear();
+        self.status = format!("{}…", kind.progress_verb());
+
+        let progress_tx = self.bg_tx.clone();
+        let progress_ctx = self.ctx.clone();
+        workers::spawn(
+            "rasterlab-library-delete",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            BgMessage::DeleteFailed,
+            move || {
+                let report = move |p: rasterlab_library::DeleteProgress| {
+                    let _ = progress_tx.send(BgMessage::DeleteProgress(p));
+                    progress_ctx.request_repaint();
+                };
+                let result = match kind {
+                    DeleteKind::ToRecentlyDeleted => {
+                        lib.move_to_recently_deleted(&photos, cancel, report)
+                    }
+                    DeleteKind::Restore => lib.restore_photos(&photos, cancel, report),
+                    DeleteKind::Permanent => {
+                        lib.purge_recently_deleted(Some(&photos), cancel, report)
+                    }
+                    DeleteKind::Empty => lib.purge_recently_deleted(None, cancel, report),
+                };
+                match result {
+                    Ok(outcome) => BgMessage::DeleteComplete { outcome },
+                    Err(e) => BgMessage::DeleteFailed(e.to_string()),
+                }
+            },
+        );
+    }
+
+    pub(super) fn on_delete_progress(&mut self, progress: rasterlab_library::DeleteProgress) {
+        // Mirror the running error list so the "⚠ N delete error(s)" button and
+        // its detail window work mid-run, not only once the whole run completes.
+        self.library.last_delete_errors = progress.errors.clone();
+        if let Some(task) = &mut self.library.delete_task {
+            task.progress = progress;
+        }
+    }
+
+    pub(super) fn on_delete_complete(&mut self, outcome: rasterlab_library::DeleteOutcome) {
+        let kind = self.finish_delete_task();
+        // Permanently erased photos will never be shown again, so their
+        // thumbnails are dead weight in the texture cache.
+        for hash in &outcome.purged {
+            self.library.thumbs.remove(hash);
+        }
+        self.library.refresh();
+
+        self.status = if outcome.cancelled {
+            format!(
+                "{} stopped after {}",
+                kind.progress_verb(),
+                photo_count(outcome.done)
+            )
+        } else {
+            format!("{} {}", kind.past_verb(), photo_count(outcome.done))
+        };
+        if !outcome.errors.is_empty() {
+            self.status
+                .push_str(&format!(", {} error(s)", outcome.errors.len()));
+        }
+        // Protected photos are a partly-unfollowed instruction, not a failure,
+        // so they get the banner rather than being lost in the status line.
+        if !outcome.protected.is_empty() {
+            self.library.last_error = Some(protected_message(&outcome.protected));
+        }
+        self.library.last_delete_errors = outcome.errors;
+    }
+
+    /// Terminal handler for a bulk operation that will never report again.
+    ///
+    /// Refreshes like a completed one: a run that died partway through still
+    /// moved the photos it had already got to, and they should not sit on
+    /// screen as though they were still where they were.
+    pub(super) fn on_delete_failed(&mut self, message: String) {
+        let kind = self.finish_delete_task();
+        self.library.refresh();
+        let text = format!("{} failed: {message}", kind.progress_verb());
+        self.status = text.clone();
+        self.library.last_error = Some(text);
+    }
+
+    /// Release the in-flight state a bulk operation owns and report which one
+    /// it was, so the caller can name it in its status line.
+    fn finish_delete_task(&mut self) -> DeleteKind {
+        self.delete_cancel = None;
+        self.library
+            .delete_task
+            .take()
+            .map(|task| task.kind)
+            .unwrap_or(DeleteKind::ToRecentlyDeleted)
     }
 
     // -----------------------------------------------------------------------
@@ -690,5 +861,17 @@ impl AppState {
             self.library.thumbs.insert(hash, handle);
         }
         self.ctx.request_repaint();
+    }
+}
+
+/// Say which photos a delete left alone, naming them while the list is short
+/// enough to be worth reading.
+fn protected_message(names: &[String]) -> String {
+    /// Above this many, the names are noise and the count is the message.
+    const NAMED: usize = 3;
+    if names.len() <= NAMED {
+        format!("Protected, so not deleted: {}.", names.join(", "))
+    } else {
+        format!("{} protected photos were not deleted.", names.len())
     }
 }

@@ -108,6 +108,15 @@ enum BgMessage {
         copy_idx: usize,
         result: Result<Vec<u8>, String>,
     },
+    /// Progress update from a running bulk Recently Deleted operation.
+    DeleteProgress(rasterlab_library::DeleteProgress),
+    /// A bulk Recently Deleted operation finished (completed or stopped).
+    DeleteComplete {
+        outcome: rasterlab_library::DeleteOutcome,
+    },
+    /// The delete worker gave up, panicked, or never started. Terminal, so the
+    /// cancellation handle that gates the delete buttons has to be released.
+    DeleteFailed(String),
     /// Progress update from a running integrity scrub.
     ScrubProgress(rasterlab_library::ScrubProgress),
     /// Progress update from a running index rebuild.
@@ -270,6 +279,11 @@ pub struct AppState {
     /// Cancellation flag for a running index rebuild, on the same terms as
     /// `scrub_cancel`.
     rebuild_cancel: Option<Arc<AtomicBool>>,
+
+    /// Cancellation flag for a running bulk Recently Deleted operation, on the
+    /// same terms as `scrub_cancel`. It is also what gates the delete buttons,
+    /// so only one such operation can be in flight at a time.
+    delete_cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Largest centred 2:1 rectangle that fits inside the image.
@@ -365,6 +379,7 @@ impl AppState {
             library_context: None,
             scrub_cancel: None,
             rebuild_cancel: None,
+            delete_cancel: None,
         }
     }
 
@@ -432,6 +447,9 @@ impl AppState {
                         self.status = format!("Error: set active copy: {error}");
                     }
                 },
+                BgMessage::DeleteProgress(p) => self.on_delete_progress(p),
+                BgMessage::DeleteComplete { outcome } => self.on_delete_complete(outcome),
+                BgMessage::DeleteFailed(e) => self.on_delete_failed(e),
                 BgMessage::ScrubProgress(p) => self.on_scrub_progress(p),
                 BgMessage::RebuildProgress(p) => self.on_rebuild_progress(p),
                 BgMessage::RebuildComplete { outcome, fatal } => {

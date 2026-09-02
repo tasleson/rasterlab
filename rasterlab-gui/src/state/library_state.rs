@@ -6,9 +6,9 @@ use std::{
 };
 
 use rasterlab_library::{
-    CollectionId, CollectionRow, ImportCollection, ImportProgress, ImportSessionRow, Library,
-    LibraryBusy, LibraryMeta, PhotoId, PhotoRow, RebuildProgress, ScrubProgress, SearchFilter,
-    SortOrder, import::rlab_path,
+    CollectionId, CollectionRow, DeleteProgress, ImportCollection, ImportProgress,
+    ImportSessionRow, Library, LibraryBusy, LibraryMeta, PhotoId, PhotoRow, RebuildProgress,
+    ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,65 @@ pub enum LibraryView {
     RecentlyDeleted,
     Session(String),
     Collection(CollectionId),
+}
+
+// ── Recently Deleted ──────────────────────────────────────────────────────────
+
+/// Which bulk operation on the Recently Deleted area is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteKind {
+    /// Moving the selection into Recently Deleted.
+    ToRecentlyDeleted,
+    /// Moving it back out.
+    Restore,
+    /// Erasing the selection from Recently Deleted for good.
+    Permanent,
+    /// Erasing everything in Recently Deleted for good.
+    Empty,
+}
+
+impl DeleteKind {
+    /// What the progress line calls the operation while it runs.
+    pub fn progress_verb(self) -> &'static str {
+        match self {
+            Self::ToRecentlyDeleted => "Moving to Recently Deleted",
+            Self::Restore => "Restoring",
+            Self::Permanent => "Deleting permanently",
+            Self::Empty => "Emptying Recently Deleted",
+        }
+    }
+
+    /// What the status line calls it once it is over.
+    pub fn past_verb(self) -> &'static str {
+        match self {
+            Self::ToRecentlyDeleted => "Moved to Recently Deleted",
+            Self::Restore => "Restored",
+            Self::Permanent | Self::Empty => "Permanently deleted",
+        }
+    }
+}
+
+/// A bulk Recently Deleted operation running in the background.
+///
+/// Each photo costs a file rename or an unlink, so a selection of a few
+/// hundred on a network-mounted library is minutes of work.  Running that on
+/// the UI thread is what left the window unable to paint for long enough that
+/// the desktop offered to kill it, so these report progress and take an answer
+/// of "stop" instead.
+pub struct DeleteTask {
+    pub kind: DeleteKind,
+    pub progress: DeleteProgress,
+    /// True once the user has asked it to stop, until the worker reports back.
+    pub stopping: bool,
+}
+
+/// "1 photo" / "3 photos", for the status lines that count them.
+pub fn photo_count(n: usize) -> String {
+    if n == 1 {
+        "1 photo".to_owned()
+    } else {
+        format!("{n} photos")
+    }
 }
 
 // ── Collections ───────────────────────────────────────────────────────────────
@@ -327,6 +386,20 @@ pub struct LibraryState {
     /// When true, show the scrub-errors detail window.
     pub show_scrub_errors: bool,
 
+    /// The running bulk Recently Deleted operation, or `None` when idle.
+    ///
+    /// Only the progress line reads it; the authoritative "is one running"
+    /// answer is `AppState::delete_running`.
+    pub delete_task: Option<DeleteTask>,
+
+    /// Per-photo `(name, message)` failures from the most recent bulk Recently
+    /// Deleted operation. Retained after it finishes so the user can review
+    /// which photos did not move.
+    pub last_delete_errors: Vec<(String, String)>,
+
+    /// When true, show the delete-errors detail window.
+    pub show_delete_errors: bool,
+
     /// When true, show the "Move to Recently Deleted?" confirmation dialog.
     pub confirm_delete: bool,
 
@@ -412,6 +485,9 @@ impl Default for LibraryState {
             rebuild_started: None,
             last_scrub_errors: Vec::new(),
             show_scrub_errors: false,
+            delete_task: None,
+            last_delete_errors: Vec::new(),
+            show_delete_errors: false,
             confirm_delete: false,
             confirm_permanent_delete: false,
             confirm_empty_recently_deleted: false,
@@ -844,97 +920,24 @@ impl LibraryState {
         self.selected.clear();
     }
 
-    /// Move all selected photos to the library-owned Recently Deleted area.
-    /// Protected photos are skipped even if confirmation is bypassed.
-    pub fn move_selected_to_recently_deleted(&mut self) {
-        let Some(lib) = &self.library else { return };
-
-        let mut deletable: Vec<PhotoId> = Vec::new();
-        let mut protected = 0usize;
-        for r in &self.results {
-            if self.selected.contains(&r.id) {
-                if r.protected {
-                    protected += 1;
-                } else {
-                    deletable.push(r.id);
-                }
-            }
-        }
-
-        for id in &deletable {
-            if let Err(e) = lib.delete_photo(*id) {
-                self.last_error = Some(format!("Move to Recently Deleted failed: {e}"));
-                self.selected.clear();
-                self.refresh();
-                return;
-            }
-        }
-
-        if protected > 0 {
-            let noun = if protected == 1 { "photo" } else { "photos" };
-            self.last_error = Some(format!("{protected} protected {noun} were not deleted."));
-        }
-        self.selected.clear();
-        self.refresh();
-    }
-
-    pub fn restore_selected(&mut self) {
-        let Some(lib) = self.library.clone() else {
-            return;
+    /// Human-readable one-liner for a running bulk Recently Deleted operation,
+    /// or `None` when idle.
+    pub fn delete_status_text(&self) -> Option<String> {
+        let task = self.delete_task.as_ref()?;
+        let progress = &task.progress;
+        let verb = if task.stopping {
+            "Stopping"
+        } else {
+            task.kind.progress_verb()
         };
-        for id in self.selected.clone() {
-            if let Err(e) = lib.restore_photo(id) {
-                self.last_error = Some(format!("Restore failed: {e}"));
-                self.selected.clear();
-                self.refresh();
-                return;
-            }
+        let mut text = format!("{verb}… {}/{}", progress.done, progress.total);
+        if !progress.protected.is_empty() {
+            text.push_str(&format!(", {} protected", progress.protected.len()));
         }
-        self.selected.clear();
-        self.refresh();
-    }
-
-    pub fn permanently_delete_selected(&mut self) {
-        let Some(lib) = self.library.clone() else {
-            return;
-        };
-        let doomed: Vec<(PhotoId, String)> = self
-            .results
-            .iter()
-            .filter(|row| self.selected.contains(&row.id))
-            .map(|row| (row.id, row.hash.clone()))
-            .collect();
-        for (id, _) in &doomed {
-            if let Err(e) = lib.delete_recently_deleted_permanently(*id) {
-                self.last_error = Some(format!("Permanent delete failed: {e}"));
-                self.selected.clear();
-                self.refresh();
-                return;
-            }
+        if !progress.errors.is_empty() {
+            text.push_str(&format!(", {} error(s)", progress.errors.len()));
         }
-        for (_, hash) in &doomed {
-            self.thumbs.remove(hash);
-        }
-        self.selected.clear();
-        self.refresh();
-    }
-
-    pub fn empty_recently_deleted(&mut self) {
-        let Some(lib) = self.library.clone() else {
-            return;
-        };
-        let hashes: Vec<String> = self.results.iter().map(|row| row.hash.clone()).collect();
-        if let Err(e) = lib.empty_recently_deleted() {
-            self.last_error = Some(format!("Empty Recently Deleted failed: {e}"));
-            self.selected.clear();
-            self.refresh();
-            return;
-        }
-        for hash in &hashes {
-            self.thumbs.remove(hash);
-        }
-        self.selected.clear();
-        self.refresh();
+        Some(text)
     }
 
     /// Mark (or unmark) all selected photos as protected.

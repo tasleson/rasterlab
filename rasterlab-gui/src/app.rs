@@ -269,6 +269,9 @@ impl RasterLabApp {
     /// Select the currently-open library photo and raise the delete confirmation.
     #[cfg(not(target_arch = "wasm32"))]
     fn trigger_editor_delete(&mut self) {
+        if self.state.delete_running() {
+            return;
+        }
         let Some((_, ref hash)) = self.state.library_context.clone() else {
             return;
         };
@@ -983,12 +986,19 @@ impl eframe::App for RasterLabApp {
 
             // If a delete was triggered from the editor and the dialog has been
             // dismissed (confirmed or cancelled), decide what to do next.
+            //
+            // A confirmed delete now runs in the background, so the answer is
+            // not in yet while one is in flight: waiting for it to finish is
+            // what makes the `hash_gone` test below mean "deleted" rather than
+            // "not deleted yet".
             if let Some(old_idx) = self.editor_delete_at_idx
                 && !self.state.library.confirm_delete
+                && !self.state.delete_running()
             {
                 self.editor_delete_at_idx = None;
                 // A hash_gone check distinguishes confirmed vs. cancelled:
-                // after cancel the photo is still in results.
+                // after cancel — and after a delete that was stopped or failed
+                // before reaching this photo — it is still in results.
                 let hash_gone = self
                     .state
                     .library_context
