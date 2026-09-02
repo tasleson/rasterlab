@@ -1,11 +1,14 @@
 use std::{
     path::PathBuf,
-    sync::{Arc, Barrier, atomic::AtomicBool},
+    sync::{
+        Arc, Barrier, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use rasterlab_library::{
     ImportCollection, Library,
-    db_trait::{PhotoId, SortOrder},
+    db_trait::{PhotoId, PhotoRow, SortOrder},
     search::SearchFilter,
 };
 
@@ -2456,4 +2459,162 @@ fn edited_hashes(lib: &Library) -> Vec<String> {
         .into_iter()
         .map(|row| row.hash)
         .collect()
+}
+
+// ── Bulk Recently Deleted operations ──────────────────────────────────────────
+//
+// The single-photo entry points above go through the same code, so what these
+// cover is what only the bulk form has: that one bad photo does not decide the
+// fate of the rest, that progress is reported per photo, and that a run stopped
+// partway leaves a library in a state it is happy in.
+
+/// Import three distinct photos and hand back their rows in import order.
+fn import_three(lib: &Library) -> Vec<PhotoRow> {
+    let sources = [
+        jpeg_path(),
+        png_path(),
+        test_images_dir().join("hue_wheel.png"),
+    ];
+    let session = lib.import_files(&sources, |_| {}).expect("import_files");
+    assert_eq!(session.photo_count, 3, "{:?}", session.errors);
+    let mut rows = lib.all_photos(SortOrder::default()).unwrap();
+    rows.sort_by_key(|row| row.id);
+    rows
+}
+
+#[test]
+fn a_bulk_move_leaves_protected_photos_and_moves_the_rest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let rows = import_three(&lib);
+    lib.set_protected(rows[1].id, true).unwrap();
+    let ids: Vec<PhotoId> = rows.iter().map(|row| row.id).collect();
+
+    let outcome = lib
+        .move_to_recently_deleted(&ids, no_cancel(), |_| {})
+        .expect("move_to_recently_deleted");
+
+    assert_eq!(outcome.done, 2);
+    assert_eq!(outcome.protected.len(), 1, "{:?}", outcome.protected);
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert!(!outcome.cancelled);
+    assert_eq!(lib.recently_deleted().unwrap().len(), 2);
+    assert!(
+        lib.rlab_path(&rows[1].hash).exists(),
+        "the protected photo must still be where an active photo lives"
+    );
+}
+
+#[test]
+fn a_photo_the_index_does_not_know_is_reported_without_stopping_the_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let rows = import_three(&lib);
+    let ids = vec![rows[0].id, PhotoId::MAX, rows[2].id];
+
+    let outcome = lib
+        .move_to_recently_deleted(&ids, no_cancel(), |_| {})
+        .expect("move_to_recently_deleted");
+
+    assert_eq!(outcome.done, 2, "the two real photos must still move");
+    assert_eq!(outcome.errors.len(), 1, "{:?}", outcome.errors);
+    assert!(
+        outcome.errors[0].1.contains("not in the library index"),
+        "unhelpful report: {:?}",
+        outcome.errors[0]
+    );
+}
+
+#[test]
+fn a_bulk_move_reports_progress_before_every_photo_and_once_at_the_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let ids: Vec<PhotoId> = import_three(&lib).iter().map(|row| row.id).collect();
+
+    let seen = Mutex::new(Vec::new());
+    lib.move_to_recently_deleted(&ids, no_cancel(), |progress| {
+        seen.lock().unwrap().push((progress.done, progress.total));
+    })
+    .expect("move_to_recently_deleted");
+
+    assert_eq!(
+        seen.into_inner().unwrap(),
+        vec![(0, 3), (1, 3), (2, 3), (3, 3)]
+    );
+}
+
+#[test]
+fn a_cancelled_bulk_move_keeps_what_it_had_already_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let ids: Vec<PhotoId> = import_three(&lib).iter().map(|row| row.id).collect();
+
+    // Raised on the report that precedes the first photo, so exactly one photo
+    // is moved and the check before the second one stops the run.
+    let cancel = no_cancel();
+    let raise = cancel.clone();
+    let outcome = lib
+        .move_to_recently_deleted(&ids, cancel, move |_| raise.store(true, Ordering::Relaxed))
+        .expect("move_to_recently_deleted");
+
+    assert!(outcome.cancelled);
+    assert_eq!(outcome.done, 1);
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+    assert_eq!(
+        lib.all_photos(SortOrder::default()).unwrap().len(),
+        2,
+        "the photos it never reached must still be active"
+    );
+}
+
+#[test]
+fn a_bulk_restore_brings_every_photo_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let rows = import_three(&lib);
+    let ids: Vec<PhotoId> = rows.iter().map(|row| row.id).collect();
+    lib.move_to_recently_deleted(&ids, no_cancel(), |_| {})
+        .unwrap();
+
+    let outcome = lib
+        .restore_photos(&ids, no_cancel(), |_| {})
+        .expect("restore_photos");
+
+    assert_eq!(outcome.done, 3);
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert!(lib.recently_deleted().unwrap().is_empty());
+    for row in &rows {
+        assert!(lib.rlab_path(&row.hash).exists());
+    }
+}
+
+#[test]
+fn purging_recently_deleted_names_the_hashes_it_erased() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let rows = import_three(&lib);
+    let ids: Vec<PhotoId> = rows.iter().map(|row| row.id).collect();
+    lib.move_to_recently_deleted(&ids, no_cancel(), |_| {})
+        .unwrap();
+
+    let outcome = lib
+        .purge_recently_deleted(None, no_cancel(), |_| {})
+        .expect("purge_recently_deleted");
+
+    assert_eq!(outcome.done, 3);
+    let mut purged = outcome.purged.clone();
+    purged.sort();
+    let mut expected: Vec<String> = rows.iter().map(|row| row.hash.clone()).collect();
+    expected.sort();
+    assert_eq!(
+        purged, expected,
+        "the caller drops its cached thumbnails from this list"
+    );
+
+    assert!(lib.recently_deleted().unwrap().is_empty());
+    assert!(lib.all_sessions().unwrap().is_empty());
+    for row in &rows {
+        assert!(!lib.recently_deleted_path(&row.hash).exists());
+        assert!(!lib.thumb_path(&row.hash).exists());
+    }
 }

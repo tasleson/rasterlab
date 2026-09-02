@@ -45,7 +45,10 @@
 //!   hash and skip what is already there, so a cancelled or crashed import
 //!   resumes by simply being run again.  Session photo counts are recomputed
 //!   from the rows rather than incremented, so an interrupted run leaves a
-//!   correct number behind.
+//!   correct number behind.  The bulk Recently Deleted operations are the same
+//!   shape: each photo is moved, restored or erased on its own, so a run that
+//!   is stopped or that trips over one bad photo leaves a library the user can
+//!   simply carry on from.
 //!
 //! * **Reconciliation is one pass, and it is re-runnable.**
 //!   [`reconstruct::rebuild`] walks the files and brings the index back to
@@ -80,7 +83,7 @@ pub use db_trait::{
     RecentlyDeletedRow, SortOrder,
 };
 pub use import::{ImportCollection, ImportSession, MONTH_NAMES, ymd_from_unix};
-pub use library::{ImportProgress, Library, LibraryBusy};
+pub use library::{DeleteOutcome, DeleteProgress, ImportProgress, Library, LibraryBusy};
 pub use rasterlab_core::library_meta::{CollectionRef, LibraryExif, LibraryMeta};
 pub use reconstruct::{RebuildOutcome, RebuildProgress};
 pub use scrub::{ScrubOutcome, ScrubProgress};

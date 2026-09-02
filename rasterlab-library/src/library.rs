@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -56,6 +59,74 @@ pub struct ImportProgress {
     /// folder import). Lets the UI show "Scanning…" instead of a frozen
     /// "Importing…" while capture dates are read.
     pub scanning: bool,
+}
+
+/// Progress of a running bulk operation on the Recently Deleted area.
+#[derive(Debug, Clone, Default)]
+pub struct DeleteProgress {
+    pub total: usize,
+    /// Photos attempted so far.
+    pub done: usize,
+    /// Names of photos left where they are because they are protected.
+    pub protected: Vec<String>,
+    /// Per-photo `(name, message)` failures so far.
+    pub errors: Vec<(String, String)>,
+}
+
+/// Final tally of a bulk operation on the Recently Deleted area.
+///
+/// Every photo is attempted, so a run that hits trouble reports what it did
+/// manage alongside what it could not: one missing file in a selection of five
+/// hundred should not decide the fate of the other four hundred and ninety
+/// nine.
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOutcome {
+    /// Photos moved, restored, or erased.
+    pub done: usize,
+    /// Names of photos left alone because they are protected.
+    pub protected: Vec<String>,
+    /// Per-photo `(name, message)` failures.
+    ///
+    /// Named rather than pathed: a `.rlab` is named by content hash, so
+    /// `files/3a/3adf….rlab` tells a photographer nothing about which of
+    /// their photographs did not move.
+    pub errors: Vec<(String, String)>,
+    /// Content hashes whose files and thumbnails are now gone for good, so a
+    /// caller holding cached thumbnails knows which of them to drop.
+    pub purged: Vec<String>,
+    /// True when the run stopped early because `cancel` was raised.
+    pub cancelled: bool,
+}
+
+/// What became of one photo inside a bulk operation.
+///
+/// A failure is a value rather than an `Err` because none of these is fatal to
+/// the run: the loop records it and carries on to the next photo.
+enum Step {
+    /// The photo was moved, restored, or erased as asked.
+    Done,
+    /// It is protected, so it was left where it is.
+    Protected(String),
+    /// It could not be done. `photo` names it for the user.
+    Failed { photo: String, error: String },
+}
+
+impl Step {
+    /// A photo the index no longer lists. `expected` completes "photo 7 is
+    /// not …".
+    fn missing(id: PhotoId, expected: &str) -> Self {
+        Self::Failed {
+            photo: format!("photo {id}"),
+            error: format!("is not {expected}"),
+        }
+    }
+
+    fn failed(row: &PhotoRow, error: &anyhow::Error) -> Self {
+        Self::Failed {
+            photo: photo_label(row),
+            error: error.to_string(),
+        }
+    }
 }
 
 // ── Library ───────────────────────────────────────────────────────────────────
@@ -297,32 +368,42 @@ impl Library {
         self.db.search(filter, sort)
     }
 
-    /// Move a photo into this library's Recently Deleted area.
+    /// Move photos into this library's Recently Deleted area.
     ///
-    /// The `.rlab` is renamed within the library filesystem, which is fast and
-    /// recoverable on local disks and network mounts alike. Its index metadata
-    /// and thumbnail remain available so the photo can be restored exactly.
-    pub fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
-        let photos = self.db.all_photos(SortOrder::default())?;
-        let Some(row) = photos.iter().find(|r| r.id == photo_id) else {
-            bail!("photo {photo_id} not found");
-        };
-        if row.protected {
-            let name = row.original_filename.as_deref().unwrap_or("photo");
-            bail!("\"{name}\" is protected and cannot be deleted");
-        }
-
-        let _write_guard = self.lock_project_writes()?;
-        let active = self.rlab_path(&row.hash);
-        let deleted = self.recently_deleted_path(&row.hash);
-        let moved = move_library_file(&active, &deleted)?;
-        if let Err(error) = self.db.mark_photo_deleted(photo_id, unix_now()) {
-            if moved {
-                let _ = move_library_file(&deleted, &active);
+    /// Each `.rlab` is renamed within the library filesystem, which is fast and
+    /// recoverable on local disks and network mounts alike. Index metadata and
+    /// thumbnails stay put, so a photo can be restored exactly.
+    ///
+    /// A protected photo is reported and left alone rather than failing the
+    /// run.  `cancel` is polled before each photo; stopping partway leaves what
+    /// has already moved in Recently Deleted, which is a state the library is
+    /// happy in — each photo moves on its own and the user can move the rest
+    /// later or restore these.
+    pub fn move_to_recently_deleted(
+        &self,
+        photos: &[PhotoId],
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(DeleteProgress),
+    ) -> Result<DeleteOutcome> {
+        let index = photo_index(self.db.all_photos(SortOrder::default())?);
+        Ok(bulk_photo_op(photos, &cancel, progress_cb, |id| {
+            let Some(row) = index.get(&id) else {
+                return Step::missing(id, "in the library index");
+            };
+            if row.protected {
+                return Step::Protected(photo_label(row));
             }
-            return Err(error.context("record Recently Deleted state"));
-        }
-        Ok(())
+            match self.move_one_to_recently_deleted(row) {
+                Ok(()) => Step::Done,
+                Err(error) => Step::failed(row, &error),
+            }
+        }))
+    }
+
+    /// Move a photo into this library's Recently Deleted area.
+    pub fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
+        let outcome = self.move_to_recently_deleted(&[photo_id], idle_cancel(), |_| {})?;
+        single_photo_result(&outcome)
     }
 
     /// Permanently remove an active photo's `.rlab`, thumbnail, and DB row.
@@ -347,43 +428,136 @@ impl Library {
         self.db.recently_deleted()
     }
 
+    /// Move photos back out of Recently Deleted, on the same terms as
+    /// [`Library::move_to_recently_deleted`].
+    pub fn restore_photos(
+        &self,
+        photos: &[PhotoId],
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(DeleteProgress),
+    ) -> Result<DeleteOutcome> {
+        let index = photo_index(self.deleted_rows()?);
+        Ok(bulk_photo_op(photos, &cancel, progress_cb, |id| {
+            let Some(row) = index.get(&id) else {
+                return Step::missing(id, "in Recently Deleted");
+            };
+            match self.restore_one(row) {
+                Ok(()) => Step::Done,
+                Err(error) => Step::failed(row, &error),
+            }
+        }))
+    }
+
     pub fn restore_photo(&self, photo_id: PhotoId) -> Result<()> {
-        let deleted_rows = self.db.recently_deleted()?;
-        let Some(row) = deleted_rows.iter().find(|r| r.photo.id == photo_id) else {
-            bail!("recently deleted photo {photo_id} not found");
-        };
+        let outcome = self.restore_photos(&[photo_id], idle_cancel(), |_| {})?;
+        single_photo_result(&outcome)
+    }
+
+    /// Erase photos from Recently Deleted for good: `photos` names them, or
+    /// `None` empties the whole area.
+    ///
+    /// Sessions left without photos are dropped once at the end rather than
+    /// after each removal, which on a network-mounted index is the difference
+    /// between one round trip and one per photo.
+    pub fn purge_recently_deleted(
+        &self,
+        photos: Option<&[PhotoId]>,
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(DeleteProgress),
+    ) -> Result<DeleteOutcome> {
+        let rows = self.deleted_rows()?;
+        let everything: Vec<PhotoId> = rows.iter().map(|row| row.id).collect();
+        let index = photo_index(rows);
+        let ids = photos.unwrap_or(&everything);
+
+        let mut purged: Vec<String> = Vec::new();
+        let mut outcome = bulk_photo_op(ids, &cancel, progress_cb, |id| {
+            let Some(row) = index.get(&id) else {
+                return Step::missing(id, "in Recently Deleted");
+            };
+            match self.purge_one(row) {
+                Ok(()) => {
+                    purged.push(row.hash.clone());
+                    Step::Done
+                }
+                Err(error) => Step::failed(row, &error),
+            }
+        });
+        outcome.purged = purged;
+        // Bookkeeping on top of work already committed: the photos are gone
+        // either way, so a failure here is recorded rather than allowed to
+        // report a successful run as a failed one — and to take `purged`,
+        // which is how the caller knows to drop their thumbnails, down with it.
+        if let Err(error) = self.db.delete_empty_sessions() {
+            outcome
+                .errors
+                .push(("the library index".to_owned(), error.to_string()));
+        }
+        Ok(outcome)
+    }
+
+    pub fn delete_recently_deleted_permanently(&self, photo_id: PhotoId) -> Result<()> {
+        let outcome = self.purge_recently_deleted(Some(&[photo_id]), idle_cancel(), |_| {})?;
+        single_photo_result(&outcome)
+    }
+
+    pub fn empty_recently_deleted(&self) -> Result<usize> {
+        let outcome = self.purge_recently_deleted(None, idle_cancel(), |_| {})?;
+        if let Some((photo, error)) = outcome.errors.first() {
+            bail!("{photo}: {error}");
+        }
+        Ok(outcome.done)
+    }
+
+    /// Every Recently Deleted photo, without the timestamp the bulk operations
+    /// have no use for.
+    fn deleted_rows(&self) -> Result<Vec<PhotoRow>> {
+        Ok(self
+            .db
+            .recently_deleted()?
+            .into_iter()
+            .map(|row| row.photo)
+            .collect())
+    }
+
+    /// Storage first, index second, with the file put back if the index will
+    /// not follow — a photo whose row still calls it active must still be
+    /// where an active photo lives.
+    fn move_one_to_recently_deleted(&self, row: &PhotoRow) -> Result<()> {
         let _write_guard = self.lock_project_writes()?;
-        let deleted = self.recently_deleted_path(&row.photo.hash);
-        let active = self.rlab_path(&row.photo.hash);
+        let active = self.rlab_path(&row.hash);
+        let deleted = self.recently_deleted_path(&row.hash);
+        let moved = move_library_file(&active, &deleted)?;
+        if let Err(error) = self.db.mark_photo_deleted(row.id, unix_now()) {
+            if moved {
+                let _ = move_library_file(&deleted, &active);
+            }
+            return Err(error.context("record Recently Deleted state"));
+        }
+        Ok(())
+    }
+
+    /// Under the same guard as its siblings, though with nothing to roll back:
+    /// the file is gone before the row is, so a failed index write leaves a
+    /// stale row rather than a resurrected photo.
+    fn purge_one(&self, row: &PhotoRow) -> Result<()> {
+        let _write_guard = self.lock_project_writes()?;
+        self.permanently_remove(row, &self.recently_deleted_path(&row.hash))
+    }
+
+    /// The mirror of [`Library::move_one_to_recently_deleted`].
+    fn restore_one(&self, row: &PhotoRow) -> Result<()> {
+        let _write_guard = self.lock_project_writes()?;
+        let deleted = self.recently_deleted_path(&row.hash);
+        let active = self.rlab_path(&row.hash);
         let moved = move_library_file(&deleted, &active)?;
-        if let Err(error) = self.db.restore_photo(photo_id) {
+        if let Err(error) = self.db.restore_photo(row.id) {
             if moved {
                 let _ = move_library_file(&active, &deleted);
             }
             return Err(error.context("restore photo index state"));
         }
         Ok(())
-    }
-
-    pub fn delete_recently_deleted_permanently(&self, photo_id: PhotoId) -> Result<()> {
-        let deleted_rows = self.db.recently_deleted()?;
-        let Some(row) = deleted_rows.iter().find(|r| r.photo.id == photo_id) else {
-            bail!("recently deleted photo {photo_id} not found");
-        };
-        let _write_guard = self.lock_project_writes()?;
-        self.permanently_remove(&row.photo, &self.recently_deleted_path(&row.photo.hash))?;
-        self.db.delete_empty_sessions()?;
-        Ok(())
-    }
-
-    pub fn empty_recently_deleted(&self) -> Result<usize> {
-        let rows = self.db.recently_deleted()?;
-        let _write_guard = self.lock_project_writes()?;
-        for row in &rows {
-            self.permanently_remove(&row.photo, &self.recently_deleted_path(&row.photo.hash))?;
-        }
-        self.db.delete_empty_sessions()?;
-        Ok(rows.len())
     }
 
     /// Complete a file-first move that was interrupted before its database
@@ -928,6 +1102,91 @@ fn migrate_legacy_collections(lmta: &mut LibraryMeta, all: &[CollectionRow]) -> 
         false
     });
     migrated
+}
+
+// ── Bulk operation helpers ───────────────────────────────────────────────────
+
+/// A cancellation flag that is never raised, for the single-photo entry points
+/// that have nothing to cancel.
+fn idle_cancel() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
+/// What to call a photo in a message to the user.
+///
+/// A `.rlab` is named by content hash, so the only name a photographer
+/// recognises is the one the file was imported under.
+fn photo_label(row: &PhotoRow) -> String {
+    row.original_filename
+        .clone()
+        .unwrap_or_else(|| row.hash.clone())
+}
+
+/// Index rows by id so a bulk operation reads the photo table once rather than
+/// once per photo — the difference between a selection of five hundred costing
+/// one query and costing five hundred full scans of the library.
+fn photo_index(rows: Vec<PhotoRow>) -> HashMap<PhotoId, PhotoRow> {
+    rows.into_iter().map(|row| (row.id, row)).collect()
+}
+
+/// Run `step` over `photos`, keeping the tally and letting the caller out.
+///
+/// The three bulk Recently Deleted operations differ only in what they do to
+/// one photo; the bookkeeping around it is the same for all three, and so is
+/// the reason it exists. Each photo is a file rename or unlink, which on a
+/// network mount can take long enough that a selection of a few hundred is
+/// minutes of work — hence a progress report before every photo and a
+/// cancellation check that does not wait for the current one to finish.
+fn bulk_photo_op(
+    photos: &[PhotoId],
+    cancel: &AtomicBool,
+    progress_cb: impl Fn(DeleteProgress),
+    mut step: impl FnMut(PhotoId) -> Step,
+) -> DeleteOutcome {
+    let mut progress = DeleteProgress {
+        total: photos.len(),
+        ..Default::default()
+    };
+    let mut done = 0usize;
+    let mut cancelled = false;
+
+    for &id in photos {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        progress_cb(progress.clone());
+        match step(id) {
+            Step::Done => done += 1,
+            Step::Protected(name) => progress.protected.push(name),
+            Step::Failed { photo, error } => {
+                eprintln!("library: {photo}: {error}");
+                progress.errors.push((photo, error));
+            }
+        }
+        progress.done += 1;
+    }
+    progress_cb(progress.clone());
+
+    DeleteOutcome {
+        done,
+        protected: progress.protected,
+        errors: progress.errors,
+        purged: Vec::new(),
+        cancelled,
+    }
+}
+
+/// Reduce a one-photo bulk run to the plain success-or-failure the
+/// single-photo entry points promise.
+fn single_photo_result(outcome: &DeleteOutcome) -> Result<()> {
+    if let Some(name) = outcome.protected.first() {
+        bail!("\"{name}\" is protected and cannot be deleted");
+    }
+    if let Some((photo, error)) = outcome.errors.first() {
+        bail!("{photo}: {error}");
+    }
+    Ok(())
 }
 
 // ── File-level helpers ────────────────────────────────────────────────────────
