@@ -432,12 +432,14 @@ pub struct LibraryState {
     pub iso_exact_text: String,
     pub aperture_exact_text: String,
     pub shutter_exact_text: String,
+    pub resolution_text: String,
 
     // Per-field validation errors; `Some` means the input is out of the
     // reasonable domain and the filter for that field is not applied.
     pub iso_error: Option<String>,
     pub aperture_error: Option<String>,
     pub shutter_error: Option<String>,
+    pub resolution_error: Option<String>,
 
     /// Set by the thumbnail grid when the user double-clicks a photo, so
     /// `app.rs` can route the open through the unsaved-changes confirmation
@@ -514,9 +516,11 @@ impl Default for LibraryState {
             iso_exact_text: String::new(),
             aperture_exact_text: String::new(),
             shutter_exact_text: String::new(),
+            resolution_text: String::new(),
             iso_error: None,
             aperture_error: None,
             shutter_error: None,
+            resolution_error: None,
             pending_open_photo: None,
             pending_focus_stack: None,
             scroll_to_hash: None,
@@ -903,9 +907,11 @@ impl LibraryState {
                 self.iso_exact_text.clear();
                 self.aperture_exact_text.clear();
                 self.shutter_exact_text.clear();
+                self.resolution_text.clear();
                 self.iso_error = None;
                 self.aperture_error = None;
                 self.shutter_error = None;
+                self.resolution_error = None;
                 self.selected.clear();
                 self.marked_collections.clear();
                 self.selected_detail = None;

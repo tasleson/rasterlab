@@ -1,7 +1,7 @@
 use egui::{ScrollArea, Sense, Vec2};
 use rasterlab_library::{
-    CollectionId, ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, SearchFilter, SortOrder,
-    ymd_from_unix,
+    CollectionId, ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, Resolution, SearchFilter,
+    SortOrder, ymd_from_unix,
 };
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
@@ -1159,6 +1159,38 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             validation_popup(ui.ctx(), &resp, "iso", state.library.iso_error.as_deref());
         });
 
+        // Resolution — e.g. "<1600x1200", ">=1920x1080", or an exact "640x480"
+        ui.horizontal(|ui| {
+            ui.label("Resolution:");
+            let resp = ui.text_edit_singleline(&mut state.library.resolution_text);
+            if resp.changed() {
+                match validate_resolution(&state.library.resolution_text) {
+                    Ok(Some((min, max))) => {
+                        state.library.filter.resolution_min = min;
+                        state.library.filter.resolution_max = max;
+                        state.library.resolution_error = None;
+                    }
+                    Ok(None) => {
+                        state.library.filter.resolution_min = None;
+                        state.library.filter.resolution_max = None;
+                        state.library.resolution_error = None;
+                    }
+                    Err(msg) => {
+                        state.library.filter.resolution_min = None;
+                        state.library.filter.resolution_max = None;
+                        state.library.resolution_error = Some(msg);
+                    }
+                }
+                changed = true;
+            }
+            validation_popup(
+                ui.ctx(),
+                &resp,
+                "resolution",
+                state.library.resolution_error.as_deref(),
+            );
+        });
+
         // Edited only
         ui.horizontal(|ui| {
             let mut v = state.library.filter.has_edits_only;
@@ -1176,7 +1208,8 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         // so the user can recover without having to find the offending field.
         let has_error = state.library.iso_error.is_some()
             || state.library.aperture_error.is_some()
-            || state.library.shutter_error.is_some();
+            || state.library.shutter_error.is_some()
+            || state.library.resolution_error.is_some();
         if !state.library.filter.is_empty() || has_error {
             ui.add_space(4.0);
             if ui.button("Clear Filters").clicked() {
@@ -1184,9 +1217,11 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 state.library.iso_exact_text.clear();
                 state.library.aperture_exact_text.clear();
                 state.library.shutter_exact_text.clear();
+                state.library.resolution_text.clear();
                 state.library.iso_error = None;
                 state.library.aperture_error = None;
                 state.library.shutter_error = None;
+                state.library.resolution_error = None;
                 state.library.refresh();
             }
         }
@@ -1205,9 +1240,11 @@ fn select_view(state: &mut AppState, view: LibraryView) {
     state.library.iso_exact_text.clear();
     state.library.aperture_exact_text.clear();
     state.library.shutter_exact_text.clear();
+    state.library.resolution_text.clear();
     state.library.iso_error = None;
     state.library.aperture_error = None;
     state.library.shutter_error = None;
+    state.library.resolution_error = None;
     state.library.refresh();
 }
 
@@ -1457,6 +1494,8 @@ const SHUTTER_MIN_SEC: f64 = 1e-5; // 1/100000 s
 const SHUTTER_MAX_SEC: f64 = 3600.0; // 1 hour
 const APERTURE_MIN: f32 = 0.5;
 const APERTURE_MAX: f32 = 100.0;
+const RESOLUTION_MIN: u32 = 1;
+const RESOLUTION_MAX: u32 = 1_000_000;
 const ISO_MIN: u32 = 10;
 const ISO_MAX: u32 = 1_000_000;
 
@@ -1524,6 +1563,65 @@ fn validate_iso(s: &str) -> Result<Option<u32>, String> {
         ));
     }
     Ok(Some(v))
+}
+
+/// Inclusive `(min, max)` pixel-dimension bounds for the search filter.
+type ResolutionBounds = (Option<Resolution>, Option<Resolution>);
+
+/// Parse a resolution filter such as `<1600x1200`, `>=1920x1080` or a bare
+/// `640x480` (exact match).  Comparisons apply to the long and short edge
+/// rather than to width and height, so orientation does not matter.
+fn validate_resolution(s: &str) -> Result<Option<ResolutionBounds>, String> {
+    const SYNTAX: &str = "Use a size like 1600x1200, optionally prefixed with <, <=, > or >=";
+
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let (op, rest) = if let Some(rest) = s.strip_prefix("<=") {
+        ("<=", rest)
+    } else if let Some(rest) = s.strip_prefix(">=") {
+        (">=", rest)
+    } else if let Some(rest) = s.strip_prefix('<') {
+        ("<", rest)
+    } else if let Some(rest) = s.strip_prefix('>') {
+        (">", rest)
+    } else {
+        ("=", s)
+    };
+
+    let (w, h) = rest
+        .trim()
+        .split_once(['x', 'X', '\u{d7}'])
+        .ok_or_else(|| SYNTAX.to_owned())?;
+    let edge = |part: &str| -> Result<u32, String> {
+        let v: u32 = part.trim().parse().map_err(|_| SYNTAX.to_owned())?;
+        if !(RESOLUTION_MIN..=RESOLUTION_MAX).contains(&v) {
+            return Err(format!(
+                "Each side must be between {RESOLUTION_MIN} and {RESOLUTION_MAX} pixels (got {v})"
+            ));
+        }
+        Ok(v)
+    };
+    let limit = Resolution::new(edge(w)?, edge(h)?);
+
+    // Strict bounds become inclusive ones a pixel in: the stored dimensions
+    // are whole pixels, so "< 1600x1200" is "<= 1599x1199".
+    let tighter = Resolution {
+        long_edge: limit.long_edge.saturating_sub(1),
+        short_edge: limit.short_edge.saturating_sub(1),
+    };
+    let looser = Resolution {
+        long_edge: limit.long_edge + 1,
+        short_edge: limit.short_edge + 1,
+    };
+    Ok(Some(match op {
+        "<" => (None, Some(tighter)),
+        "<=" => (None, Some(limit)),
+        ">" => (Some(looser), None),
+        ">=" => (Some(limit), None),
+        _ => (Some(limit), Some(limit)),
+    }))
 }
 
 /// Draw a small warning popup just below the given text-edit response.
@@ -1991,6 +2089,34 @@ fn fit_rect_preserve_aspect(outer: egui::Rect, w: u32, h: u32) -> egui::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolution_input_parses_every_comparison_form() {
+        let r = |a, b| Some(Resolution::new(a, b));
+        // (input, min, max)
+        let cases: &[(&str, Option<Resolution>, Option<Resolution>)] = &[
+            ("1600x1200", r(1600, 1200), r(1600, 1200)),
+            ("<1600x1200", None, r(1599, 1199)),
+            ("<=1600x1200", None, r(1600, 1200)),
+            (">1920x1080", r(1921, 1081), None),
+            (">=1920x1080", r(1920, 1080), None),
+            // Orientation, case and spacing are all normalised away.
+            (" < 1200 X 1600 ", None, r(1599, 1199)),
+            ("1200\u{d7}1600", r(1600, 1200), r(1600, 1200)),
+        ];
+        for (input, min, max) in cases {
+            let got = validate_resolution(input).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(got, Some((*min, *max)), "{input}");
+        }
+    }
+
+    #[test]
+    fn resolution_input_rejects_what_it_cannot_use() {
+        assert_eq!(validate_resolution("   ").unwrap(), None, "blank clears it");
+        for bad in ["1600", "1600*1200", "x1200", "1600x", "0x100", "1600x1e9"] {
+            assert!(validate_resolution(bad).is_err(), "{bad} should not parse");
+        }
+    }
 
     fn sess(id: &str, started_at: u64, photo_count: i64) -> ImportSessionRow {
         ImportSessionRow {
