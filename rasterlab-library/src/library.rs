@@ -98,17 +98,17 @@ pub struct DeleteOutcome {
     pub cancelled: bool,
 }
 
-/// What became of one photo inside a bulk operation.
+/// What became of one item inside a bulk operation.
 ///
 /// A failure is a value rather than an `Err` because none of these is fatal to
-/// the run: the loop records it and carries on to the next photo.
+/// the run: the loop records it and carries on to the next item.
 enum Step {
-    /// The photo was moved, restored, or erased as asked.
+    /// The item was moved, restored, or erased as asked.
     Done,
     /// It is protected, so it was left where it is.
     Protected(String),
-    /// It could not be done. `photo` names it for the user.
-    Failed { photo: String, error: String },
+    /// It could not be done. `item` names it for the user.
+    Failed { item: String, error: String },
 }
 
 impl Step {
@@ -116,14 +116,14 @@ impl Step {
     /// not …".
     fn missing(id: PhotoId, expected: &str) -> Self {
         Self::Failed {
-            photo: format!("photo {id}"),
+            item: format!("photo {id}"),
             error: format!("is not {expected}"),
         }
     }
 
     fn failed(row: &PhotoRow, error: &anyhow::Error) -> Self {
         Self::Failed {
-            photo: photo_label(row),
+            item: photo_label(row),
             error: error.to_string(),
         }
     }
@@ -386,7 +386,7 @@ impl Library {
         progress_cb: impl Fn(DeleteProgress),
     ) -> Result<DeleteOutcome> {
         let index = photo_index(self.db.all_photos(SortOrder::default())?);
-        Ok(bulk_photo_op(photos, &cancel, progress_cb, |id| {
+        Ok(bulk_op(photos, &cancel, progress_cb, |id| {
             let Some(row) = index.get(&id) else {
                 return Step::missing(id, "in the library index");
             };
@@ -437,7 +437,7 @@ impl Library {
         progress_cb: impl Fn(DeleteProgress),
     ) -> Result<DeleteOutcome> {
         let index = photo_index(self.deleted_rows()?);
-        Ok(bulk_photo_op(photos, &cancel, progress_cb, |id| {
+        Ok(bulk_op(photos, &cancel, progress_cb, |id| {
             let Some(row) = index.get(&id) else {
                 return Step::missing(id, "in Recently Deleted");
             };
@@ -471,7 +471,7 @@ impl Library {
         let ids = photos.unwrap_or(&everything);
 
         let mut purged: Vec<String> = Vec::new();
-        let mut outcome = bulk_photo_op(ids, &cancel, progress_cb, |id| {
+        let mut outcome = bulk_op(ids, &cancel, progress_cb, |id| {
             let Some(row) = index.get(&id) else {
                 return Step::missing(id, "in Recently Deleted");
             };
@@ -722,6 +722,45 @@ impl Library {
         let members = self.db.collection_member_ids(id)?;
         self.remove_from_collection(id, &members)?;
         self.db.delete_collection(id)
+    }
+
+    /// Delete several collections, reporting progress and stopping when asked.
+    ///
+    /// Each one costs a rewrite of every member `.rlab`, so a handful of large
+    /// collections is minutes of work on a network mount.  Every id is
+    /// attempted even after one fails: the collections are independent, and a
+    /// single unwritable photo should not strand the rest of the batch half
+    /// done.  What failed is named in the outcome; what succeeded is gone.
+    ///
+    /// `cancel` is polled between collections rather than within one, since a
+    /// collection is only half deleted until its last member has been
+    /// rewritten.
+    pub fn delete_collections(
+        &self,
+        ids: &[CollectionId],
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(DeleteProgress),
+    ) -> Result<DeleteOutcome> {
+        // Named up front: once a collection is deleted the index can no longer
+        // say what it was called, and an id is no use in an error message.
+        let names: HashMap<CollectionId, String> = self
+            .all_collections()?
+            .into_iter()
+            .map(|row| (row.id, row.name))
+            .collect();
+        Ok(bulk_op(ids, &cancel, progress_cb, |id| {
+            let name = names
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| format!("collection {id}"));
+            match self.delete_collection(id) {
+                Ok(()) => Step::Done,
+                Err(error) => Step::Failed {
+                    item: name,
+                    error: error.to_string(),
+                },
+            }
+        }))
     }
 
     pub fn all_collections(&self) -> Result<Vec<CollectionRow>> {
@@ -1129,28 +1168,28 @@ fn photo_index(rows: Vec<PhotoRow>) -> HashMap<PhotoId, PhotoRow> {
     rows.into_iter().map(|row| (row.id, row)).collect()
 }
 
-/// Run `step` over `photos`, keeping the tally and letting the caller out.
+/// Run `step` over `items`, keeping the tally and letting the caller out.
 ///
-/// The three bulk Recently Deleted operations differ only in what they do to
-/// one photo; the bookkeeping around it is the same for all three, and so is
-/// the reason it exists. Each photo is a file rename or unlink, which on a
-/// network mount can take long enough that a selection of a few hundred is
-/// minutes of work — hence a progress report before every photo and a
-/// cancellation check that does not wait for the current one to finish.
-fn bulk_photo_op(
-    photos: &[PhotoId],
+/// The bulk operations differ only in what they do to one item; the
+/// bookkeeping around it is the same for all of them, and so is the reason it
+/// exists. Each item is a file rename, unlink, or rewrite, which on a network
+/// mount can take long enough that a batch of a few hundred is minutes of
+/// work — hence a progress report before every item and a cancellation check
+/// that does not wait for the current one to finish.
+fn bulk_op<T: Copy>(
+    items: &[T],
     cancel: &AtomicBool,
     progress_cb: impl Fn(DeleteProgress),
-    mut step: impl FnMut(PhotoId) -> Step,
+    mut step: impl FnMut(T) -> Step,
 ) -> DeleteOutcome {
     let mut progress = DeleteProgress {
-        total: photos.len(),
+        total: items.len(),
         ..Default::default()
     };
     let mut done = 0usize;
     let mut cancelled = false;
 
-    for &id in photos {
+    for &id in items {
         if cancel.load(Ordering::Relaxed) {
             cancelled = true;
             break;
@@ -1159,9 +1198,9 @@ fn bulk_photo_op(
         match step(id) {
             Step::Done => done += 1,
             Step::Protected(name) => progress.protected.push(name),
-            Step::Failed { photo, error } => {
-                eprintln!("library: {photo}: {error}");
-                progress.errors.push((photo, error));
+            Step::Failed { item, error } => {
+                eprintln!("library: {item}: {error}");
+                progress.errors.push((item, error));
             }
         }
         progress.done += 1;

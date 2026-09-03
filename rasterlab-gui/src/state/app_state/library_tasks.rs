@@ -1,5 +1,5 @@
-//! Library background tasks: imports, bulk Recently Deleted operations,
-//! integrity scrubs, index rebuilds, thumbnail loading/regeneration, and the
+//! Library background tasks: imports, bulk delete operations (Recently
+//! Deleted and collections), integrity scrubs, index rebuilds, thumbnail loading/regeneration, and the
 //! handlers that fold their progress reports back into [`AppState`].
 
 use std::{
@@ -13,9 +13,10 @@ use std::{
 
 use image as img_crate;
 use rasterlab_core::panic_guard;
+use rasterlab_library::CollectionId;
 
 use super::{AppMode, AppState, BgMessage, workers};
-use crate::state::library_state::{DeleteKind, DeleteTask, photo_count};
+use crate::state::library_state::{DeleteKind, DeleteTask};
 
 /// Number of worker threads servicing thumbnail loads. Fixed and small so a
 /// large library grid can't spawn thousands of threads at once.
@@ -327,22 +328,31 @@ impl AppState {
 
     /// Move the selection into the library-owned Recently Deleted area.
     pub fn move_selected_to_recently_deleted(&mut self) {
-        self.start_delete_task(DeleteKind::ToRecentlyDeleted);
+        self.start_delete_task(DeleteKind::ToRecentlyDeleted, Vec::new());
     }
 
     /// Move the selection back out of Recently Deleted.
     pub fn restore_selected(&mut self) {
-        self.start_delete_task(DeleteKind::Restore);
+        self.start_delete_task(DeleteKind::Restore, Vec::new());
     }
 
     /// Erase the selected Recently Deleted photos for good.
     pub fn permanently_delete_selected(&mut self) {
-        self.start_delete_task(DeleteKind::Permanent);
+        self.start_delete_task(DeleteKind::Permanent, Vec::new());
     }
 
     /// Erase everything in Recently Deleted for good.
     pub fn empty_recently_deleted(&mut self) {
-        self.start_delete_task(DeleteKind::Empty);
+        self.start_delete_task(DeleteKind::Empty, Vec::new());
+    }
+
+    /// Delete collections, leaving the photos that were in them alone.
+    ///
+    /// The ids come from the confirmation the user answered rather than from
+    /// the marks as they stand now: the sidebar is still live behind the
+    /// dialog, and the batch that goes must be the batch that was listed.
+    pub fn delete_collections(&mut self, ids: Vec<CollectionId>) {
+        self.start_delete_task(DeleteKind::Collections, ids);
     }
 
     /// Request that a running bulk operation stop after the current photo.
@@ -355,29 +365,36 @@ impl AppState {
         }
     }
 
-    /// Spawn the worker for one bulk Recently Deleted operation.
+    /// Spawn the worker for one bulk delete operation.
     ///
-    /// The selection is cleared as the task starts rather than when it
-    /// finishes: those photos are on their way out, and leaving them selected
-    /// invites a second run at them while the first is still going.
-    fn start_delete_task(&mut self, kind: DeleteKind) {
+    /// What the operation acts on is taken as the task starts rather than when
+    /// it finishes: those photos or collections are on their way out, and
+    /// leaving them marked invites a second run at them while the first is
+    /// still going.
+    fn start_delete_task(&mut self, kind: DeleteKind, collections: Vec<CollectionId>) {
         if self.delete_running() {
             return;
         }
         let Some(lib) = self.library.library.clone() else {
             return;
         };
-        let photos = std::mem::take(&mut self.library.selected);
-        if kind != DeleteKind::Empty && photos.is_empty() {
+        let mut photos = Vec::new();
+        match kind {
+            DeleteKind::Empty => {}
+            DeleteKind::Collections => self.library.leave_collections(&collections),
+            _ => photos = std::mem::take(&mut self.library.selected),
+        }
+        // Empty takes no list of its own, so seed its bar from the sidebar
+        // count until the worker's first report replaces it with the real
+        // total.
+        let total = match kind {
+            DeleteKind::Empty => self.library.recently_deleted_count,
+            DeleteKind::Collections => collections.len(),
+            _ => photos.len(),
+        };
+        if kind != DeleteKind::Empty && total == 0 {
             return;
         }
-        // Empty takes no photo list, so seed its bar from the sidebar count
-        // until the worker's first report replaces it with the real total.
-        let total = if kind == DeleteKind::Empty {
-            self.library.recently_deleted_count
-        } else {
-            photos.len()
-        };
 
         let cancel = Arc::new(AtomicBool::new(false));
         self.delete_cancel = Some(cancel.clone());
@@ -414,6 +431,7 @@ impl AppState {
                         lib.purge_recently_deleted(Some(&photos), cancel, report)
                     }
                     DeleteKind::Empty => lib.purge_recently_deleted(None, cancel, report),
+                    DeleteKind::Collections => lib.delete_collections(&collections, cancel, report),
                 };
                 match result {
                     Ok(outcome) => BgMessage::DeleteComplete { outcome },
@@ -445,10 +463,10 @@ impl AppState {
             format!(
                 "{} stopped after {}",
                 kind.progress_verb(),
-                photo_count(outcome.done)
+                kind.item_count(outcome.done)
             )
         } else {
-            format!("{} {}", kind.past_verb(), photo_count(outcome.done))
+            format!("{} {}", kind.past_verb(), kind.item_count(outcome.done))
         };
         if !outcome.errors.is_empty() {
             self.status

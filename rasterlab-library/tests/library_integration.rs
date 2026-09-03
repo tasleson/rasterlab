@@ -2105,6 +2105,61 @@ fn create_add_rename_delete_collection() {
     assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
 }
 
+/// A batch of collections goes in one run, reporting as it goes and stopping
+/// when asked.  The GUI drives this from a worker thread, so the progress and
+/// the cancel flag are what the user sees and what they can do about it.
+#[test]
+fn delete_collections_reports_progress_and_can_be_stopped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo_id = lib.all_photos(SortOrder::default()).unwrap()[0].id;
+
+    let ids: Vec<_> = ["Portfolio", "Prints", "Archive"]
+        .iter()
+        .map(|name| lib.create_collection(name).unwrap().id)
+        .collect();
+    // The photo is in one of them, so at least one delete has to reach a
+    // member file rather than the index alone.
+    lib.add_to_collection(ids[0], &[photo_id]).unwrap();
+
+    let seen = std::sync::Mutex::new(Vec::new());
+    let outcome = lib
+        .delete_collections(&ids[..2], no_cancel(), |p| {
+            seen.lock().unwrap().push((p.done, p.total))
+        })
+        .unwrap();
+
+    assert_eq!(outcome.done, 2);
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert!(!outcome.cancelled);
+    assert_eq!(
+        seen.lock().unwrap().last().copied(),
+        Some((2, 2)),
+        "the last report is the finished tally"
+    );
+    let left: Vec<String> = lib
+        .all_collections()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(left, ["Archive"], "only the untouched collection is left");
+    assert_eq!(
+        lib.all_photos(SortOrder::default()).unwrap().len(),
+        1,
+        "the photo stays in the library"
+    );
+
+    // A flag already raised stops the run before it deletes anything.
+    let outcome = lib
+        .delete_collections(&ids[2..], Arc::new(AtomicBool::new(true)), |_| {})
+        .unwrap();
+    assert!(outcome.cancelled && outcome.done == 0);
+    assert_eq!(lib.all_collections().unwrap().len(), 1);
+}
+
 #[test]
 fn remove_from_collection_updates_lmta() {
     let tmp = tempfile::tempdir().unwrap();

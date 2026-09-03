@@ -179,7 +179,7 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 .is_some_and(|task| task.stopping);
             if ui
                 .add_enabled(!stopping, egui::Button::new("Stop"))
-                .on_hover_text("Stop after the current photo; what is already done is kept")
+                .on_hover_text("Stop after the current item; what is already done is kept")
                 .clicked()
             {
                 state.stop_delete();
@@ -283,7 +283,7 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                     egui::RichText::new(format!("⚠ {delete_errors} delete error(s)"))
                         .color(egui::Color32::RED),
                 )
-                .on_hover_text("Click to see which photos could not be moved")
+                .on_hover_text("Click to see what could not be deleted")
                 .clicked()
             {
                 state.library.show_delete_errors = true;
@@ -339,10 +339,10 @@ fn error_banner_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
 // ── Confirmation dialog ───────────────────────────────────────────────────────
 
-/// Why a confirm button is unavailable. Only one bulk Recently Deleted
-/// operation runs at a time, and a dialog can be sitting open when another
-/// route starts one.
-const BUSY_HINT: &str = "Another Recently Deleted operation is still running";
+/// Why a confirm button is unavailable. Only one bulk delete runs at a time —
+/// Recently Deleted operations and collection deletes alike — and a dialog can
+/// be sitting open when another route starts one.
+const BUSY_HINT: &str = "Another bulk delete is still running";
 
 pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
     move_to_recently_deleted_dialog(ctx, state);
@@ -851,9 +851,14 @@ fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
         .first()
         .map_or(0, |&id| state.library.collection_len(id));
 
+    // Deleting collections goes through the same one-at-a-time worker as the
+    // Recently Deleted operations, so it waits its turn like they do; Enter is
+    // left unconsumed meanwhile rather than swallowed by a confirmation this
+    // dialog is in no position to act on.
+    let idle = !state.delete_running();
     let (enter, esc) = ctx.input_mut(|i| {
         (
-            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            idle && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
             i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
         )
     });
@@ -863,7 +868,7 @@ fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
     if enter {
         state.library.collection_prompt = None;
-        state.library.delete_collections(&ids);
+        state.delete_collections(ids);
         return;
     }
 
@@ -904,7 +909,11 @@ fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button(&button).clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new(&button))
+                    .on_disabled_hover_text(BUSY_HINT)
+                    .clicked()
+                {
                     delete = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -915,7 +924,7 @@ fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
 
     if delete {
         state.library.collection_prompt = None;
-        state.library.delete_collections(&ids);
+        state.delete_collections(ids);
     } else if cancel || !open {
         state.library.collection_prompt = None;
     }
@@ -1254,7 +1263,11 @@ fn collections_ui(ui: &mut egui::Ui, state: &mut AppState) {
             } else {
                 format!("Delete {n} Collections…")
             };
-            if ui.button(label).clicked() {
+            if ui
+                .add_enabled(!state.delete_running(), egui::Button::new(label))
+                .on_disabled_hover_text(BUSY_HINT)
+                .clicked()
+            {
                 state.library.collection_prompt = Some(CollectionPrompt::Delete { ids: marked });
                 ui.close();
             }

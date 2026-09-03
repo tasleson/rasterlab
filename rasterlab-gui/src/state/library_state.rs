@@ -27,7 +27,7 @@ pub enum LibraryView {
 
 // ── Recently Deleted ──────────────────────────────────────────────────────────
 
-/// Which bulk operation on the Recently Deleted area is running.
+/// Which bulk delete operation is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteKind {
     /// Moving the selection into Recently Deleted.
@@ -38,6 +38,8 @@ pub enum DeleteKind {
     Permanent,
     /// Erasing everything in Recently Deleted for good.
     Empty,
+    /// Deleting the marked collections, leaving their photos alone.
+    Collections,
 }
 
 impl DeleteKind {
@@ -48,6 +50,7 @@ impl DeleteKind {
             Self::Restore => "Restoring",
             Self::Permanent => "Deleting permanently",
             Self::Empty => "Emptying Recently Deleted",
+            Self::Collections => "Deleting collections",
         }
     }
 
@@ -57,17 +60,26 @@ impl DeleteKind {
             Self::ToRecentlyDeleted => "Moved to Recently Deleted",
             Self::Restore => "Restored",
             Self::Permanent | Self::Empty => "Permanently deleted",
+            Self::Collections => "Deleted",
+        }
+    }
+
+    /// What the operation counts, for the status line that tallies it.
+    pub fn item_count(self, n: usize) -> String {
+        match self {
+            Self::Collections => plural(n, "collection"),
+            _ => plural(n, "photo"),
         }
     }
 }
 
-/// A bulk Recently Deleted operation running in the background.
+/// A bulk delete operation running in the background.
 ///
-/// Each photo costs a file rename or an unlink, so a selection of a few
-/// hundred on a network-mounted library is minutes of work.  Running that on
-/// the UI thread is what left the window unable to paint for long enough that
-/// the desktop offered to kill it, so these report progress and take an answer
-/// of "stop" instead.
+/// Each photo costs a file rename or an unlink, and each collection a rewrite
+/// of every member file, so a batch of any size on a network-mounted library
+/// is minutes of work.  Running that on the UI thread is what left the window
+/// unable to paint for long enough that the desktop offered to kill it, so
+/// these report progress and take an answer of "stop" instead.
 pub struct DeleteTask {
     pub kind: DeleteKind,
     pub progress: DeleteProgress,
@@ -76,11 +88,11 @@ pub struct DeleteTask {
 }
 
 /// "1 photo" / "3 photos", for the status lines that count them.
-pub fn photo_count(n: usize) -> String {
+pub fn plural(n: usize, noun: &str) -> String {
     if n == 1 {
-        "1 photo".to_owned()
+        format!("1 {noun}")
     } else {
-        format!("{n} photos")
+        format!("{n} {noun}s")
     }
 }
 
@@ -1100,34 +1112,22 @@ impl LibraryState {
             .map(|c| c.name.as_str())
     }
 
-    /// Delete collections. The photos that were in them are left alone.
+    /// Let go of collections that are on their way out, before the worker
+    /// that deletes them has got to any of them.
     ///
-    /// Every id is attempted even when one fails: deleting a collection has to
-    /// reach each member's file, so one unwritable photo would otherwise
-    /// strand the rest of the batch half done.  What failed is reported
-    /// together at the end, and what succeeded is gone.
-    pub fn delete_collections(&mut self, ids: &[CollectionId]) {
-        let Some(lib) = self.library.clone() else {
-            return;
-        };
-        let mut failures = Vec::new();
-        for &id in ids {
-            let name = self.collection_name(id).unwrap_or("collection").to_owned();
-            if let Err(e) = lib.delete_collection(id) {
-                failures.push(format!("{name}: {e}"));
-            } else if self.view == LibraryView::Collection(id) {
-                // The grid cannot stay pointed at a collection that is gone.
-                self.view = LibraryView::AllPhotos;
-                self.select_none();
-            }
+    /// Their marks go now rather than when the run ends: leaving them marked
+    /// invites a second run at them while the first is still going.  The grid
+    /// cannot stay pointed at one either, so it falls back to All Photos — the
+    /// photos in it are staying in the library.
+    pub fn leave_collections(&mut self, ids: &[CollectionId]) {
+        self.marked_collections.retain(|id| !ids.contains(id));
+        if let LibraryView::Collection(id) = self.view
+            && ids.contains(&id)
+        {
+            self.view = LibraryView::AllPhotos;
+            self.select_none();
+            self.refresh();
         }
-        if !failures.is_empty() {
-            self.last_error = Some(format!(
-                "Delete collection failed — {}",
-                failures.join("; ")
-            ));
-        }
-        self.refresh();
     }
 
     /// Add every selected photo to a collection; the ones already in it stay
@@ -1305,6 +1305,8 @@ impl ThumbCache {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
 
     /// A held library and a broken one are different messages, and only the
@@ -1542,8 +1544,9 @@ mod tests {
         assert_eq!(state.collection_len(coll.id), 1, "sidebar count");
     }
 
-    /// Deleting a marked set takes every one of them, leaves the photos alone,
-    /// and cannot leave the grid pointed at a collection that is gone.
+    /// Handing a marked set to the delete worker drops the marks, takes the
+    /// grid off a collection that is on its way out, and leaves the photos in
+    /// the library once the worker has been round them all.
     #[test]
     fn deleting_marked_collections_takes_them_all() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1575,7 +1578,20 @@ mod tests {
         state.marked_collections = doomed.clone();
         state.refresh();
 
-        state.delete_collections(&doomed);
+        // The view and the marks are given up as the run starts; the
+        // collections themselves go on the worker's thread.
+        state.leave_collections(&doomed);
+        assert_eq!(
+            state.view,
+            LibraryView::AllPhotos,
+            "the grid cannot stay on a collection that is being deleted"
+        );
+        let outcome = lib
+            .delete_collections(&doomed, Arc::new(AtomicBool::new(false)), |_| {})
+            .unwrap();
+        assert_eq!(outcome.done, doomed.len());
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        state.refresh();
 
         assert_eq!(state.last_error, None);
         let left: Vec<CollectionId> = state.collections.iter().map(|c| c.id).collect();
@@ -1583,11 +1599,6 @@ mod tests {
         assert!(
             state.marked_collections.is_empty(),
             "marks on deleted collections must not survive"
-        );
-        assert_eq!(
-            state.view,
-            LibraryView::AllPhotos,
-            "the grid cannot stay on a deleted collection"
         );
         assert_eq!(
             state.results.len(),
