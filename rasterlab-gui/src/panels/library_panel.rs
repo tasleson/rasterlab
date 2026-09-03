@@ -1572,15 +1572,27 @@ fn keyboard_nav(ui: &mut egui::Ui, state: &mut AppState, cols: usize) {
         .first()
         .and_then(|&id| state.library.results.iter().position(|p| p.id == id));
 
-    let (left, right, up, down, enter) = ui.ctx().input_mut(|i| {
+    // Delete only offers to move photos out of the library proper; in Recently
+    // Deleted the destructive counterpart stays behind its explicit button.
+    let can_delete = state.library.view != LibraryView::RecentlyDeleted
+        && !state.library.selected.is_empty()
+        && !state.delete_running();
+
+    let (left, right, up, down, enter, delete) = ui.ctx().input_mut(|i| {
         (
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
             i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            can_delete && i.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
         )
     });
+
+    if delete {
+        state.library.confirm_delete = true;
+        return;
+    }
 
     let n = state.library.results.len();
     let new_idx = if let Some(idx) = current_idx {
