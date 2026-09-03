@@ -2,6 +2,26 @@ use std::ops::RangeInclusive;
 
 use crate::db_trait::CollectionId;
 
+/// A pixel-dimension limit, normalised to long edge / short edge so that a
+/// filter reads the same for landscape and portrait originals: a limit of
+/// 1600x1200 bounds a 1200x1600 portrait just as it bounds a 1600x1200
+/// landscape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resolution {
+    pub long_edge: u32,
+    pub short_edge: u32,
+}
+
+impl Resolution {
+    /// Build a limit from dimensions in either order.
+    pub fn new(a: u32, b: u32) -> Self {
+        Self {
+            long_edge: a.max(b),
+            short_edge: a.min(b),
+        }
+    }
+}
+
 /// All fields are ANDed together. `None` means "no constraint on this field".
 #[derive(Debug, Clone, Default)]
 pub struct SearchFilter {
@@ -44,6 +64,13 @@ pub struct SearchFilter {
     /// Filter to photos in a specific collection.
     pub collection_id: Option<CollectionId>,
 
+    /// Upper bound on pixel dimensions (inclusive): both edges of the photo
+    /// must be within the corresponding edge of the limit.
+    pub resolution_max: Option<Resolution>,
+
+    /// Lower bound on pixel dimensions (inclusive).
+    pub resolution_min: Option<Resolution>,
+
     /// Color label: `"red"`, `"yellow"`, `"green"`, `"blue"`, `"purple"`.
     pub color_label: Option<String>,
 
@@ -66,6 +93,8 @@ impl SearchFilter {
             && self.capture_date_to.is_none()
             && self.import_session.is_none()
             && self.collection_id.is_none()
+            && self.resolution_max.is_none()
+            && self.resolution_min.is_none()
             && self.color_label.is_none()
             && !self.has_edits_only
     }

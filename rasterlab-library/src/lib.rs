@@ -87,5 +87,5 @@ pub use library::{DeleteOutcome, DeleteProgress, ImportProgress, Library, Librar
 pub use rasterlab_core::library_meta::{CollectionRef, LibraryExif, LibraryMeta};
 pub use reconstruct::{RebuildOutcome, RebuildProgress};
 pub use scrub::{ScrubOutcome, ScrubProgress};
-pub use search::SearchFilter;
+pub use search::{Resolution, SearchFilter};
 pub use stoolap_db::StoolapDb;

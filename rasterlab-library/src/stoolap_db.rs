@@ -563,6 +563,28 @@ impl LibraryDb for StoolapDb {
         if let Some(ref session) = filter.import_session {
             push!("p.import_session = {}", Value::text(session.clone()));
         }
+        // Orientation-agnostic dimension bounds.  `max(width, height)` is not
+        // portable SQL here, so the long/short-edge comparison is spelled out
+        // as the two orientations it can take; the pair is equivalent to
+        // "long edge within the limit's long edge, short within its short".
+        if let Some(res) = filter.resolution_max {
+            push!(
+                "((p.width <= {} AND p.height <= {}) OR (p.width <= {} AND p.height <= {}))",
+                Value::integer(res.long_edge as i64),
+                Value::integer(res.short_edge as i64),
+                Value::integer(res.short_edge as i64),
+                Value::integer(res.long_edge as i64)
+            );
+        }
+        if let Some(res) = filter.resolution_min {
+            push!(
+                "((p.width >= {} AND p.height >= {}) OR (p.width >= {} AND p.height >= {}))",
+                Value::integer(res.long_edge as i64),
+                Value::integer(res.short_edge as i64),
+                Value::integer(res.short_edge as i64),
+                Value::integer(res.long_edge as i64)
+            );
+        }
         if let Some(ref label) = filter.color_label {
             push!("r.color_label = {}", Value::text(label.clone()));
         }

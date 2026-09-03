@@ -9,7 +9,7 @@ use std::{
 use rasterlab_library::{
     ImportCollection, Library,
     db_trait::{PhotoId, PhotoRow, SortOrder},
-    search::SearchFilter,
+    search::{Resolution, SearchFilter},
 };
 
 fn test_images_dir() -> PathBuf {
@@ -1906,6 +1906,87 @@ fn search_by_shutter_finds_matching_photo() {
         results[0].original_filename.as_deref(),
         Some("meta_test.jpg")
     );
+}
+
+#[test]
+fn search_by_resolution_bounds_is_orientation_agnostic() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    // meta_test.jpg is 640x480, color_patches.png is 576x384; add a portrait
+    // 400x600 so the long/short-edge comparison has something to get wrong.
+    let portrait = tmp.path().join("portrait.png");
+    image::RgbImage::from_pixel(400, 600, image::Rgb([9, 9, 9]))
+        .save(&portrait)
+        .expect("write portrait png");
+    lib.import_files(&[jpeg_path(), png_path(), portrait], |_| {})
+        .unwrap();
+
+    struct Case {
+        desc: &'static str,
+        min: Option<Resolution>,
+        max: Option<Resolution>,
+        expected: &'static [&'static str],
+    }
+    let case = |desc, min, max, expected| Case {
+        desc,
+        min,
+        max,
+        expected,
+    };
+    let cases = [
+        case(
+            "at most 576x400 keeps only the smallest",
+            None,
+            Some(Resolution::new(576, 400)),
+            &["color_patches.png"],
+        ),
+        case(
+            "the same limit written in portrait order means the same thing",
+            None,
+            Some(Resolution::new(400, 576)),
+            &["color_patches.png"],
+        ),
+        case(
+            "at most 600x400 also admits the portrait, whose long edge fits",
+            None,
+            Some(Resolution::new(600, 400)),
+            &["color_patches.png", "portrait.png"],
+        ),
+        case(
+            "at least 600x400 drops the smallest, keeps both orientations",
+            Some(Resolution::new(600, 400)),
+            None,
+            &["meta_test.jpg", "portrait.png"],
+        ),
+        case(
+            "a min and a max together bracket a single photo",
+            Some(Resolution::new(600, 400)),
+            Some(Resolution::new(600, 400)),
+            &["portrait.png"],
+        ),
+    ];
+
+    for Case {
+        desc,
+        min,
+        max,
+        expected,
+    } in cases
+    {
+        let filter = SearchFilter {
+            resolution_min: min,
+            resolution_max: max,
+            ..Default::default()
+        };
+        let mut got: Vec<String> = lib
+            .search(&filter, SortOrder::default())
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| r.original_filename)
+            .collect();
+        got.sort();
+        assert_eq!(got, expected, "{desc}");
+    }
 }
 
 // ── Search ────────────────────────────────────────────────────────────────────
