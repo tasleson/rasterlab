@@ -12,7 +12,7 @@ use rasterlab_core::{
 use wgpu::util::DeviceExt;
 
 use crate::{
-    common::{WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y, expected_rgba_len},
+    common::{NLM_WORKGROUP_SIZE, WORKGROUP_SIZE, expected_rgba_len},
     context::GpuContext,
     error::GpuError,
     image::GpuImage,
@@ -165,12 +165,7 @@ fn apply_brightness_contrast(
     image: GpuImage,
 ) -> Result<GpuImage, GpuError> {
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab brightness_contrast output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab brightness_contrast output", byte_len);
     let params = LutParams {
         width: image.width,
         height: image.height,
@@ -193,17 +188,15 @@ fn apply_brightness_contrast(
             contents: bytemuck::cast_slice(&lut_u32),
             usage: wgpu::BufferUsages::STORAGE,
         });
-    dispatch_4binding(
+    dispatch_compute(
         ctx,
-        &ctx.brightness_contrast.pipeline,
-        &ctx.brightness_contrast.bind_group_layout,
+        Kernel::new(
+            &ctx.brightness_contrast.pipeline,
+            &ctx.brightness_contrast.bind_group_layout,
+        ),
         "rasterlab brightness_contrast",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        &lut_buffer,
-        image.width,
-        image.height,
+        [&image.buffer, &output, &params_buffer, &lut_buffer],
+        [image.width, image.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -214,12 +207,7 @@ fn apply_brightness_contrast(
 
 fn apply_curves(ctx: &GpuContext, op: &CurvesOp, image: GpuImage) -> Result<GpuImage, GpuError> {
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab curves output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab curves output", byte_len);
     let params = LutParams {
         width: image.width,
         height: image.height,
@@ -242,17 +230,12 @@ fn apply_curves(ctx: &GpuContext, op: &CurvesOp, image: GpuImage) -> Result<GpuI
             contents: bytemuck::cast_slice(&lut_u32),
             usage: wgpu::BufferUsages::STORAGE,
         });
-    dispatch_4binding(
+    dispatch_compute(
         ctx,
-        &ctx.curves.pipeline,
-        &ctx.curves.bind_group_layout,
+        Kernel::new(&ctx.curves.pipeline, &ctx.curves.bind_group_layout),
         "rasterlab curves",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        &lut_buffer,
-        image.width,
-        image.height,
+        [&image.buffer, &output, &params_buffer, &lut_buffer],
+        [image.width, image.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -403,12 +386,7 @@ fn apply_hue_shift(
     }
 
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab hue_shift output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab hue_shift output", byte_len);
     let params = HueShiftParams {
         width: image.width,
         height: image.height,
@@ -424,46 +402,13 @@ fn apply_hue_shift(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab hue_shift bind group"),
-        layout: &ctx.hue_shift.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab hue_shift encoder"),
-        });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab hue_shift pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.hue_shift.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let groups_x = params.width.div_ceil(WORKGROUP_SIZE_X);
-        let groups_y = params.height.div_ceil(WORKGROUP_SIZE_Y);
-        pass.dispatch_workgroups(groups_x, groups_y, 1);
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
-
+    dispatch_compute(
+        ctx,
+        Kernel::new(&ctx.hue_shift.pipeline, &ctx.hue_shift.bind_group_layout),
+        "rasterlab hue_shift",
+        [&image.buffer, &output, &params_buffer],
+        [image.width, image.height],
+    )?;
     Ok(GpuImage {
         width: image.width,
         height: image.height,
@@ -481,12 +426,7 @@ fn apply_saturation(
     }
 
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab saturation output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab saturation output", byte_len);
     let params = SaturationParams {
         width: image.width,
         height: image.height,
@@ -502,46 +442,13 @@ fn apply_saturation(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab saturation bind group"),
-        layout: &ctx.saturation.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab saturation encoder"),
-        });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab saturation pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.saturation.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let groups_x = params.width.div_ceil(WORKGROUP_SIZE_X);
-        let groups_y = params.height.div_ceil(WORKGROUP_SIZE_Y);
-        pass.dispatch_workgroups(groups_x, groups_y, 1);
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
-
+    dispatch_compute(
+        ctx,
+        Kernel::new(&ctx.saturation.pipeline, &ctx.saturation.bind_group_layout),
+        "rasterlab saturation",
+        [&image.buffer, &output, &params_buffer],
+        [image.width, image.height],
+    )?;
     Ok(GpuImage {
         width: image.width,
         height: image.height,
@@ -559,12 +466,7 @@ fn apply_vibrance(
     }
 
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab vibrance output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab vibrance output", byte_len);
     let params = VibranceParams {
         width: image.width,
         height: image.height,
@@ -580,46 +482,13 @@ fn apply_vibrance(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab vibrance bind group"),
-        layout: &ctx.vibrance.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab vibrance encoder"),
-        });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab vibrance pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.vibrance.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let groups_x = params.width.div_ceil(WORKGROUP_SIZE_X);
-        let groups_y = params.height.div_ceil(WORKGROUP_SIZE_Y);
-        pass.dispatch_workgroups(groups_x, groups_y, 1);
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
-
+    dispatch_compute(
+        ctx,
+        Kernel::new(&ctx.vibrance.pipeline, &ctx.vibrance.bind_group_layout),
+        "rasterlab vibrance",
+        [&image.buffer, &output, &params_buffer],
+        [image.width, image.height],
+    )?;
     Ok(GpuImage {
         width: image.width,
         height: image.height,
@@ -637,12 +506,7 @@ fn apply_white_balance(
     }
 
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab white_balance output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab white_balance output", byte_len);
     let temp = op.temperature.clamp(-1.0, 1.0);
     let tint = op.tint.clamp(-1.0, 1.0);
     let params = WhiteBalanceParams {
@@ -662,46 +526,16 @@ fn apply_white_balance(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab white_balance bind group"),
-        layout: &ctx.white_balance.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab white_balance encoder"),
-        });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab white_balance pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.white_balance.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let groups_x = params.width.div_ceil(WORKGROUP_SIZE_X);
-        let groups_y = params.height.div_ceil(WORKGROUP_SIZE_Y);
-        pass.dispatch_workgroups(groups_x, groups_y, 1);
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
-
+    dispatch_compute(
+        ctx,
+        Kernel::new(
+            &ctx.white_balance.pipeline,
+            &ctx.white_balance.bind_group_layout,
+        ),
+        "rasterlab white_balance",
+        [&image.buffer, &output, &params_buffer],
+        [image.width, image.height],
+    )?;
     Ok(GpuImage {
         width: image.width,
         height: image.height,
@@ -709,52 +543,98 @@ fn apply_white_balance(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dispatch_3binding(
-    ctx: &GpuContext,
-    pipeline: &wgpu::ComputePipeline,
-    layout: &wgpu::BindGroupLayout,
+/// A compute pipeline and the two things a dispatch has to know about it: the
+/// layout its bind group must match, and the `@workgroup_size` its shader
+/// declares.
+///
+/// The workgroup size travels with the pipeline because sizing a dispatch from
+/// the wrong one silently leaves the tail of the image unprocessed instead of
+/// failing — the two NLM kernels are 8×8 where everything else is 16×16.
+struct Kernel<'a> {
+    pipeline: &'a wgpu::ComputePipeline,
+    layout: &'a wgpu::BindGroupLayout,
+    workgroup: [u32; 2],
+}
+
+impl<'a> Kernel<'a> {
+    /// A kernel from a shader declaring the usual `@workgroup_size(16, 16)`.
+    fn new(pipeline: &'a wgpu::ComputePipeline, layout: &'a wgpu::BindGroupLayout) -> Self {
+        Self {
+            pipeline,
+            layout,
+            workgroup: WORKGROUP_SIZE,
+        }
+    }
+
+    /// A kernel whose shader declares some other `@workgroup_size`.
+    fn with_workgroup(
+        pipeline: &'a wgpu::ComputePipeline,
+        layout: &'a wgpu::BindGroupLayout,
+        workgroup: [u32; 2],
+    ) -> Self {
+        Self {
+            pipeline,
+            layout,
+            workgroup,
+        }
+    }
+}
+
+// Buffers are supplied in shader binding order, starting at binding zero.
+fn encode_compute<const N: usize>(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    kernel: Kernel<'_>,
     label: &str,
-    input: &wgpu::Buffer,
-    output: &wgpu::Buffer,
-    params: &wgpu::Buffer,
-    width: u32,
-    height: u32,
-) -> Result<(), GpuError> {
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params.as_entire_binding(),
-            },
-        ],
+    buffers: [&wgpu::Buffer; N],
+    dimensions: [u32; 2],
+) {
+    let entries = std::array::from_fn::<_, N, _>(|binding| wgpu::BindGroupEntry {
+        binding: binding as u32,
+        resource: buffers[binding].as_entire_binding(),
     });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: kernel.layout,
+        entries: &entries,
+    });
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(kernel.pipeline);
+    pass.set_bind_group(0, &bind_group, &[]);
+    pass.dispatch_workgroups(
+        dimensions[0].div_ceil(kernel.workgroup[0]),
+        dimensions[1].div_ceil(kernel.workgroup[1]),
+        1,
+    );
+}
+
+fn dispatch_compute<const N: usize>(
+    ctx: &GpuContext,
+    kernel: Kernel<'_>,
+    label: &str,
+    buffers: [&wgpu::Buffer; N],
+    dimensions: [u32; 2],
+) -> Result<(), GpuError> {
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some(label),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(
-            width.div_ceil(WORKGROUP_SIZE_X),
-            height.div_ceil(WORKGROUP_SIZE_Y),
-            1,
-        );
-    }
+    encode_compute(
+        &ctx.device,
+        &mut encoder,
+        kernel,
+        label,
+        buffers,
+        dimensions,
+    );
+    submit_and_wait(ctx, encoder)
+}
+
+/// Hand the encoded passes to the queue and block until the GPU is done with
+/// them, so the caller can read the output buffer back.
+fn submit_and_wait(ctx: &GpuContext, encoder: wgpu::CommandEncoder) -> Result<(), GpuError> {
     ctx.queue.submit(Some(encoder.finish()));
     ctx.device
         .poll(wgpu::PollType::wait_indefinitely())
@@ -762,62 +642,15 @@ fn dispatch_3binding(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dispatch_4binding(
-    ctx: &GpuContext,
-    pipeline: &wgpu::ComputePipeline,
-    layout: &wgpu::BindGroupLayout,
-    label: &str,
-    b0: &wgpu::Buffer,
-    b1: &wgpu::Buffer,
-    b2: &wgpu::Buffer,
-    b3: &wgpu::Buffer,
-    width: u32,
-    height: u32,
-) -> Result<(), GpuError> {
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+/// A buffer an op writes its result into: readable back to the CPU, and usable
+/// as the input of whatever op runs next.
+fn output_buffer(ctx: &GpuContext, label: &str, byte_len: u64) -> wgpu::Buffer {
+    ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: b0.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: b1.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: b2.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: b3.as_entire_binding(),
-            },
-        ],
-    });
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some(label),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(
-            width.div_ceil(WORKGROUP_SIZE_X),
-            height.div_ceil(WORKGROUP_SIZE_Y),
-            1,
-        );
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
-    Ok(())
+        size: byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
 }
 
 fn hue_to_rgb_f32(hue: f32) -> (f32, f32, f32) {
@@ -839,12 +672,7 @@ fn apply_sepia(ctx: &GpuContext, op: &SepiaOp, image: GpuImage) -> Result<GpuIma
         return Ok(image);
     }
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab sepia output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab sepia output", byte_len);
     let params = SepiaParams {
         width: image.width,
         height: image.height,
@@ -862,16 +690,12 @@ fn apply_sepia(ctx: &GpuContext, op: &SepiaOp, image: GpuImage) -> Result<GpuIma
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.sepia.pipeline,
-        &ctx.sepia.bind_group_layout,
+        Kernel::new(&ctx.sepia.pipeline, &ctx.sepia.bind_group_layout),
         "rasterlab sepia",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -882,12 +706,7 @@ fn apply_sepia(ctx: &GpuContext, op: &SepiaOp, image: GpuImage) -> Result<GpuIma
 
 fn apply_levels(ctx: &GpuContext, op: &LevelsOp, image: GpuImage) -> Result<GpuImage, GpuError> {
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab levels output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab levels output", byte_len);
     let params = LutParams {
         width: image.width,
         height: image.height,
@@ -910,50 +729,13 @@ fn apply_levels(ctx: &GpuContext, op: &LevelsOp, image: GpuImage) -> Result<GpuI
             contents: bytemuck::cast_slice(&lut_u32),
             usage: wgpu::BufferUsages::STORAGE,
         });
-    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab levels bind group"),
-        layout: &ctx.levels.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: lut_buffer.as_entire_binding(),
-            },
-        ],
-    });
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab levels encoder"),
-        });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab levels pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.levels.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(
-            params.width.div_ceil(WORKGROUP_SIZE_X),
-            params.height.div_ceil(WORKGROUP_SIZE_Y),
-            1,
-        );
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
+    dispatch_compute(
+        ctx,
+        Kernel::new(&ctx.levels.pipeline, &ctx.levels.bind_group_layout),
+        "rasterlab levels",
+        [&image.buffer, &output, &params_buffer, &lut_buffer],
+        [image.width, image.height],
+    )?;
     Ok(GpuImage {
         width: image.width,
         height: image.height,
@@ -970,12 +752,7 @@ fn apply_highlights_shadows(
         return Ok(image);
     }
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab highlights_shadows output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab highlights_shadows output", byte_len);
     let params = HighlightsShadowsParams {
         width: image.width,
         height: image.height,
@@ -993,16 +770,15 @@ fn apply_highlights_shadows(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.highlights_shadows.pipeline,
-        &ctx.highlights_shadows.bind_group_layout,
+        Kernel::new(
+            &ctx.highlights_shadows.pipeline,
+            &ctx.highlights_shadows.bind_group_layout,
+        ),
         "rasterlab highlights_shadows",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1023,12 +799,7 @@ fn apply_vignette(
     let outer = inner + op.feather * (1.0 - inner);
     let zone = (outer - inner).max(1e-6);
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab vignette output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab vignette output", byte_len);
     let params = VignetteParams {
         width: image.width,
         height: image.height,
@@ -1046,16 +817,12 @@ fn apply_vignette(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.vignette.pipeline,
-        &ctx.vignette.bind_group_layout,
+        Kernel::new(&ctx.vignette.pipeline, &ctx.vignette.bind_group_layout),
         "rasterlab vignette",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1073,12 +840,7 @@ fn apply_shadow_exposure(
         return Ok(image);
     }
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab shadow_exposure output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab shadow_exposure output", byte_len);
     let params = ShadowExposureParams {
         width: image.width,
         height: image.height,
@@ -1096,16 +858,15 @@ fn apply_shadow_exposure(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.shadow_exposure.pipeline,
-        &ctx.shadow_exposure.bind_group_layout,
+        Kernel::new(
+            &ctx.shadow_exposure.pipeline,
+            &ctx.shadow_exposure.bind_group_layout,
+        ),
         "rasterlab shadow_exposure",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1125,12 +886,7 @@ fn apply_split_tone(
     let (sh_r, sh_g, sh_b) = hue_to_rgb_f32(op.shadow_hue);
     let (hi_r, hi_g, hi_b) = hue_to_rgb_f32(op.highlight_hue);
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab split_tone output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab split_tone output", byte_len);
     let params = SplitToneParams {
         width: image.width,
         height: image.height,
@@ -1156,16 +912,12 @@ fn apply_split_tone(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.split_tone.pipeline,
-        &ctx.split_tone.bind_group_layout,
+        Kernel::new(&ctx.split_tone.pipeline, &ctx.split_tone.bind_group_layout),
         "rasterlab split_tone",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1186,12 +938,7 @@ fn apply_black_and_white(
         BwMode::ChannelMixer { r, g, b } => (3, *r, *g, *b),
     };
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab black_and_white output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab black_and_white output", byte_len);
     let params = BlackAndWhiteParams {
         width: image.width,
         height: image.height,
@@ -1213,16 +960,15 @@ fn apply_black_and_white(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.black_and_white.pipeline,
-        &ctx.black_and_white.bind_group_layout,
+        Kernel::new(
+            &ctx.black_and_white.pipeline,
+            &ctx.black_and_white.bind_group_layout,
+        ),
         "rasterlab black_and_white",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1242,12 +988,7 @@ fn apply_blur(ctx: &GpuContext, op: &BlurOp, image: GpuImage) -> Result<GpuImage
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab blur output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab blur output", byte_len);
     let params = BlurParams {
         width: image.width,
         height: image.height,
@@ -1266,78 +1007,30 @@ fn apply_blur(ctx: &GpuContext, op: &BlurOp, image: GpuImage) -> Result<GpuImage
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let h_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab blur h bind group"),
-        layout: &ctx.blur.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: intermediate.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-    let v_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab blur v bind group"),
-        layout: &ctx.blur.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: intermediate.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab blur encoder"),
+            label: Some("rasterlab blur"),
         });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab blur h pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.blur.h_pipeline);
-        pass.set_bind_group(0, &h_bind_group, &[]);
-        pass.dispatch_workgroups(
-            params.width.div_ceil(WORKGROUP_SIZE_X),
-            params.height.div_ceil(WORKGROUP_SIZE_Y),
-            1,
-        );
-    }
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab blur v pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.blur.v_pipeline);
-        pass.set_bind_group(0, &v_bind_group, &[]);
-        pass.dispatch_workgroups(
-            params.width.div_ceil(WORKGROUP_SIZE_X),
-            params.height.div_ceil(WORKGROUP_SIZE_Y),
-            1,
-        );
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
+    // Separable: the horizontal pass writes the intermediate the vertical one
+    // reads, and both share the one params buffer.
+    encode_compute(
+        &ctx.device,
+        &mut encoder,
+        Kernel::new(&ctx.blur.h_pipeline, &ctx.blur.bind_group_layout),
+        "rasterlab blur h",
+        [&image.buffer, &intermediate, &params_buffer],
+        [params.width, params.height],
+    );
+    encode_compute(
+        &ctx.device,
+        &mut encoder,
+        Kernel::new(&ctx.blur.v_pipeline, &ctx.blur.bind_group_layout),
+        "rasterlab blur v",
+        [&intermediate, &output, &params_buffer],
+        [params.width, params.height],
+    );
+    submit_and_wait(ctx, encoder)?;
 
     Ok(GpuImage {
         width: image.width,
@@ -1355,12 +1048,7 @@ fn apply_color_balance(
         return Ok(image);
     }
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab color_balance output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab color_balance output", byte_len);
     let params = ColorBalanceParams {
         width: image.width,
         height: image.height,
@@ -1386,16 +1074,15 @@ fn apply_color_balance(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.color_balance.pipeline,
-        &ctx.color_balance.bind_group_layout,
+        Kernel::new(
+            &ctx.color_balance.pipeline,
+            &ctx.color_balance.bind_group_layout,
+        ),
         "rasterlab color_balance",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1414,12 +1101,7 @@ fn apply_color_space(
         ColorSpaceConversion::DisplayP3ToSrgb => &P3_TO_SRGB,
     };
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab color_space output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab color_space output", byte_len);
     let params = ColorSpaceParams {
         width: image.width,
         height: image.height,
@@ -1445,16 +1127,15 @@ fn apply_color_space(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.color_space.pipeline,
-        &ctx.color_space.bind_group_layout,
+        Kernel::new(
+            &ctx.color_space.pipeline,
+            &ctx.color_space.bind_group_layout,
+        ),
         "rasterlab color_space",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1468,12 +1149,7 @@ fn apply_denoise(ctx: &GpuContext, op: &DenoiseOp, image: GpuImage) -> Result<Gp
     let r = op.radius.clamp(1, 10) as f32;
     let sigma_s = r.max(1.0) * 0.5;
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab denoise output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab denoise output", byte_len);
     let params = DenoiseParams {
         width: image.width,
         height: image.height,
@@ -1491,16 +1167,12 @@ fn apply_denoise(ctx: &GpuContext, op: &DenoiseOp, image: GpuImage) -> Result<Gp
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.denoise.pipeline,
-        &ctx.denoise.bind_group_layout,
+        Kernel::new(&ctx.denoise.pipeline, &ctx.denoise.bind_group_layout),
         "rasterlab denoise",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1518,12 +1190,7 @@ fn apply_hsl_panel(
         return Ok(image);
     }
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab hsl_panel output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab hsl_panel output", byte_len);
     let params = HslPanelParams {
         width: image.width,
         height: image.height,
@@ -1540,16 +1207,12 @@ fn apply_hsl_panel(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.hsl_panel.pipeline,
-        &ctx.hsl_panel.bind_group_layout,
+        Kernel::new(&ctx.hsl_panel.pipeline, &ctx.hsl_panel.bind_group_layout),
         "rasterlab hsl_panel",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1570,12 +1233,7 @@ fn apply_sharpen(ctx: &GpuContext, op: &SharpenOp, image: GpuImage) -> Result<Gp
         return Ok(image);
     }
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab sharpen output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab sharpen output", byte_len);
     let params = SharpenParams {
         width: image.width,
         height: image.height,
@@ -1593,16 +1251,12 @@ fn apply_sharpen(ctx: &GpuContext, op: &SharpenOp, image: GpuImage) -> Result<Gp
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.sharpen.pipeline,
-        &ctx.sharpen.bind_group_layout,
+        Kernel::new(&ctx.sharpen.pipeline, &ctx.sharpen.bind_group_layout),
         "rasterlab sharpen",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1624,12 +1278,7 @@ fn apply_noise_reduction_nlm(
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab noise_reduction_nlm output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab noise_reduction_nlm output", byte_len);
     let luma_h = (op.luma_strength * 25.0).max(1e-4);
     let color_h = (op.color_strength * 25.0).max(1e-4);
     let params = NrNlmParams {
@@ -1649,74 +1298,38 @@ fn apply_noise_reduction_nlm(
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    let nlm_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab noise_reduction_nlm bind group"),
-        layout: &ctx.noise_reduction_nlm.nlm_bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: denoised_ycc.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-    let detail_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rasterlab noise_reduction_detail bind group"),
-        layout: &ctx.noise_reduction_nlm.detail_bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: image.buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: denoised_ycc.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: output.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: params_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rasterlab noise_reduction_nlm encoder"),
+            label: Some("rasterlab noise_reduction_nlm"),
         });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab noise_reduction_nlm pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.noise_reduction_nlm.nlm_pipeline);
-        pass.set_bind_group(0, &nlm_bind_group, &[]);
-        pass.dispatch_workgroups(image.width.div_ceil(8), image.height.div_ceil(8), 1);
-    }
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("rasterlab noise_reduction_detail pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&ctx.noise_reduction_nlm.detail_pipeline);
-        pass.set_bind_group(0, &detail_bind_group, &[]);
-        pass.dispatch_workgroups(image.width.div_ceil(8), image.height.div_ceil(8), 1);
-    }
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
+    // The first pass denoises into Y'CbCr; the second reads the original
+    // alongside it to put back the detail the first pass removed.
+    encode_compute(
+        &ctx.device,
+        &mut encoder,
+        Kernel::with_workgroup(
+            &ctx.noise_reduction_nlm.nlm_pipeline,
+            &ctx.noise_reduction_nlm.nlm_bind_group_layout,
+            NLM_WORKGROUP_SIZE,
+        ),
+        "rasterlab noise_reduction_nlm",
+        [&image.buffer, &denoised_ycc, &params_buffer],
+        [image.width, image.height],
+    );
+    encode_compute(
+        &ctx.device,
+        &mut encoder,
+        Kernel::with_workgroup(
+            &ctx.noise_reduction_nlm.detail_pipeline,
+            &ctx.noise_reduction_nlm.detail_bind_group_layout,
+            NLM_WORKGROUP_SIZE,
+        ),
+        "rasterlab noise_reduction_detail",
+        [&image.buffer, &denoised_ycc, &output, &params_buffer],
+        [image.width, image.height],
+    );
+    submit_and_wait(ctx, encoder)?;
 
     Ok(GpuImage {
         width: image.width,
@@ -1907,12 +1520,7 @@ fn apply_faux_hdr(ctx: &GpuContext, op: &FauxHdrOp, image: GpuImage) -> Result<G
         return Ok(image);
     }
     let byte_len = expected_rgba_len(image.width, image.height) as u64;
-    let output = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rasterlab faux_hdr output"),
-        size: byte_len,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
+    let output = output_buffer(ctx, "rasterlab faux_hdr output", byte_len);
     let params = FauxHdrParams {
         width: image.width,
         height: image.height,
@@ -1930,16 +1538,12 @@ fn apply_faux_hdr(ctx: &GpuContext, op: &FauxHdrOp, image: GpuImage) -> Result<G
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-    dispatch_3binding(
+    dispatch_compute(
         ctx,
-        &ctx.faux_hdr.pipeline,
-        &ctx.faux_hdr.bind_group_layout,
+        Kernel::new(&ctx.faux_hdr.pipeline, &ctx.faux_hdr.bind_group_layout),
         "rasterlab faux_hdr",
-        &image.buffer,
-        &output,
-        &params_buffer,
-        params.width,
-        params.height,
+        [&image.buffer, &output, &params_buffer],
+        [params.width, params.height],
     )?;
     Ok(GpuImage {
         width: image.width,
@@ -1948,96 +1552,124 @@ fn apply_faux_hdr(ctx: &GpuContext, op: &FauxHdrOp, image: GpuImage) -> Result<G
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn encode_clarity_3binding(
-    device: &wgpu::Device,
-    encoder: &mut wgpu::CommandEncoder,
-    pipeline: &wgpu::ComputePipeline,
-    layout: &wgpu::BindGroupLayout,
-    label: &str,
-    b0: &wgpu::Buffer,
-    b1: &wgpu::Buffer,
-    b2: &wgpu::Buffer,
-    width: u32,
-    height: u32,
-) {
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: b0.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: b1.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: b2.as_entire_binding(),
-            },
-        ],
-    });
-    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some(label),
-        timestamp_writes: None,
-    });
-    pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, &bg, &[]);
-    pass.dispatch_workgroups(
-        width.div_ceil(WORKGROUP_SIZE_X),
-        height.div_ceil(WORKGROUP_SIZE_Y),
-        1,
-    );
+/// One unsharp-mask stage of Clarity/Texture: blur the source's luma, then add
+/// back a weighted share of what the blur removed.
+///
+/// Clarity and Texture are the same three passes over the same buffers; they
+/// differ only in how wide the blur is and whether the result is weighted
+/// towards midtones.
+struct UnsharpStage<'a> {
+    /// Prefixes the debug labels, so a capture says which stage a pass is.
+    name: &'a str,
+    src: &'a wgpu::Buffer,
+    dst: &'a wgpu::Buffer,
+    radius: u32,
+    midtone_weight: u32,
+    amount: f32,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn encode_clarity_4binding(
-    device: &wgpu::Device,
+/// The luma buffers the blur ping-pongs between, and the extent they cover.
+/// Both stages reuse the one set: the second overwrites what the first left.
+struct LumaScratch<'a> {
+    a: &'a wgpu::Buffer,
+    b: &'a wgpu::Buffer,
+    params: &'a wgpu::Buffer,
+}
+
+/// Box blur repeated this many times approximates a Gaussian closely enough
+/// for an unsharp mask, and each pass is separable.  An odd count would leave
+/// the result in the wrong buffer of the ping-pong.
+const BOX_BLUR_PASSES: usize = 3;
+
+fn encode_unsharp_stage(
+    ctx: &GpuContext,
     encoder: &mut wgpu::CommandEncoder,
-    pipeline: &wgpu::ComputePipeline,
-    layout: &wgpu::BindGroupLayout,
-    label: &str,
-    b0: &wgpu::Buffer,
-    b1: &wgpu::Buffer,
-    b2: &wgpu::Buffer,
-    b3: &wgpu::Buffer,
-    width: u32,
-    height: u32,
+    stage: UnsharpStage<'_>,
+    scratch: &LumaScratch<'_>,
+    dimensions: [u32; 2],
 ) {
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(label),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: b0.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: b1.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: b2.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: b3.as_entire_binding(),
-            },
-        ],
-    });
-    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some(label),
-        timestamp_writes: None,
-    });
-    pass.set_pipeline(pipeline);
-    pass.set_bind_group(0, &bg, &[]);
-    pass.dispatch_workgroups(
-        width.div_ceil(WORKGROUP_SIZE_X),
-        height.div_ceil(WORKGROUP_SIZE_Y),
-        1,
+    let [w, h] = dimensions;
+    let pixel_count = w.saturating_mul(h);
+    let name = stage.name;
+
+    let blur_params = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("rasterlab {name} blur params")),
+            contents: bytemuck::bytes_of(&ClarityBlurParams {
+                width: w,
+                height: h,
+                pixel_count,
+                radius: stage.radius,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    let detail_params = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("rasterlab {name} detail params")),
+            contents: bytemuck::bytes_of(&ClarityDetailParams {
+                width: w,
+                height: h,
+                pixel_count,
+                midtone_weight: stage.midtone_weight,
+                amount: stage.amount,
+                _pad1: 0.0,
+                _pad2: 0.0,
+                _pad3: 0.0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+    encode_compute(
+        &ctx.device,
+        encoder,
+        Kernel::new(
+            &ctx.clarity_texture.extract_luma_pipeline,
+            &ctx.clarity_texture.three_bind_layout,
+        ),
+        &format!("{name} extract_luma"),
+        [stage.src, scratch.a, scratch.params],
+        dimensions,
+    );
+
+    // Each iteration is a horizontal pass into `b` and a vertical one back
+    // into `a`, so the blurred luma ends up in `a` however many run.
+    for _ in 0..BOX_BLUR_PASSES {
+        encode_compute(
+            &ctx.device,
+            encoder,
+            Kernel::new(
+                &ctx.clarity_texture.box_blur_h_pipeline,
+                &ctx.clarity_texture.three_bind_layout,
+            ),
+            &format!("{name} box_blur_h"),
+            [scratch.a, scratch.b, &blur_params],
+            dimensions,
+        );
+        encode_compute(
+            &ctx.device,
+            encoder,
+            Kernel::new(
+                &ctx.clarity_texture.box_blur_v_pipeline,
+                &ctx.clarity_texture.three_bind_layout,
+            ),
+            &format!("{name} box_blur_v"),
+            [scratch.b, scratch.a, &blur_params],
+            dimensions,
+        );
+    }
+
+    encode_compute(
+        &ctx.device,
+        encoder,
+        Kernel::new(
+            &ctx.clarity_texture.apply_detail_pipeline,
+            &ctx.clarity_texture.four_bind_layout,
+        ),
+        &format!("{name} apply_detail"),
+        [stage.src, stage.dst, &detail_params, scratch.a],
+        dimensions,
     );
 }
 
@@ -2091,12 +1723,11 @@ fn apply_clarity_texture(
 
     // Final output buffer (needed only when texture pass is active).
     let output = if do_texture {
-        Some(ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rasterlab clarity output rgba"),
-            size: rgba_byte_len,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        }))
+        Some(output_buffer(
+            ctx,
+            "rasterlab clarity output rgba",
+            rgba_byte_len,
+        ))
     } else {
         None
     };
@@ -2119,194 +1750,54 @@ fn apply_clarity_texture(
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+    let scratch = LumaScratch {
+        a: &luma_a,
+        b: &luma_b,
+        params: &luma_params_buf,
+    };
 
     if do_clarity {
-        let blur_params_buf = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rasterlab clarity blur params"),
-                contents: bytemuck::bytes_of(&ClarityBlurParams {
-                    width: w,
-                    height: h,
-                    pixel_count,
-                    radius: clarity_radius,
-                }),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let detail_params_buf = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rasterlab clarity detail params"),
-                contents: bytemuck::bytes_of(&ClarityDetailParams {
-                    width: w,
-                    height: h,
-                    pixel_count,
-                    midtone_weight: 1,
-                    amount: op.clarity,
-                    _pad1: 0.0,
-                    _pad2: 0.0,
-                    _pad3: 0.0,
-                }),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        // Extract luma from input pixels → luma_a
-        encode_clarity_3binding(
-            &ctx.device,
+        encode_unsharp_stage(
+            ctx,
             &mut encoder,
-            &ctx.clarity_texture.extract_luma_pipeline,
-            &ctx.clarity_texture.three_bind_layout,
-            "clarity extract_luma",
-            &image.buffer,
-            &luma_a,
-            &luma_params_buf,
-            w,
-            h,
-        );
-
-        // 3 passes of box blur (H then V), ping-pong luma_a ↔ luma_b
-        // After 3 full H+V passes the result is back in luma_a
-        for _ in 0..3 {
-            encode_clarity_3binding(
-                &ctx.device,
-                &mut encoder,
-                &ctx.clarity_texture.box_blur_h_pipeline,
-                &ctx.clarity_texture.three_bind_layout,
-                "clarity box_blur_h",
-                &luma_a,
-                &luma_b,
-                &blur_params_buf,
-                w,
-                h,
-            );
-            encode_clarity_3binding(
-                &ctx.device,
-                &mut encoder,
-                &ctx.clarity_texture.box_blur_v_pipeline,
-                &ctx.clarity_texture.three_bind_layout,
-                "clarity box_blur_v",
-                &luma_b,
-                &luma_a,
-                &blur_params_buf,
-                w,
-                h,
-            );
-        }
-
-        // Apply clarity detail: input rgba + blurred luma (luma_a) → intermediate
-        encode_clarity_4binding(
-            &ctx.device,
-            &mut encoder,
-            &ctx.clarity_texture.apply_detail_pipeline,
-            &ctx.clarity_texture.four_bind_layout,
-            "clarity apply_detail",
-            &image.buffer,
-            &intermediate,
-            &detail_params_buf,
-            &luma_a,
-            w,
-            h,
+            UnsharpStage {
+                name: "clarity",
+                src: &image.buffer,
+                dst: &intermediate,
+                radius: clarity_radius,
+                midtone_weight: 1,
+                amount: op.clarity,
+            },
+            &scratch,
+            [w, h],
         );
     }
 
     if do_texture {
-        let output_buf = output.as_ref().unwrap();
-        let src = if do_clarity {
-            &intermediate
-        } else {
-            &image.buffer
-        };
-
-        let blur_params_buf = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rasterlab texture blur params"),
-                contents: bytemuck::bytes_of(&ClarityBlurParams {
-                    width: w,
-                    height: h,
-                    pixel_count,
-                    radius: texture_radius,
-                }),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        let detail_params_buf = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rasterlab texture detail params"),
-                contents: bytemuck::bytes_of(&ClarityDetailParams {
-                    width: w,
-                    height: h,
-                    pixel_count,
-                    midtone_weight: 0,
-                    amount: op.texture,
-                    _pad1: 0.0,
-                    _pad2: 0.0,
-                    _pad3: 0.0,
-                }),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        // Extract luma from post-clarity pixels → luma_a
-        encode_clarity_3binding(
-            &ctx.device,
+        encode_unsharp_stage(
+            ctx,
             &mut encoder,
-            &ctx.clarity_texture.extract_luma_pipeline,
-            &ctx.clarity_texture.three_bind_layout,
-            "texture extract_luma",
-            src,
-            &luma_a,
-            &luma_params_buf,
-            w,
-            h,
-        );
-
-        for _ in 0..3 {
-            encode_clarity_3binding(
-                &ctx.device,
-                &mut encoder,
-                &ctx.clarity_texture.box_blur_h_pipeline,
-                &ctx.clarity_texture.three_bind_layout,
-                "texture box_blur_h",
-                &luma_a,
-                &luma_b,
-                &blur_params_buf,
-                w,
-                h,
-            );
-            encode_clarity_3binding(
-                &ctx.device,
-                &mut encoder,
-                &ctx.clarity_texture.box_blur_v_pipeline,
-                &ctx.clarity_texture.three_bind_layout,
-                "texture box_blur_v",
-                &luma_b,
-                &luma_a,
-                &blur_params_buf,
-                w,
-                h,
-            );
-        }
-
-        // Apply texture detail: src rgba + blurred luma → output
-        encode_clarity_4binding(
-            &ctx.device,
-            &mut encoder,
-            &ctx.clarity_texture.apply_detail_pipeline,
-            &ctx.clarity_texture.four_bind_layout,
-            "texture apply_detail",
-            src,
-            output_buf,
-            &detail_params_buf,
-            &luma_a,
-            w,
-            h,
+            UnsharpStage {
+                name: "texture",
+                // Texture sharpens what Clarity already produced, when it ran.
+                src: if do_clarity {
+                    &intermediate
+                } else {
+                    &image.buffer
+                },
+                dst: output
+                    .as_ref()
+                    .expect("do_texture implies an output buffer"),
+                radius: texture_radius,
+                midtone_weight: 0,
+                amount: op.texture,
+            },
+            &scratch,
+            [w, h],
         );
     }
 
-    ctx.queue.submit(Some(encoder.finish()));
-    ctx.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| GpuError::Poll(e.to_string()))?;
+    submit_and_wait(ctx, encoder)?;
 
     let final_buf = if do_texture {
         output.unwrap()
