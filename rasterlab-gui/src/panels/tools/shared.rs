@@ -5,8 +5,82 @@ use rasterlab_core::traits::operation::Operation;
 use super::tool_trait::{ToolAction, ToolUiCtx};
 use crate::state::{EditSession, EditingTool};
 
-macro_rules! impl_preview_tool {
-    ($tool:ident => $op:expr) => {
+/// The parameter half of a tool whose panel is a set of widgets over a single
+/// operation: Auto Enhance's sliders, Vignette's three knobs, Channel Levels'
+/// nine.
+///
+/// Every such tool used to spell out the same four `Tool` methods and the same
+/// Apply/Cancel/Reset match by hand, which is how a preview drifts from what
+/// Apply commits — they were built from two separate copies of the same
+/// expression. Building both from [`ParamTool::op`] keeps them one thing.
+pub(super) trait ParamTool {
+    /// The operation this tool builds, and the only one it loads back.
+    type Op: Operation + 'static;
+
+    /// Label on the Apply button.
+    const APPLY: &'static str = "Apply";
+
+    /// Build the operation from the current parameter values.
+    fn op(&self) -> Self::Op;
+
+    /// Return every parameter to the value the tool starts at — for the tools
+    /// here, `*self = Self::new()`, so a default lives in one place only.
+    ///
+    /// The preview flag is already cleared by the time this runs, on both the
+    /// Apply and the Reset path.
+    fn reset(&mut self);
+
+    /// Copy a committed op's parameters back in, for editing from the stack.
+    fn load(&mut self, op: &Self::Op);
+
+    fn preview_active(&mut self) -> &mut bool;
+}
+
+/// The tail every [`ParamTool`] panel ends with: moving a widget turns the
+/// preview on, then the Apply/Cancel/Reset row is drawn and acted on.
+///
+/// `changed` is whether any of the tool's widgets moved this frame. A button
+/// click wins over the slider that may have moved with it, matching the old
+/// hand-written order.
+pub(super) fn param_tool_actions<T: ParamTool>(
+    ui: &mut Ui,
+    ctx: &ToolUiCtx<'_>,
+    tool: &mut T,
+    changed: bool,
+) -> ToolAction {
+    let mut action = ToolAction::None;
+    if changed && ctx.has_image {
+        *tool.preview_active() = true;
+        action = ToolAction::RequestRender;
+    }
+    let Some(clicked) = preview_buttons(ui, ctx.has_image, tool.preview_active(), T::APPLY) else {
+        return action;
+    };
+    match clicked {
+        PreviewButtonAction::Apply => {
+            let op = ToolAction::PushOp(Box::new(tool.op()));
+            tool.reset();
+            op
+        }
+        PreviewButtonAction::Cancel => ToolAction::RequestRender,
+        PreviewButtonAction::Reset { request_render } => {
+            tool.reset();
+            if request_render {
+                ToolAction::RequestRender
+            } else {
+                ToolAction::None
+            }
+        }
+    }
+}
+
+/// Emit the `Tool` methods a [`ParamTool`] implementation already determines.
+///
+/// These are the trait-object side of the same tool — downcasting and boxing
+/// that no blanket impl can supply, because each tool still writes its own
+/// `render_ui`.
+macro_rules! impl_param_tool {
+    () => {
         fn is_preview_active(&self) -> bool {
             self.preview_active
         }
@@ -16,13 +90,21 @@ macro_rules! impl_preview_tool {
         fn activate_preview(&mut self) {
             self.preview_active = true;
         }
-        fn preview_op(&self) -> Option<Box<dyn Operation>> {
-            if self.preview_active {
-                let $tool = self;
-                Some(Box::new($op))
-            } else {
-                None
-            }
+        fn preview_op(&self) -> Option<Box<dyn rasterlab_core::traits::operation::Operation>> {
+            self.preview_active.then(|| {
+                Box::new(super::shared::ParamTool::op(self))
+                    as Box<dyn rasterlab_core::traits::operation::Operation>
+            })
+        }
+        fn load_from_op(&mut self, op: &dyn rasterlab_core::traits::operation::Operation) -> bool {
+            let Some(op) = op
+                .as_any()
+                .and_then(|op| op.downcast_ref::<<Self as super::shared::ParamTool>::Op>())
+            else {
+                return false;
+            };
+            super::shared::ParamTool::load(self, op);
+            true
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -33,7 +115,7 @@ macro_rules! impl_preview_tool {
     };
 }
 
-pub(crate) use impl_preview_tool;
+pub(crate) use impl_param_tool;
 
 macro_rules! impl_preview_controls {
     () => {
@@ -356,9 +438,105 @@ mod tests {
     use super::*;
     use rasterlab_core::{
         library_meta::LibraryMeta,
+        ops::SepiaOp,
         pipeline::PipelineState,
         project::{RlabFile, RlabMeta, SavedCopy},
     };
+
+    fn click_preview_button(
+        label: &str,
+        has_image: bool,
+        preview_active: &mut bool,
+    ) -> Option<PreviewButtonAction> {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(preview_buttons(ui, has_image, preview_active, "Apply").is_none());
+        });
+        // Locate the rendered label so this exercises real pointer input
+        // without depending on font metrics or hard-coded button positions.
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing button: {label}"));
+        let mut action = None;
+        for pressed in [true, false] {
+            let input = egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                action = preview_buttons(ui, has_image, preview_active, "Apply");
+            });
+            if pressed {
+                assert!(action.is_none());
+            }
+        }
+        action
+    }
+
+    #[test]
+    fn applying_requires_an_image_and_clears_the_preview() {
+        for has_image in [false, true] {
+            for initially_active in [false, true] {
+                let mut active = initially_active;
+                let action = click_preview_button("Apply", has_image, &mut active);
+                assert_eq!(
+                    matches!(action, Some(PreviewButtonAction::Apply)),
+                    has_image,
+                );
+                if !has_image {
+                    assert!(action.is_none());
+                }
+                assert_eq!(active, initially_active && !has_image);
+            }
+        }
+    }
+
+    #[test]
+    fn cancelling_clears_the_preview_and_reports_cancellation() {
+        for has_image in [false, true] {
+            let mut active = true;
+            let action = click_preview_button("Cancel", has_image, &mut active);
+            assert_eq!(
+                matches!(action, Some(PreviewButtonAction::Cancel)),
+                has_image,
+            );
+            if !has_image {
+                assert!(action.is_none());
+            }
+            assert_eq!(active, !has_image);
+        }
+    }
+
+    #[test]
+    fn resetting_requests_a_render_only_for_an_active_preview() {
+        for has_image in [false, true] {
+            for initially_active in [false, true] {
+                let mut active = initially_active;
+                let action = click_preview_button("Reset", has_image, &mut active);
+                assert!(matches!(
+                    action,
+                    Some(PreviewButtonAction::Reset { request_render })
+                        if request_render == initially_active
+                ));
+                assert!(!active);
+            }
+        }
+    }
 
     /// A library photo is stored under the Blake3 of its content, so labelling
     /// frames with their path's file name shows the user 64 hex characters and
@@ -445,5 +623,172 @@ mod tests {
         // A container that cannot be read still gets a stable label rather
         // than an empty row in the list.
         assert_eq!(StackFrame::new("/gone/abc123.rlab").label, "abc123.rlab");
+    }
+
+    /// A stand-in for the eighteen tools that route their buttons through
+    /// [`param_tool_actions`]: one parameter, a non-zero default, and the same
+    /// `reset` every real one has.
+    struct FakeTool {
+        strength: f32,
+        preview_active: bool,
+    }
+
+    impl FakeTool {
+        fn new() -> Self {
+            Self {
+                strength: DEFAULT_STRENGTH,
+                preview_active: false,
+            }
+        }
+    }
+
+    impl ParamTool for FakeTool {
+        type Op = SepiaOp;
+
+        fn op(&self) -> SepiaOp {
+            SepiaOp::new(self.strength)
+        }
+        fn reset(&mut self) {
+            *self = Self::new();
+        }
+        fn load(&mut self, op: &SepiaOp) {
+            self.strength = op.strength;
+        }
+        fn preview_active(&mut self) -> &mut bool {
+            &mut self.preview_active
+        }
+    }
+
+    const DEFAULT_STRENGTH: f32 = 0.75;
+
+    /// Run one frame of `param_tool_actions`, clicking `label` if it is given.
+    fn run_param_tool(
+        label: Option<&str>,
+        has_image: bool,
+        changed: bool,
+        tool: &mut FakeTool,
+    ) -> ToolAction {
+        let ctx = egui::Context::default();
+        let mut action = ToolAction::None;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            action = param_tool_actions(ui, &fake_ui_ctx(has_image), tool, changed);
+        });
+        let Some(label) = label else {
+            return action;
+        };
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing button: {label}"));
+        for pressed in [true, false] {
+            let input = egui::RawInput {
+                events: vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                action = param_tool_actions(ui, &fake_ui_ctx(has_image), tool, changed);
+            });
+        }
+        action
+    }
+
+    fn fake_ui_ctx(has_image: bool) -> ToolUiCtx<'static> {
+        ToolUiCtx {
+            has_image,
+            editing: None,
+            histogram: None,
+            last_path: None,
+            nr_in_flight: false,
+            source_dims: None,
+            committed_dims: None,
+            force_open: None,
+        }
+    }
+
+    fn sepia_strength(action: &ToolAction) -> f32 {
+        let ToolAction::PushOp(op) = action else {
+            panic!("expected a pushed op");
+        };
+        op.as_any()
+            .and_then(|op| op.downcast_ref::<SepiaOp>())
+            .expect("pushed the tool's own op")
+            .strength
+    }
+
+    /// Moving a slider is what arms the preview — but only when there is an
+    /// image to preview it on.
+    #[test]
+    fn a_changed_widget_arms_the_preview_only_with_an_image() {
+        for has_image in [false, true] {
+            let mut tool = FakeTool::new();
+            let action = run_param_tool(None, has_image, true, &mut tool);
+            assert_eq!(tool.preview_active, has_image);
+            assert_eq!(matches!(action, ToolAction::RequestRender), has_image);
+        }
+
+        let mut tool = FakeTool::new();
+        let action = run_param_tool(None, true, false, &mut tool);
+        assert!(!tool.preview_active);
+        assert!(matches!(action, ToolAction::None));
+    }
+
+    /// Apply commits the values on screen and leaves the tool at its defaults,
+    /// so the next edit starts from neutral rather than the last one.
+    #[test]
+    fn applying_pushes_the_current_values_and_returns_to_defaults() {
+        let mut tool = FakeTool::new();
+        tool.strength = 0.25;
+        tool.preview_active = true;
+
+        let action = run_param_tool(Some("Apply"), true, false, &mut tool);
+
+        assert_eq!(sepia_strength(&action), 0.25);
+        assert_eq!(tool.strength, DEFAULT_STRENGTH);
+        assert!(!tool.preview_active);
+    }
+
+    /// Cancel drops the preview without committing anything.
+    #[test]
+    fn cancelling_keeps_the_values_and_asks_for_a_render() {
+        let mut tool = FakeTool::new();
+        tool.strength = 0.25;
+        tool.preview_active = true;
+
+        let action = run_param_tool(Some("Cancel"), true, false, &mut tool);
+
+        assert!(matches!(action, ToolAction::RequestRender));
+        assert_eq!(tool.strength, 0.25);
+        assert!(!tool.preview_active);
+    }
+
+    /// Reset always restores the defaults, but only costs a render when a
+    /// preview was actually on screen to be taken down.
+    #[test]
+    fn resetting_renders_only_when_a_preview_was_showing() {
+        for was_active in [false, true] {
+            let mut tool = FakeTool::new();
+            tool.strength = 0.25;
+            tool.preview_active = was_active;
+
+            let action = run_param_tool(Some("Reset"), true, false, &mut tool);
+
+            assert_eq!(matches!(action, ToolAction::RequestRender), was_active);
+            assert_eq!(tool.strength, DEFAULT_STRENGTH);
+            assert!(!tool.preview_active);
+        }
     }
 }

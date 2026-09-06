@@ -1,8 +1,6 @@
-use std::any::Any;
-
 use rasterlab_core::ops::ColorBalanceOp;
-use rasterlab_core::traits::operation::Operation;
 
+use super::shared::{ParamTool, param_tool_actions};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
@@ -21,6 +19,28 @@ impl ColorBalanceTool {
             yellow_blue: [0.0; 3],
             preview_active: false,
         }
+    }
+}
+
+impl ParamTool for ColorBalanceTool {
+    type Op = ColorBalanceOp;
+
+    fn op(&self) -> ColorBalanceOp {
+        ColorBalanceOp::new(self.cyan_red, self.magenta_green, self.yellow_blue)
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn load(&mut self, op: &ColorBalanceOp) {
+        self.cyan_red = op.cyan_red;
+        self.magenta_green = op.magenta_green;
+        self.yellow_blue = op.yellow_blue;
+    }
+
+    fn preview_active(&mut self) -> &mut bool {
+        &mut self.preview_active
     }
 }
 
@@ -84,73 +104,7 @@ impl Tool for ColorBalanceTool {
             });
         ui.add_space(4.0);
 
-        let mut action = ToolAction::None;
-        if changed && ctx.has_image {
-            self.preview_active = true;
-            action = ToolAction::RequestRender;
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(ColorBalanceOp::new(
-                    self.cyan_red,
-                    self.magenta_green,
-                    self.yellow_blue,
-                )));
-                self.cyan_red = [0.0; 3];
-                self.magenta_green = [0.0; 3];
-                self.yellow_blue = [0.0; 3];
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.cyan_red = [0.0; 3];
-                self.magenta_green = [0.0; 3];
-                self.yellow_blue = [0.0; 3];
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
-        action
+        param_tool_actions(ui, ctx, self, changed)
     }
-
-    super::shared::impl_preview_controls!();
-    fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active {
-            Some(Box::new(ColorBalanceOp::new(
-                self.cyan_red,
-                self.magenta_green,
-                self.yellow_blue,
-            )))
-        } else {
-            None
-        }
-    }
-    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<ColorBalanceOp>()) {
-            self.cyan_red = o.cyan_red;
-            self.magenta_green = o.magenta_green;
-            self.yellow_blue = o.yellow_blue;
-            true
-        } else {
-            false
-        }
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    super::shared::impl_param_tool!();
 }

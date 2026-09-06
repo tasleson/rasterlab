@@ -1,8 +1,6 @@
-use std::any::Any;
-
 use rasterlab_core::ops::ShadowExposureOp;
-use rasterlab_core::traits::operation::Operation;
 
+use super::shared::{ParamTool, param_tool_actions};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
@@ -19,6 +17,27 @@ impl ShadowExposureTool {
             falloff: 2.0,
             preview_active: false,
         }
+    }
+}
+
+impl ParamTool for ShadowExposureTool {
+    type Op = ShadowExposureOp;
+
+    fn op(&self) -> ShadowExposureOp {
+        ShadowExposureOp::new(self.ev, self.falloff)
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn load(&mut self, op: &ShadowExposureOp) {
+        self.ev = op.ev;
+        self.falloff = op.falloff;
+    }
+
+    fn preview_active(&mut self) -> &mut bool {
+        &mut self.preview_active
     }
 }
 
@@ -59,65 +78,7 @@ impl Tool for ShadowExposureTool {
                     .changed();
                 ui.end_row();
             });
-        let mut action = ToolAction::None;
-        if changed && ctx.has_image {
-            self.preview_active = true;
-            action = ToolAction::RequestRender;
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(ShadowExposureOp::new(self.ev, self.falloff)));
-                self.ev = 0.0;
-                self.falloff = 2.0;
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.ev = 0.0;
-                self.falloff = 2.0;
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
-        action
+        param_tool_actions(ui, ctx, self, changed)
     }
-
-    super::shared::impl_preview_controls!();
-    fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active {
-            Some(Box::new(ShadowExposureOp::new(self.ev, self.falloff)))
-        } else {
-            None
-        }
-    }
-    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        if let Some(o) = op
-            .as_any()
-            .and_then(|a| a.downcast_ref::<ShadowExposureOp>())
-        {
-            self.ev = o.ev;
-            self.falloff = o.falloff;
-            true
-        } else {
-            false
-        }
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    super::shared::impl_param_tool!();
 }

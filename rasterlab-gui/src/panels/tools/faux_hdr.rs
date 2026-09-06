@@ -1,8 +1,6 @@
-use std::any::Any;
-
 use rasterlab_core::ops::FauxHdrOp;
-use rasterlab_core::traits::operation::Operation;
 
+use super::shared::{ParamTool, param_tool_actions};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
@@ -17,6 +15,26 @@ impl FauxHdrTool {
             strength: 0.8,
             preview_active: false,
         }
+    }
+}
+
+impl ParamTool for FauxHdrTool {
+    type Op = FauxHdrOp;
+
+    fn op(&self) -> FauxHdrOp {
+        FauxHdrOp::new(self.strength)
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn load(&mut self, op: &FauxHdrOp) {
+        self.strength = op.strength;
+    }
+
+    fn preview_active(&mut self) -> &mut bool {
+        &mut self.preview_active
     }
 }
 
@@ -45,59 +63,7 @@ impl Tool for FauxHdrTool {
                     .step_by(0.01),
             )
             .changed();
-        let mut action = ToolAction::None;
-        if changed && ctx.has_image {
-            self.preview_active = true;
-            action = ToolAction::RequestRender;
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(FauxHdrOp::new(self.strength)));
-                self.strength = 0.8;
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.strength = 0.8;
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
-        action
+        param_tool_actions(ui, ctx, self, changed)
     }
-
-    super::shared::impl_preview_controls!();
-    fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active {
-            Some(Box::new(FauxHdrOp::new(self.strength)))
-        } else {
-            None
-        }
-    }
-    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<FauxHdrOp>()) {
-            self.strength = o.strength;
-            true
-        } else {
-            false
-        }
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    super::shared::impl_param_tool!();
 }
