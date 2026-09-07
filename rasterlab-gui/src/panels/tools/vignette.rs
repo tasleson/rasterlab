@@ -1,9 +1,7 @@
-use std::any::Any;
-
 use egui::DragValue;
 use rasterlab_core::ops::VignetteOp;
-use rasterlab_core::traits::operation::Operation;
 
+use super::shared::{ParamTool, param_tool_actions};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
@@ -22,6 +20,30 @@ impl VignetteTool {
             feather: 0.3,
             preview_active: false,
         }
+    }
+}
+
+impl ParamTool for VignetteTool {
+    type Op = VignetteOp;
+
+    const APPLY: &'static str = "Apply Vignette";
+
+    fn op(&self) -> VignetteOp {
+        VignetteOp::new(self.strength, self.radius, self.feather)
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn load(&mut self, op: &VignetteOp) {
+        self.strength = op.strength;
+        self.radius = op.radius;
+        self.feather = op.feather;
+    }
+
+    fn preview_active(&mut self) -> &mut bool {
+        &mut self.preview_active
     }
 }
 
@@ -70,73 +92,7 @@ impl Tool for VignetteTool {
                     .changed();
                 ui.end_row();
             });
-        let mut action = ToolAction::None;
-        if changed && ctx.has_image {
-            self.preview_active = true;
-            action = ToolAction::RequestRender;
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply Vignette"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(VignetteOp::new(
-                    self.strength,
-                    self.radius,
-                    self.feather,
-                )));
-                self.strength = 0.5;
-                self.radius = 0.7;
-                self.feather = 0.3;
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.strength = 0.5;
-                self.radius = 0.7;
-                self.feather = 0.3;
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
-        action
+        param_tool_actions(ui, ctx, self, changed)
     }
-
-    super::shared::impl_preview_controls!();
-    fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active {
-            Some(Box::new(VignetteOp::new(
-                self.strength,
-                self.radius,
-                self.feather,
-            )))
-        } else {
-            None
-        }
-    }
-    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<VignetteOp>()) {
-            self.strength = o.strength;
-            self.radius = o.radius;
-            self.feather = o.feather;
-            true
-        } else {
-            false
-        }
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    super::shared::impl_param_tool!();
 }

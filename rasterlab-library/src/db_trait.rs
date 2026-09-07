@@ -7,6 +7,29 @@ pub type CollectionId = i64;
 
 // ── Row types returned by the DB ──────────────────────────────────────────────
 
+/// One photo as it is handed to [`LibraryDb::insert_photo`].
+///
+/// A struct rather than a row of positional arguments because most of what an
+/// insert needs comes from the photo's `.rlab`, and `has_edits` in particular
+/// is easy to leave out: no `LMTA` field backs it — it is derived from the
+/// virtual copies' undo cursors — and a row inserted without it silently drops
+/// out of the library's edited-only filter until something happens to rewrite
+/// the photo's thumbnail.
+#[derive(Debug, Clone, Copy)]
+pub struct NewPhoto<'a> {
+    /// Blake3 hex of the original file bytes.
+    pub hash: &'a str,
+    /// Relative path inside `files/`: e.g. `"ab/cd/abc123….rlab"`.
+    pub lib_path: &'a str,
+    pub lmta: &'a LibraryMeta,
+    pub width: u32,
+    pub height: u32,
+    /// UUID shared by all files in a RAW+JPEG stack.
+    pub stack_id: Option<&'a str>,
+    /// True when any of the photo's virtual copies carries edits.
+    pub has_edits: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct PhotoRow {
     pub id: PhotoId,
@@ -63,7 +86,11 @@ impl ImportSessionRow {
 
 #[derive(Debug, Clone)]
 pub struct CollectionRow {
+    /// Index-local row id.  Assigned by the database and reassigned by a
+    /// rebuild, so it is never written into a `.rlab`.
     pub id: CollectionId,
+    /// Stable identity, minted at creation and recorded in every member file.
+    pub uuid: String,
     pub name: String,
     pub created_at: u64,
 }
@@ -97,15 +124,18 @@ pub trait LibraryDb: Send + Sync {
 
     // ── Photos ────────────────────────────────────────────────────────────
 
-    fn insert_photo(
-        &self,
-        hash: &str,
-        lib_path: &str,
-        lmta: &LibraryMeta,
-        width: u32,
-        height: u32,
-        stack_id: Option<&str>,
-    ) -> anyhow::Result<PhotoId>;
+    fn insert_photo(&self, photo: NewPhoto<'_>) -> anyhow::Result<PhotoId>;
+
+    /// Rewrite an existing photo's row, and every row that hangs off it, from
+    /// what its `.rlab` now says — keeping the row's id.
+    ///
+    /// This is what a rebuild uses instead of deleting the row and inserting a
+    /// fresh one.  The id is what collection membership is keyed by, so
+    /// replacing the row would silently drop the photo out of its collections;
+    /// and a process killed between the delete and the insert would leave the
+    /// photo with no row at all.  One statement per table in one transaction
+    /// has neither problem.
+    fn replace_photo(&self, photo_id: PhotoId, photo: NewPhoto<'_>) -> anyhow::Result<()>;
 
     fn photo_by_hash(&self, hash: &str) -> anyhow::Result<Option<PhotoRow>>;
 
@@ -189,14 +219,40 @@ pub trait LibraryDb: Send + Sync {
 
     // ── Collections ───────────────────────────────────────────────────────
 
-    fn create_collection(&self, name: &str, created_at: u64) -> anyhow::Result<CollectionId>;
+    /// Create a collection with a caller-minted `uuid`.  The uuid is what
+    /// member files record; `id` is an index detail a rebuild may change.
+    fn create_collection(
+        &self,
+        uuid: &str,
+        name: &str,
+        created_at: u64,
+    ) -> anyhow::Result<CollectionId>;
 
+    /// Rename a collection.  Member files are not touched: they record the
+    /// uuid, and the name they carry is only a hint.
     fn rename_collection(&self, id: CollectionId, name: &str) -> anyhow::Result<()>;
 
     fn delete_collection(&self, id: CollectionId) -> anyhow::Result<()>;
 
     fn all_collections(&self) -> anyhow::Result<Vec<CollectionRow>>;
 
+    /// Every photo a collection holds, deleted ones included.
+    ///
+    /// [`LibraryDb::collection_photos`] answers what the library should show,
+    /// which leaves out photos in Recently Deleted.  This answers which files
+    /// record the collection, which is what a write that has to reach every
+    /// member needs.
+    fn collection_member_ids(&self, collection_id: CollectionId) -> anyhow::Result<Vec<PhotoId>>;
+
+    /// Every `(collection, photo)` pair, for callers that need membership for
+    /// many photos at once rather than one collection's photos at a time.
+    ///
+    /// Soft-deleted photos are left out: they keep their membership rows so a
+    /// restore puts them back in their collections, but until then they are not
+    /// in the library and must not be counted or shown as members.
+    fn collection_memberships(&self) -> anyhow::Result<Vec<(CollectionId, PhotoId)>>;
+
+    /// Add photos to a collection, ignoring any that are already members.
     fn add_to_collection(
         &self,
         collection_id: CollectionId,

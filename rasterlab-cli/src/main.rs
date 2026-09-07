@@ -24,6 +24,12 @@
 //!
 //! # Print image metadata and histogram
 //! rasterlab info photo.jpg
+//!
+//! # Fill and maintain a library on a headless machine
+//! rasterlab library create /srv/photos
+//! rasterlab library import /srv/photos ~/cards/DCIM --collection-per-folder
+//! rasterlab library rebuild /srv/photos
+//! rasterlab library scrub /srv/photos
 //! ```
 
 mod commands;
@@ -54,6 +60,10 @@ enum Commands {
 
     /// Print metadata and channel histograms for an image.
     Info(commands::info::InfoArgs),
+
+    /// Manage a photo library: create it, import into it, rebuild its index,
+    /// scrub its files.
+    Library(commands::library::LibraryArgs),
 }
 
 fn main() -> Result<()> {
@@ -68,5 +78,6 @@ fn main() -> Result<()> {
         Commands::Process(args) => commands::process::run(args),
         Commands::Batch(args) => commands::batch::run(args),
         Commands::Info(args) => commands::info::run(args),
+        Commands::Library(args) => commands::library::run(args),
     }
 }

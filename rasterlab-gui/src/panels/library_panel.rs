@@ -1,11 +1,12 @@
 use egui::{ScrollArea, Sense, Vec2};
 use rasterlab_library::{
-    ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, SearchFilter, SortOrder, ymd_from_unix,
+    CollectionId, ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, Resolution, SearchFilter,
+    SortOrder, ymd_from_unix,
 };
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
 use crate::state::library_state::thumb_target_side;
-use crate::state::{AppState, LibraryView};
+use crate::state::{AppState, CollectionPrompt, ImportCollectionChoice, LibraryView, Membership};
 
 /// Scroll-margin multiple for the resident texture cap: keep roughly this many
 /// screens of thumbnails so scrolling in either direction rarely hits a cold
@@ -34,8 +35,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // Scrub-errors detail window
     scrub_errors_dialog(ui.ctx(), state);
 
+    // Recently-Deleted-errors detail window
+    delete_errors_dialog(ui.ctx(), state);
+
+    // New-collection / delete-collection windows
+    collection_dialogs(ui.ctx(), state);
+
     // Toolbar (import button, sort, scale slider)
     toolbar_ui(ui, state);
+    error_banner_ui(ui, state);
     ui.separator();
 
     // Main body: sidebar + grid
@@ -50,11 +58,25 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
 
 // ── No-library placeholder ────────────────────────────────────────────────────
 
-fn no_library_ui(ui: &mut egui::Ui, _state: &mut AppState) {
-    ui.centered_and_justified(|ui| {
+/// Shown in place of the grid when no library is open.
+///
+/// Carries the error banner too, because a failed open lands here: the toolbar
+/// that normally holds the banner is not drawn without a library, so this is
+/// the only place the reason for the failure can appear.
+fn no_library_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() * NO_LIBRARY_TOP_FRACTION);
         ui.label("No library open.\nUse File > New Library… or File > Open Library…");
+        ui.add_space(NO_LIBRARY_MESSAGE_GAP);
+        error_banner_ui(ui, state);
     });
 }
+
+/// How far down the empty panel its message sits, as a fraction of the height.
+const NO_LIBRARY_TOP_FRACTION: f32 = 0.4;
+
+/// Gap between that message and the error banner under it.
+const NO_LIBRARY_MESSAGE_GAP: f32 = 8.0;
 
 // ── Toolbar ───────────────────────────────────────────────────────────────────
 
@@ -102,14 +124,20 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 
         let count = state.library.results.len();
         let selected = state.library.selected.len();
+        // Every one of these starts a bulk operation, and only one may be in
+        // flight; a second would fight the first over the same files.
+        let idle = !state.delete_running();
         if in_recently_deleted {
             if selected > 0 {
                 ui.label(format!("{} selected / {} items", selected, count));
                 ui.separator();
-                if ui.button("Restore").clicked() {
-                    state.library.restore_selected();
+                if ui.add_enabled(idle, egui::Button::new("Restore")).clicked() {
+                    state.restore_selected();
                 }
-                if ui.button("Delete Permanently").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Delete Permanently"))
+                    .clicked()
+                {
                     state.library.confirm_permanent_delete = true;
                 }
             } else {
@@ -117,18 +145,45 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
             if state.library.recently_deleted_count > 0 {
                 ui.separator();
-                if ui.button("Empty Recently Deleted").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Empty Recently Deleted"))
+                    .clicked()
+                {
                     state.library.confirm_empty_recently_deleted = true;
                 }
             }
         } else if selected > 0 {
             ui.label(format!("{} selected / {} photos", selected, count));
             ui.separator();
-            if ui.button("Move to Recently Deleted").clicked() {
+            if ui
+                .add_enabled(idle, egui::Button::new("Move to Recently Deleted"))
+                .clicked()
+            {
                 state.library.confirm_delete = true;
             }
         } else {
             ui.label(format!("{} photos", count));
+        }
+
+        // Bulk Recently Deleted progress. Like the rebuild line it carries its
+        // own way out: on a network share this is where a user who selected
+        // more than they meant to looks for one.
+        if let Some(text) = state.library.delete_status_text() {
+            ui.separator();
+            ui.spinner();
+            ui.label(text);
+            let stopping = state
+                .library
+                .delete_task
+                .as_ref()
+                .is_some_and(|task| task.stopping);
+            if ui
+                .add_enabled(!stopping, egui::Button::new("Stop"))
+                .on_hover_text("Stop after the current item; what is already done is kept")
+                .clicked()
+            {
+                state.stop_delete();
+            }
         }
 
         // Import progress
@@ -190,6 +245,15 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             ui.separator();
             ui.spinner();
             ui.label(text);
+            // A rebuild walks every file in the library, so the progress line
+            // is where a user who started one by mistake looks for the way out.
+            if ui
+                .add_enabled(!state.library.rebuild_stopping, egui::Button::new("Stop"))
+                .on_hover_text("Stop after the current file; what has been re-indexed is kept")
+                .clicked()
+            {
+                state.stop_rebuild();
+            }
         }
 
         // Persistent indicator for the most recent scrub's uncorrectable
@@ -209,6 +273,23 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
+        // Persistent indicator for the most recent bulk Recently Deleted
+        // operation's failures. Clicking it lists the photos that did not move.
+        let delete_errors = state.library.last_delete_errors.len();
+        if delete_errors > 0 {
+            ui.separator();
+            if ui
+                .button(
+                    egui::RichText::new(format!("⚠ {delete_errors} delete error(s)"))
+                        .color(egui::Color32::RED),
+                )
+                .on_hover_text("Click to see what could not be deleted")
+                .clicked()
+            {
+                state.library.show_delete_errors = true;
+            }
+        }
+
         // Thumbnail load diagnostics — remove once thumbnails confirmed working
         {
             let cached = state.library.thumbs.cached_len();
@@ -221,7 +302,47 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
     });
 }
 
+// ── Error banner ──────────────────────────────────────────────────────────────
+
+/// The last failed library action, shown until dismissed.
+///
+/// Given its own row rather than a slot in the toolbar because these messages
+/// carry the reason a write failed, which is worth the width. Most of what
+/// raises one — a collection change, protect, delete — has no other way to say
+/// it did not happen.
+///
+/// A library held open by another process gets a Retry alongside, since there
+/// the message is only telling the user to come back later.
+fn error_banner_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(error) = state.library.last_error.clone() else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
+            state.library.last_error = None;
+            state.library.busy_library = None;
+        }
+        ui.colored_label(
+            egui::Color32::from_rgb(255, 140, 140),
+            format!("⚠ {}", error),
+        );
+        if let Some(path) = state.library.busy_library.clone()
+            && ui
+                .small_button("Retry")
+                .on_hover_text(format!("Try opening {} again", path.display()))
+                .clicked()
+        {
+            state.open_library(path);
+        }
+    });
+}
+
 // ── Confirmation dialog ───────────────────────────────────────────────────────
+
+/// Why a confirm button is unavailable. Only one bulk delete runs at a time —
+/// Recently Deleted operations and collection deletes alike — and a dialog can
+/// be sitting open when another route starts one.
+const BUSY_HINT: &str = "Another bulk delete is still running";
 
 pub(crate) fn confirm_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
     move_to_recently_deleted_dialog(ctx, state);
@@ -234,16 +355,21 @@ fn move_to_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
 
-    // Keyboard shortcuts: Enter = confirm, Escape = cancel.
+    let idle = !state.delete_running();
+
+    // Keyboard shortcuts: Enter = confirm, Escape = cancel. Enter is left
+    // unconsumed while another operation runs, so it is not swallowed by a
+    // confirmation this dialog is in no position to act on.  Escape always
+    // works: backing out is safe whatever else is going on.
     let (enter, esc) = ctx.input_mut(|i| {
         (
-            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            idle && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
             i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
         )
     });
     if enter {
         state.library.confirm_delete = false;
-        state.library.move_selected_to_recently_deleted();
+        state.move_selected_to_recently_deleted();
         return;
     }
     if esc {
@@ -284,9 +410,13 @@ fn move_to_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Move to Recently Deleted").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Move to Recently Deleted"))
+                    .on_disabled_hover_text(BUSY_HINT)
+                    .clicked()
+                {
                     state.library.confirm_delete = false;
-                    state.library.move_selected_to_recently_deleted();
+                    state.move_selected_to_recently_deleted();
                 }
                 if ui.button("Cancel").clicked() {
                     state.library.confirm_delete = false;
@@ -303,6 +433,7 @@ fn permanent_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
     let n = state.library.selected.len();
+    let idle = !state.delete_running();
     let title = if n == 1 {
         "Delete Photo Permanently?".to_owned()
     } else {
@@ -322,9 +453,13 @@ fn permanent_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
             ui.label("The selected photos and their RasterLab edits will be permanently removed.");
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Delete Permanently").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Delete Permanently"))
+                    .on_disabled_hover_text(BUSY_HINT)
+                    .clicked()
+                {
                     state.library.confirm_permanent_delete = false;
-                    state.library.permanently_delete_selected();
+                    state.permanently_delete_selected();
                 }
                 if ui.button("Cancel").clicked() {
                     state.library.confirm_permanent_delete = false;
@@ -341,6 +476,7 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
     let n = state.library.recently_deleted_count;
+    let idle = !state.delete_running();
     let mut open = true;
     egui::Window::new("Empty Recently Deleted?")
         .collapsible(false)
@@ -357,9 +493,13 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
             ));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Empty Recently Deleted").clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Empty Recently Deleted"))
+                    .on_disabled_hover_text(BUSY_HINT)
+                    .clicked()
+                {
                     state.library.confirm_empty_recently_deleted = false;
-                    state.library.empty_recently_deleted();
+                    state.empty_recently_deleted();
                 }
                 if ui.button("Cancel").clicked() {
                     state.library.confirm_empty_recently_deleted = false;
@@ -372,74 +512,421 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
 }
 
 pub(crate) fn import_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
-    if !state.library.show_import_errors {
-        return;
-    }
-    if state.library.last_import_errors.is_empty() {
-        state.library.show_import_errors = false;
-        return;
-    }
-
-    let n = state.library.last_import_errors.len();
-    let mut open = true;
-    egui::Window::new(format!("Import errors ({n})"))
-        .collapsible(false)
-        .resizable(true)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
-        .show(ctx, |ui| {
-            ui.label("These files could not be imported:");
-            ui.add_space(6.0);
-            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                for (path, msg) in &state.library.last_import_errors {
-                    ui.label(egui::RichText::new(path.display().to_string()).strong());
-                    ui.colored_label(egui::Color32::RED, msg);
-                    ui.add_space(4.0);
-                }
-            });
-            ui.add_space(8.0);
-            if ui.button("Close").clicked() {
-                state.library.show_import_errors = false;
-            }
-        });
-    if !open {
-        state.library.show_import_errors = false;
-    }
+    let entries: Vec<(String, String)> = state
+        .library
+        .last_import_errors
+        .iter()
+        .map(|(path, msg)| (path.display().to_string(), msg.clone()))
+        .collect();
+    errors_dialog(
+        ctx,
+        "Import errors",
+        "These files could not be imported:",
+        &entries,
+        &mut state.library.show_import_errors,
+    );
 }
 
 pub(crate) fn scrub_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
-    if !state.library.show_scrub_errors {
+    let entries: Vec<(String, String)> = state
+        .library
+        .last_scrub_errors
+        .iter()
+        .map(|(path, msg)| (path.display().to_string(), msg.clone()))
+        .collect();
+    errors_dialog(
+        ctx,
+        "Scrub errors",
+        "These files are corrupted and could not be repaired:",
+        &entries,
+        &mut state.library.show_scrub_errors,
+    );
+}
+
+pub(crate) fn delete_errors_dialog(ctx: &egui::Context, state: &mut AppState) {
+    // Cloned rather than borrowed: `errors_dialog` needs the open flag from the
+    // same state the list lives in.
+    let entries = state.library.last_delete_errors.clone();
+    errors_dialog(
+        ctx,
+        "Recently Deleted errors",
+        "These photos could not be moved:",
+        &entries,
+        &mut state.library.show_delete_errors,
+    );
+}
+
+/// One `(subject, message)` list, rendered the same way whichever background
+/// task produced it.
+///
+/// `open` is cleared when the list is empty as well as when the window is
+/// dismissed: a stale flag would otherwise reopen an empty window the next time
+/// its task ran.
+fn errors_dialog(
+    ctx: &egui::Context,
+    title: &str,
+    blurb: &str,
+    entries: &[(String, String)],
+    open: &mut bool,
+) {
+    if !*open {
         return;
     }
-    if state.library.last_scrub_errors.is_empty() {
-        state.library.show_scrub_errors = false;
+    if entries.is_empty() {
+        *open = false;
         return;
     }
 
-    let n = state.library.last_scrub_errors.len();
-    let mut open = true;
-    egui::Window::new(format!("Scrub errors ({n})"))
+    let mut window_open = true;
+    let mut close = false;
+    egui::Window::new(format!("{title} ({})", entries.len()))
         .collapsible(false)
         .resizable(true)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .open(&mut open)
+        .open(&mut window_open)
         .show(ctx, |ui| {
-            ui.label("These files are corrupted and could not be repaired:");
+            ui.label(blurb);
             ui.add_space(6.0);
             ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                for (path, msg) in &state.library.last_scrub_errors {
-                    ui.label(egui::RichText::new(path.display().to_string()).strong());
+                for (subject, msg) in entries {
+                    ui.label(egui::RichText::new(subject).strong());
                     ui.colored_label(egui::Color32::RED, msg);
                     ui.add_space(4.0);
                 }
             });
             ui.add_space(8.0);
             if ui.button("Close").clicked() {
-                state.library.show_scrub_errors = false;
+                close = true;
             }
         });
-    if !open {
-        state.library.show_scrub_errors = false;
+    if close || !window_open {
+        *open = false;
+    }
+}
+
+// ── Folder import options ─────────────────────────────────────────────────────
+
+/// Ask what collection a folder import should file its photos into.
+///
+/// Shown between picking the folder and starting the import, because neither
+/// file-picker backend has room for the question.  The choice is remembered in
+/// the prefs so a photographer who always wants a collection per shoot answers
+/// once; the name is not, being particular to the import.
+pub(crate) fn folder_import_dialog(ctx: &egui::Context, state: &mut AppState) {
+    if state.library.folder_import_prompt.is_none() {
+        return;
+    }
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        state.library.folder_import_prompt = None;
+        return;
+    }
+
+    let mut start = false;
+    let mut cancel = false;
+    let mut open = true;
+    egui::Window::new("Import Folder")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let Some(prompt) = state.library.folder_import_prompt.as_mut() else {
+                return;
+            };
+            ui.label(
+                egui::RichText::new(prompt.folder.display().to_string())
+                    .strong()
+                    .monospace(),
+            );
+            ui.add_space(8.0);
+            ui.label("Add the imported photos to:");
+
+            ui.radio_value(&mut prompt.choice, ImportCollectionChoice::None, "Nothing")
+                .on_hover_text("Import the photos without putting them in a collection.");
+            ui.radio_value(
+                &mut prompt.choice,
+                ImportCollectionChoice::PerFolder,
+                "A collection per folder",
+            )
+            .on_hover_text(
+                "Each folder that directly holds photos gets a collection named after it.",
+            );
+            ui.horizontal(|ui| {
+                ui.radio_value(
+                    &mut prompt.choice,
+                    ImportCollectionChoice::Named,
+                    "One collection:",
+                );
+                let response = ui
+                    .add(egui::TextEdit::singleline(&mut prompt.name).hint_text("Collection name"));
+                if response.gained_focus() {
+                    prompt.choice = ImportCollectionChoice::Named;
+                }
+                if prompt.choice == ImportCollectionChoice::Named && !prompt.focused {
+                    prompt.focused = true;
+                    response.request_focus();
+                }
+                if prompt.choice != ImportCollectionChoice::Named {
+                    prompt.focused = false;
+                }
+            });
+
+            if prompt.choice != ImportCollectionChoice::None {
+                ui.add_space(4.0);
+                ui.weak(
+                    "A collection that already goes by the name is used as it is, so \
+                     importing the same folder again adds only what is new.",
+                );
+            }
+
+            let ready = prompt.to_import_collection().is_some();
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(ready, egui::Button::new("Import"))
+                    .on_disabled_hover_text("Enter a name for the collection.")
+                    .clicked()
+                {
+                    start = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+            // Enter starts the import from anywhere in the dialog, including
+            // straight out of the name field, which drops focus on Enter.
+            if ready && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                start = true;
+            }
+        });
+
+    if cancel || !open {
+        state.library.folder_import_prompt = None;
+        return;
+    }
+    if !start {
+        return;
+    }
+    let Some(prompt) = state.library.folder_import_prompt.take() else {
+        return;
+    };
+    let Some(collection) = prompt.to_import_collection() else {
+        return;
+    };
+    if state.prefs.import_collection != prompt.choice {
+        state.prefs.import_collection = prompt.choice;
+        state.prefs.save();
+    }
+    state.import_folder_into_library(prompt.folder, collection);
+}
+
+// ── Collection dialogs ────────────────────────────────────────────────────────
+
+fn collection_dialogs(ctx: &egui::Context, state: &mut AppState) {
+    match state.library.collection_prompt {
+        Some(CollectionPrompt::New { .. } | CollectionPrompt::Rename { .. }) => {
+            collection_name_dialog(ctx, state)
+        }
+        Some(CollectionPrompt::Delete { .. }) => delete_collection_dialog(ctx, state),
+        None => {}
+    }
+}
+
+/// The dialog for naming a collection, whether it is being created or renamed.
+///
+/// Both are the same question — one line of text, and a name the library may
+/// refuse — so a rejected name keeps the dialog open with what was typed still
+/// in it and the cursor back in the field, rather than making the user start
+/// again.
+fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let (title, action, photo_count) = match &state.library.collection_prompt {
+        Some(CollectionPrompt::New { photos, .. }) => ("New Collection", "Create", photos.len()),
+        Some(CollectionPrompt::Rename { .. }) => ("Rename Collection", "Rename", 0),
+        _ => return,
+    };
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        state.library.collection_prompt = None;
+        return;
+    }
+
+    let mut commit = false;
+    let mut cancel = false;
+    let mut open = true;
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            // Borrow the entry only for the text field, so the buttons below
+            // are free to touch the rest of the state.
+            let (response, error) = {
+                let Some(entry) = state
+                    .library
+                    .collection_prompt
+                    .as_mut()
+                    .and_then(name_entry)
+                else {
+                    return;
+                };
+                let response = ui
+                    .add(egui::TextEdit::singleline(&mut entry.name).hint_text("Collection name"));
+                if !entry.focused {
+                    entry.focused = true;
+                    response.request_focus();
+                }
+                (response, entry.error.clone())
+            };
+
+            if photo_count > 0 {
+                let noun = if photo_count == 1 { "photo" } else { "photos" };
+                ui.weak(format!("{photo_count} selected {noun} will be added."));
+            }
+            if let Some(error) = error {
+                ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
+            }
+
+            let pressed_enter =
+                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(action).clicked() || pressed_enter {
+                    commit = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if cancel || !open {
+        state.library.collection_prompt = None;
+        return;
+    }
+    if !commit {
+        return;
+    }
+
+    let (result, mut prompt) = match state.library.collection_prompt.take() {
+        Some(CollectionPrompt::New { entry, photos }) => (
+            state.library.create_collection(&entry.name, &photos),
+            CollectionPrompt::New { entry, photos },
+        ),
+        Some(CollectionPrompt::Rename { id, entry }) => (
+            state.library.rename_collection(id, &entry.name),
+            CollectionPrompt::Rename { id, entry },
+        ),
+        _ => return,
+    };
+    if let Err(message) = result
+        && let Some(entry) = name_entry(&mut prompt)
+    {
+        entry.error = Some(message);
+        entry.focused = false;
+        state.library.collection_prompt = Some(prompt);
+    }
+}
+
+/// The text being typed, for the two prompts that ask for a name.
+fn name_entry(
+    prompt: &mut CollectionPrompt,
+) -> Option<&mut crate::state::library_state::NameEntry> {
+    match prompt {
+        CollectionPrompt::New { entry, .. } | CollectionPrompt::Rename { entry, .. } => Some(entry),
+        CollectionPrompt::Delete { .. } => None,
+    }
+}
+
+fn delete_collection_dialog(ctx: &egui::Context, state: &mut AppState) {
+    let Some(CollectionPrompt::Delete { ids }) = &state.library.collection_prompt else {
+        return;
+    };
+    let ids = ids.clone();
+    let names: Vec<String> = ids
+        .iter()
+        .filter_map(|&id| state.library.collection_name(id).map(str::to_owned))
+        .collect();
+    let photo_count = ids
+        .first()
+        .map_or(0, |&id| state.library.collection_len(id));
+
+    // Deleting collections goes through the same one-at-a-time worker as the
+    // Recently Deleted operations, so it waits its turn like they do; Enter is
+    // left unconsumed meanwhile rather than swallowed by a confirmation this
+    // dialog is in no position to act on.
+    let idle = !state.delete_running();
+    let (enter, esc) = ctx.input_mut(|i| {
+        (
+            idle && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+        )
+    });
+    if esc {
+        state.library.collection_prompt = None;
+        return;
+    }
+    if enter {
+        state.library.collection_prompt = None;
+        state.delete_collections(ids);
+        return;
+    }
+
+    let title = match names.as_slice() {
+        [name] => format!("Delete the collection “{name}”?"),
+        _ => format!("Delete {} collections?", ids.len()),
+    };
+    let button = if ids.len() == 1 {
+        "Delete Collection".to_owned()
+    } else {
+        format!("Delete {} Collections", ids.len())
+    };
+
+    let mut delete = false;
+    let mut cancel = false;
+    let mut open = true;
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .open(&mut open)
+        .show(ctx, |ui| {
+            // With several going at once the names are the only way to check
+            // that the marked set is the one the user meant.
+            if names.len() > 1 {
+                for name in &names {
+                    ui.label(format!("• {name}"));
+                }
+                ui.add_space(4.0);
+                ui.label("The photos in them stay in the library — only the collections go.");
+            } else if photo_count == 0 {
+                ui.label("The collection is empty.");
+            } else {
+                let noun = if photo_count == 1 { "photo" } else { "photos" };
+                ui.label(format!(
+                    "Its {photo_count} {noun} stay in the library — only the collection goes."
+                ));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(idle, egui::Button::new(&button))
+                    .on_disabled_hover_text(BUSY_HINT)
+                    .clicked()
+                {
+                    delete = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if delete {
+        state.library.collection_prompt = None;
+        state.delete_collections(ids);
+    } else if cancel || !open {
+        state.library.collection_prompt = None;
     }
 }
 
@@ -499,16 +986,21 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         ui.strong("Import Sessions");
         sessions_tree_ui(ui, state, &sessions);
 
-        // Collections
+        // Collections — user-made groupings, filled from the grid's right-click
+        // menu. Membership is per photo, so a photo can be in several.
         ui.add_space(4.0);
-        ui.strong("Collections");
-        let collections = state.library.collections.clone();
-        for coll in &collections {
-            let selected = state.library.view == LibraryView::Collection(coll.id);
-            if ui.selectable_label(selected, &coll.name).clicked() {
-                select_view(state, LibraryView::Collection(coll.id));
+        ui.horizontal(|ui| {
+            ui.strong("Collections");
+            if ui
+                .small_button("➕")
+                .on_hover_text("Create an empty collection")
+                .clicked()
+            {
+                state.library.collection_prompt =
+                    Some(CollectionPrompt::new_collection(Vec::new()));
             }
-        }
+        });
+        collections_ui(ui, state);
 
         ui.add_space(8.0);
         ui.separator();
@@ -667,6 +1159,38 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             validation_popup(ui.ctx(), &resp, "iso", state.library.iso_error.as_deref());
         });
 
+        // Resolution — e.g. "<1600x1200", ">=1920x1080", or an exact "640x480"
+        ui.horizontal(|ui| {
+            ui.label("Resolution:");
+            let resp = ui.text_edit_singleline(&mut state.library.resolution_text);
+            if resp.changed() {
+                match validate_resolution(&state.library.resolution_text) {
+                    Ok(Some((min, max))) => {
+                        state.library.filter.resolution_min = min;
+                        state.library.filter.resolution_max = max;
+                        state.library.resolution_error = None;
+                    }
+                    Ok(None) => {
+                        state.library.filter.resolution_min = None;
+                        state.library.filter.resolution_max = None;
+                        state.library.resolution_error = None;
+                    }
+                    Err(msg) => {
+                        state.library.filter.resolution_min = None;
+                        state.library.filter.resolution_max = None;
+                        state.library.resolution_error = Some(msg);
+                    }
+                }
+                changed = true;
+            }
+            validation_popup(
+                ui.ctx(),
+                &resp,
+                "resolution",
+                state.library.resolution_error.as_deref(),
+            );
+        });
+
         // Edited only
         ui.horizontal(|ui| {
             let mut v = state.library.filter.has_edits_only;
@@ -684,7 +1208,8 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         // so the user can recover without having to find the offending field.
         let has_error = state.library.iso_error.is_some()
             || state.library.aperture_error.is_some()
-            || state.library.shutter_error.is_some();
+            || state.library.shutter_error.is_some()
+            || state.library.resolution_error.is_some();
         if !state.library.filter.is_empty() || has_error {
             ui.add_space(4.0);
             if ui.button("Clear Filters").clicked() {
@@ -692,9 +1217,11 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 state.library.iso_exact_text.clear();
                 state.library.aperture_exact_text.clear();
                 state.library.shutter_exact_text.clear();
+                state.library.resolution_text.clear();
                 state.library.iso_error = None;
                 state.library.aperture_error = None;
                 state.library.shutter_error = None;
+                state.library.resolution_error = None;
                 state.library.refresh();
             }
         }
@@ -706,14 +1233,114 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
 fn select_view(state: &mut AppState, view: LibraryView) {
     state.library.view = view;
     state.library.select_none();
+    // Marks belong to the sidebar list, not to the grid: moving off the
+    // collections leaves nothing marked behind to act on by accident.
+    state.library.marked_collections.clear();
     state.library.filter = SearchFilter::default();
     state.library.iso_exact_text.clear();
     state.library.aperture_exact_text.clear();
     state.library.shutter_exact_text.clear();
+    state.library.resolution_text.clear();
     state.library.iso_error = None;
     state.library.aperture_error = None;
     state.library.shutter_error = None;
+    state.library.resolution_error = None;
     state.library.refresh();
+}
+
+// ── Collections ───────────────────────────────────────────────────────────────
+
+fn collections_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    if state.library.collections.is_empty() {
+        ui.weak("No collections yet")
+            .on_hover_text("Right-click photos in the grid to put them in one");
+        return;
+    }
+
+    for coll in state.library.collections.clone() {
+        // Marked collections read as selected too, so a ctrl-click set looks
+        // the same as the one collection the grid is showing.
+        let selected = state.library.view == LibraryView::Collection(coll.id)
+            || state.library.marked_collections.contains(&coll.id);
+        let label = format!("{}  ({})", coll.name, state.library.collection_len(coll.id));
+        let response = ui.selectable_label(selected, label);
+        if response.clicked() {
+            // Same modifiers as the grid: ctrl toggles one, shift takes the
+            // run up to it, a plain click opens the collection on its own.
+            let (ctrl, shift) = ui.input(|i| (i.modifiers.ctrl, i.modifiers.shift));
+            if ctrl {
+                toggle_collection_mark(state, coll.id);
+            } else if shift {
+                extend_collection_marks(state, coll.id);
+            } else {
+                select_view(state, LibraryView::Collection(coll.id));
+                state.library.marked_collections = vec![coll.id];
+            }
+        }
+        response.context_menu(|ui| {
+            // Right-clicking outside the marked set acts on what was clicked,
+            // matching the grid's right-click.
+            if !state.library.marked_collections.contains(&coll.id) {
+                state.library.marked_collections = vec![coll.id];
+            }
+            let marked = state.library.marked_collections.clone();
+            let n = marked.len();
+
+            if ui
+                .add_enabled(n == 1, egui::Button::new("Rename…"))
+                .on_disabled_hover_text("Renaming takes one collection at a time.")
+                .clicked()
+            {
+                state.library.collection_prompt =
+                    Some(CollectionPrompt::rename(coll.id, &coll.name));
+                ui.close();
+            }
+            let label = if n == 1 {
+                "Delete Collection…".to_owned()
+            } else {
+                format!("Delete {n} Collections…")
+            };
+            if ui
+                .add_enabled(!state.delete_running(), egui::Button::new(label))
+                .on_disabled_hover_text(BUSY_HINT)
+                .clicked()
+            {
+                state.library.collection_prompt = Some(CollectionPrompt::Delete { ids: marked });
+                ui.close();
+            }
+        });
+    }
+}
+
+/// Add a collection to the marked set, or take it back out.
+fn toggle_collection_mark(state: &mut AppState, id: CollectionId) {
+    let marked = &mut state.library.marked_collections;
+    if let Some(pos) = marked.iter().position(|&x| x == id) {
+        marked.remove(pos);
+    } else {
+        marked.push(id);
+    }
+}
+
+/// Mark every collection between the one marked last and `id`, in the order
+/// the sidebar lists them.
+fn extend_collection_marks(state: &mut AppState, id: CollectionId) {
+    let Some(&last) = state.library.marked_collections.last() else {
+        state.library.marked_collections = vec![id];
+        return;
+    };
+    let order = &state.library.collections;
+    let position = |target| order.iter().position(|c| c.id == target);
+    let (Some(a), Some(b)) = (position(last), position(id)) else {
+        return;
+    };
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let run: Vec<CollectionId> = order[lo..=hi].iter().map(|c| c.id).collect();
+    for id in run {
+        if !state.library.marked_collections.contains(&id) {
+            state.library.marked_collections.push(id);
+        }
+    }
 }
 
 // ── Recent imports ────────────────────────────────────────────────────────────
@@ -867,6 +1494,8 @@ const SHUTTER_MIN_SEC: f64 = 1e-5; // 1/100000 s
 const SHUTTER_MAX_SEC: f64 = 3600.0; // 1 hour
 const APERTURE_MIN: f32 = 0.5;
 const APERTURE_MAX: f32 = 100.0;
+const RESOLUTION_MIN: u32 = 1;
+const RESOLUTION_MAX: u32 = 1_000_000;
 const ISO_MIN: u32 = 10;
 const ISO_MAX: u32 = 1_000_000;
 
@@ -936,6 +1565,65 @@ fn validate_iso(s: &str) -> Result<Option<u32>, String> {
     Ok(Some(v))
 }
 
+/// Inclusive `(min, max)` pixel-dimension bounds for the search filter.
+type ResolutionBounds = (Option<Resolution>, Option<Resolution>);
+
+/// Parse a resolution filter such as `<1600x1200`, `>=1920x1080` or a bare
+/// `640x480` (exact match).  Comparisons apply to the long and short edge
+/// rather than to width and height, so orientation does not matter.
+fn validate_resolution(s: &str) -> Result<Option<ResolutionBounds>, String> {
+    const SYNTAX: &str = "Use a size like 1600x1200, optionally prefixed with <, <=, > or >=";
+
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let (op, rest) = if let Some(rest) = s.strip_prefix("<=") {
+        ("<=", rest)
+    } else if let Some(rest) = s.strip_prefix(">=") {
+        (">=", rest)
+    } else if let Some(rest) = s.strip_prefix('<') {
+        ("<", rest)
+    } else if let Some(rest) = s.strip_prefix('>') {
+        (">", rest)
+    } else {
+        ("=", s)
+    };
+
+    let (w, h) = rest
+        .trim()
+        .split_once(['x', 'X', '\u{d7}'])
+        .ok_or_else(|| SYNTAX.to_owned())?;
+    let edge = |part: &str| -> Result<u32, String> {
+        let v: u32 = part.trim().parse().map_err(|_| SYNTAX.to_owned())?;
+        if !(RESOLUTION_MIN..=RESOLUTION_MAX).contains(&v) {
+            return Err(format!(
+                "Each side must be between {RESOLUTION_MIN} and {RESOLUTION_MAX} pixels (got {v})"
+            ));
+        }
+        Ok(v)
+    };
+    let limit = Resolution::new(edge(w)?, edge(h)?);
+
+    // Strict bounds become inclusive ones a pixel in: the stored dimensions
+    // are whole pixels, so "< 1600x1200" is "<= 1599x1199".
+    let tighter = Resolution {
+        long_edge: limit.long_edge.saturating_sub(1),
+        short_edge: limit.short_edge.saturating_sub(1),
+    };
+    let looser = Resolution {
+        long_edge: limit.long_edge + 1,
+        short_edge: limit.short_edge + 1,
+    };
+    Ok(Some(match op {
+        "<" => (None, Some(tighter)),
+        "<=" => (None, Some(limit)),
+        ">" => (Some(looser), None),
+        ">=" => (Some(limit), None),
+        _ => (Some(limit), Some(limit)),
+    }))
+}
+
 /// Draw a small warning popup just below the given text-edit response.
 /// Shown only when `error` is `Some`; disappears automatically when cleared.
 fn validation_popup(
@@ -970,6 +1658,7 @@ fn keyboard_nav(ui: &mut egui::Ui, state: &mut AppState, cols: usize) {
         || state.library.confirm_delete
         || state.library.confirm_permanent_delete
         || state.library.confirm_empty_recently_deleted
+        || state.library.collection_prompt.is_some()
         || state.library.results.is_empty()
     {
         return;
@@ -981,15 +1670,27 @@ fn keyboard_nav(ui: &mut egui::Ui, state: &mut AppState, cols: usize) {
         .first()
         .and_then(|&id| state.library.results.iter().position(|p| p.id == id));
 
-    let (left, right, up, down, enter) = ui.ctx().input_mut(|i| {
+    // Delete only offers to move photos out of the library proper; in Recently
+    // Deleted the destructive counterpart stays behind its explicit button.
+    let can_delete = state.library.view != LibraryView::RecentlyDeleted
+        && !state.library.selected.is_empty()
+        && !state.delete_running();
+
+    let (left, right, up, down, enter, delete) = ui.ctx().input_mut(|i| {
         (
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft),
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight),
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
             i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
             i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            can_delete && i.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
         )
     });
+
+    if delete {
+        state.library.confirm_delete = true;
+        return;
+    }
 
     let n = state.library.results.len();
     let new_idx = if let Some(idx) = current_idx {
@@ -1244,10 +1945,13 @@ fn thumb_cell(
             state.library.select_only(id);
         }
         let n = state.library.selected.len();
+        // Matches the toolbar: one bulk operation at a time, and an entry that
+        // would only be ignored is better shown as unavailable than as working.
+        let idle = !state.delete_running();
 
         if state.library.view == LibraryView::RecentlyDeleted {
-            if ui.button("Restore").clicked() {
-                state.library.restore_selected();
+            if ui.add_enabled(idle, egui::Button::new("Restore")).clicked() {
+                state.restore_selected();
                 ui.close();
             }
             let label = if n == 1 {
@@ -1255,7 +1959,7 @@ fn thumb_cell(
             } else {
                 format!("Delete {n} Permanently")
             };
-            if ui.button(label).clicked() {
+            if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
                 state.library.confirm_permanent_delete = true;
                 ui.close();
             }
@@ -1293,6 +1997,9 @@ fn thumb_cell(
         }
         ui.separator();
 
+        collections_menu(ui, state, n);
+        ui.separator();
+
         // Protect / Unprotect toggle for the whole selection.
         let all_protected = state.library.all_selected_protected();
         let protect_label = if all_protected {
@@ -1310,8 +2017,52 @@ fn thumb_cell(
         } else {
             format!("Move {n} to Recently Deleted")
         };
-        if ui.button(label).clicked() {
+        if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
             state.library.confirm_delete = true;
+            ui.close();
+        }
+    });
+}
+
+/// The grid context menu's Collections submenu.
+///
+/// One row per collection, marked with how much of the selection it already
+/// holds, and clicking a row moves the selection the way that mark implies: a
+/// collection holding all of it lets the selection out, any other takes in the
+/// photos it is missing. One list rather than separate add and remove menus,
+/// because with the marks in front of the names it is also the answer to
+/// "which collections is this photo in?".
+fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
+    ui.menu_button("Collections", |ui| {
+        for coll in state.library.collections.clone() {
+            let membership = state.library.selection_membership(coll.id);
+            let (mark, hover) = match membership {
+                Membership::All if selection == 1 => ("✔", "Remove this photo".to_owned()),
+                Membership::All => ("✔", format!("Remove these {selection} photos")),
+                Membership::Partial => ("–", "Add the rest of the selection".to_owned()),
+                Membership::None if selection == 1 => (" ", "Add this photo".to_owned()),
+                Membership::None => (" ", format!("Add these {selection} photos")),
+            };
+            if ui
+                .button(format!("{mark}  {}", coll.name))
+                .on_hover_text(hover)
+                .clicked()
+            {
+                if membership == Membership::All {
+                    state.library.remove_selected_from_collection(coll.id);
+                } else {
+                    state.library.add_selected_to_collection(coll.id);
+                }
+                ui.close();
+            }
+        }
+
+        if !state.library.collections.is_empty() {
+            ui.separator();
+        }
+        if ui.button("New Collection…").clicked() {
+            let photos = state.library.selected.clone();
+            state.library.collection_prompt = Some(CollectionPrompt::new_collection(photos));
             ui.close();
         }
     });
@@ -1338,6 +2089,34 @@ fn fit_rect_preserve_aspect(outer: egui::Rect, w: u32, h: u32) -> egui::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolution_input_parses_every_comparison_form() {
+        let r = |a, b| Some(Resolution::new(a, b));
+        // (input, min, max)
+        let cases: &[(&str, Option<Resolution>, Option<Resolution>)] = &[
+            ("1600x1200", r(1600, 1200), r(1600, 1200)),
+            ("<1600x1200", None, r(1599, 1199)),
+            ("<=1600x1200", None, r(1600, 1200)),
+            (">1920x1080", r(1921, 1081), None),
+            (">=1920x1080", r(1920, 1080), None),
+            // Orientation, case and spacing are all normalised away.
+            (" < 1200 X 1600 ", None, r(1599, 1199)),
+            ("1200\u{d7}1600", r(1600, 1200), r(1600, 1200)),
+        ];
+        for (input, min, max) in cases {
+            let got = validate_resolution(input).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(got, Some((*min, *max)), "{input}");
+        }
+    }
+
+    #[test]
+    fn resolution_input_rejects_what_it_cannot_use() {
+        assert_eq!(validate_resolution("   ").unwrap(), None, "blank clears it");
+        for bad in ["1600", "1600*1200", "x1200", "1600x", "0x100", "1600x1e9"] {
+            assert!(validate_resolution(bad).is_err(), "{bad} should not parse");
+        }
+    }
 
     fn sess(id: &str, started_at: u64, photo_count: i64) -> ImportSessionRow {
         ImportSessionRow {

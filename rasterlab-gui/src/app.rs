@@ -269,6 +269,9 @@ impl RasterLabApp {
     /// Select the currently-open library photo and raise the delete confirmation.
     #[cfg(not(target_arch = "wasm32"))]
     fn trigger_editor_delete(&mut self) {
+        if self.state.delete_running() {
+            return;
+        }
         let Some((_, ref hash)) = self.state.library_context.clone() else {
             return;
         };
@@ -438,7 +441,7 @@ impl RasterLabApp {
             DialogKind::ImportFiles => self.state.import_into_library(paths),
             DialogKind::ImportFolder => {
                 if let Some(p) = first() {
-                    self.state.import_folder_into_library(p)
+                    self.state.prompt_folder_import(p)
                 }
             }
             DialogKind::ExportDestination => {
@@ -681,9 +684,27 @@ impl eframe::App for RasterLabApp {
                             },
                         );
                         ui.add_enabled_ui(self.state.library.library.is_some(), |ui| {
-                            if ui.button("Rebuild Library Index").clicked() {
+                            let running = self.state.rebuild_running();
+                            let label = if running {
+                                "Stop Index Rebuild"
+                            } else {
+                                "Rebuild Library Index"
+                            };
+                            if ui
+                                .button(label)
+                                .on_hover_text(
+                                    "Bring the index back in line with the photo files on \
+                                     disk. Stopping keeps whatever it has re-indexed; run \
+                                     it again to finish.",
+                                )
+                                .clicked()
+                            {
                                 ui.close_kind(egui::UiKind::Menu);
-                                self.state.rebuild_library_index();
+                                if running {
+                                    self.state.stop_rebuild();
+                                } else {
+                                    self.state.rebuild_library_index();
+                                }
                             }
                         });
                         ui.add_enabled_ui(self.state.library.library.is_some(), |ui| {
@@ -952,6 +973,10 @@ impl eframe::App for RasterLabApp {
         // File menu work identically from either view.
         export_dialog::ui(&ctx, &mut self.state);
 
+        // The folder-import question is asked from the File menu, which is
+        // reachable in either mode, so it cannot live inside the library panel.
+        library_panel::folder_import_dialog(&ctx, &mut self.state);
+
         // ── Delete confirmation (editor mode) ────────────────────────────
         // The confirmation dialog lives in library_panel but must also appear
         // when the user presses Delete while editing a library photo.
@@ -961,12 +986,19 @@ impl eframe::App for RasterLabApp {
 
             // If a delete was triggered from the editor and the dialog has been
             // dismissed (confirmed or cancelled), decide what to do next.
+            //
+            // A confirmed delete now runs in the background, so the answer is
+            // not in yet while one is in flight: waiting for it to finish is
+            // what makes the `hash_gone` test below mean "deleted" rather than
+            // "not deleted yet".
             if let Some(old_idx) = self.editor_delete_at_idx
                 && !self.state.library.confirm_delete
+                && !self.state.delete_running()
             {
                 self.editor_delete_at_idx = None;
                 // A hash_gone check distinguishes confirmed vs. cancelled:
-                // after cancel the photo is still in results.
+                // after cancel — and after a delete that was stopped or failed
+                // before reaching this photo — it is still in results.
                 let hash_gone = self
                     .state
                     .library_context

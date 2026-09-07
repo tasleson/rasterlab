@@ -1,9 +1,7 @@
-use std::any::Any;
-
 use egui::DragValue;
 use rasterlab_core::ops::DenoiseOp;
-use rasterlab_core::traits::operation::Operation;
 
+use super::shared::{ParamTool, param_tool_actions};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
@@ -20,6 +18,29 @@ impl DenoiseTool {
             radius: 3,
             preview_active: false,
         }
+    }
+}
+
+impl ParamTool for DenoiseTool {
+    type Op = DenoiseOp;
+
+    const APPLY: &'static str = "Apply Denoise";
+
+    fn op(&self) -> DenoiseOp {
+        DenoiseOp::new(self.strength, self.radius)
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn load(&mut self, op: &DenoiseOp) {
+        self.strength = op.strength;
+        self.radius = op.radius;
+    }
+
+    fn preview_active(&mut self) -> &mut bool {
+        &mut self.preview_active
     }
 }
 
@@ -60,62 +81,7 @@ impl Tool for DenoiseTool {
                     .changed();
                 ui.end_row();
             });
-        let mut action = ToolAction::None;
-        if changed && ctx.has_image {
-            self.preview_active = true;
-            action = ToolAction::RequestRender;
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply Denoise"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(DenoiseOp::new(self.strength, self.radius)));
-                self.strength = 0.5;
-                self.radius = 3;
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.strength = 0.5;
-                self.radius = 3;
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
-        action
+        param_tool_actions(ui, ctx, self, changed)
     }
-
-    super::shared::impl_preview_controls!();
-    fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active {
-            Some(Box::new(DenoiseOp::new(self.strength, self.radius)))
-        } else {
-            None
-        }
-    }
-    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<DenoiseOp>()) {
-            self.strength = o.strength;
-            self.radius = o.radius;
-            true
-        } else {
-            false
-        }
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    super::shared::impl_param_tool!();
 }

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -10,14 +11,14 @@ use std::{
 use anyhow::{Context, Result};
 use rasterlab_core::{
     formats::{FormatRegistry, exif_util::read_capture_date_from_prefix},
-    library_meta::{FileTimeStamp, LibraryExif, LibraryMeta},
+    library_meta::{CollectionRef, FileTimeStamp, LibraryExif, LibraryMeta},
     project::{RlabFile, is_rlab_path},
     verified_write::create_dir_all_synced,
 };
 use uuid::Uuid;
 
 use crate::{
-    db_trait::LibraryDb,
+    db_trait::{CollectionId, CollectionRow, LibraryDb, NewPhoto, PhotoId},
     library::ImportProgress,
     thumbnail::{generate_thumbnail, write_thumbnail},
 };
@@ -32,6 +33,102 @@ pub struct ImportSession {
     pub started_at: u64,
     pub photo_count: usize,
     pub errors: Vec<(std::path::PathBuf, String)>,
+}
+
+/// What collection, if any, an import files the photos it brings in into.
+///
+/// Only *newly* imported photos join: a file already in the library is skipped
+/// as a duplicate and its memberships are left as the user last set them.  That
+/// is what makes re-running an import over a folder cheap and predictable —
+/// the second run adds whatever is new and touches nothing else.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ImportCollection {
+    /// Leave collections alone.
+    #[default]
+    None,
+    /// One collection per directory that directly holds photos, named after
+    /// that directory.  A recursive import of a tree of shoot folders comes out
+    /// as one collection per shoot.
+    PerFolder,
+    /// A single collection, under this name, for everything the run imports.
+    Named(String),
+}
+
+impl ImportCollection {
+    /// The collection name for a source file, or `None` when this mode files
+    /// nothing.
+    fn name_for(&self, path: &Path) -> Option<String> {
+        let name = match self {
+            Self::None => return None,
+            Self::PerFolder => path.parent()?.file_name()?.to_string_lossy().into_owned(),
+            Self::Named(name) => name.clone(),
+        };
+        let name = name.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+}
+
+/// Hands each imported file the collection row it should join, creating
+/// collections the first time a name comes up.
+///
+/// An existing collection of the same name is reused rather than duplicated,
+/// so importing the same folder again — or a second folder of the same name —
+/// adds to the collection the user already has.  The match ignores ASCII case,
+/// matching what the UI refuses to let the user create by hand.
+struct CollectionAssigner<'a> {
+    db: &'a dyn LibraryDb,
+    mode: ImportCollection,
+    /// Name (as asked for) → the row it resolved to.  Without this the whole
+    /// collection list would be re-read once per imported photo.
+    resolved: HashMap<String, CollectionRow>,
+}
+
+impl<'a> CollectionAssigner<'a> {
+    fn new(db: &'a dyn LibraryDb, mode: ImportCollection) -> Self {
+        Self {
+            db,
+            mode,
+            resolved: HashMap::new(),
+        }
+    }
+
+    fn for_path(&mut self, path: &Path) -> Result<Option<CollectionRow>> {
+        let Some(name) = self.mode.name_for(path) else {
+            return Ok(None);
+        };
+        if let Some(row) = self.resolved.get(&name) {
+            return Ok(Some(row.clone()));
+        }
+        let existing = self
+            .db
+            .all_collections()?
+            .into_iter()
+            .find(|row| row.name.eq_ignore_ascii_case(&name));
+        let row = match existing {
+            Some(row) => row,
+            None => {
+                // Minted here for the same reason `Library::create_collection`
+                // mints it: the uuid goes into every member file and has to
+                // outlive an index rebuild, which reassigns row ids.
+                let uuid = Uuid::new_v4().to_string();
+                let now = unix_now();
+                let id = self
+                    .db
+                    .create_collection(&uuid, &name, now)
+                    .with_context(|| format!("create collection “{name}”"))?;
+                CollectionRow {
+                    id,
+                    uuid,
+                    name: name.clone(),
+                    created_at: now,
+                }
+            }
+        };
+        // Keyed by the name that was asked for, not the row's: a collection
+        // matched case-insensitively still has to be found again next time
+        // without re-reading the whole collection list.
+        Ok(Some(self.resolved.entry(name).or_insert(row).clone()))
+    }
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -77,6 +174,9 @@ pub fn import_files(
 
     // Detect RAW+JPEG stacks within this batch before importing.
     let stack_map = detect_stacks(paths);
+    // Picking individual files says nothing about which collection they belong
+    // in, so this import files nothing.
+    let mut assigner = CollectionAssigner::new(db, ImportCollection::None);
 
     let mut processed = 0usize;
     let mut imported = 0usize;
@@ -108,12 +208,13 @@ pub fn import_files(
             &stack_map,
             now,
             None,
+            &mut assigner,
         ) {
             Ok(None) => {
                 skipped_duplicates += 1;
             }
-            Ok(Some(hash)) => {
-                imported_hashes.push((path.clone(), hash));
+            Ok(Some(photo)) => {
+                imported_hashes.push((path.clone(), photo.hash));
                 imported += 1;
             }
             Err(e) => {
@@ -159,6 +260,7 @@ pub fn import_files(
 /// importing another tool's library reconstructs a believable, years-long
 /// history.  Capture time is taken from EXIF `DateTimeOriginal`, falling back to
 /// the file's modified time and then created time.
+#[allow(clippy::too_many_arguments)]
 pub fn import_folder_grouped(
     library_root: &Path,
     db: &dyn LibraryDb,
@@ -166,8 +268,10 @@ pub fn import_folder_grouped(
     paths: &[PathBuf],
     cancelled: Arc<AtomicBool>,
     source_dir: Option<&Path>,
+    collection: ImportCollection,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Result<Vec<ImportSession>> {
+    let mut assigner = CollectionAssigner::new(db, collection);
     let total = paths.len();
     // One clock reading for the whole run, so every group this import creates
     // sorts together in a recent-imports list.
@@ -263,9 +367,18 @@ pub fn import_folder_grouped(
                 &stack_map,
                 *ts,
                 Some(*ts),
+                &mut assigner,
             ) {
                 Ok(None) => skipped_duplicates += 1,
-                Ok(Some(_)) => {
+                Ok(Some(photo)) => {
+                    // Recorded as each photo lands rather than in one batch at
+                    // the end, so an import that is cancelled or crashes leaves
+                    // the index agreeing with the files it did write.
+                    if let Some(collection) = photo.collection
+                        && let Err(e) = db.add_to_collection(collection, &[photo.photo_id])
+                    {
+                        errors.push((path.clone(), format!("{:#}", e)));
+                    }
                     group_done += 1;
                     imported += 1;
                 }
@@ -446,11 +559,31 @@ fn recount_session(db: &dyn LibraryDb, session_id: &str) -> Result<()> {
 
 // ── Single-file import ────────────────────────────────────────────────────────
 
-/// Returns `Ok(Some(hash))` on success, `Ok(None)` if duplicate, `Err` on failure.
+/// What one successful [`import_one`] left behind.
+struct Imported {
+    /// Blake3 hex of the original file bytes.
+    hash: String,
+    photo_id: PhotoId,
+    /// The collection the photo was filed into, already recorded in its
+    /// `.rlab` and still to be recorded in the index.
+    collection: Option<CollectionId>,
+}
+
+/// Returns `Ok(Some(..))` on success, `Ok(None)` if duplicate, `Err` on
+/// failure.
 ///
 /// `import_date` is stored verbatim (callers back-date it for grouped imports),
 /// and `fallback_capture_ts` synthesises an EXIF capture date for files that
 /// carry none, so they still sort coherently by capture time.
+///
+/// `assigner` decides which collection the photo joins, and is consulted only
+/// once the file is known to be a genuinely new photograph — so a folder whose
+/// files are all already in the library leaves no empty collection behind.  The
+/// membership goes into the `.rlab` before it is written, which costs nothing:
+/// adding it afterwards through `Library::add_to_collection` would re-read and
+/// re-write every freshly written original just to add one line of metadata.
+/// Recording it in the *index* is still the caller's job, which is what the
+/// returned ids are for.
 #[allow(clippy::too_many_arguments)]
 fn import_one(
     library_root: &Path,
@@ -461,7 +594,8 @@ fn import_one(
     stack_map: &[(usize, usize)], // (primary_idx, secondary_idx) pairs by path index
     import_date: u64,
     fallback_capture_ts: Option<u64>,
-) -> Result<Option<String>> {
+    assigner: &mut CollectionAssigner<'_>,
+) -> Result<Option<Imported>> {
     // 1. Read source bytes + capture source-file timestamps.
     //    Stat first so we read the times the file had before we opened it.
     let fs_meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
@@ -555,7 +689,7 @@ fn import_one(
         None
     };
 
-    let lmta = if let Some(project) = imported_project.as_ref() {
+    let mut lmta = if let Some(project) = imported_project.as_ref() {
         // Preserve meaningful metadata already carried by a project (rating,
         // keywords, original source timestamps, etc.), but place it in this
         // import session. Editor-only projects have no LMTA, so derive their
@@ -603,6 +737,22 @@ fn import_one(
         }
     };
 
+    // Recorded in the file itself, so the `.rlab` is right from the moment it
+    // exists and a rebuild that never sees the index still finds the
+    // membership.
+    let collection = assigner.for_path(path)?;
+    if let Some(collection) = collection.as_ref()
+        && !lmta
+            .collection_refs
+            .iter()
+            .any(|held| held.id == collection.uuid)
+    {
+        lmta.collection_refs.push(CollectionRef {
+            id: collection.uuid.clone(),
+            name: collection.name.clone(),
+        });
+    }
+
     // 9. Write thumbnail.
     //
     // Steps 9–11 are ordered storage-first: the `.rlab` holds the only copy of
@@ -641,16 +791,27 @@ fn import_one(
     }
 
     // 11. Insert into DB
-    db.insert_photo(
-        &hash,
-        &relative_lib_path(&hash),
-        &lmta,
+    let photo_id = db.insert_photo(NewPhoto {
+        hash: &hash,
+        lib_path: &relative_lib_path(&hash),
+        lmta: &lmta,
         width,
         height,
-        stack_id.as_deref(),
-    )?;
+        stack_id: stack_id.as_deref(),
+        // An imported project arrives with its edit history intact, so the
+        // index has to say so from the start: a photo imported already edited
+        // is one the edited-only filter should find straight away rather than
+        // after the next save happens to rewrite its thumbnail.
+        has_edits: imported_project
+            .as_ref()
+            .is_some_and(|project| project.has_edits()),
+    })?;
 
-    Ok(Some(hash))
+    Ok(Some(Imported {
+        hash,
+        photo_id,
+        collection: collection.map(|row| row.id),
+    }))
 }
 
 /// Decode source bytes already loaded by the importer, retaining the source
@@ -715,6 +876,22 @@ pub fn rlab_path(library_root: &Path, hash: &str) -> PathBuf {
     library_root.join("files").join(relative_lib_path(hash))
 }
 
+/// Every `.rlab` under `dir`, or nothing at all when it does not exist.
+///
+/// A library keeps them under two roots — `files/` and
+/// `recently_deleted/files/` — and the passes that read the library back off
+/// the disk have to cover both.
+pub(crate) fn walk_rlab_files(dir: &Path) -> Vec<PathBuf> {
+    walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_type().is_file() && entry.path().extension().is_some_and(|x| x == "rlab")
+        })
+        .map(|entry| entry.into_path())
+        .collect()
+}
+
 pub fn thumb_path(library_root: &Path, hash: &str) -> PathBuf {
     library_root
         .join("thumbs")
@@ -729,8 +906,6 @@ pub fn thumb_path(library_root: &Path, hash: &str) -> PathBuf {
 /// file stem.  A single index pass builds a stem → JPEG-indices map so the whole
 /// thing is O(n); the previous nested scan was O(n²) and stalled large imports.
 fn detect_stacks(paths: &[PathBuf]) -> Vec<(usize, usize)> {
-    use std::collections::HashMap;
-
     let stem_of = |p: &Path| -> String {
         p.file_stem()
             .unwrap_or_default()
@@ -905,7 +1080,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

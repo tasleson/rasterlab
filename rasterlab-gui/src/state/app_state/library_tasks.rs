@@ -1,6 +1,6 @@
-//! Library background tasks: imports, integrity scrubs, index rebuilds,
-//! thumbnail loading/regeneration, and the handlers that fold their progress
-//! reports back into [`AppState`].
+//! Library background tasks: imports, bulk delete operations (Recently
+//! Deleted and collections), integrity scrubs, index rebuilds, thumbnail loading/regeneration, and the
+//! handlers that fold their progress reports back into [`AppState`].
 
 use std::{
     path::PathBuf as StdPathBuf,
@@ -13,8 +13,10 @@ use std::{
 
 use image as img_crate;
 use rasterlab_core::panic_guard;
+use rasterlab_library::CollectionId;
 
 use super::{AppMode, AppState, BgMessage, workers};
+use crate::state::library_state::{DeleteKind, DeleteTask};
 
 /// Number of worker threads servicing thumbnail loads. Fixed and small so a
 /// large library grid can't spawn thousands of threads at once.
@@ -192,9 +194,32 @@ impl AppState {
         );
     }
 
+    /// Ask what collection a folder import should file its photos into, rather
+    /// than starting the import straight away.
+    ///
+    /// The folder picker — native or built-in — has nowhere to put the
+    /// question, so it is asked in a dialog of its own once the folder is
+    /// known.  That also lets the dialog seed the collection name with the
+    /// folder's, which is what the user almost always wants.
+    pub fn prompt_folder_import(&mut self, folder: std::path::PathBuf) {
+        if self.library.library.is_none() {
+            return;
+        }
+        self.library.folder_import_prompt =
+            Some(crate::state::library_state::FolderImportPrompt::new(
+                folder,
+                self.prefs.import_collection,
+            ));
+    }
+
     /// Recursively import `folder`, grouping photos into back-dated import
-    /// sessions by capture date (see [`rasterlab_library::Library::import_folder`]).
-    pub fn import_folder_into_library(&mut self, folder: std::path::PathBuf) {
+    /// sessions by capture date (see [`rasterlab_library::Library::import_folder`]),
+    /// filing what it imports as `collection` says.
+    pub fn import_folder_into_library(
+        &mut self,
+        folder: std::path::PathBuf,
+        collection: rasterlab_library::ImportCollection,
+    ) {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
@@ -207,7 +232,7 @@ impl AppState {
             self.ctx.clone(),
             BgMessage::ImportFailed,
             move || {
-                let result = lib.import_folder(&folder, move |p| {
+                let result = lib.import_folder_into_collection(&folder, collection, move |p| {
                     let _ = progress_tx.send(BgMessage::ImportProgress(p));
                     progress_ctx.request_repaint();
                 });
@@ -290,6 +315,193 @@ impl AppState {
         self.library.thumbs.clear();
         self.library.refresh();
         self.status = format!("Import failed: {message}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Recently Deleted
+    // -----------------------------------------------------------------------
+
+    /// True while a bulk Recently Deleted operation is running.
+    pub fn delete_running(&self) -> bool {
+        self.delete_cancel.is_some()
+    }
+
+    /// Move the selection into the library-owned Recently Deleted area.
+    pub fn move_selected_to_recently_deleted(&mut self) {
+        self.start_delete_task(DeleteKind::ToRecentlyDeleted, Vec::new());
+    }
+
+    /// Move the selection back out of Recently Deleted.
+    pub fn restore_selected(&mut self) {
+        self.start_delete_task(DeleteKind::Restore, Vec::new());
+    }
+
+    /// Erase the selected Recently Deleted photos for good.
+    pub fn permanently_delete_selected(&mut self) {
+        self.start_delete_task(DeleteKind::Permanent, Vec::new());
+    }
+
+    /// Erase everything in Recently Deleted for good.
+    pub fn empty_recently_deleted(&mut self) {
+        self.start_delete_task(DeleteKind::Empty, Vec::new());
+    }
+
+    /// Delete collections, leaving the photos that were in them alone.
+    ///
+    /// The ids come from the confirmation the user answered rather than from
+    /// the marks as they stand now: the sidebar is still live behind the
+    /// dialog, and the batch that goes must be the batch that was listed.
+    pub fn delete_collections(&mut self, ids: Vec<CollectionId>) {
+        self.start_delete_task(DeleteKind::Collections, ids);
+    }
+
+    /// Request that a running bulk operation stop after the current photo.
+    pub fn stop_delete(&mut self) {
+        if let Some(cancel) = &self.delete_cancel {
+            cancel.store(true, Ordering::Relaxed);
+            if let Some(task) = &mut self.library.delete_task {
+                task.stopping = true;
+            }
+        }
+    }
+
+    /// Spawn the worker for one bulk delete operation.
+    ///
+    /// What the operation acts on is taken as the task starts rather than when
+    /// it finishes: those photos or collections are on their way out, and
+    /// leaving them marked invites a second run at them while the first is
+    /// still going.
+    fn start_delete_task(&mut self, kind: DeleteKind, collections: Vec<CollectionId>) {
+        if self.delete_running() {
+            return;
+        }
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        let mut photos = Vec::new();
+        match kind {
+            DeleteKind::Empty => {}
+            DeleteKind::Collections => self.library.leave_collections(&collections),
+            _ => photos = std::mem::take(&mut self.library.selected),
+        }
+        // Empty takes no list of its own, so seed its bar from the sidebar
+        // count until the worker's first report replaces it with the real
+        // total.
+        let total = match kind {
+            DeleteKind::Empty => self.library.recently_deleted_count,
+            DeleteKind::Collections => collections.len(),
+            _ => photos.len(),
+        };
+        if kind != DeleteKind::Empty && total == 0 {
+            return;
+        }
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.delete_cancel = Some(cancel.clone());
+        self.library.delete_task = Some(DeleteTask {
+            kind,
+            progress: rasterlab_library::DeleteProgress {
+                total,
+                ..Default::default()
+            },
+            stopping: false,
+        });
+        self.library.last_delete_errors.clear();
+        self.status = format!("{}…", kind.progress_verb());
+
+        let progress_tx = self.bg_tx.clone();
+        let progress_ctx = self.ctx.clone();
+        workers::spawn(
+            "rasterlab-library-delete",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            BgMessage::DeleteFailed,
+            move || {
+                let report = move |p: rasterlab_library::DeleteProgress| {
+                    let _ = progress_tx.send(BgMessage::DeleteProgress(p));
+                    progress_ctx.request_repaint();
+                };
+                let result = match kind {
+                    DeleteKind::ToRecentlyDeleted => {
+                        lib.move_to_recently_deleted(&photos, cancel, report)
+                    }
+                    DeleteKind::Restore => lib.restore_photos(&photos, cancel, report),
+                    DeleteKind::Permanent => {
+                        lib.purge_recently_deleted(Some(&photos), cancel, report)
+                    }
+                    DeleteKind::Empty => lib.purge_recently_deleted(None, cancel, report),
+                    DeleteKind::Collections => lib.delete_collections(&collections, cancel, report),
+                };
+                match result {
+                    Ok(outcome) => BgMessage::DeleteComplete { outcome },
+                    Err(e) => BgMessage::DeleteFailed(e.to_string()),
+                }
+            },
+        );
+    }
+
+    pub(super) fn on_delete_progress(&mut self, progress: rasterlab_library::DeleteProgress) {
+        // Mirror the running error list so the "⚠ N delete error(s)" button and
+        // its detail window work mid-run, not only once the whole run completes.
+        self.library.last_delete_errors = progress.errors.clone();
+        if let Some(task) = &mut self.library.delete_task {
+            task.progress = progress;
+        }
+    }
+
+    pub(super) fn on_delete_complete(&mut self, outcome: rasterlab_library::DeleteOutcome) {
+        let kind = self.finish_delete_task();
+        // Permanently erased photos will never be shown again, so their
+        // thumbnails are dead weight in the texture cache.
+        for hash in &outcome.purged {
+            self.library.thumbs.remove(hash);
+        }
+        self.library.refresh();
+
+        self.status = if outcome.cancelled {
+            format!(
+                "{} stopped after {}",
+                kind.progress_verb(),
+                kind.item_count(outcome.done)
+            )
+        } else {
+            format!("{} {}", kind.past_verb(), kind.item_count(outcome.done))
+        };
+        if !outcome.errors.is_empty() {
+            self.status
+                .push_str(&format!(", {} error(s)", outcome.errors.len()));
+        }
+        // Protected photos are a partly-unfollowed instruction, not a failure,
+        // so they get the banner rather than being lost in the status line.
+        if !outcome.protected.is_empty() {
+            self.library.last_error = Some(protected_message(&outcome.protected));
+        }
+        self.library.last_delete_errors = outcome.errors;
+    }
+
+    /// Terminal handler for a bulk operation that will never report again.
+    ///
+    /// Refreshes like a completed one: a run that died partway through still
+    /// moved the photos it had already got to, and they should not sit on
+    /// screen as though they were still where they were.
+    pub(super) fn on_delete_failed(&mut self, message: String) {
+        let kind = self.finish_delete_task();
+        self.library.refresh();
+        let text = format!("{} failed: {message}", kind.progress_verb());
+        self.status = text.clone();
+        self.library.last_error = Some(text);
+    }
+
+    /// Release the in-flight state a bulk operation owns and report which one
+    /// it was, so the caller can name it in its status line.
+    fn finish_delete_task(&mut self) -> DeleteKind {
+        self.delete_cancel = None;
+        self.library
+            .delete_task
+            .take()
+            .map(|task| task.kind)
+            .unwrap_or(DeleteKind::ToRecentlyDeleted)
     }
 
     // -----------------------------------------------------------------------
@@ -385,8 +597,15 @@ impl AppState {
     // Index rebuild
     // -----------------------------------------------------------------------
 
+    /// True while a background index rebuild is running.
+    pub fn rebuild_running(&self) -> bool {
+        self.rebuild_cancel.is_some()
+    }
+
+    /// Spawn a background rebuild of the open library's index. No-op if one is
+    /// already running or no library is open.
     pub fn rebuild_library_index(&mut self) {
-        if self.library.rebuild_started.is_some() {
+        if self.rebuild_running() {
             return;
         }
         let Some(lib) = self.library.library.clone() else {
@@ -394,38 +613,51 @@ impl AppState {
         };
         let progress_tx = self.bg_tx.clone();
         let progress_ctx = self.ctx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.rebuild_cancel = Some(cancel.clone());
         self.library.rebuild_started = Some(std::time::Instant::now());
+        self.library.rebuild_stopping = false;
         self.status = "Rebuilding library index…".into();
         workers::spawn(
             "rasterlab-rebuild",
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            // A rebuild that dies has no total to report; the fatal message is
+            // A rebuild that dies has no tally to report; the fatal message is
             // what clears `rebuild_started` and unblocks a retry.
             |message| BgMessage::RebuildComplete {
-                total: 0,
-                errors: Vec::new(),
+                outcome: rasterlab_library::RebuildOutcome::default(),
                 fatal: Some(message),
             },
             move || {
-                // Track the last progress report so the completion message can
-                // carry the final total and per-file errors (rebuild_index only
-                // exposes them through the callback).
-                let last = std::cell::RefCell::new((0usize, Vec::new()));
-                let result = lib.rebuild_index(|p| {
-                    *last.borrow_mut() = (p.total, p.errors.clone());
+                let result = lib.rebuild_index(cancel, |p| {
                     let _ = progress_tx.send(BgMessage::RebuildProgress(p));
                     progress_ctx.request_repaint();
                 });
-                let (total, errors) = last.into_inner();
-                BgMessage::RebuildComplete {
-                    total,
-                    errors,
-                    fatal: result.err().map(|e| e.to_string()),
+                match result {
+                    Ok(outcome) => BgMessage::RebuildComplete {
+                        outcome,
+                        fatal: None,
+                    },
+                    Err(e) => BgMessage::RebuildComplete {
+                        outcome: rasterlab_library::RebuildOutcome::default(),
+                        fatal: Some(e.to_string()),
+                    },
                 }
             },
         );
+    }
+
+    /// Request that a running rebuild stop after the current file.
+    ///
+    /// The walk it interrupts has still refreshed every row it reached, so the
+    /// index is left usable and running the rebuild again finishes the job.
+    pub fn stop_rebuild(&mut self) {
+        if let Some(cancel) = &self.rebuild_cancel {
+            cancel.store(true, Ordering::Relaxed);
+            self.library.rebuild_stopping = true;
+            self.status = "Stopping index rebuild…".into();
+        }
     }
 
     pub(super) fn on_rebuild_progress(&mut self, progress: rasterlab_library::RebuildProgress) {
@@ -435,18 +667,37 @@ impl AppState {
         }
     }
 
+    /// Terminal handler for a rebuild that has finished, been stopped, or died.
+    ///
+    /// Releasing `rebuild_cancel` is what [`Self::rebuild_running`] reports, so
+    /// leaving it set would pin the File menu to "Stop Index Rebuild".
     pub(super) fn on_rebuild_complete(
         &mut self,
-        total: usize,
-        errors: Vec<(StdPathBuf, String)>,
+        outcome: rasterlab_library::RebuildOutcome,
         fatal: Option<String>,
     ) {
+        let rasterlab_library::RebuildOutcome {
+            total,
+            done,
+            errors,
+            cancelled,
+        } = outcome;
+        self.rebuild_cancel = None;
         self.library.rebuild_progress = None;
         self.library.rebuild_started = None;
+        self.library.rebuild_stopping = false;
         self.library.thumbs.clear();
         self.library.refresh();
         if let Some(e) = fatal {
             self.status = format!("Rebuild failed: {e}");
+        } else if cancelled {
+            // The files it did not reach are not errors, so report how far it
+            // got rather than a photo count that looks like the whole library.
+            self.status = format!("Index rebuild stopped: {done} of {total} photos indexed");
+            if !errors.is_empty() {
+                self.status
+                    .push_str(&format!(", {} error(s)", errors.len()));
+            }
         } else if errors.is_empty() {
             self.status = format!("Index rebuild complete: {total} photos");
         } else {
@@ -628,5 +879,17 @@ impl AppState {
             self.library.thumbs.insert(hash, handle);
         }
         self.ctx.request_repaint();
+    }
+}
+
+/// Say which photos a delete left alone, naming them while the list is short
+/// enough to be worth reading.
+fn protected_message(names: &[String]) -> String {
+    /// Above this many, the names are noise and the count is the message.
+    const NAMED: usize = 3;
+    if names.len() <= NAMED {
+        format!("Protected, so not deleted: {}.", names.join(", "))
+    } else {
+        format!("{} protected photos were not deleted.", names.len())
     }
 }

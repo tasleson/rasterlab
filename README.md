@@ -109,6 +109,7 @@ RasterLab uses several independent mechanisms because no single checksum, undo s
 - Pipeline state is autosaved after changes. Previous unsaved sessions can be restored from **File > Previously Unsaved Work**.
 - Opening another file or library photo while edits are unsaved requires confirmation.
 - Library deletion requires confirmation and moves photos to RasterLab's **Recently Deleted** view, where they can be restored, deleted permanently, or removed together with **Empty Recently Deleted**.
+- All four, and deleting collections, run in the background with a progress count and a **Stop** button, so a large batch on a network-mounted library never blocks the window. One runs at a time. Stopping keeps whatever has already been done; what could not be done is listed by name.
 - A library photo can be marked **Protected**. RasterLab then refuses to delete it (even into Recently Deleted) until it is unprotected.
 
 ### Detecting corruption in `.rlab` files
@@ -137,7 +138,7 @@ Each v5 file contains Reed–Solomon recovery data in two `RECC` chunks, one bef
 - **File > Start Integrity Scrub** verifies every `.rlab` in the open library. It leaves clean v5 files alone, upgrades clean v3/v4 files to v5, and repairs correctable damage.
 - Before a scrub replaces a damaged file, it copies the damaged original into the library's `recovered/` tree, verifying that backup the same way a save is verified. The repaired temporary file is then renamed over the live file on the same filesystem.
 - Library files are addressed by the BLAKE3 hash of their embedded original bytes. A scrub also compares that identity with the file's name and directory, detecting a valid but misplaced or misdirected file that internal checksums alone would accept.
-- The Stoolap database is an index, not the only copy of library metadata. Ratings, flags, labels, captions, keywords, collections, EXIF snapshots, and edit state are embedded in `.rlab` files, allowing **File > Rebuild Library Index** to reconstruct the catalog.
+- The Stoolap database is an index, not the only copy of library metadata. Ratings, flags, labels, captions, keywords, collections, EXIF snapshots, and edit state are embedded in `.rlab` files, allowing **File > Rebuild Library Index** to reconstruct the catalog. A rebuild walks every photo, so it can be stopped from the same menu item or from the progress line in the library toolbar; it keeps whatever it re-indexed, and running it again finishes the job.
 
 To verify an individual project from the source tree:
 
@@ -169,8 +170,10 @@ Current library features include:
 
 - File or recursive folder import, duplicate detection, RAW+JPEG pairing, and 512 px thumbnails.
 - Import-session grouping; folder imports use capture dates, with filesystem timestamps as fallback, to rebuild a useful historical timeline. Consecutive shooting days merge into one session, except that a day of more than 100 photos is kept as a session of its own. A **Recent Imports** list in the sidebar shows the last 10 sessions in the order they were imported, so a folder of old photographs is one click away instead of buried under its capture date.
-- Collections, ratings, pick/reject flags, color labels, captions, keywords, and batch metadata edits.
-- Filtering by text, rating, flag, color label, camera, lens, capture date, aperture, shutter speed, ISO, and edited state.
+- Ratings, pick/reject flags, color labels, captions, keywords, and batch metadata edits.
+- Collections: create one from the sidebar, then right-click a selection in the grid and use **Collections** to put photos in or take them out. Right-clicking a collection in the sidebar renames or deletes it, and selecting a photo lists the collections it belongs to. Ctrl-click and shift-click mark several collections in the sidebar the way they select several photos in the grid, so a batch of them can be deleted in one confirmation, which runs in the background like the Recently Deleted operations. A photo can be in as many collections as you like, and each membership is stored in that photo's own `.rlab`, so it survives an index rebuild. Deleting a collection leaves its photos alone. Files record a collection's identity rather than its name, so renaming one is instant however many photos are in it; the name each file carries is only a fallback for rebuilding an index that has been lost outright, and may be a rename behind.
+- Import-time collections: choosing **File > Import Photos > Select Folder…** asks, before the import starts, whether the photos should be filed into a collection — one per folder, named after the folder that directly holds them, or a single collection you name for the whole import. A collection that already goes by that name is used as it is, so importing the same folder again adds only what is new. The choice is remembered between imports.
+- Filtering by text, rating, flag, color label, camera, lens, capture date, aperture, shutter speed, ISO, pixel dimensions, and edited state.
 - Sorting by import date, capture date, rating, or filename.
 - Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals.
 - Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
@@ -217,7 +220,7 @@ cargo test -p rasterlab-gpu -- --ignored
 
 ## Command-line interface
 
-The `rasterlab` CLI provides single-image processing, parallel directory batches, metadata/histogram inspection, and JSON pipeline save/load. Its direct operation flags currently cover crop, rotate, black and white, Airplane Window correction, and sharpen; loading a saved pipeline can apply a broader serialized edit stack.
+The `rasterlab` CLI provides single-image processing, parallel directory batches, metadata/histogram inspection, JSON pipeline save/load, and library creation, import and maintenance. Its direct operation flags currently cover crop, rotate, black and white, Airplane Window correction, and sharpen; loading a saved pipeline can apply a broader serialized edit stack.
 
 ```sh
 # Show all commands and options
@@ -231,6 +234,50 @@ cargo run --release -p rasterlab-cli -- process photo.nef \
 cargo run --release -p rasterlab-cli -- info photo.jpg
 ```
 
+### Libraries
+
+Creating a library, importing into it, rebuilding its index and scrubbing its
+files are all CLI commands, so a library on a headless machine can be filled
+and maintained over ssh or from cron rather than being mounted on a desktop
+first. They all take the library root and stop cleanly on Ctrl-C after the file
+they are on; a second Ctrl-C quits immediately, which is safe because every
+`.rlab` write is staged and renamed into place.
+
+On a terminal they show a spinner with the counts the GUI shows — files done of
+total, imported, repaired, upgraded, errors, and an estimate of the time left —
+over the file currently being read. Redirected to a log or a cron mail that
+becomes one whole line every thirty seconds instead, and `--quiet` leaves only
+the final tally.
+
+```sh
+# Create an empty library
+rasterlab library create /srv/photos
+
+# Import a card, a shoot tree, or loose files; folders are searched recursively
+rasterlab library import /srv/photos ~/cards/DCIM
+rasterlab library import /srv/photos ~/shoots --collection-per-folder
+rasterlab library import /srv/photos iceland/*.nef --collection "Iceland 2024"
+
+# Re-index the .rlab files on disk, recovering rows the index has lost
+rasterlab library rebuild /srv/photos
+
+# Verify every file and repair what its parity can recover
+rasterlab library scrub /srv/photos --quiet
+```
+
+An import groups what it brings in into back-dated sessions by capture date,
+the same way the GUI groups a folder import, so importing an existing archive
+reconstructs its history instead of landing it all under today. Photos already
+in the library are skipped by content hash, which makes re-running an import
+over the same source cheap — and is why an interrupted import is finished by
+simply running it again. `--create` makes the library as part of the import for
+the first run.
+
+Every command exits non-zero if any file failed, so a scheduled scrub is worth
+running under a job that reports failures. Uncorrectable corruption is listed
+on stderr with the file that carries it; the damaged original of anything
+repaired is kept under `recovered/`.
+
 ## Architecture
 
 ```text
@@ -239,7 +286,7 @@ rasterlab-render/     Background rendering, preview scheduling, GPU/CPU routing
 rasterlab-gpu/        wgpu compute kernels for supported operations
 rasterlab-gui/        egui/eframe desktop application
 rasterlab-library/    Managed library, Stoolap index, import/export, integrity scrub
-rasterlab-cli/        Headless single-image, batch, and inspection commands
+rasterlab-cli/        Headless single-image, batch, inspection, and library management
 rasterlab-plugin-api/ Stable C-ABI types for external operations
 plugins/              Example plugin
 ```

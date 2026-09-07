@@ -1,7 +1,9 @@
 //! Background integrity scrub.
 //!
-//! Walks every `.rlab` file under `library_root/files/`, verifies its per-chunk
-//! and whole-file Blake3 hashes, and acts on the result:
+//! Walks every `.rlab` file the library holds — under `library_root/files/`
+//! and `library_root/recently_deleted/files/` alike, since a photo waiting to
+//! be restored rots at the same rate as any other — verifies its per-chunk and
+//! whole-file Blake3 hashes, and acts on the result:
 //!
 //! * **Clean, already v5** — left untouched.
 //! * **Clean, older format** — rewritten as v5. v3 files gain Reed-Solomon
@@ -9,7 +11,8 @@
 //!   that survives truncation from either end. This is a lossless re-save; the
 //!   corrupted-file backup path is *not* taken.
 //! * **Correctable corruption** — the damaged original is copied to
-//!   `library_root/recovered/` (mirroring its `ab/cd/{hash}.rlab` layout) and
+//!   `library_root/recovered/` (mirroring its `ab/cd/{hash}.rlab` layout,
+//!   whichever root it was found under — the name is the photo either way) and
 //!   the file is repaired from its `RECC` parity and re-saved in place.
 //! * **Unreadable sectors** — the file is read past the bad regions, which are
 //!   zero-filled and then reconstructed from parity like any other damage, so a
@@ -34,13 +37,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::import::walk_rlab_files;
 use anyhow::{Context, Result};
 use rasterlab_core::{
     degraded_read::read_degraded_file,
     project::{FORMAT_VERSION_V5, RlabFile, read_original_hash, verify_and_repair},
     verified_write::{create_dir_all_synced, rename_synced, write_verified_atomic},
 };
-use walkdir::WalkDir;
 
 /// Extension used for the temporary file a repair/upgrade is staged into before
 /// being atomically renamed over the original.
@@ -80,7 +83,7 @@ enum ScrubAction {
     Upgraded,
 }
 
-/// Scrub every `.rlab` file under `library_root/files/`.
+/// Scrub every `.rlab` file the library holds, Recently Deleted included.
 ///
 /// `cancel` is polled before each file; when set, the scrub returns early with
 /// `cancelled = true` and the tallies accumulated so far. `progress_cb` is
@@ -112,17 +115,24 @@ fn scrub_impl(
     project_write_lock: Option<&Mutex<()>>,
 ) -> Result<ScrubOutcome> {
     let files_dir = library_root.join("files");
+    let deleted_dir = library_root.join("recently_deleted/files");
     let recovered_dir = library_root.join("recovered");
 
     if !files_dir.exists() {
         return Ok(ScrubOutcome::default());
     }
 
-    let rlab_paths: Vec<PathBuf> = WalkDir::new(&files_dir)
+    // Each file is carried with the root it was found under, which is what its
+    // `ab/cd/{hash}.rlab` placement — the half of its identity that lives
+    // outside the file — is relative to.
+    let rlab_paths: Vec<(&Path, PathBuf)> = walk_rlab_files(&files_dir)
         .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "rlab"))
-        .map(|e| e.into_path())
+        .map(|path| (files_dir.as_path(), path))
+        .chain(
+            walk_rlab_files(&deleted_dir)
+                .into_iter()
+                .map(|path| (deleted_dir.as_path(), path)),
+        )
         .collect();
 
     let total = rlab_paths.len();
@@ -131,7 +141,7 @@ fn scrub_impl(
         ..Default::default()
     };
 
-    for (i, path) in rlab_paths.iter().enumerate() {
+    for (i, (base_dir, path)) in rlab_paths.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             return Ok(ScrubOutcome {
                 checked: i,
@@ -150,9 +160,9 @@ fn scrub_impl(
             let _write_guard = lock
                 .lock()
                 .map_err(|_| anyhow::anyhow!("project write lock is poisoned"))?;
-            scrub_one(&files_dir, &recovered_dir, path)
+            scrub_one(base_dir, &recovered_dir, path)
         } else {
-            scrub_one(&files_dir, &recovered_dir, path)
+            scrub_one(base_dir, &recovered_dir, path)
         };
         match action {
             Ok(ScrubAction::Clean) => {}
@@ -179,17 +189,19 @@ fn scrub_impl(
     })
 }
 
-fn scrub_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<ScrubAction> {
-    let action = repair_one(files_dir, recovered_dir, path)?;
+/// Check one file.  `base_dir` is the root its `ab/cd/{hash}.rlab` placement
+/// is relative to, which is `files/` or the Recently Deleted mirror of it.
+fn scrub_one(base_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<ScrubAction> {
+    let action = repair_one(base_dir, recovered_dir, path)?;
     // Runs on the settled file so the hash checked is the one that will be
     // kept. A file that was repaired and then fails this is still reported as
     // an error: the bytes were recovered, but they are not the bytes this path
     // is supposed to hold.
-    check_identity(files_dir, path)?;
+    check_identity(base_dir, path)?;
     Ok(action)
 }
 
-fn repair_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<ScrubAction> {
+fn repair_one(base_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<ScrubAction> {
     let tmp = path.with_extension(TMP_EXT);
     // Drop any stale temp left by an interrupted earlier run.
     let _ = std::fs::remove_file(&tmp);
@@ -223,7 +235,7 @@ fn repair_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scr
     } else if report.repaired {
         // `tmp` now holds the repaired file. Back up the corrupted original
         // before overwriting it, then swap the repaired copy into place.
-        backup_to_recovered(files_dir, recovered_dir, path)?;
+        backup_to_recovered(base_dir, recovered_dir, path)?;
         replace_atomically(&tmp, path)?;
         Ok(ScrubAction::Repaired)
     } else {
@@ -269,7 +281,7 @@ fn repair_one(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<Scr
 ///
 /// Files whose name is not a hash are skipped — there is nothing to check them
 /// against.
-fn check_identity(files_dir: &Path, path: &Path) -> Result<()> {
+fn check_identity(base_dir: &Path, path: &Path) -> Result<()> {
     let Some(named_hash) = path.file_stem().and_then(|s| s.to_str()) else {
         return Ok(());
     };
@@ -279,7 +291,7 @@ fn check_identity(files_dir: &Path, path: &Path) -> Result<()> {
 
     // Placement is derived from the same hash, so a file that is correctly
     // named but in the wrong shard directory is unreachable by hash lookup.
-    let rel = path.strip_prefix(files_dir).unwrap_or(path);
+    let rel = path.strip_prefix(base_dir).unwrap_or(path);
     let expected_rel = crate::import::relative_lib_path(named_hash);
     if rel != Path::new(&expected_rel) {
         anyhow::bail!(
@@ -322,8 +334,8 @@ fn upgrade_to_v5(path: &Path) -> Result<()> {
 /// up may have unreadable sectors — that is one of the reasons it is being
 /// repaired — and a plain copy would fail on the first `EIO`, taking the repair
 /// down with it. Unreadable regions appear in the backup as zeros.
-fn backup_to_recovered(files_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<()> {
-    let rel = path.strip_prefix(files_dir).unwrap_or(path);
+fn backup_to_recovered(base_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<()> {
+    let rel = path.strip_prefix(base_dir).unwrap_or(path);
     let mut dest = recovered_dir.join(rel);
     if dest.exists() {
         let ts = unix_now();

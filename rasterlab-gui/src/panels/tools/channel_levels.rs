@@ -1,9 +1,7 @@
-use std::any::Any;
-
 use egui::{Color32, RichText};
 use rasterlab_core::ops::{ChannelLevelsOp, ChannelRange};
-use rasterlab_core::traits::operation::Operation;
 
+use super::shared::{ParamTool, param_tool_actions};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
@@ -23,15 +21,29 @@ impl ChannelLevelsTool {
             preview_active: false,
         }
     }
+}
 
-    fn operation(&self) -> ChannelLevelsOp {
+impl ParamTool for ChannelLevelsTool {
+    type Op = ChannelLevelsOp;
+
+    const APPLY: &'static str = "Apply Channel Levels";
+
+    fn op(&self) -> ChannelLevelsOp {
         ChannelLevelsOp::new(self.red, self.green, self.blue)
     }
 
     fn reset(&mut self) {
-        self.red = ChannelRange::identity();
-        self.green = ChannelRange::identity();
-        self.blue = ChannelRange::identity();
+        *self = Self::new();
+    }
+
+    fn load(&mut self, op: &ChannelLevelsOp) {
+        self.red = op.red;
+        self.green = op.green;
+        self.blue = op.blue;
+    }
+
+    fn preview_active(&mut self) -> &mut bool {
+        &mut self.preview_active
     }
 }
 
@@ -87,69 +99,9 @@ impl Tool for ChannelLevelsTool {
                 .color(Color32::from_gray(150)),
         );
 
-        let mut action = ToolAction::None;
-        if changed && ctx.has_image {
-            self.preview_active = true;
-            action = ToolAction::RequestRender;
-        }
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply Channel Levels"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(self.operation()));
-                self.reset();
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.reset();
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
-
-        action
+        param_tool_actions(ui, ctx, self, changed)
     }
-
-    super::shared::impl_preview_controls!();
-
-    fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        self.preview_active
-            .then(|| Box::new(self.operation()) as Box<dyn Operation>)
-    }
-
-    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        let Some(op) = op
-            .as_any()
-            .and_then(|op| op.downcast_ref::<ChannelLevelsOp>())
-        else {
-            return false;
-        };
-
-        self.red = op.red;
-        self.green = op.green;
-        self.blue = op.blue;
-        true
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    super::shared::impl_param_tool!();
 }
 
 fn channel_controls(

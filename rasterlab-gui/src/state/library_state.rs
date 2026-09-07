@@ -6,9 +6,11 @@ use std::{
 };
 
 use rasterlab_library::{
-    CollectionId, CollectionRow, ImportProgress, ImportSessionRow, Library, LibraryMeta, PhotoId,
-    PhotoRow, RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
+    CollectionId, CollectionRow, DeleteProgress, ImportCollection, ImportProgress,
+    ImportSessionRow, Library, LibraryBusy, LibraryMeta, PhotoId, PhotoRow, RebuildProgress,
+    ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
 
@@ -21,6 +23,209 @@ pub enum LibraryView {
     RecentlyDeleted,
     Session(String),
     Collection(CollectionId),
+}
+
+// ── Recently Deleted ──────────────────────────────────────────────────────────
+
+/// Which bulk delete operation is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteKind {
+    /// Moving the selection into Recently Deleted.
+    ToRecentlyDeleted,
+    /// Moving it back out.
+    Restore,
+    /// Erasing the selection from Recently Deleted for good.
+    Permanent,
+    /// Erasing everything in Recently Deleted for good.
+    Empty,
+    /// Deleting the marked collections, leaving their photos alone.
+    Collections,
+}
+
+impl DeleteKind {
+    /// What the progress line calls the operation while it runs.
+    pub fn progress_verb(self) -> &'static str {
+        match self {
+            Self::ToRecentlyDeleted => "Moving to Recently Deleted",
+            Self::Restore => "Restoring",
+            Self::Permanent => "Deleting permanently",
+            Self::Empty => "Emptying Recently Deleted",
+            Self::Collections => "Deleting collections",
+        }
+    }
+
+    /// What the status line calls it once it is over.
+    pub fn past_verb(self) -> &'static str {
+        match self {
+            Self::ToRecentlyDeleted => "Moved to Recently Deleted",
+            Self::Restore => "Restored",
+            Self::Permanent | Self::Empty => "Permanently deleted",
+            Self::Collections => "Deleted",
+        }
+    }
+
+    /// What the operation counts, for the status line that tallies it.
+    pub fn item_count(self, n: usize) -> String {
+        match self {
+            Self::Collections => plural(n, "collection"),
+            _ => plural(n, "photo"),
+        }
+    }
+}
+
+/// A bulk delete operation running in the background.
+///
+/// Each photo costs a file rename or an unlink, and each collection a rewrite
+/// of every member file, so a batch of any size on a network-mounted library
+/// is minutes of work.  Running that on the UI thread is what left the window
+/// unable to paint for long enough that the desktop offered to kill it, so
+/// these report progress and take an answer of "stop" instead.
+pub struct DeleteTask {
+    pub kind: DeleteKind,
+    pub progress: DeleteProgress,
+    /// True once the user has asked it to stop, until the worker reports back.
+    pub stopping: bool,
+}
+
+/// "1 photo" / "3 photos", for the status lines that count them.
+pub fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+// ── Collections ───────────────────────────────────────────────────────────────
+
+/// How much of the grid selection a collection already holds.
+///
+/// Drives the mark shown beside each collection in the grid's Collections
+/// menu, and what clicking it does: a collection that holds the whole
+/// selection removes it, anything else takes the photos it is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Membership {
+    /// No selected photo is in the collection — an empty selection included.
+    None,
+    /// Some of the selection is in it, some is not.
+    Partial,
+    /// Every selected photo is in it.
+    All,
+}
+
+/// The collection dialog currently on screen, if any.
+pub enum CollectionPrompt {
+    /// Naming a new collection.
+    New {
+        entry: NameEntry,
+        /// Photos to put in it once it exists. Captured when the dialog opens,
+        /// so a click in the grid's Collections menu still lands on the photos
+        /// the user right-clicked even if the selection moves on.
+        photos: Vec<PhotoId>,
+    },
+    /// Renaming an existing one.
+    Rename { id: CollectionId, entry: NameEntry },
+    /// Confirming that collections should go.  Several at once when several
+    /// are marked in the sidebar, so a clean-up doesn't need one dialog per
+    /// collection.
+    Delete { ids: Vec<CollectionId> },
+}
+
+impl CollectionPrompt {
+    pub fn new_collection(photos: Vec<PhotoId>) -> Self {
+        Self::New {
+            entry: NameEntry::default(),
+            photos,
+        }
+    }
+
+    pub fn rename(id: CollectionId, current_name: &str) -> Self {
+        Self::Rename {
+            id,
+            entry: NameEntry::seeded(current_name),
+        }
+    }
+}
+
+// ── Folder import options ─────────────────────────────────────────────────────
+
+/// Which of the three collection choices the folder-import dialog is on.
+///
+/// Kept apart from [`rasterlab_library::ImportCollection`] so the name the user
+/// typed survives switching to another choice and back, and so the choice
+/// itself can be remembered in the prefs file between runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportCollectionChoice {
+    /// Import without touching collections.
+    #[default]
+    None,
+    /// One collection per directory, named after it.
+    PerFolder,
+    /// One collection, named by the user, for the whole import.
+    Named,
+}
+
+/// The question asked after a folder is picked and before its import starts:
+/// what collection, if any, should the photos be filed into.
+pub struct FolderImportPrompt {
+    pub folder: PathBuf,
+    pub choice: ImportCollectionChoice,
+    /// The name for [`ImportCollectionChoice::Named`], seeded with the folder's
+    /// own name so the common case needs no typing.
+    pub name: String,
+    /// Set once the name field has claimed keyboard focus, so it is taken on
+    /// the frame the user picks `Named` and not on every frame after.
+    pub focused: bool,
+}
+
+impl FolderImportPrompt {
+    pub fn new(folder: PathBuf, choice: ImportCollectionChoice) -> Self {
+        let name = folder
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Self {
+            folder,
+            choice,
+            name,
+            focused: false,
+        }
+    }
+
+    /// What the library should be asked to do, or `None` when the dialog is not
+    /// answerable yet — a named collection with nothing typed in it.
+    pub fn to_import_collection(&self) -> Option<ImportCollection> {
+        match self.choice {
+            ImportCollectionChoice::None => Some(ImportCollection::None),
+            ImportCollectionChoice::PerFolder => Some(ImportCollection::PerFolder),
+            ImportCollectionChoice::Named => {
+                let name = self.name.trim();
+                (!name.is_empty()).then(|| ImportCollection::Named(name.to_owned()))
+            }
+        }
+    }
+}
+
+/// The name being typed into one of the collection dialogs.
+#[derive(Default)]
+pub struct NameEntry {
+    pub name: String,
+    /// Why the name was rejected. The dialog stays open showing this rather
+    /// than closing and making the user type the name again.
+    pub error: Option<String>,
+    /// Set once the field has been given keyboard focus, so it is claimed on
+    /// the first frame only and the user can then tab away from it.
+    pub focused: bool,
+}
+
+impl NameEntry {
+    fn seeded(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            ..Default::default()
+        }
+    }
 }
 
 // ── FocusStackRequest ─────────────────────────────────────────────────────────
@@ -98,6 +303,32 @@ pub(crate) struct MetadataCommitRequest {
     pub library: Arc<Library>,
 }
 
+// ── Open failures ─────────────────────────────────────────────────────────────
+
+/// The banner text for a failed open, plus the path to offer a retry for.
+///
+/// A busy library is the one open failure that is not a fault: the library is
+/// fine and the answer is to wait, so it says so in those terms and names what
+/// is likely holding it, instead of showing `flock` wording no one asked
+/// about.
+fn open_failure(path: &Path, err: &anyhow::Error) -> (String, Option<PathBuf>) {
+    if err.downcast_ref::<LibraryBusy>().is_none() {
+        return (format!("Failed to open library: {err}"), None);
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    (
+        format!(
+            "\"{name}\" is in use by another RasterLab process — a \
+             command-line rebuild or scrub, most likely. It will open once \
+             that finishes."
+        ),
+        Some(path.to_path_buf()),
+    )
+}
+
 // ── LibraryState ──────────────────────────────────────────────────────────────
 
 pub struct LibraryState {
@@ -117,11 +348,34 @@ pub struct LibraryState {
     // Sidebar state
     pub sessions: Vec<ImportSessionRow>,
     pub collections: Vec<CollectionRow>,
+
+    /// Collections ticked in the sidebar with ctrl- or shift-click, for the
+    /// actions that can take more than one.  Kept apart from `view`, which is
+    /// the single collection whose photos the grid is showing.
+    pub marked_collections: Vec<CollectionId>,
+
+    /// Which photos are in each collection, refreshed alongside `collections`.
+    /// Held rather than queried on demand because the grid asks about the
+    /// current selection for every collection, every frame a menu is open.
+    pub collection_members: HashMap<CollectionId, HashSet<PhotoId>>,
+
+    /// The open collection dialog (new / delete confirmation), if any.
+    pub collection_prompt: Option<CollectionPrompt>,
+
+    /// A folder waiting on the user's answer about collections before its
+    /// import starts, if any.
+    pub folder_import_prompt: Option<FolderImportPrompt>,
     pub all_photo_count: usize,
     pub recently_deleted_count: usize,
 
     /// Error message to show in a status bar or dialog.
     pub last_error: Option<String>,
+
+    /// The library an open failed on because another process holds it, if the
+    /// last open failed that way.  Kept so the error banner can offer to open
+    /// it again: waiting is the whole remedy, and the wait can be long enough
+    /// that being handed a button beats retracing the Open Library dialog.
+    pub busy_library: Option<PathBuf>,
 
     /// Per-file `(path, message)` failures from the most recent import. Retained
     /// after the import finishes so the user can review what went wrong.
@@ -136,9 +390,12 @@ pub struct LibraryState {
     /// Progress of a running index rebuild, or `None` when idle.
     pub rebuild_progress: Option<RebuildProgress>,
 
+    /// True once the user has asked a running rebuild to stop, until the
+    /// worker actually reports back. Only the status line reads it; the
+    /// authoritative "is one running" answer is `AppState::rebuild_running`.
+    pub rebuild_stopping: bool,
+
     /// When the running index rebuild started; used to estimate time left.
-    /// Also serves as the "rebuild in flight" guard, since it is set before
-    /// the first progress message arrives.
     pub rebuild_started: Option<std::time::Instant>,
 
     /// Per-file `(path, message)` uncorrectable failures from the most recent
@@ -147,6 +404,20 @@ pub struct LibraryState {
 
     /// When true, show the scrub-errors detail window.
     pub show_scrub_errors: bool,
+
+    /// The running bulk Recently Deleted operation, or `None` when idle.
+    ///
+    /// Only the progress line reads it; the authoritative "is one running"
+    /// answer is `AppState::delete_running`.
+    pub delete_task: Option<DeleteTask>,
+
+    /// Per-photo `(name, message)` failures from the most recent bulk Recently
+    /// Deleted operation. Retained after it finishes so the user can review
+    /// which photos did not move.
+    pub last_delete_errors: Vec<(String, String)>,
+
+    /// When true, show the delete-errors detail window.
+    pub show_delete_errors: bool,
 
     /// When true, show the "Move to Recently Deleted?" confirmation dialog.
     pub confirm_delete: bool,
@@ -161,12 +432,14 @@ pub struct LibraryState {
     pub iso_exact_text: String,
     pub aperture_exact_text: String,
     pub shutter_exact_text: String,
+    pub resolution_text: String,
 
     // Per-field validation errors; `Some` means the input is out of the
     // reasonable domain and the filter for that field is not applied.
     pub iso_error: Option<String>,
     pub aperture_error: Option<String>,
     pub shutter_error: Option<String>,
+    pub resolution_error: Option<String>,
 
     /// Set by the thumbnail grid when the user double-clicks a photo, so
     /// `app.rs` can route the open through the unsaved-changes confirmation
@@ -218,25 +491,36 @@ impl Default for LibraryState {
             thumbs: ThumbCache::new(THUMB_CACHE_CAP),
             sessions: Vec::new(),
             collections: Vec::new(),
+            marked_collections: Vec::new(),
+            collection_members: HashMap::new(),
+            collection_prompt: None,
+            folder_import_prompt: None,
             all_photo_count: 0,
             recently_deleted_count: 0,
             last_error: None,
+            busy_library: None,
             last_import_errors: Vec::new(),
             show_import_errors: false,
             scrub_progress: None,
             rebuild_progress: None,
+            rebuild_stopping: false,
             rebuild_started: None,
             last_scrub_errors: Vec::new(),
             show_scrub_errors: false,
+            delete_task: None,
+            last_delete_errors: Vec::new(),
+            show_delete_errors: false,
             confirm_delete: false,
             confirm_permanent_delete: false,
             confirm_empty_recently_deleted: false,
             iso_exact_text: String::new(),
             aperture_exact_text: String::new(),
             shutter_exact_text: String::new(),
+            resolution_text: String::new(),
             iso_error: None,
             aperture_error: None,
             shutter_error: None,
+            resolution_error: None,
             pending_open_photo: None,
             pending_focus_stack: None,
             scroll_to_hash: None,
@@ -292,7 +576,10 @@ impl LibraryState {
         Some(DetailLoadRequest {
             id,
             hash: hash.to_owned(),
-            path: lib.rlab_path(hash),
+            // A photo shown in Recently Deleted has its file elsewhere, and
+            // reading it where an active photo's would be fails the whole
+            // detail load — collections included.
+            path: lib.photo_rlab_path(hash),
             request_revision,
         })
     }
@@ -530,7 +817,7 @@ impl LibraryState {
         self.recently_deleted_count = deleted.len();
 
         let photos = if self.view == LibraryView::RecentlyDeleted {
-            Some(deleted.into_iter().map(|row| row.photo).collect())
+            Ok(deleted.into_iter().map(|row| row.photo).collect())
         } else {
             // Compose the view scope into a copy of the filter so that
             // session/collection views also honor shutter/ISO/aperture/etc.
@@ -541,19 +828,38 @@ impl LibraryState {
                 LibraryView::Collection(id) => filter.collection_id = Some(*id),
             }
             if filter.is_empty() {
-                lib.all_photos(self.sort).ok()
+                lib.all_photos(self.sort)
             } else {
-                lib.search(&filter, self.sort).ok()
+                lib.search(&filter, self.sort)
             }
         };
 
-        if let Some(photos) = photos {
-            self.results = photos;
+        match photos {
+            Ok(photos) => self.results = photos,
+            // Leaving the previous view's photos on screen is worse than an
+            // empty grid: they read as the answer to the query that just
+            // failed, which is how a collection view that could not be
+            // queried at all looked like one holding the wrong photos.
+            Err(e) => {
+                self.results.clear();
+                self.last_error = Some(format!("Could not list photos: {e}"));
+            }
         }
 
         // Refresh sidebar lists
         self.sessions = lib.all_sessions().unwrap_or_default();
         self.collections = lib.all_collections().unwrap_or_default();
+        // A mark on a collection that is gone — deleted here, or dropped by a
+        // rebuild — must not linger and take part in the next bulk action.
+        let live: HashSet<CollectionId> = self.collections.iter().map(|c| c.id).collect();
+        self.marked_collections.retain(|id| live.contains(id));
+        self.collection_members.clear();
+        for (collection, photo) in lib.collection_memberships().unwrap_or_default() {
+            self.collection_members
+                .entry(collection)
+                .or_default()
+                .insert(photo);
+        }
         self.all_photo_count = self
             .sessions
             .iter()
@@ -566,6 +872,14 @@ impl LibraryState {
     /// has elapsed for it to be meaningful, and a running error count.
     pub fn rebuild_status_text(&self) -> Option<String> {
         let p = self.rebuild_progress.as_ref()?;
+        if self.rebuild_stopping {
+            // No estimate: what is left is the current file, not the rest of
+            // the walk.
+            return Some(format!(
+                "Stopping index rebuild… {}/{} indexed",
+                p.done, p.total
+            ));
+        }
         let mut s = format!("Rebuilding library index… {}/{}", p.done, p.total);
         if let Some(started) = self.rebuild_started
             && p.done > 0
@@ -593,19 +907,25 @@ impl LibraryState {
                 self.iso_exact_text.clear();
                 self.aperture_exact_text.clear();
                 self.shutter_exact_text.clear();
+                self.resolution_text.clear();
                 self.iso_error = None;
                 self.aperture_error = None;
                 self.shutter_error = None;
+                self.resolution_error = None;
                 self.selected.clear();
+                self.marked_collections.clear();
                 self.selected_detail = None;
                 self.metadata_drafts.clear();
                 self.active_copy_saves.clear();
                 self.thumbs.clear();
                 self.last_error = None;
+                self.busy_library = None;
                 self.refresh();
             }
             Err(e) => {
-                self.last_error = Some(format!("Failed to open library: {e}"));
+                let (message, busy) = open_failure(&path, &e);
+                self.last_error = Some(message);
+                self.busy_library = busy;
             }
         }
     }
@@ -631,97 +951,24 @@ impl LibraryState {
         self.selected.clear();
     }
 
-    /// Move all selected photos to the library-owned Recently Deleted area.
-    /// Protected photos are skipped even if confirmation is bypassed.
-    pub fn move_selected_to_recently_deleted(&mut self) {
-        let Some(lib) = &self.library else { return };
-
-        let mut deletable: Vec<PhotoId> = Vec::new();
-        let mut protected = 0usize;
-        for r in &self.results {
-            if self.selected.contains(&r.id) {
-                if r.protected {
-                    protected += 1;
-                } else {
-                    deletable.push(r.id);
-                }
-            }
-        }
-
-        for id in &deletable {
-            if let Err(e) = lib.delete_photo(*id) {
-                self.last_error = Some(format!("Move to Recently Deleted failed: {e}"));
-                self.selected.clear();
-                self.refresh();
-                return;
-            }
-        }
-
-        if protected > 0 {
-            let noun = if protected == 1 { "photo" } else { "photos" };
-            self.last_error = Some(format!("{protected} protected {noun} were not deleted."));
-        }
-        self.selected.clear();
-        self.refresh();
-    }
-
-    pub fn restore_selected(&mut self) {
-        let Some(lib) = self.library.clone() else {
-            return;
+    /// Human-readable one-liner for a running bulk Recently Deleted operation,
+    /// or `None` when idle.
+    pub fn delete_status_text(&self) -> Option<String> {
+        let task = self.delete_task.as_ref()?;
+        let progress = &task.progress;
+        let verb = if task.stopping {
+            "Stopping"
+        } else {
+            task.kind.progress_verb()
         };
-        for id in self.selected.clone() {
-            if let Err(e) = lib.restore_photo(id) {
-                self.last_error = Some(format!("Restore failed: {e}"));
-                self.selected.clear();
-                self.refresh();
-                return;
-            }
+        let mut text = format!("{verb}… {}/{}", progress.done, progress.total);
+        if !progress.protected.is_empty() {
+            text.push_str(&format!(", {} protected", progress.protected.len()));
         }
-        self.selected.clear();
-        self.refresh();
-    }
-
-    pub fn permanently_delete_selected(&mut self) {
-        let Some(lib) = self.library.clone() else {
-            return;
-        };
-        let doomed: Vec<(PhotoId, String)> = self
-            .results
-            .iter()
-            .filter(|row| self.selected.contains(&row.id))
-            .map(|row| (row.id, row.hash.clone()))
-            .collect();
-        for (id, _) in &doomed {
-            if let Err(e) = lib.delete_recently_deleted_permanently(*id) {
-                self.last_error = Some(format!("Permanent delete failed: {e}"));
-                self.selected.clear();
-                self.refresh();
-                return;
-            }
+        if !progress.errors.is_empty() {
+            text.push_str(&format!(", {} error(s)", progress.errors.len()));
         }
-        for (_, hash) in &doomed {
-            self.thumbs.remove(hash);
-        }
-        self.selected.clear();
-        self.refresh();
-    }
-
-    pub fn empty_recently_deleted(&mut self) {
-        let Some(lib) = self.library.clone() else {
-            return;
-        };
-        let hashes: Vec<String> = self.results.iter().map(|row| row.hash.clone()).collect();
-        if let Err(e) = lib.empty_recently_deleted() {
-            self.last_error = Some(format!("Empty Recently Deleted failed: {e}"));
-            self.selected.clear();
-            self.refresh();
-            return;
-        }
-        for hash in &hashes {
-            self.thumbs.remove(hash);
-        }
-        self.selected.clear();
-        self.refresh();
+        Some(text)
     }
 
     /// Mark (or unmark) all selected photos as protected.
@@ -752,6 +999,172 @@ impl LibraryState {
             base_hash,
             frame_paths: frames.into_iter().map(|(_, path)| path).collect(),
         });
+    }
+
+    // ── Collections ───────────────────────────────────────────────────────
+
+    /// How many photos are in a collection.
+    pub fn collection_len(&self, id: CollectionId) -> usize {
+        self.collection_members.get(&id).map_or(0, HashSet::len)
+    }
+
+    /// Names of the collections a photo is in, in the sidebar's order.
+    ///
+    /// Read from the index rather than the photo's own `LMTA`, so that adding
+    /// a collection shows up while the photo stays selected: the detail
+    /// panel's copy of the file is loaded once per selection and knows nothing
+    /// of a change made from the grid afterwards.
+    pub fn collections_for(&self, photo: PhotoId) -> Vec<&str> {
+        self.collections
+            .iter()
+            .filter(|collection| {
+                self.collection_members
+                    .get(&collection.id)
+                    .is_some_and(|members| members.contains(&photo))
+            })
+            .map(|collection| collection.name.as_str())
+            .collect()
+    }
+
+    /// How much of the current selection collection `id` already holds.
+    pub fn selection_membership(&self, id: CollectionId) -> Membership {
+        if self.selected.is_empty() {
+            return Membership::None;
+        }
+        let empty = HashSet::new();
+        let members = self.collection_members.get(&id).unwrap_or(&empty);
+        let in_collection = self
+            .selected
+            .iter()
+            .filter(|photo| members.contains(photo))
+            .count();
+        match in_collection {
+            0 => Membership::None,
+            n if n == self.selected.len() => Membership::All,
+            _ => Membership::Partial,
+        }
+    }
+
+    /// Create a collection and put `photos` in it.
+    ///
+    /// The message in `Err` belongs in the dialog next to the name field: it
+    /// says the name cannot be used, and the dialog stays open so the user can
+    /// change it. Failures past that point are the library's rather than the
+    /// name's, and are reported through `last_error` like every other one.
+    pub fn create_collection(&mut self, name: &str, photos: &[PhotoId]) -> Result<(), String> {
+        let name = name.trim();
+        self.check_collection_name(name, None)?;
+        let Some(lib) = self.library.clone() else {
+            return Err("No library is open.".to_owned());
+        };
+
+        let collection = lib
+            .create_collection(name)
+            .map_err(|e| format!("Could not create the collection: {e}"))?;
+        if !photos.is_empty()
+            && let Err(e) = lib.add_to_collection(collection.id, photos)
+        {
+            self.last_error = Some(format!("Add to collection failed: {e}"));
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// Rename a collection, under the same name rules as creating one.
+    ///
+    /// One index row however many photos are in it: the files record the
+    /// collection's id, not its name.
+    pub fn rename_collection(&mut self, id: CollectionId, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        self.check_collection_name(name, Some(id))?;
+        let Some(lib) = self.library.clone() else {
+            return Err("No library is open.".to_owned());
+        };
+        lib.rename_collection(id, name)
+            .map_err(|e| format!("Could not rename the collection: {e}"))?;
+        self.refresh();
+        Ok(())
+    }
+
+    /// Reject a name no collection can be given, before any of it reaches the
+    /// library.
+    ///
+    /// `keep` is the collection being renamed, whose own name is not a clash —
+    /// otherwise correcting the capitalisation of a name would be refused as a
+    /// duplicate of itself.
+    fn check_collection_name(&self, name: &str, keep: Option<CollectionId>) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("Enter a name for the collection.".to_owned());
+        }
+        // The index rejects an exact duplicate itself; catching it here — and
+        // case-insensitively — turns a raw SQL error into an answer, and keeps
+        // "Portfolio" and "portfolio" from sitting next to each other in the
+        // sidebar looking like the same thing.
+        let clash = self
+            .collections
+            .iter()
+            .any(|existing| Some(existing.id) != keep && existing.name.eq_ignore_ascii_case(name));
+        if clash {
+            return Err(format!("A collection named “{name}” already exists."));
+        }
+        Ok(())
+    }
+
+    /// The name of a collection the sidebar currently lists.
+    pub fn collection_name(&self, id: CollectionId) -> Option<&str> {
+        self.collections
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.name.as_str())
+    }
+
+    /// Let go of collections that are on their way out, before the worker
+    /// that deletes them has got to any of them.
+    ///
+    /// Their marks go now rather than when the run ends: leaving them marked
+    /// invites a second run at them while the first is still going.  The grid
+    /// cannot stay pointed at one either, so it falls back to All Photos — the
+    /// photos in it are staying in the library.
+    pub fn leave_collections(&mut self, ids: &[CollectionId]) {
+        self.marked_collections.retain(|id| !ids.contains(id));
+        if let LibraryView::Collection(id) = self.view
+            && ids.contains(&id)
+        {
+            self.view = LibraryView::AllPhotos;
+            self.select_none();
+            self.refresh();
+        }
+    }
+
+    /// Add every selected photo to a collection; the ones already in it stay
+    /// as they are.
+    pub fn add_selected_to_collection(&mut self, id: CollectionId) {
+        self.change_collection_membership(id, true);
+    }
+
+    /// Take every selected photo out of a collection.
+    pub fn remove_selected_from_collection(&mut self, id: CollectionId) {
+        self.change_collection_membership(id, false);
+    }
+
+    fn change_collection_membership(&mut self, id: CollectionId, member: bool) {
+        let Some(lib) = self.library.clone() else {
+            return;
+        };
+        let photos = self.selected.clone();
+        if photos.is_empty() {
+            return;
+        }
+        let result = if member {
+            lib.add_to_collection(id, &photos)
+        } else {
+            lib.remove_from_collection(id, &photos)
+        };
+        if let Err(e) = result {
+            let what = if member { "Add to" } else { "Remove from" };
+            self.last_error = Some(format!("{what} collection failed: {e}"));
+        }
+        self.refresh();
     }
 
     /// True if every selected photo is currently protected (and there is at
@@ -898,7 +1311,30 @@ impl ThumbCache {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
+
+    /// A held library and a broken one are different messages, and only the
+    /// held one is worth a Retry — retrying anything else just fails again.
+    #[test]
+    fn open_failure_separates_busy_from_broken() {
+        let path = Path::new("/photos/Main Library");
+
+        let (message, retry) = open_failure(path, &anyhow::Error::new(LibraryBusy));
+        assert_eq!(retry.as_deref(), Some(path), "a busy library is retryable");
+        assert!(
+            message.contains("Main Library") && message.contains("another RasterLab process"),
+            "busy message names the library and the reason: {message}"
+        );
+
+        let (message, retry) = open_failure(path, &anyhow::anyhow!("index is corrupt"));
+        assert_eq!(retry, None, "a broken library is not retryable");
+        assert!(
+            message.contains("index is corrupt"),
+            "other failures keep their own text: {message}"
+        );
+    }
 
     fn row(id: PhotoId, hash: &str) -> PhotoRow {
         PhotoRow {
@@ -999,6 +1435,226 @@ mod tests {
 
         assert!(selected_frames(&results, &[], root).is_empty());
         assert_eq!(selected_frames(&results, &[2], root).len(), 1);
+    }
+
+    fn collection(id: CollectionId, name: &str) -> CollectionRow {
+        CollectionRow {
+            id,
+            uuid: format!("uuid-{id}"),
+            name: name.to_owned(),
+            created_at: 0,
+        }
+    }
+
+    /// The mark beside each collection in the grid menu, and what clicking it
+    /// does, both come from this: a selection the collection holds entirely is
+    /// taken out, anything less is added.
+    #[test]
+    fn selection_membership_measures_the_whole_selection() {
+        let mut state = LibraryState::default();
+        state.collection_members.insert(1, HashSet::from([10, 20]));
+
+        assert_eq!(state.collection_len(1), 2);
+        assert_eq!(state.collection_len(2), 0, "unknown collection is empty");
+
+        // Nothing selected is nothing to add or remove.
+        assert_eq!(state.selection_membership(1), Membership::None);
+
+        state.selected = vec![10, 20];
+        assert_eq!(state.selection_membership(1), Membership::All);
+
+        state.selected = vec![10, 30];
+        assert_eq!(state.selection_membership(1), Membership::Partial);
+
+        state.selected = vec![30];
+        assert_eq!(state.selection_membership(1), Membership::None);
+        assert_eq!(
+            state.selection_membership(2),
+            Membership::None,
+            "a collection with no members holds no selection"
+        );
+    }
+
+    /// Both name rules are checked before the library is touched, so the
+    /// dialog can say what is wrong with the name rather than reporting
+    /// whatever the index made of it.
+    #[test]
+    fn a_new_collection_needs_a_name_that_is_not_already_taken() {
+        let mut state = LibraryState {
+            collections: vec![collection(1, "Portfolio")],
+            ..Default::default()
+        };
+
+        assert!(state.create_collection("   ", &[]).is_err());
+        let taken = state
+            .create_collection("portfolio", &[])
+            .expect_err("a name differing only in case is the same name");
+        assert!(taken.contains("already exists"), "{taken}");
+
+        // A usable name gets past both rules and only then wants a library.
+        let no_library = state
+            .create_collection("Landscapes", &[])
+            .expect_err("no library is open");
+        assert!(no_library.contains("No library"), "{no_library}");
+    }
+
+    /// What clicking a collection in the sidebar does, end to end: the view
+    /// scopes the filter, and the filter has to come back with that
+    /// collection's photos and nothing else.
+    ///
+    /// The library-side test for this drives `search` directly, which is one
+    /// branch further along than the panel gets — this goes through the same
+    /// `refresh` the sidebar calls.
+    #[test]
+    fn selecting_a_collection_shows_its_photos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = LibraryState::default();
+        state.open_library(tmp.path().to_path_buf(), 0.5);
+        let lib = state.library.clone().expect("library should open");
+
+        let images = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("test_images");
+        lib.import_files(
+            &[
+                images.join("meta_test.jpg"),
+                images.join("color_patches.png"),
+            ],
+            |_| {},
+        )
+        .unwrap();
+        state.refresh();
+        assert_eq!(state.results.len(), 2, "both photos are in All Photos");
+
+        let coll = lib.create_collection("Portfolio").unwrap();
+        let first = state.results[0].clone();
+        state.select_only(first.id);
+        state.add_selected_to_collection(coll.id);
+
+        state.view = LibraryView::Collection(coll.id);
+        state.refresh();
+
+        assert_eq!(state.last_error, None, "the query failed");
+        assert_eq!(
+            state.results.len(),
+            1,
+            "collection view listed {:?}",
+            state
+                .results
+                .iter()
+                .map(|row| row.hash.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(state.results[0].hash, first.hash);
+        assert_eq!(state.collection_len(coll.id), 1, "sidebar count");
+    }
+
+    /// Handing a marked set to the delete worker drops the marks, takes the
+    /// grid off a collection that is on its way out, and leaves the photos in
+    /// the library once the worker has been round them all.
+    #[test]
+    fn deleting_marked_collections_takes_them_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = LibraryState::default();
+        state.open_library(tmp.path().to_path_buf(), 0.5);
+        let lib = state.library.clone().expect("library should open");
+
+        let images = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("test_images");
+        lib.import_files(&[images.join("meta_test.jpg")], |_| {})
+            .unwrap();
+        state.refresh();
+
+        let keep = lib.create_collection("Archive").unwrap();
+        let doomed: Vec<CollectionId> = ["Portfolio", "Prints"]
+            .iter()
+            .map(|name| lib.create_collection(name).unwrap().id)
+            .collect();
+        state.refresh();
+
+        // The photo is in one of the collections being deleted, and the grid
+        // is showing that collection.
+        let photo = state.results[0].id;
+        state.select_only(photo);
+        state.add_selected_to_collection(doomed[0]);
+        state.view = LibraryView::Collection(doomed[0]);
+        state.marked_collections = doomed.clone();
+        state.refresh();
+
+        // The view and the marks are given up as the run starts; the
+        // collections themselves go on the worker's thread.
+        state.leave_collections(&doomed);
+        assert_eq!(
+            state.view,
+            LibraryView::AllPhotos,
+            "the grid cannot stay on a collection that is being deleted"
+        );
+        let outcome = lib
+            .delete_collections(&doomed, Arc::new(AtomicBool::new(false)), |_| {})
+            .unwrap();
+        assert_eq!(outcome.done, doomed.len());
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        state.refresh();
+
+        assert_eq!(state.last_error, None);
+        let left: Vec<CollectionId> = state.collections.iter().map(|c| c.id).collect();
+        assert_eq!(left, [keep.id], "only the unmarked collection is left");
+        assert!(
+            state.marked_collections.is_empty(),
+            "marks on deleted collections must not survive"
+        );
+        assert_eq!(
+            state.results.len(),
+            1,
+            "the photo itself stays in the library"
+        );
+    }
+
+    /// Renaming has the same name rules as creating, except that a collection
+    /// is not a clash with itself — correcting the capitalisation of a name
+    /// would otherwise be refused as a duplicate of the thing being renamed.
+    #[test]
+    fn renaming_a_collection_does_not_clash_with_its_own_name() {
+        let state = LibraryState {
+            collections: vec![collection(1, "Portfolio"), collection(2, "Prints")],
+            ..Default::default()
+        };
+
+        // Its own name, in any case, is free; another collection's is not.
+        assert!(state.check_collection_name("Portfolio", Some(1)).is_ok());
+        assert!(state.check_collection_name("PORTFOLIO", Some(1)).is_ok());
+        assert!(state.check_collection_name("Prints", Some(1)).is_err());
+        assert!(state.check_collection_name("Portfolio", None).is_err());
+
+        // And an empty name is no name at all, whichever dialog is asking.
+        assert!(state.check_collection_name("", Some(1)).is_err());
+        assert!(state.check_collection_name("", None).is_err());
+    }
+
+    /// The detail panel lists a photo's collections in the same order the
+    /// sidebar does, so the two read as one list rather than two.
+    #[test]
+    fn collections_for_a_photo_follow_the_sidebar_order() {
+        let mut state = LibraryState {
+            // `all_collections` returns them by name; the panel must not
+            // re-order them by id.
+            collections: vec![
+                collection(3, "Archive"),
+                collection(1, "Portfolio"),
+                collection(2, "Prints"),
+            ],
+            ..Default::default()
+        };
+        state.collection_members.insert(1, HashSet::from([10, 20]));
+        state.collection_members.insert(2, HashSet::from([20]));
+        state.collection_members.insert(3, HashSet::from([10]));
+
+        assert_eq!(state.collections_for(10), ["Archive", "Portfolio"]);
+        assert_eq!(state.collections_for(20), ["Portfolio", "Prints"]);
+        assert!(state.collections_for(30).is_empty());
     }
 
     #[test]

@@ -1,15 +1,17 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
-use rasterlab_core::library_meta::LibraryMeta;
+use rasterlab_core::library_meta::{LibraryExif, LibraryMeta};
 use stoolap::Value;
 use stoolap::api::{Database, Transaction};
+use uuid::Uuid;
 
 use crate::{
     db_trait::{
-        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
+        CollectionId, CollectionRow, ImportSessionRow, LibraryDb, NewPhoto, PhotoId, PhotoRow,
         RecentlyDeletedRow, SortOrder,
     },
+    library::LibraryBusy,
     search::SearchFilter,
 };
 
@@ -21,7 +23,12 @@ impl StoolapDb {
     pub fn open(library_root: &Path) -> Result<Self> {
         let db_path = library_root.join("library.db");
         let dsn = format!("file://{}", db_path.display());
-        let db = Database::open(&dsn).context("open library.db")?;
+        // A held lock is not a broken library, so it keeps its own type all
+        // the way up rather than arriving as one more opaque open failure.
+        let db = Database::open(&dsn).map_err(|e| match e {
+            stoolap::Error::DatabaseLocked => anyhow::Error::new(LibraryBusy),
+            other => anyhow::Error::new(other).context("open library.db"),
+        })?;
         Ok(Self { db })
     }
 
@@ -29,6 +36,71 @@ impl StoolapDb {
     pub fn open_in_memory() -> Result<Self> {
         let db = Database::open_in_memory().context("open in-memory db")?;
         Ok(Self { db })
+    }
+
+    /// A collection's photos, in the caller's order.
+    ///
+    /// Two tables is the limit: a third turns this into the join that comes
+    /// back empty. See `search` on this type, and STOOLAP_BUG.md.
+    fn collection_photos_sorted(
+        &self,
+        collection_id: CollectionId,
+        sort: SortOrder,
+    ) -> Result<Vec<PhotoRow>> {
+        let rows = self.db.query(
+            &format!(
+                "{} JOIN collection_photos cp ON cp.photo_id = p.id
+                 WHERE cp.collection_id = $1 {}",
+                PHOTO_SELECT,
+                sort_clause(sort)
+            ),
+            (collection_id,),
+        )?;
+        let mut result = Vec::new();
+        for row in rows {
+            let row = row.context("collection_photos row")?;
+            if row_is_active(&row)? {
+                result.push(row_to_photo(&row)?);
+            }
+        }
+        Ok(result)
+    }
+
+    /// [`LibraryDb::collection_member_ids`] as a set, for the caller that is
+    /// filtering rows it has already decided are visible.
+    fn collection_member_id_set(&self, collection_id: CollectionId) -> Result<HashSet<PhotoId>> {
+        Ok(LibraryDb::collection_member_ids(self, collection_id)?
+            .into_iter()
+            .collect())
+    }
+
+    /// Mint a uuid for every collection row that predates them.
+    ///
+    /// Runs on every open and is a no-op once done.  A collection without a
+    /// uuid cannot be written into a photo's `.rlab`, so this has to happen
+    /// before anything reads the table, not lazily.
+    fn backfill_collection_uuids(&self) -> Result<()> {
+        let rows = self
+            .db
+            .query("SELECT id, uuid FROM collections", ())
+            .context("read collections for uuid backfill")?;
+        let mut missing = Vec::new();
+        for row in rows {
+            let row = row.context("collection row")?;
+            let has_uuid = row
+                .get::<String>(1)
+                .is_ok_and(|uuid| !uuid.trim().is_empty());
+            if !has_uuid {
+                missing.push(row.get::<i64>(0).context("collection id")?);
+            }
+        }
+        for id in missing {
+            self.db.execute(
+                "UPDATE collections SET uuid = $1 WHERE id = $2",
+                (Uuid::new_v4().to_string(), id),
+            )?;
+        }
+        Ok(())
     }
 
     /// Run `f` in one transaction, committing only if it returns `Ok`.
@@ -119,6 +191,7 @@ const SCHEMA_STMTS: &[&str] = &[
     )",
     "CREATE TABLE IF NOT EXISTS collections (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        uuid       TEXT NOT NULL UNIQUE,
         name       TEXT NOT NULL UNIQUE,
         created_at INTEGER
     )",
@@ -204,6 +277,14 @@ impl LibraryDb for StoolapDb {
             "ALTER TABLE photos ADD COLUMN protected INTEGER NOT NULL DEFAULT 0",
             (),
         );
+        // Migration: collections used to be identified by name.  The column is
+        // added without the UNIQUE the fresh schema carries — the rows that
+        // exist have no uuid yet — and every one of them is given one below.
+        let _ = self
+            .db
+            .execute("ALTER TABLE collections ADD COLUMN uuid TEXT", ());
+        self.backfill_collection_uuids()
+            .context("give existing collections a uuid")?;
         // Migration: source fingerprint columns for fast import resume.
         let _ = self
             .db
@@ -236,16 +317,12 @@ impl LibraryDb for StoolapDb {
 
     // ── Photos ────────────────────────────────────────────────────────────
 
-    fn insert_photo(
-        &self,
-        hash: &str,
-        lib_path: &str,
-        lmta: &LibraryMeta,
-        width: u32,
-        height: u32,
-        stack_id: Option<&str>,
-    ) -> Result<PhotoId> {
-        self.in_transaction(|tx| insert_photo_tx(tx, hash, lib_path, lmta, width, height, stack_id))
+    fn insert_photo(&self, photo: NewPhoto<'_>) -> Result<PhotoId> {
+        self.in_transaction(|tx| insert_photo_tx(tx, photo))
+    }
+
+    fn replace_photo(&self, photo_id: PhotoId, photo: NewPhoto<'_>) -> Result<()> {
+        self.in_transaction(|tx| replace_photo_tx(tx, photo_id, photo))
     }
 
     fn photo_by_hash(&self, hash: &str) -> Result<Option<PhotoRow>> {
@@ -356,6 +433,33 @@ impl LibraryDb for StoolapDb {
     // ── Search ────────────────────────────────────────────────────────────
 
     fn search(&self, filter: &SearchFilter, sort: SortOrder) -> Result<Vec<PhotoRow>> {
+        // A collection scope cannot go into the statement below. Stoolap
+        // returns *no rows at all*, silently, from a join of three or more
+        // tables when the join column of one of them carries an index and the
+        // rows are read back in a later session. `collection_photos(photo_id)`
+        // is indexed and `photo_id` is what the join is on, so putting that
+        // table in with the metadata tables empties the whole result.
+        // STOOLAP_BUG.md has the reproduction. Membership is resolved with a
+        // query of its own instead, and applied to the rows here.
+        let members = match filter.collection_id {
+            Some(id) => Some(self.collection_member_id_set(id)?),
+            None => None,
+        };
+
+        // A collection and nothing else is what clicking one in the sidebar
+        // asks for, and a join on its own is a shape the database does handle.
+        // Worth its own path: it reads a collection's handful of rows instead
+        // of every photo in the library.
+        let others = SearchFilter {
+            collection_id: None,
+            ..filter.clone()
+        };
+        if let Some(id) = filter.collection_id
+            && others.is_empty()
+        {
+            return self.collection_photos_sorted(id, sort);
+        }
+
         let mut conditions: Vec<String> = Vec::new();
         let mut params: Vec<Value> = Vec::new();
 
@@ -459,10 +563,26 @@ impl LibraryDb for StoolapDb {
         if let Some(ref session) = filter.import_session {
             push!("p.import_session = {}", Value::text(session.clone()));
         }
-        if let Some(coll_id) = filter.collection_id {
+        // Orientation-agnostic dimension bounds.  `max(width, height)` is not
+        // portable SQL here, so the long/short-edge comparison is spelled out
+        // as the two orientations it can take; the pair is equivalent to
+        // "long edge within the limit's long edge, short within its short".
+        if let Some(res) = filter.resolution_max {
             push!(
-                "p.id IN (SELECT photo_id FROM collection_photos WHERE collection_id = {})",
-                Value::integer(coll_id)
+                "((p.width <= {} AND p.height <= {}) OR (p.width <= {} AND p.height <= {}))",
+                Value::integer(res.long_edge as i64),
+                Value::integer(res.short_edge as i64),
+                Value::integer(res.short_edge as i64),
+                Value::integer(res.long_edge as i64)
+            );
+        }
+        if let Some(res) = filter.resolution_min {
+            push!(
+                "((p.width >= {} AND p.height >= {}) OR (p.width >= {} AND p.height >= {}))",
+                Value::integer(res.long_edge as i64),
+                Value::integer(res.short_edge as i64),
+                Value::integer(res.short_edge as i64),
+                Value::integer(res.long_edge as i64)
             );
         }
         if let Some(ref label) = filter.color_label {
@@ -497,8 +617,12 @@ impl LibraryDb for StoolapDb {
         let mut result = Vec::new();
         for row in rows {
             let row = row.context("search row")?;
-            if row_is_active(&row)? {
-                result.push(row_to_photo(&row)?);
+            if !row_is_active(&row)? {
+                continue;
+            }
+            let photo = row_to_photo(&row)?;
+            if members.as_ref().is_none_or(|ids| ids.contains(&photo.id)) {
+                result.push(photo);
             }
         }
         Ok(result)
@@ -524,23 +648,7 @@ impl LibraryDb for StoolapDb {
     }
 
     fn collection_photos(&self, collection_id: CollectionId) -> Result<Vec<PhotoRow>> {
-        let rows = self.db.query(
-            &format!(
-                "{} JOIN collection_photos cp ON cp.photo_id = p.id
-                 WHERE cp.collection_id = $1
-                 ORDER BY p.capture_date DESC, p.id DESC",
-                PHOTO_SELECT
-            ),
-            (collection_id,),
-        )?;
-        let mut result = Vec::new();
-        for row in rows {
-            let row = row.context("collection_photos row")?;
-            if row_is_active(&row)? {
-                result.push(row_to_photo(&row)?);
-            }
-        }
-        Ok(result)
+        self.collection_photos_sorted(collection_id, SortOrder::CaptureDateDesc)
     }
 
     // ── Import sessions ───────────────────────────────────────────────────
@@ -665,10 +773,10 @@ impl LibraryDb for StoolapDb {
 
     // ── Collections ───────────────────────────────────────────────────────
 
-    fn create_collection(&self, name: &str, created_at: u64) -> Result<CollectionId> {
+    fn create_collection(&self, uuid: &str, name: &str, created_at: u64) -> Result<CollectionId> {
         let id: i64 = self.db.query_one(
-            "INSERT INTO collections (name, created_at) VALUES ($1,$2) RETURNING id",
-            (name, created_at as i64),
+            "INSERT INTO collections (uuid, name, created_at) VALUES ($1,$2,$3) RETURNING id",
+            (uuid, name, created_at as i64),
         )?;
         Ok(id)
     }
@@ -692,7 +800,7 @@ impl LibraryDb for StoolapDb {
 
     fn all_collections(&self) -> Result<Vec<CollectionRow>> {
         let rows = self.db.query(
-            "SELECT id, name, created_at FROM collections ORDER BY name ASC",
+            "SELECT id, uuid, name, created_at FROM collections ORDER BY name ASC",
             (),
         )?;
         let mut result = Vec::new();
@@ -700,9 +808,42 @@ impl LibraryDb for StoolapDb {
             let row = row.context("all_collections row")?;
             result.push(CollectionRow {
                 id: row.get::<i64>(0)?,
-                name: row.get::<String>(1)?,
-                created_at: row.get::<i64>(2)? as u64,
+                uuid: row.get::<String>(1)?,
+                name: row.get::<String>(2)?,
+                created_at: row.get::<i64>(3)? as u64,
             });
+        }
+        Ok(result)
+    }
+
+    fn collection_member_ids(&self, collection_id: CollectionId) -> Result<Vec<PhotoId>> {
+        let rows = self.db.query(
+            "SELECT photo_id FROM collection_photos WHERE collection_id = $1",
+            (collection_id,),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.context("collection member row")?.get::<i64>(0)?);
+        }
+        Ok(ids)
+    }
+
+    fn collection_memberships(&self) -> Result<Vec<(CollectionId, PhotoId)>> {
+        let rows = self.db.query(
+            "SELECT cp.collection_id, cp.photo_id, p.deleted_at
+             FROM collection_photos cp JOIN photos p ON p.id = cp.photo_id",
+            (),
+        )?;
+        let mut result = Vec::new();
+        for row in rows {
+            let row = row.context("collection_memberships row")?;
+            if row.get::<i64>(2).context("deleted_at")? != 0 {
+                continue;
+            }
+            result.push((
+                row.get::<i64>(0).context("collection_id")?,
+                row.get::<i64>(1).context("photo_id")?,
+            ));
         }
         Ok(result)
     }
@@ -710,10 +851,26 @@ impl LibraryDb for StoolapDb {
     fn add_to_collection(&self, collection_id: CollectionId, photo_ids: &[PhotoId]) -> Result<()> {
         let now = unix_now() as i64;
         self.in_transaction(|tx| {
+            // `collection_photos` has no key to conflict on, so re-adding a
+            // photo would insert a second membership row and the collection
+            // would list it twice.  Skipping the photos already there is what
+            // makes adding a selection that partly overlaps the collection —
+            // the common case — do the obvious thing.
+            let mut existing = HashSet::new();
+            let rows = tx.query(
+                "SELECT photo_id FROM collection_photos WHERE collection_id = $1",
+                (collection_id,),
+            )?;
+            for row in rows {
+                existing.insert(row.context("collection member row")?.get::<i64>(0)?);
+            }
             for &pid in photo_ids {
+                if !existing.insert(pid) {
+                    continue;
+                }
                 tx.execute(
                     "INSERT INTO collection_photos
-                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3)",
                     (collection_id, pid, now),
                 )?;
             }
@@ -745,22 +902,22 @@ impl LibraryDb for StoolapDb {
 
 /// Insert a photo row and every row that hangs off it.
 #[allow(clippy::too_many_arguments)]
-fn insert_photo_tx(
-    tx: &mut Transaction,
-    hash: &str,
-    lib_path: &str,
-    lmta: &LibraryMeta,
-    width: u32,
-    height: u32,
-    stack_id: Option<&str>,
-) -> Result<PhotoId> {
+fn insert_photo_tx(tx: &mut Transaction, photo: NewPhoto<'_>) -> Result<PhotoId> {
+    let NewPhoto {
+        hash,
+        lib_path,
+        lmta,
+        width,
+        height,
+        stack_id,
+        has_edits,
+    } = photo;
     let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
 
     let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
     let opt_int = |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
-    let opt_f64 = |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
 
-    // 14 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
+    // 15 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
     let photo_params: Vec<Value> = vec![
         Value::text(hash),
         Value::text(lib_path),
@@ -776,66 +933,171 @@ fn insert_photo_tx(
         opt_text(lmta.source_path.as_deref()),
         opt_int(lmta.source_size.map(|s| s as i64)),
         opt_int(lmta.source_mtime.map(|t| t.secs)),
+        Value::integer(has_edits as i64),
     ];
     let photo_id: i64 = tx
         .query_one(
             "INSERT INTO photos
              (hash, lib_path, width, height, import_date, import_session,
               capture_date, original_filename, stack_id, stack_is_primary, protected,
-              source_path, source_size, source_mtime)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+              source_path, source_size, source_mtime, has_edits)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
              RETURNING id",
             photo_params,
         )
         .context("insert photo")?;
 
-    // EXIF — 17 params exceeds tuple impl limit; use Vec<Value>
-    if let Some(exif) = &lmta.exif {
-        let params: Vec<Value> = vec![
-            Value::integer(photo_id),
-            opt_text(exif.camera_make.as_deref()),
-            opt_text(exif.camera_model.as_deref()),
-            opt_text(exif.lens_make.as_deref()),
-            opt_text(exif.lens_model.as_deref()),
-            opt_int(exif.iso.map(|v| v as i64)),
-            opt_f64(exif.shutter_sec),
-            opt_text(exif.shutter_display.as_deref()),
-            opt_f64(exif.aperture.map(|v| v as f64)),
-            opt_f64(exif.focal_length.map(|v| v as f64)),
-            opt_f64(exif.focal_length_35mm.map(|v| v as f64)),
-            opt_f64(exif.exposure_bias.map(|v| v as f64)),
-            opt_text(exif.exposure_program.as_deref()),
-            opt_text(exif.metering_mode.as_deref()),
-            opt_int(exif.flash.map(|v| if v { 1i64 } else { 0i64 })),
-            opt_f64(exif.gps_lat),
-            opt_f64(exif.gps_lon),
-            opt_f64(exif.gps_alt.map(|v| v as f64)),
-        ];
-        tx.execute(
-            "INSERT INTO exif
-                 (photo_id, camera_make, camera_model, lens_make, lens_model, iso,
-                  shutter_sec, shutter_display, aperture, focal_length,
-                  focal_length_35mm, exposure_bias, exposure_program,
-                  metering_mode, flash, gps_lat, gps_lon, gps_alt)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+    write_photo_dependents_tx(tx, photo_id, lmta)?;
+
+    // Collection membership is deliberately not restored here.  A photo's
+    // `.rlab` names its collections only as a hint, and which name wins is a
+    // question about the whole library rather than one photo, so
+    // `reconstruct::rebuild` settles it in a pass of its own once every file
+    // has been read.
+
+    Ok(photo_id)
+}
+
+/// Rewrite one photo's row in place from what its `.rlab` says, keeping its id
+/// and therefore its collection membership. See [`LibraryDb::replace_photo`].
+fn replace_photo_tx(tx: &mut Transaction, photo_id: PhotoId, photo: NewPhoto<'_>) -> Result<()> {
+    let NewPhoto {
+        hash: _,
+        lib_path,
+        lmta,
+        width,
+        height,
+        stack_id,
+        has_edits,
+    } = photo;
+    let capture_date: Option<&str> = lmta.exif.as_ref().and_then(|e| e.capture_date.as_deref());
+
+    let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+    let opt_int = |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
+
+    // `deleted_at` is reset along with everything else: the caller found this
+    // row by the hash of a file sitting in `files/`, and a photo whose file is
+    // there is an active one however the index came to think otherwise.
+    let params: Vec<Value> = vec![
+        Value::text(lib_path),
+        Value::integer(width as i64),
+        Value::integer(height as i64),
+        Value::integer(lmta.import_date as i64),
+        Value::text(lmta.import_session_id.as_str()),
+        opt_text(capture_date),
+        opt_text(lmta.original_filename.as_deref()),
+        opt_text(stack_id),
+        Value::integer(if lmta.stack_is_primary { 1 } else { 0 }),
+        Value::integer(if lmta.protected { 1 } else { 0 }),
+        opt_text(lmta.source_path.as_deref()),
+        opt_int(lmta.source_size.map(|s| s as i64)),
+        opt_int(lmta.source_mtime.map(|t| t.secs)),
+        Value::integer(has_edits as i64),
+        Value::integer(photo_id),
+    ];
+    // No row means the caller is working from an id the index no longer has;
+    // writing the dependent rows anyway would attach them to nothing.
+    if tx
+        .execute(
+            "UPDATE photos SET
+             lib_path=$1, width=$2, height=$3, import_date=$4, import_session=$5,
+             capture_date=$6, original_filename=$7, stack_id=$8, stack_is_primary=$9,
+             protected=$10, source_path=$11, source_size=$12, source_mtime=$13,
+             has_edits=$14, deleted_at=0
+         WHERE id=$15",
             params,
         )
-        .context("insert exif")?;
+        .context("update photo")?
+        == 0
+    {
+        anyhow::bail!("photo {photo_id} is not in the index");
     }
 
-    // Ratings row
-    tx.execute(
-        "INSERT INTO ratings (photo_id, rating, color_label, flag) VALUES ($1,$2,$3,$4)",
-        (
-            photo_id,
-            lmta.rating as i64,
-            lmta.color_label.as_deref(),
-            lmta.flag.as_deref(),
-        ),
-    )
-    .context("insert rating")?;
+    write_photo_dependents_tx(tx, photo_id, lmta)?;
 
-    // Keywords
+    // Keep the sidebar's cached count in step with the row just written, the
+    // way every other photo mutation here does. A photo whose file moved it to
+    // another session leaves the old session's count to the pass that ends a
+    // rebuild.
+    tx.execute(
+        "UPDATE import_sessions
+         SET photo_count = (
+             SELECT COUNT(*) FROM photos
+             WHERE import_session = import_sessions.id AND deleted_at = 0
+         )
+         WHERE id = (SELECT import_session FROM photos WHERE id = $1)",
+        (photo_id,),
+    )?;
+
+    Ok(())
+}
+
+/// Write the rows that hang off a photo — EXIF, rating, keywords, user
+/// metadata — from what its `.rlab` says.
+///
+/// Each row is updated where it exists and inserted where it does not, rather
+/// than being cleared and rewritten: stoolap rejects an insert of a primary key
+/// that was deleted earlier in the same transaction, and `exif`, `ratings` and
+/// `user_meta` are all keyed by `photo_id`.  That is also what lets inserting a
+/// photo and rewriting one in place share this.
+fn write_photo_dependents_tx(
+    tx: &mut Transaction,
+    photo_id: PhotoId,
+    lmta: &LibraryMeta,
+) -> Result<()> {
+    write_exif_tx(tx, photo_id, lmta.exif.as_ref())?;
+
+    let rating_params = vec![
+        Value::integer(photo_id),
+        Value::integer(lmta.rating as i64),
+        lmta.color_label
+            .as_deref()
+            .map_or_else(Value::null_unknown, Value::text),
+        lmta.flag
+            .as_deref()
+            .map_or_else(Value::null_unknown, Value::text),
+    ];
+    if tx.execute(
+        "UPDATE ratings SET rating=$2, color_label=$3, flag=$4 WHERE photo_id=$1",
+        rating_params.clone(),
+    )? == 0
+    {
+        tx.execute(
+            "INSERT INTO ratings (photo_id, rating, color_label, flag) VALUES ($1,$2,$3,$4)",
+            rating_params,
+        )
+        .context("insert rating")?;
+    }
+
+    let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+    let user_meta_params = vec![
+        Value::integer(photo_id),
+        opt_text(lmta.caption.as_deref()),
+        opt_text(lmta.copyright.as_deref()),
+        opt_text(lmta.creator.as_deref()),
+        opt_text(lmta.location_city.as_deref()),
+        opt_text(lmta.location_country.as_deref()),
+    ];
+    if tx.execute(
+        "UPDATE user_meta SET caption=$2, copyright=$3, creator=$4,
+             location_city=$5, location_country=$6
+         WHERE photo_id=$1",
+        user_meta_params.clone(),
+    )? == 0
+    {
+        tx.execute(
+            "INSERT INTO user_meta
+             (photo_id, caption, copyright, creator, location_city, location_country)
+             VALUES ($1,$2,$3,$4,$5,$6)",
+            user_meta_params,
+        )
+        .context("insert user_meta")?;
+    }
+
+    // Keywords have no key to update against, so the list is replaced whole.
+    // Both statements are in this transaction, so a failure between them cannot
+    // leave the photo with none.
+    tx.execute("DELETE FROM keywords WHERE photo_id = $1", (photo_id,))?;
     for kw in &lmta.keywords {
         tx.execute(
             "INSERT INTO keywords (photo_id, keyword) VALUES ($1, $2)",
@@ -844,43 +1106,71 @@ fn insert_photo_tx(
         .context("insert keyword")?;
     }
 
-    // user_meta
-    tx.execute(
-        "INSERT INTO user_meta
-             (photo_id, caption, copyright, creator, location_city, location_country)
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        (
-            photo_id,
-            lmta.caption.as_deref(),
-            lmta.copyright.as_deref(),
-            lmta.creator.as_deref(),
-            lmta.location_city.as_deref(),
-            lmta.location_country.as_deref(),
-        ),
-    )
-    .context("insert user_meta")?;
+    Ok(())
+}
 
-    // Collections
-    for coll_name in &lmta.collections {
+/// Write a photo's EXIF row, or drop it for a file that carries no snapshot.
+///
+/// The parameters are ordered `photo_id` first so one vector serves both the
+/// update and the insert.
+fn write_exif_tx(
+    tx: &mut Transaction,
+    photo_id: PhotoId,
+    exif: Option<&LibraryExif>,
+) -> Result<()> {
+    let Some(exif) = exif else {
+        tx.execute("DELETE FROM exif WHERE photo_id = $1", (photo_id,))?;
+        return Ok(());
+    };
+
+    let opt_text = |s: Option<&str>| -> Value { s.map_or_else(Value::null_unknown, Value::text) };
+    let opt_int = |v: Option<i64>| -> Value { v.map_or_else(Value::null_unknown, Value::integer) };
+    let opt_f64 = |v: Option<f64>| -> Value { v.map_or_else(Value::null_unknown, Value::float) };
+
+    // 18 params exceeds the 12-tuple Params impl limit; use Vec<Value>.
+    let params: Vec<Value> = vec![
+        Value::integer(photo_id),
+        opt_text(exif.camera_make.as_deref()),
+        opt_text(exif.camera_model.as_deref()),
+        opt_text(exif.lens_make.as_deref()),
+        opt_text(exif.lens_model.as_deref()),
+        opt_int(exif.iso.map(|v| v as i64)),
+        opt_f64(exif.shutter_sec),
+        opt_text(exif.shutter_display.as_deref()),
+        opt_f64(exif.aperture.map(|v| v as f64)),
+        opt_f64(exif.focal_length.map(|v| v as f64)),
+        opt_f64(exif.focal_length_35mm.map(|v| v as f64)),
+        opt_f64(exif.exposure_bias.map(|v| v as f64)),
+        opt_text(exif.exposure_program.as_deref()),
+        opt_text(exif.metering_mode.as_deref()),
+        opt_int(exif.flash.map(|v| if v { 1i64 } else { 0i64 })),
+        opt_f64(exif.gps_lat),
+        opt_f64(exif.gps_lon),
+        opt_f64(exif.gps_alt.map(|v| v as f64)),
+    ];
+
+    if tx.execute(
+        "UPDATE exif SET
+             camera_make=$2, camera_model=$3, lens_make=$4, lens_model=$5, iso=$6,
+             shutter_sec=$7, shutter_display=$8, aperture=$9, focal_length=$10,
+             focal_length_35mm=$11, exposure_bias=$12, exposure_program=$13,
+             metering_mode=$14, flash=$15, gps_lat=$16, gps_lon=$17, gps_alt=$18
+         WHERE photo_id=$1",
+        params.clone(),
+    )? == 0
+    {
         tx.execute(
-            "INSERT INTO collections (name, created_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            (coll_name.as_str(), unix_now() as i64),
+            "INSERT INTO exif
+             (photo_id, camera_make, camera_model, lens_make, lens_model, iso,
+              shutter_sec, shutter_display, aperture, focal_length,
+              focal_length_35mm, exposure_bias, exposure_program,
+              metering_mode, flash, gps_lat, gps_lon, gps_alt)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
+            params,
         )
-        .ok();
-        if let Ok(coll_id) = tx.query_one::<i64, _>(
-            "SELECT id FROM collections WHERE name = $1",
-            (coll_name.as_str(),),
-        ) {
-            tx.execute(
-                "INSERT INTO collection_photos
-                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-                (coll_id, photo_id, unix_now() as i64),
-            )
-            .ok();
-        }
+        .context("insert exif")?;
     }
-
-    Ok(photo_id)
+    Ok(())
 }
 
 /// Rewrite the mutable metadata of one photo: rating, user fields, keywords.
@@ -1002,6 +1292,19 @@ mod tests {
         }
     }
 
+    /// A photo to insert, with everything a test does not care about filled in.
+    fn new_photo<'a>(hash: &'a str, lib_path: &'a str, lmta: &'a LibraryMeta) -> NewPhoto<'a> {
+        NewPhoto {
+            hash,
+            lib_path,
+            lmta,
+            width: 10,
+            height: 10,
+            stack_id: None,
+            has_edits: false,
+        }
+    }
+
     fn count(db: &StoolapDb, sql: &str) -> i64 {
         db.db.query_one::<i64, _>(sql, ()).unwrap()
     }
@@ -1013,11 +1316,11 @@ mod tests {
     #[test]
     fn a_failed_insert_leaves_no_rows_behind() {
         let db = db();
-        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 100, 50, None)
+        db.insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
 
         let before = count(&db, "SELECT COUNT(*) FROM keywords");
-        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 100, 50, None)
+        db.insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .expect_err("duplicate hash must be rejected");
 
         assert_eq!(count(&db, "SELECT COUNT(*) FROM photos"), 1);
@@ -1030,6 +1333,104 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM user_meta"), 1);
     }
 
+    /// What a rebuild needs from `replace_photo`: the row keeps its id and its
+    /// collection membership, and the rows hanging off it are rewritten from
+    /// the file rather than accumulating alongside what was already there.
+    #[test]
+    fn replacing_a_photo_keeps_its_id_and_collections_and_rewrites_the_rest() {
+        let db = db();
+        let id = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        let collection = db
+            .create_collection("uuid-1", "Trip", 1_600_000_000)
+            .unwrap();
+        db.add_to_collection(collection, &[id]).unwrap();
+
+        let updated = LibraryMeta {
+            rating: 4,
+            keywords: vec!["gamma".into()],
+            caption: Some("after".into()),
+            ..lmta("s1")
+        };
+        db.replace_photo(id, new_photo("aabbcc", "aa/bb/aabbcc.rlab", &updated))
+            .unwrap();
+
+        let row = db.photo_by_hash("aabbcc").unwrap().expect("photo row");
+        assert_eq!(row.id, id, "the row must keep the id its members refer to");
+        assert_eq!(
+            db.collection_photos(collection).unwrap().len(),
+            1,
+            "membership hangs off the id, so it must survive the rewrite"
+        );
+        assert_eq!(
+            count(&db, "SELECT COUNT(*) FROM keywords"),
+            1,
+            "keywords should be replaced by the file's, not added to them"
+        );
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM ratings"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM user_meta"), 1);
+        assert_eq!(count(&db, "SELECT rating FROM ratings"), 4);
+    }
+
+    /// A rebuild replaces rows one at a time with no delete in between, so the
+    /// session's cached count — which the sidebar shows and `all_sessions`
+    /// filters on — must never dip while it runs.
+    #[test]
+    fn replacing_a_photo_leaves_its_session_count_alone() {
+        let db = db();
+        db.insert_session("s1", "Session", 1_600_000_000, None)
+            .unwrap();
+        let id = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        db.update_session_count("s1", db.session_photo_count("s1").unwrap())
+            .unwrap();
+
+        db.replace_photo(id, new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+
+        assert_eq!(
+            db.all_sessions().unwrap()[0].photo_count,
+            1,
+            "a session of one photo must not vanish mid-rebuild"
+        );
+    }
+
+    /// The edited-only filter reads one column, and only an insert can put a
+    /// photo that arrived already edited into it.
+    #[test]
+    fn an_edited_photo_is_indexed_as_edited_and_found_by_the_filter() {
+        let db = db();
+        db.insert_photo(NewPhoto {
+            has_edits: true,
+            ..new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"))
+        })
+        .unwrap();
+        db.insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1")))
+            .unwrap();
+
+        assert!(
+            db.all_photos(SortOrder::default()).unwrap()[0].has_edits
+                ^ db.all_photos(SortOrder::default()).unwrap()[1].has_edits
+        );
+
+        let filter = SearchFilter {
+            import_session: Some("s1".into()),
+            has_edits_only: true,
+            ..Default::default()
+        };
+        let found = db.search(&filter, SortOrder::default()).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|row| row.hash.as_str())
+                .collect::<Vec<_>>(),
+            ["aabbcc"],
+            "the session's edited photo is the only one the filter should return"
+        );
+    }
+
     #[test]
     fn session_photo_count_reflects_the_rows() {
         let db = db();
@@ -1038,9 +1439,9 @@ mod tests {
         assert_eq!(db.session_photo_count("s1").unwrap(), 0);
 
         let id = db
-            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
-        db.insert_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1"), 10, 10, None)
+        db.insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1")))
             .unwrap();
         assert_eq!(db.session_photo_count("s1").unwrap(), 2);
 
@@ -1056,7 +1457,7 @@ mod tests {
         db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
             .unwrap();
         let id = db
-            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
         db.update_session_count("s1", 1).unwrap();
 
@@ -1079,7 +1480,7 @@ mod tests {
         db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
             .unwrap();
         let id = db
-            .insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1"), 10, 10, None)
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
             .unwrap();
         db.update_session_count("s1", 1).unwrap();
         assert_eq!(db.all_photos(SortOrder::default()).unwrap().len(), 1);
@@ -1111,7 +1512,7 @@ mod tests {
             .unwrap();
         db.insert_session("empty", "Jun 4 2025", 1_600_100_000, None)
             .unwrap();
-        db.insert_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("full"), 10, 10, None)
+        db.insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("full")))
             .unwrap();
         db.update_session_count("full", 1).unwrap();
 
@@ -1123,5 +1524,89 @@ mod tests {
             .map(|s| s.id)
             .collect();
         assert_eq!(ids, ["full"]);
+    }
+    /// `collection_photos` joins on the membership rows, so a second add would
+    /// otherwise show the photo twice in the collection it is already in.
+    #[test]
+    fn re_adding_a_photo_leaves_one_membership_row() {
+        let db = db();
+        let a = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        let b = db
+            .insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1")))
+            .unwrap();
+        let coll = db
+            .create_collection("uuid-favorites", "Favorites", 1_600_000_000)
+            .unwrap();
+
+        db.add_to_collection(coll, &[a]).unwrap();
+        // The overlapping case: `a` is already in, `b` is not.
+        db.add_to_collection(coll, &[a, b]).unwrap();
+
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM collection_photos"), 2);
+        assert_eq!(db.collection_photos(coll).unwrap().len(), 2);
+    }
+
+    /// Libraries made before collections had ids have rows without one, and a
+    /// collection with no uuid cannot be written into a photo's file at all.
+    #[test]
+    fn opening_an_older_index_gives_every_collection_a_uuid() {
+        let db = db();
+        // What the migration finds: a row from before the column existed.
+        db.db
+            .execute(
+                "INSERT INTO collections (uuid, name, created_at) VALUES ('', 'Portfolio', 1)",
+                (),
+            )
+            .unwrap();
+
+        db.init().expect("init must be re-runnable");
+
+        let collections = db.all_collections().unwrap();
+        assert_eq!(collections.len(), 1);
+        assert!(
+            !collections[0].uuid.is_empty(),
+            "the pre-uuid row was left without an id"
+        );
+
+        // Re-running must not mint a second one over the top of the first.
+        let minted = collections[0].uuid.clone();
+        db.init().unwrap();
+        assert_eq!(db.all_collections().unwrap()[0].uuid, minted);
+    }
+
+    /// A soft-deleted photo keeps its membership row so restoring puts it back
+    /// in the collection, but while it is in Recently Deleted it is not one of
+    /// the collection's photos.
+    #[test]
+    fn collection_memberships_skip_deleted_photos() {
+        let db = db();
+        let a = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        let b = db
+            .insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s1")))
+            .unwrap();
+        let favorites = db
+            .create_collection("uuid-favorites", "Favorites", 1_600_000_000)
+            .unwrap();
+        let portfolio = db
+            .create_collection("uuid-portfolio", "Portfolio", 1_600_000_000)
+            .unwrap();
+        db.add_to_collection(favorites, &[a, b]).unwrap();
+        db.add_to_collection(portfolio, &[a]).unwrap();
+
+        let mut pairs = db.collection_memberships().unwrap();
+        pairs.sort_unstable();
+        assert_eq!(pairs, [(favorites, a), (favorites, b), (portfolio, a)]);
+
+        db.mark_photo_deleted(b, 1_700_000_000).unwrap();
+        let mut pairs = db.collection_memberships().unwrap();
+        pairs.sort_unstable();
+        assert_eq!(pairs, [(favorites, a), (portfolio, a)]);
+
+        db.restore_photo(b).unwrap();
+        assert_eq!(db.collection_memberships().unwrap().len(), 3);
     }
 }

@@ -1,3 +1,76 @@
+/// The uniforms every compute shader in this file takes, and the bindings it
+/// reads them through.
+///
+/// `$extra` carries whichever fields an operation adds after the common four.
+/// WGSL has no include directive, so shared shader text is either spliced in
+/// at compile time or copied by hand — this file used to do the latter, in
+/// fifteen places.
+macro_rules! params_and_bindings {
+    () => {
+        params_and_bindings!("")
+    };
+    ($extra:expr) => {
+        concat!(
+            r#"struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+"#,
+            $extra,
+            r#"};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+"#
+        )
+    };
+}
+
+/// The sRGB transfer function, both directions.
+macro_rules! srgb_helpers {
+    () => {
+        r#"fn srgb_to_linear(c: f32) -> f32 {
+    if (c <= 0.04045) {
+        return c / 12.92;
+    }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    if (c <= 0.0031308) {
+        return 12.92 * c;
+    }
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+"#
+    };
+}
+
+/// Discard the threads the dispatch rounds up past the last pixel, and name
+/// the index of the one this thread owns.
+macro_rules! bounds_guard {
+    () => {
+        r#"    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let i = gid.y * params.width + gid.x;
+    if (i >= params.pixel_count) { return; }
+"#
+    };
+}
+
+/// Unpack the owned pixel into 0..1 channels, alpha left packed for reassembly.
+macro_rules! unpack_rgb {
+    () => {
+        r#"    let px = input_pixels[i];
+    let r = f32(px & 0xffu) / 255.0;
+    let g = f32((px >> 8u) & 0xffu) / 255.0;
+    let b = f32((px >> 16u) & 0xffu) / 255.0;
+    let a = px & 0xff000000u;
+"#
+    };
+}
+
 macro_rules! lut_shader {
     () => {
         r#"
@@ -234,22 +307,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#
 );
 
-pub(crate) const WHITE_BALANCE_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    r_scale: f32,
+pub(crate) const WHITE_BALANCE_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    r_scale: f32,
     g_scale: f32,
     b_scale: f32,
     _pad2: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 fn scaled_channel(byte: u32, scale: f32) -> u32 {
     return u32(clamp(f32(byte) * scale, 0.0, 255.0));
 }
@@ -272,30 +340,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let a = px & 0xff000000u;
     output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const SEPIA_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    strength: f32,
+pub(crate) const SEPIA_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    strength: f32,
     _pad2: f32,
     _pad3: f32,
     _pad4: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
+"#,
+    bounds_guard!(),
+    r#"
     let px = input_pixels[i];
     let r = f32(px & 0xffu);
     let g = f32((px >> 8u) & 0xffu);
@@ -312,20 +375,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nb = u32(b + (sb - b) * s);
     output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const LEVELS_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-@group(0) @binding(3) var<storage, read> lut: array<u32>;
+pub(crate) const LEVELS_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(),
+    r#"@group(0) @binding(3) var<storage, read> lut: array<u32>;
 
 fn channel(byte: u32) -> u32 {
     return lut[byte] & 0xffu;
@@ -333,10 +390,9 @@ fn channel(byte: u32) -> u32 {
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
+"#,
+    bounds_guard!(),
+    r#"
     let px = input_pixels[i];
     let r = channel(px & 0xffu);
     let g = channel((px >> 8u) & 0xffu);
@@ -344,36 +400,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let a = px & 0xff000000u;
     output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const HIGHLIGHTS_SHADOWS_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    highlights: f32,
+pub(crate) const HIGHLIGHTS_SHADOWS_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    highlights: f32,
     shadows: f32,
     _pad2: f32,
     _pad3: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
-    let px = input_pixels[i];
-    let r = f32(px & 0xffu) / 255.0;
-    let g = f32((px >> 8u) & 0xffu) / 255.0;
-    let b = f32((px >> 16u) & 0xffu) / 255.0;
-    let a = px & 0xff000000u;
-
+"#,
+    bounds_guard!(),
+    r#"
+"#,
+    unpack_rgb!(),
+    r#"
     let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let hl_weight = pow(max((luma - 0.5) * 2.0, 0.0), 2.0);
     let sh_weight = pow(max((0.5 - luma) * 2.0, 0.0), 2.0);
@@ -384,32 +432,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nb = u32(clamp((b + delta) * 255.0, 0.0, 255.0));
     output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const VIGNETTE_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    strength: f32,
+pub(crate) const VIGNETTE_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    strength: f32,
     inner: f32,
     zone: f32,
     _pad2: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 const INV_SQRT2: f32 = 0.70710678118654752;
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
+"#,
+    bounds_guard!(),
+    r#"
     let half_w = f32(params.width) * 0.5;
     let half_h = f32(params.height) * 0.5;
     let dx = (f32(gid.x) + 0.5 - half_w) / half_w;
@@ -427,50 +470,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let a = px & 0xff000000u;
     output_pixels[i] = r | (g << 8u) | (b << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const SHADOW_EXPOSURE_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    ev: f32,
+pub(crate) const SHADOW_EXPOSURE_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    ev: f32,
     falloff: f32,
     _pad2: f32,
     _pad3: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-fn srgb_to_linear(c: f32) -> f32 {
-    if (c <= 0.04045) {
-        return c / 12.92;
-    }
-    return pow((c + 0.055) / 1.055, 2.4);
-}
-
-fn linear_to_srgb(c: f32) -> f32 {
-    if (c <= 0.0031308) {
-        return 12.92 * c;
-    }
-    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
-}
-
+"#
+    ),
+    r#"
+"#,
+    srgb_helpers!(),
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
-    let px = input_pixels[i];
-    let r = f32(px & 0xffu) / 255.0;
-    let g = f32((px >> 8u) & 0xffu) / 255.0;
-    let b = f32((px >> 16u) & 0xffu) / 255.0;
-    let a = px & 0xff000000u;
-
+"#,
+    bounds_guard!(),
+    r#"
+"#,
+    unpack_rgb!(),
+    r#"
     let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let weight = pow(clamp(1.0 - luma, 0.0, 1.0), params.falloff);
     let gain = exp2(params.ev * weight);
@@ -484,15 +508,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nb = u32(clamp(linear_to_srgb(bl) * 255.0, 0.0, 255.0));
     output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const SPLIT_TONE_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    sh_r: f32,
+pub(crate) const SPLIT_TONE_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    sh_r: f32,
     sh_g: f32,
     sh_b: f32,
     shadow_sat: f32,
@@ -504,24 +527,17 @@ struct Params {
     _pad2: f32,
     _pad3: f32,
     _pad4: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
-    let px = input_pixels[i];
-    let r = f32(px & 0xffu) / 255.0;
-    let g = f32((px >> 8u) & 0xffu) / 255.0;
-    let b = f32((px >> 16u) & 0xffu) / 255.0;
-    let a = px & 0xff000000u;
-
+"#,
+    bounds_guard!(),
+    r#"
+"#,
+    unpack_rgb!(),
+    r#"
     let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let luma_b = clamp(luma + params.balance, 0.0, 1.0);
 
@@ -535,15 +551,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     output_pixels[i] = u32(nr * 255.0 + 0.5) | (u32(ng * 255.0 + 0.5) << 8u)
         | (u32(nb * 255.0 + 0.5) << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const BLACK_AND_WHITE_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    mode: u32,
+pub(crate) const BLACK_AND_WHITE_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    mode: u32,
     _pad2: u32,
     _pad3: u32,
     _pad4: u32,
@@ -551,24 +566,17 @@ struct Params {
     gw: f32,
     bw: f32,
     _pad5: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
-    let px = input_pixels[i];
-    let r = f32(px & 0xffu) / 255.0;
-    let g = f32((px >> 8u) & 0xffu) / 255.0;
-    let b = f32((px >> 16u) & 0xffu) / 255.0;
-    let a = px & 0xff000000u;
-
+"#,
+    bounds_guard!(),
+    r#"
+"#,
+    unpack_rgb!(),
+    r#"
     var gray: f32;
     if (params.mode == 0u) {
         gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -583,9 +591,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let out = u32(gray * 255.0 + 0.5);
     output_pixels[i] = out | (out << 8u) | (out << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const BLUR_WGSL: &str = r#"
+pub(crate) const BLUR_WGSL: &str = concat!(
+    r#"
 struct Params {
     width: u32,
     height: u32,
@@ -603,10 +613,9 @@ struct Params {
 
 @compute @workgroup_size(16, 16)
 fn main_h(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
+"#,
+    bounds_guard!(),
+    r#"
     var sum_r = 0.0;
     var sum_g = 0.0;
     var sum_b = 0.0;
@@ -635,10 +644,9 @@ fn main_h(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(16, 16)
 fn main_v(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
+"#,
+    bounds_guard!(),
+    r#"
     var sum_r = 0.0;
     var sum_g = 0.0;
     var sum_b = 0.0;
@@ -664,15 +672,14 @@ fn main_v(@builtin(global_invocation_id) gid: vec3<u32>) {
     let na = u32(clamp(sum_a / weight_sum, 0.0, 255.0));
     output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | (na << 24u);
 }
-"#;
+"#,
+);
 
-pub(crate) const COLOR_BALANCE_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    cr0: f32,
+pub(crate) const COLOR_BALANCE_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    cr0: f32,
     cr1: f32,
     cr2: f32,
     _pad2: f32,
@@ -684,24 +691,17 @@ struct Params {
     yb1: f32,
     yb2: f32,
     _pad4: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
-    let px = input_pixels[i];
-    let r = f32(px & 0xffu) / 255.0;
-    let g = f32((px >> 8u) & 0xffu) / 255.0;
-    let b = f32((px >> 16u) & 0xffu) / 255.0;
-    let a = px & 0xff000000u;
-
+"#,
+    bounds_guard!(),
+    r#"
+"#,
+    unpack_rgb!(),
+    r#"
     let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let sh = (1.0 - luma) * (1.0 - luma);
     let mt = 4.0 * luma * (1.0 - luma);
@@ -716,15 +716,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nb = u32(clamp((b + db) * 255.0, 0.0, 255.0));
     output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const COLOR_SPACE_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    m0: f32,
+pub(crate) const COLOR_SPACE_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    m0: f32,
     m1: f32,
     m2: f32,
     _pad2: f32,
@@ -736,38 +735,20 @@ struct Params {
     m7: f32,
     m8: f32,
     _pad4: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-fn srgb_to_linear(c: f32) -> f32 {
-    if (c <= 0.04045) {
-        return c / 12.92;
-    }
-    return pow((c + 0.055) / 1.055, 2.4);
-}
-
-fn linear_to_srgb(c: f32) -> f32 {
-    if (c <= 0.0031308) {
-        return 12.92 * c;
-    }
-    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
-}
-
+"#
+    ),
+    r#"
+"#,
+    srgb_helpers!(),
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
-    let px = input_pixels[i];
-    let r = f32(px & 0xffu) / 255.0;
-    let g = f32((px >> 8u) & 0xffu) / 255.0;
-    let b = f32((px >> 16u) & 0xffu) / 255.0;
-    let a = px & 0xff000000u;
-
+"#,
+    bounds_guard!(),
+    r#"
+"#,
+    unpack_rgb!(),
+    r#"
     let rl = srgb_to_linear(r);
     let gl = srgb_to_linear(g);
     let bl = srgb_to_linear(b);
@@ -781,9 +762,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nb = u32(clamp(linear_to_srgb(out_bl) * 255.0, 0.0, 255.0));
     output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const DENOISE_WGSL: &str = r#"
+pub(crate) const DENOISE_WGSL: &str = concat!(
+    r#"
 struct Params {
     width: u32,
     height: u32,
@@ -801,10 +784,9 @@ struct Params {
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
+"#,
+    bounds_guard!(),
+    r#"
     // `sigma_r2` is expressed in the [0,1] colour space the CPU op works in,
     // so the colour distance has to be computed there too.
     let px = input_pixels[i];
@@ -858,23 +840,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         output_pixels[i] = px;
     }
 }
-"#;
+"#,
+);
 
-pub(crate) const HSL_PANEL_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    hue: array<vec4<f32>, 2>,
+pub(crate) const HSL_PANEL_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    hue: array<vec4<f32>, 2>,
     sat: array<vec4<f32>, 2>,
     lum: array<vec4<f32>, 2>,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 fn hue_to_rgb(p: f32, q: f32, t_in: f32) -> f32 {
     var t = t_in;
     if (t < 0.0) { t = t + 1.0; }
@@ -940,10 +918,9 @@ fn param_at(values: array<vec4<f32>, 2>, i: u32) -> f32 {
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
+"#,
+    bounds_guard!(),
+    r#"
     let px = input_pixels[i];
     let hsl = rgb_to_hsl(unpack_rgb(px));
     let h = hsl.x;
@@ -980,9 +957,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rgb = hsl_to_rgb(vec3<f32>(new_h, new_s, new_l));
     output_pixels[i] = pack_rgba(rgb, px & 0xff000000u);
 }
-"#;
+"#,
+);
 
-pub(crate) const SHARPEN_WGSL: &str = r#"
+pub(crate) const SHARPEN_WGSL: &str = concat!(
+    r#"
 struct Params {
     width: u32,
     height: u32,
@@ -1006,10 +985,9 @@ fn read_pixel(x: i32, y: i32) -> u32 {
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
+"#,
+    bounds_guard!(),
+    r#"
     let xi = i32(gid.x);
     let yi = i32(gid.y);
 
@@ -1082,7 +1060,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         output_pixels[i] = nr | (ng << 8u) | (nb << 16u) | a;
     }
 }
-"#;
+"#,
+);
 
 pub(crate) const NOISE_REDUCTION_NLM_WGSL: &str = r#"
 struct Params {
@@ -1307,34 +1286,25 @@ fn detail_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-pub(crate) const FAUX_HDR_WGSL: &str = r#"
-struct Params {
-    width: u32,
-    height: u32,
-    pixel_count: u32,
-    _pad: u32,
-    strength: f32,
+pub(crate) const FAUX_HDR_WGSL: &str = concat!(
+    r#"
+"#,
+    params_and_bindings!(
+        r#"    strength: f32,
     _pad2: f32,
     _pad3: f32,
     _pad4: f32,
-};
-
-@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
+"#
+    ),
+    r#"
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
-    let px = input_pixels[i];
-    let r = f32(px & 0xffu) / 255.0;
-    let g = f32((px >> 8u) & 0xffu) / 255.0;
-    let b = f32((px >> 16u) & 0xffu) / 255.0;
-    let a = px & 0xff000000u;
-
+"#,
+    bounds_guard!(),
+    r#"
+"#,
+    unpack_rgb!(),
+    r#"
     let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let luma_over = min(luma * 2.0, 1.0);
     let luma_under = luma * 0.5;
@@ -1364,9 +1334,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     output_pixels[i] = u32(nr * 255.0 + 0.5) | (u32(ng * 255.0 + 0.5) << 8u)
         | (u32(nb * 255.0 + 0.5) << 16u) | a;
 }
-"#;
+"#,
+);
 
-pub(crate) const CLARITY_EXTRACT_LUMA_WGSL: &str = r#"
+pub(crate) const CLARITY_EXTRACT_LUMA_WGSL: &str = concat!(
+    r#"
 struct Params { width: u32, height: u32, pixel_count: u32, _pad: u32 };
 
 @group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
@@ -1375,16 +1347,16 @@ struct Params { width: u32, height: u32, pixel_count: u32, _pad: u32 };
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-    let px = input_pixels[i];
+"#,
+    bounds_guard!(),
+    r#"    let px = input_pixels[i];
     let r = f32(px & 0xffu) / 255.0;
     let g = f32((px >> 8u) & 0xffu) / 255.0;
     let b = f32((px >> 16u) & 0xffu) / 255.0;
     luma[i] = 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
-"#;
+"#,
+);
 
 pub(crate) const CLARITY_BOX_BLUR_H_WGSL: &str = r#"
 struct Params { width: u32, height: u32, pixel_count: u32, radius: u32 };
@@ -1428,7 +1400,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-pub(crate) const CLARITY_APPLY_DETAIL_WGSL: &str = r#"
+pub(crate) const CLARITY_APPLY_DETAIL_WGSL: &str = concat!(
+    r#"
 struct Params {
     width: u32,
     height: u32,
@@ -1447,16 +1420,12 @@ struct Params {
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
-    let i = gid.y * params.width + gid.x;
-    if (i >= params.pixel_count) { return; }
-
-    let px = input_pixels[i];
-    let r = f32(px & 0xffu) / 255.0;
-    let g = f32((px >> 8u) & 0xffu) / 255.0;
-    let b = f32((px >> 16u) & 0xffu) / 255.0;
-    let a = px & 0xff000000u;
-
+"#,
+    bounds_guard!(),
+    r#"
+"#,
+    unpack_rgb!(),
+    r#"
     let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let detail = l - blurred_luma[i];
     let weight = select(1.0, 4.0 * l * (1.0 - l), params.midtone_weight != 0u);
@@ -1469,4 +1438,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     output_pixels[i] = u32(nr * 255.0 + 0.5) | (u32(ng * 255.0 + 0.5) << 8u)
         | (u32(nb * 255.0 + 0.5) << 16u) | a;
 }
-"#;
+"#,
+);

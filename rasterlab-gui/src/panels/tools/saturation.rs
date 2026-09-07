@@ -1,6 +1,6 @@
 use rasterlab_core::ops::SaturationOp;
-use rasterlab_core::traits::operation::Operation;
 
+use super::shared::{ParamTool, param_tool_actions};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
@@ -15,6 +15,26 @@ impl SaturationTool {
             saturation: 1.0,
             preview_active: false,
         }
+    }
+}
+
+impl ParamTool for SaturationTool {
+    type Op = SaturationOp;
+
+    fn op(&self) -> SaturationOp {
+        SaturationOp::new(self.saturation)
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn load(&mut self, op: &SaturationOp) {
+        self.saturation = op.saturation;
+    }
+
+    fn preview_active(&mut self) -> &mut bool {
+        &mut self.preview_active
     }
 }
 
@@ -33,47 +53,8 @@ impl Tool for SaturationTool {
         let changed = ui
             .add(egui::Slider::new(&mut self.saturation, 0.0..=4.0).step_by(0.01))
             .changed();
-        let mut action = ToolAction::None;
-        if changed && ctx.has_image {
-            self.preview_active = true;
-            action = ToolAction::RequestRender;
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(SaturationOp::new(self.saturation)));
-                self.saturation = 1.0;
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.saturation = 1.0;
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
-        action
+        param_tool_actions(ui, ctx, self, changed)
     }
 
-    super::shared::impl_preview_tool!(tool => SaturationOp::new(tool.saturation));
-
-    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        if let Some(o) = op.as_any().and_then(|a| a.downcast_ref::<SaturationOp>()) {
-            self.saturation = o.saturation;
-            true
-        } else {
-            false
-        }
-    }
+    super::shared::impl_param_tool!();
 }

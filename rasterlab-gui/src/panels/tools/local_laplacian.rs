@@ -1,9 +1,7 @@
-use std::any::Any;
-
 use rasterlab_core::ops::LocalLaplacianOp;
 use rasterlab_core::ops::local_laplacian::DEFAULT_THRESHOLD;
-use rasterlab_core::traits::operation::Operation;
 
+use super::shared::{ParamTool, param_tool_actions};
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
@@ -23,15 +21,27 @@ impl LocalLaplacianTool {
             preview_active: false,
         }
     }
+}
+
+impl ParamTool for LocalLaplacianTool {
+    type Op = LocalLaplacianOp;
 
     fn op(&self) -> LocalLaplacianOp {
         LocalLaplacianOp::new(self.tone, self.detail, self.threshold)
     }
 
     fn reset(&mut self) {
-        self.tone = 0.0;
-        self.detail = 0.0;
-        self.threshold = DEFAULT_THRESHOLD;
+        *self = Self::new();
+    }
+
+    fn load(&mut self, op: &LocalLaplacianOp) {
+        self.tone = op.tone;
+        self.detail = op.detail;
+        self.threshold = op.threshold;
+    }
+
+    fn preview_active(&mut self) -> &mut bool {
+        &mut self.preview_active
     }
 }
 
@@ -78,65 +88,12 @@ impl Tool for LocalLaplacianTool {
             )
             .changed();
 
-        let mut action = ToolAction::None;
-        if (tone_changed || detail_changed || threshold_changed) && ctx.has_image {
-            self.preview_active = true;
-            action = ToolAction::RequestRender;
-        }
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ctx.has_image, egui::Button::new("Apply"))
-                .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::PushOp(Box::new(self.op()));
-                self.reset();
-            }
-            if self.preview_active
-                && ui
-                    .add_enabled(ctx.has_image, egui::Button::new("Cancel"))
-                    .clicked()
-            {
-                self.preview_active = false;
-                action = ToolAction::RequestRender;
-            }
-            if ui.button("Reset").clicked() {
-                self.reset();
-                if self.preview_active {
-                    self.preview_active = false;
-                    action = ToolAction::RequestRender;
-                }
-            }
-        });
-        action
+        param_tool_actions(
+            ui,
+            ctx,
+            self,
+            tone_changed || detail_changed || threshold_changed,
+        )
     }
-
-    super::shared::impl_preview_controls!();
-    fn preview_op(&self) -> Option<Box<dyn Operation>> {
-        if self.preview_active {
-            Some(Box::new(self.op()))
-        } else {
-            None
-        }
-    }
-    fn load_from_op(&mut self, op: &dyn Operation) -> bool {
-        if let Some(o) = op
-            .as_any()
-            .and_then(|a| a.downcast_ref::<LocalLaplacianOp>())
-        {
-            self.tone = o.tone;
-            self.detail = o.detail;
-            self.threshold = o.threshold;
-            true
-        } else {
-            false
-        }
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+    super::shared::impl_param_tool!();
 }
