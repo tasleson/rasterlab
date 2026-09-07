@@ -44,6 +44,28 @@ use crate::{
 #[error("the library is already open in another RasterLab process")]
 pub struct LibraryBusy;
 
+/// Opening the library failed because there is no library at that path.
+///
+/// A path stops being a library between one session and the next more often
+/// than it sounds: an external drive is unplugged, a network share has not
+/// been mounted yet, a directory is renamed or deleted.  Answering any of
+/// those with [`Library::open_or_create`] loses the failure — the user is
+/// shown an empty library that is really a new one — and on a mount point it
+/// also writes that new library into the directory the real one mounts over.
+#[derive(Debug, thiserror::Error)]
+#[error("{} is not a RasterLab library", .0.display())]
+pub struct NotALibrary(pub PathBuf);
+
+/// Whether `path` is the root of a library.
+///
+/// `files/` is the marker rather than `library.db`: it is created with the
+/// library and holds the photographs themselves, and the index can be rebuilt
+/// from them, so a library that has lost its index is still a library.  An
+/// unmounted volume has neither, which is the case this exists to catch.
+pub fn is_library_root(path: &Path) -> bool {
+    path.join("files").is_dir()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ImportProgress {
     pub total: usize,
@@ -146,6 +168,18 @@ impl Library {
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let db = StoolapDb::open(path)?;
         Self::with_db(path, Box::new(db))
+    }
+
+    /// Open a library that already exists at `path`, never creating one.
+    ///
+    /// What every caller that did not just ask for a new library wants:
+    /// opening a recent library, a path from the command line, the library the
+    /// last session had open.  Failing here is the point — see [`NotALibrary`].
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        if !is_library_root(path) {
+            return Err(anyhow::Error::new(NotALibrary(path.to_path_buf())));
+        }
+        Self::open_or_create(path)
     }
 
     /// Open (or create) a library at `path` with an injected DB backend

@@ -7,7 +7,7 @@ use std::{
 };
 
 use rasterlab_library::{
-    ImportCollection, Library,
+    ImportCollection, Library, NotALibrary,
     db_trait::{PhotoId, PhotoRow, SortOrder},
     search::{Resolution, SearchFilter},
 };
@@ -2753,4 +2753,45 @@ fn purging_recently_deleted_names_the_hashes_it_erased() {
         assert!(!lib.recently_deleted_path(&row.hash).exists());
         assert!(!lib.thumb_path(&row.hash).exists());
     }
+}
+
+/// A path that is not a library must fail rather than quietly become one.
+///
+/// The GUI opens recent libraries and the last session's library by path, and
+/// a drive that is not plugged in looks exactly like a directory that is not
+/// there.  Creating one on the spot hides that, and on a mount point it writes
+/// the new library into the directory the real one mounts over.
+#[test]
+fn open_existing_refuses_a_path_that_is_no_longer_a_library() {
+    let tmp = tempfile::tempdir().unwrap();
+    let gone = tmp.path().join("Main Library");
+
+    // `Library` is not Debug, so the failures are matched rather than unwrapped.
+    let Err(error) = Library::open_existing(&gone) else {
+        panic!("a missing library must not open");
+    };
+    assert!(
+        error.downcast_ref::<NotALibrary>().is_some(),
+        "callers tell this apart from a broken library by its type: {error}"
+    );
+    assert!(!gone.exists(), "the failed open left a library behind");
+
+    // An empty directory where a library used to be — an unmounted volume's
+    // mount point — is the same answer.
+    std::fs::create_dir(&gone).unwrap();
+    let Err(error) = Library::open_existing(&gone) else {
+        panic!("an empty directory is not a library");
+    };
+    assert!(error.downcast_ref::<NotALibrary>().is_some(), "{error}");
+    assert!(
+        gone.read_dir().unwrap().next().is_none(),
+        "the failed open wrote into the directory"
+    );
+
+    // The real thing still opens. Dropped first: the index holds an flock.
+    drop(open_library(&gone));
+    assert!(
+        Library::open_existing(&gone).is_ok(),
+        "a real library must open by the same path"
+    );
 }

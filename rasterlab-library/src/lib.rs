@@ -83,7 +83,10 @@ pub use db_trait::{
     RecentlyDeletedRow, SortOrder,
 };
 pub use import::{ImportCollection, ImportSession, MONTH_NAMES, ymd_from_unix};
-pub use library::{DeleteOutcome, DeleteProgress, ImportProgress, Library, LibraryBusy};
+pub use library::{
+    DeleteOutcome, DeleteProgress, ImportProgress, Library, LibraryBusy, NotALibrary,
+    is_library_root,
+};
 pub use rasterlab_core::library_meta::{CollectionRef, LibraryExif, LibraryMeta};
 pub use reconstruct::{RebuildOutcome, RebuildProgress};
 pub use scrub::{ScrubOutcome, ScrubProgress};
