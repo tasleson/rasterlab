@@ -7,8 +7,8 @@ use std::{
 
 use rasterlab_library::{
     CollectionId, CollectionRow, DeleteProgress, ImportCollection, ImportProgress,
-    ImportSessionRow, Library, LibraryBusy, LibraryMeta, PhotoId, PhotoRow, RebuildProgress,
-    ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
+    ImportSessionRow, Library, LibraryBusy, LibraryMeta, NotALibrary, PhotoId, PhotoRow,
+    RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -307,26 +307,37 @@ pub(crate) struct MetadataCommitRequest {
 
 /// The banner text for a failed open, plus the path to offer a retry for.
 ///
-/// A busy library is the one open failure that is not a fault: the library is
-/// fine and the answer is to wait, so it says so in those terms and names what
-/// is likely holding it, instead of showing `flock` wording no one asked
-/// about.
+/// Two of these are not faults in the library at all — it is held by another
+/// process, or it is on something that is not connected — and both are fixed
+/// by waiting and trying again, so each says so in those terms and comes with
+/// a path to retry, rather than showing `flock` wording no one asked about.
+/// Anything else is the library itself being broken, and carries its own text.
 fn open_failure(path: &Path, err: &anyhow::Error) -> (String, Option<PathBuf>) {
-    if err.downcast_ref::<LibraryBusy>().is_none() {
-        return (format!("Failed to open library: {err}"), None);
-    }
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
-    (
-        format!(
-            "\"{name}\" is in use by another RasterLab process — a \
-             command-line rebuild or scrub, most likely. It will open once \
-             that finishes."
-        ),
-        Some(path.to_path_buf()),
-    )
+    if err.downcast_ref::<LibraryBusy>().is_some() {
+        return (
+            format!(
+                "\"{name}\" is in use by another RasterLab process — a \
+                 command-line rebuild or scrub, most likely. It will open once \
+                 that finishes."
+            ),
+            Some(path.to_path_buf()),
+        );
+    }
+    if err.downcast_ref::<NotALibrary>().is_some() {
+        return (
+            format!(
+                "No library at {} any more. If it lives on a drive or share \
+                 that is not connected, connect it and try again.",
+                path.display()
+            ),
+            Some(path.to_path_buf()),
+        );
+    }
+    (format!("Failed to open library: {err}"), None)
 }
 
 // ── LibraryState ──────────────────────────────────────────────────────────────
@@ -371,11 +382,11 @@ pub struct LibraryState {
     /// Error message to show in a status bar or dialog.
     pub last_error: Option<String>,
 
-    /// The library an open failed on because another process holds it, if the
-    /// last open failed that way.  Kept so the error banner can offer to open
-    /// it again: waiting is the whole remedy, and the wait can be long enough
-    /// that being handed a button beats retracing the Open Library dialog.
-    pub busy_library: Option<PathBuf>,
+    /// The library the last open failed on, when trying it again is the whole
+    /// remedy: another process holds it, or it is on a volume that is not
+    /// mounted.  Kept so the error banner can offer a button, since the wait
+    /// can be long enough that retracing the Open Library dialog is worse.
+    pub retry_library: Option<PathBuf>,
 
     /// Per-file `(path, message)` failures from the most recent import. Retained
     /// after the import finishes so the user can review what went wrong.
@@ -498,7 +509,7 @@ impl Default for LibraryState {
             all_photo_count: 0,
             recently_deleted_count: 0,
             last_error: None,
-            busy_library: None,
+            retry_library: None,
             last_import_errors: Vec::new(),
             show_import_errors: false,
             scrub_progress: None,
@@ -897,8 +908,23 @@ impl LibraryState {
         Some(s)
     }
 
+    /// Open the library at `path`, which must already be one.
     pub fn open_library(&mut self, path: PathBuf, thumb_scale: f32) {
-        match Library::open_or_create(&path) {
+        let opened = Library::open_existing(&path);
+        self.adopt_library(path, thumb_scale, opened);
+    }
+
+    /// Open the library at `path`, laying one out there if it is new.
+    ///
+    /// Only for File > New Library. Everywhere else a path that is not a
+    /// library is a mistake to report, not an invitation to make one.
+    pub fn create_library(&mut self, path: PathBuf, thumb_scale: f32) {
+        let opened = Library::open_or_create(&path);
+        self.adopt_library(path, thumb_scale, opened);
+    }
+
+    fn adopt_library(&mut self, path: PathBuf, thumb_scale: f32, opened: anyhow::Result<Library>) {
+        match opened {
             Ok(lib) => {
                 self.library = Some(Arc::new(lib));
                 self.thumb_scale = thumb_scale;
@@ -919,13 +945,13 @@ impl LibraryState {
                 self.active_copy_saves.clear();
                 self.thumbs.clear();
                 self.last_error = None;
-                self.busy_library = None;
+                self.retry_library = None;
                 self.refresh();
             }
             Err(e) => {
-                let (message, busy) = open_failure(&path, &e);
+                let (message, retry) = open_failure(&path, &e);
                 self.last_error = Some(message);
-                self.busy_library = busy;
+                self.retry_library = retry;
             }
         }
     }
@@ -1315,10 +1341,10 @@ mod tests {
 
     use super::*;
 
-    /// A held library and a broken one are different messages, and only the
-    /// held one is worth a Retry — retrying anything else just fails again.
+    /// Held, gone and broken are three different messages, and only the first
+    /// two are worth a Retry — retrying a corrupt index just fails again.
     #[test]
-    fn open_failure_separates_busy_from_broken() {
+    fn open_failure_separates_busy_and_missing_from_broken() {
         let path = Path::new("/photos/Main Library");
 
         let (message, retry) = open_failure(path, &anyhow::Error::new(LibraryBusy));
@@ -1328,11 +1354,45 @@ mod tests {
             "busy message names the library and the reason: {message}"
         );
 
+        let (message, retry) =
+            open_failure(path, &anyhow::Error::new(NotALibrary(path.to_path_buf())));
+        assert_eq!(
+            retry.as_deref(),
+            Some(path),
+            "a library on a disconnected drive is worth retrying"
+        );
+        assert!(
+            message.contains("/photos/Main Library") && message.contains("connected"),
+            "missing message names the path and what to do about it: {message}"
+        );
+
         let (message, retry) = open_failure(path, &anyhow::anyhow!("index is corrupt"));
         assert_eq!(retry, None, "a broken library is not retryable");
         assert!(
             message.contains("index is corrupt"),
             "other failures keep their own text: {message}"
+        );
+    }
+
+    /// The bug this guards: opening a library that is no longer there left
+    /// the user in front of an empty grid, because the open had quietly made
+    /// a new library at that path and succeeded.
+    #[test]
+    fn opening_a_library_that_is_gone_reports_it_instead_of_making_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("Main Library");
+        let mut state = LibraryState::default();
+
+        state.open_library(gone.clone(), 0.5);
+
+        assert!(state.library.is_none(), "no library should be open");
+        assert!(!gone.exists(), "a library was created at the missing path");
+        let error = state.last_error.expect("the failure has to be shown");
+        assert!(error.contains("Main Library"), "{error}");
+        assert_eq!(
+            state.retry_library.as_deref(),
+            Some(gone.as_path()),
+            "the banner should offer to try again once the drive is back"
         );
     }
 
@@ -1509,7 +1569,7 @@ mod tests {
     fn selecting_a_collection_shows_its_photos() {
         let tmp = tempfile::tempdir().unwrap();
         let mut state = LibraryState::default();
-        state.open_library(tmp.path().to_path_buf(), 0.5);
+        state.create_library(tmp.path().to_path_buf(), 0.5);
         let lib = state.library.clone().expect("library should open");
 
         let images = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1557,7 +1617,7 @@ mod tests {
     fn deleting_marked_collections_takes_them_all() {
         let tmp = tempfile::tempdir().unwrap();
         let mut state = LibraryState::default();
-        state.open_library(tmp.path().to_path_buf(), 0.5);
+        state.create_library(tmp.path().to_path_buf(), 0.5);
         let lib = state.library.clone().expect("library should open");
 
         let images = Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -96,9 +96,10 @@ impl RasterLabApp {
             state.open_file(path);
         }
         // Auto-open the last library if one was open when the app last exited.
-        if let Some(lib_path) = state.prefs.last_library.clone()
-            && lib_path.exists()
-        {
+        // One that has gone missing is opened anyway so that it fails and says
+        // so: skipping it quietly leaves the user in front of a library that
+        // looks like it simply has nothing in it.
+        if let Some(lib_path) = state.prefs.last_library.clone() {
             state.open_library(lib_path);
         }
         #[cfg(not(target_arch = "wasm32"))]

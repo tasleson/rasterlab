@@ -40,13 +40,25 @@ impl AppState {
             self.library.last_error = Some(format!("Failed to create directory: {e}"));
             return;
         }
-        self.open_library(path);
+        self.flush_library_metadata_drafts();
+        let scale = self.prefs.library_thumb_scale;
+        self.library.create_library(path.clone(), scale);
+        self.remember_open_library(path);
     }
 
     pub fn open_library(&mut self, path: std::path::PathBuf) {
         self.flush_library_metadata_drafts();
         let scale = self.prefs.library_thumb_scale;
         self.library.open_library(path.clone(), scale);
+        self.remember_open_library(path);
+    }
+
+    /// Record the library the user just opened, and show it.
+    ///
+    /// Runs whether or not the open succeeded: a library on a disconnected
+    /// drive is still the one the user means to come back to, and the Library
+    /// mode is where the error banner explaining the failure lives.
+    fn remember_open_library(&mut self, path: std::path::PathBuf) {
         self.prefs.push_recent_library(path.clone());
         self.prefs.last_library = Some(path);
         self.prefs.save();

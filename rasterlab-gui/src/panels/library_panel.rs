@@ -320,13 +320,13 @@ fn error_banner_ui(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
             state.library.last_error = None;
-            state.library.busy_library = None;
+            state.library.retry_library = None;
         }
         ui.colored_label(
             egui::Color32::from_rgb(255, 140, 140),
             format!("⚠ {}", error),
         );
-        if let Some(path) = state.library.busy_library.clone()
+        if let Some(path) = state.library.retry_library.clone()
             && ui
                 .small_button("Retry")
                 .on_hover_text(format!("Try opening {} again", path.display()))
