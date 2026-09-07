@@ -405,8 +405,14 @@ impl AppState {
         }
     }
 
-    /// Save the current project to `path` as a `.rlab` file.
-    pub fn save_project(&mut self, path: std::path::PathBuf) {
+    /// Assemble the `.rlab` container describing the current document.
+    ///
+    /// Shared by [`save_project`](Self::save_project) and the export dialog's
+    /// project export, so a container written into an export directory carries
+    /// the same edits, thumbnail and library metadata an in-place save writes.
+    /// The thumbnail comes back alongside the file because a save also
+    /// publishes it to the library's thumbnail cache.
+    pub(crate) fn build_project_file(&mut self) -> Result<(RlabFile, Vec<u8>), String> {
         // An edit session temporarily disables the committed operation while
         // its replacement is shown as a live preview. Neither state is a valid
         // save boundary: serialising now would persist the disabled operation
@@ -414,43 +420,27 @@ impl AppState {
         // chooser that was already open (or any other direct caller) cannot
         // write transient state.
         if self.editing.is_some() {
-            self.status = "Finish or cancel the active edit before saving".into();
-            return;
+            return Err("Finish or cancel the active edit before saving".into());
         }
         let Some(original_bytes) = self.original_bytes.clone() else {
-            self.status = "Nothing to save — open an image first".into();
-            return;
+            return Err("Nothing to save — open an image first".into());
         };
         let Some(store) = &mut self.copies else {
-            self.status = "Nothing to save — no active pipeline".into();
-            return;
+            return Err("Nothing to save — no active pipeline".into());
         };
 
         // Render the committed active copy once and carry its thumbnail in the
         // same authoritative write. Previously the save omitted PREV and then
         // thumbnail regeneration read and rewrote the whole remote container.
-        let rendered = match store.active_pipeline_mut().render() {
-            Ok(image) => image,
-            Err(e) => {
-                self.status = format!("Save failed (thumbnail render): {e}");
-                return;
-            }
-        };
-        let thumbnail = match rasterlab_library::thumbnail::generate_thumbnail(&rendered, 512) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                self.status = format!("Save failed (thumbnail): {e}");
-                return;
-            }
-        };
-
-        let (copies_saved, active_idx) = match store.save_states() {
-            Ok(s) => s,
-            Err(e) => {
-                self.status = format!("Save failed (pipeline): {}", e);
-                return;
-            }
-        };
+        let rendered = store
+            .active_pipeline_mut()
+            .render()
+            .map_err(|e| format!("Save failed (thumbnail render): {e}"))?;
+        let thumbnail = rasterlab_library::thumbnail::generate_thumbnail(&rendered, 512)
+            .map_err(|e| format!("Save failed (thumbnail): {e}"))?;
+        let (copies_saved, active_idx) = store
+            .save_states()
+            .map_err(|e| format!("Save failed (pipeline): {e}"))?;
 
         let source = store.source();
         let (w, h) = (source.width, source.height);
@@ -468,7 +458,6 @@ impl AppState {
         }
         meta = meta.touch();
 
-        let created_at = meta.created_at;
         let mut rlab = RlabFile::new(
             meta,
             original_bytes,
@@ -477,6 +466,19 @@ impl AppState {
             Some(thumbnail.clone()),
         );
         rlab.set_lmta(self.project_lmta.clone());
+        Ok((rlab, thumbnail))
+    }
+
+    /// Save the current project to `path` as a `.rlab` file.
+    pub fn save_project(&mut self, path: std::path::PathBuf) {
+        let (rlab, thumbnail) = match self.build_project_file() {
+            Ok(built) => built,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let created_at = rlab.meta.created_at;
         let has_edits = rlab.has_edits();
         // v4 adds Reed-Solomon parity so the file is repairable by an integrity
         // scrub; this also avoids downgrading a library photo that was imported
