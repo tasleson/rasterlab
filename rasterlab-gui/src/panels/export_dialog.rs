@@ -7,7 +7,7 @@ use rasterlab_core::{
     library_meta::{FileTimeStamp, LibraryMeta},
     project::RlabFile,
     traits::format_handler::EncodeOptions,
-    verified_write::write_atomic,
+    verified_write::{write_atomic, write_verified_atomic},
 };
 
 use crate::panels::export_border::ExportBorderOptions;
@@ -131,6 +131,9 @@ pub enum ExportFormat {
     /// Verbatim copy of the original imported bytes, with filesystem
     /// timestamps restored to their values at import time.
     Original,
+    /// The `.rlab` project container: the original bytes plus every virtual
+    /// copy's edit stack, so the export can be opened and edited further.
+    Rlab,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +151,29 @@ impl ExportFormat {
             Self::Png => "png",
             // Unused for Original — the original filename is preserved instead.
             Self::Original => "",
+            Self::Rlab => "rlab",
+        }
+    }
+
+    /// Whether the export re-encodes pixels. The byte-copying formats ignore
+    /// quality, metadata, resize and border, so the dialog hides those rows
+    /// rather than offering settings that would not be honoured.
+    fn renders_pixels(self) -> bool {
+        matches!(self, Self::Jpeg | Self::Png)
+    }
+
+    /// What a byte-copying format writes, for the line under the format picker.
+    fn passthrough_description(self) -> Option<&'static str> {
+        match self {
+            Self::Original => Some(
+                "Writes the unmodified imported bytes with the \
+                 original filename and timestamps.",
+            ),
+            Self::Rlab => Some(
+                "Writes the .rlab project — original bytes plus every edit — \
+                 named after the original file.",
+            ),
+            Self::Jpeg | Self::Png => None,
         }
     }
 }
@@ -234,15 +260,13 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                         ui.selectable_value(&mut export.format, ExportFormat::Jpeg, "JPEG");
                         ui.selectable_value(&mut export.format, ExportFormat::Png, "PNG");
                         ui.selectable_value(&mut export.format, ExportFormat::Original, "Original");
+                        ui.selectable_value(&mut export.format, ExportFormat::Rlab, "RLAB");
                     });
                     ui.end_row();
 
-                    if export.format == ExportFormat::Original {
+                    if let Some(description) = export.format.passthrough_description() {
                         ui.label("");
-                        ui.label(
-                            "Writes the unmodified imported bytes with the \
-                             original filename and timestamps.",
-                        );
+                        ui.label(description);
                         ui.end_row();
                     }
 
@@ -263,7 +287,7 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                         ui.end_row();
                     }
 
-                    if export.format != ExportFormat::Original {
+                    if export.format.renders_pixels() {
                         ui.label("Metadata:");
                         settings_changed |= ui
                             .checkbox(&mut export.preserve_metadata, "Keep EXIF from the original")
@@ -271,7 +295,7 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                         ui.end_row();
                     }
 
-                    if export.format != ExportFormat::Original {
+                    if export.format.renders_pixels() {
                         ui.label("Resize:");
                         ui.horizontal(|ui| {
                             let mut resize = export.size_constraint.is_some();
@@ -356,7 +380,7 @@ pub fn ui(ctx: &egui::Context, state: &mut AppState) {
                     }
                 });
 
-            if export.format != ExportFormat::Original {
+            if export.format.renders_pixels() {
                 ui.separator();
                 border_changed |= crate::panels::export_border::options_ui(ui, border);
             }
@@ -536,24 +560,24 @@ fn start_current_export(state: &mut AppState) {
 
     let source_path = state.last_path.clone();
     let source_name = current_source_name(state, source_path.as_deref());
-    let result = if settings.format == ExportFormat::Original {
-        export_current_original(state, &dest_dir, &source_name, source_path.as_deref())
-            .map_err(|error| error.to_string())
-    } else {
-        let stem = Path::new(&source_name)
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("export");
-        let filename = format!("{}.{}", stem, settings.format.ext());
-        let dest = unique_dest_path(&dest_dir, &filename);
-        state
-            .save_file_with_dialog_options(
-                dest,
-                settings.size_constraint,
-                &settings.encode,
-                &settings.border,
-            )
-            .map(|_| ())
+    let result = match settings.format {
+        ExportFormat::Original => {
+            export_current_original(state, &dest_dir, &source_name, source_path.as_deref())
+                .map_err(|error| error.to_string())
+        }
+        ExportFormat::Rlab => export_current_rlab(state, &dest_dir, &source_name),
+        ExportFormat::Jpeg | ExportFormat::Png => {
+            let filename = format!("{}.{}", dest_stem(&source_name), settings.format.ext());
+            let dest = unique_dest_path(&dest_dir, &filename);
+            state
+                .save_file_with_dialog_options(
+                    dest,
+                    settings.size_constraint,
+                    &settings.encode,
+                    &settings.border,
+                )
+                .map(|_| ())
+        }
     };
 
     let mut progress = lock_shared(&shared);
@@ -586,6 +610,37 @@ fn current_source_name(state: &AppState, source_path: Option<&Path>) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("export")
         .to_owned()
+}
+
+/// Write the open document out as a `.rlab` project, current edits included.
+///
+/// Unlike Save As this does not adopt the exported path or clear the dirty
+/// flag. The project the user has open is still the library photo (or the
+/// `.rlab` they opened), and treating a detached copy as its save boundary
+/// would let that file's own copy of these edits be dropped on close.
+fn export_current_rlab(
+    state: &mut AppState,
+    dest_dir: &Path,
+    source_name: &str,
+) -> Result<(), String> {
+    let (rlab, _thumbnail) = state.build_project_file()?;
+    let dest = unique_dest_path(dest_dir, &format!("{}.rlab", dest_stem(source_name)));
+    rlab.write_v5(&dest).map_err(|error| error.to_string())?;
+    state.status = format!("Exported project → {}", dest.display());
+    Ok(())
+}
+
+/// The usable part of a filename before its extension, if there is one.
+fn file_stem_of(name: &str) -> Option<&str> {
+    Path::new(name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+}
+
+/// Basename the open document's export is written under.
+fn dest_stem(source_name: &str) -> &str {
+    file_stem_of(source_name).unwrap_or("export")
 }
 
 fn export_current_original(
@@ -624,6 +679,13 @@ fn export_one(
     settings: &ExportSettings,
     hash: &str,
 ) -> anyhow::Result<()> {
+    // Copying the container needs neither its pixels nor its edit stack, and
+    // parsing it first would hold a whole second photograph in memory to no
+    // purpose.
+    if settings.format == ExportFormat::Rlab {
+        return export_rlab(rlab_path, dest_dir, hash);
+    }
+
     let mut rlab = RlabFile::read(rlab_path)?;
     rlab.resolve_relative_paths(
         rlab_path
@@ -686,14 +748,29 @@ fn export_one(
 
     // Encode — derive output name from the original import name, not the hash.
     let orig_name = original_filename_for(&rlab, rlab_path, hash);
-    let stem = Path::new(&orig_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(hash);
+    let stem = file_stem_of(&orig_name).unwrap_or(hash);
     let filename = format!("{}.{}", stem, settings.format.ext());
     let dest = unique_dest_path(dest_dir, &filename);
     let bytes = registry.encode_file(&image, &dest, &settings.encode)?;
     write_atomic(&dest, &bytes)?;
+    Ok(())
+}
+
+/// Copy a library photo's `.rlab` verbatim, under the name it was imported
+/// with rather than the content hash the library files it under.
+///
+/// The copy is read back and compared after the write: an exported project
+/// carries the only copy of a photograph, and is very often taken somewhere
+/// the library's integrity scrub will never look at it again.
+fn export_rlab(rlab_path: &Path, dest_dir: &Path, hash: &str) -> anyhow::Result<()> {
+    // Reads only the small META/LMTA chunks, seeking over the photo itself.
+    let imported_name = rasterlab_core::project::read_original_filename(rlab_path)?;
+    let stem = imported_name
+        .as_deref()
+        .and_then(file_stem_of)
+        .unwrap_or(hash);
+    let dest = unique_dest_path(dest_dir, &format!("{stem}.rlab"));
+    write_verified_atomic(&dest, &std::fs::read(rlab_path)?)?;
     Ok(())
 }
 
@@ -810,11 +887,31 @@ fn filetime_from_stamp(ts: FileTimeStamp) -> filetime::FileTime {
 
 #[cfg(test)]
 mod tests {
-    use rasterlab_core::{Image, pipeline::EditPipeline};
+    use rasterlab_core::{Image, ops::SaturationOp, pipeline::EditPipeline, project::RlabMeta};
 
     use crate::state::VirtualCopyStore;
 
     use super::*;
+
+    /// A document with one saturation edit, standing in for an open photo.
+    fn state_with_an_edit(source_name: &Path) -> AppState {
+        let mut pipeline = EditPipeline::new(Image::new(4, 4));
+        pipeline.push_op(Box::new(SaturationOp::new(1.4)));
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
+        state.last_path = Some(source_name.to_path_buf());
+        state.original_bytes = Some(vec![1, 2, 3, 4]);
+        state
+    }
+
+    fn settings_for(format: ExportFormat) -> ExportSettings {
+        ExportSettings {
+            format,
+            encode: EncodeOptions::default(),
+            size_constraint: None,
+            border: ExportBorderOptions::default(),
+        }
+    }
 
     #[test]
     fn original_export_of_a_library_photo_uses_its_imported_filename() {
@@ -877,6 +974,74 @@ mod tests {
             std::fs::read(dest_dir.join("photo.raw")).unwrap(),
             original_bytes
         );
+        let progress = lock_shared(&state.tools.export_dialog.shared);
+        assert_eq!(progress.done, 1);
+        assert!(progress.finished);
+        assert!(progress.errors.is_empty());
+    }
+
+    #[test]
+    fn library_rlab_export_copies_the_container_under_its_imported_name() {
+        // Library files are named after their content hash, which tells the
+        // user nothing once the file is sitting in an export directory.
+        let temp = tempfile::tempdir().unwrap();
+        let dest_dir = temp.path().join("destination");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let hash = "dead".repeat(16);
+
+        let store = VirtualCopyStore::new("Copy 1".into(), EditPipeline::new(Image::new(4, 4)));
+        let (copies, active) = store.save_states().unwrap();
+        let mut rlab = RlabFile::new(
+            RlabMeta::new("test", None::<String>, 4, 4),
+            vec![9, 8, 7, 6],
+            copies,
+            active,
+            None,
+        );
+        rlab.set_lmta(Some(LibraryMeta {
+            original_filename: Some("DSC_0001.JPG".into()),
+            ..Default::default()
+        }));
+        let source = temp.path().join(format!("{hash}.rlab"));
+        rlab.write_v5(&source).unwrap();
+
+        export_one(
+            &source,
+            &dest_dir,
+            &FormatRegistry::with_builtins(),
+            &settings_for(ExportFormat::Rlab),
+            &hash,
+        )
+        .unwrap();
+
+        let exported = dest_dir.join("DSC_0001.rlab");
+        assert_eq!(
+            std::fs::read(&exported).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+        // A verbatim copy is only worth anything if it still opens.
+        assert_eq!(
+            RlabFile::read(&exported).unwrap().original_bytes,
+            [9, 8, 7, 6]
+        );
+    }
+
+    #[test]
+    fn rlab_export_of_the_open_photo_carries_its_unsaved_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest_dir = temp.path().join("destination");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+
+        let mut state = state_with_an_edit(&temp.path().join("photo.jpg"));
+        state.tools.export_dialog.scope = ExportScope::CurrentPhoto;
+        state.tools.export_dialog.format = ExportFormat::Rlab;
+        state.tools.export_dialog.dest_dir = dest_dir.clone();
+
+        start_current_export(&mut state);
+
+        let exported = RlabFile::read(&dest_dir.join("photo.rlab")).unwrap();
+        assert_eq!(exported.copies[0].pipeline_state.entries.len(), 1);
+        assert!(exported.has_edits());
         let progress = lock_shared(&state.tools.export_dialog.shared);
         assert_eq!(progress.done, 1);
         assert!(progress.finished);

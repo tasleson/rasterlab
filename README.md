@@ -36,7 +36,7 @@ RasterLab began as a one-month AI-assisted development experiment and has contin
 | Recognized RAW extensions | `3fr`, `arw`, `cr2`, `cr3`, `dng`, `erf`, `iiq`, `nef`, `nrw`, `orf`, `pef`, `raf`, `raw`, `rw2`, `sr2`, `srf`, `srw` |
 | Rendered export | JPEG and PNG |
 | Native project | `.rlab` |
-| Library export | Rendered JPEG/PNG or the verbatim imported original |
+| Library export | Rendered JPEG/PNG, the verbatim imported original, or the `.rlab` project |
 
 RAW files are decoded to an editable sRGB image. RasterLab retains the original file bytes in a saved `.rlab` project or managed library item; it does not write changes back into a RAW file.
 
@@ -104,7 +104,7 @@ RasterLab uses several independent mechanisms because no single checksum, undo s
 ### Non-destructive editing and recovery from user mistakes
 
 - Editing operations are stored as parameters in a pipeline; the source pixels are not overwritten.
-- A `.rlab` file embeds the original source-file bytes verbatim, plus every virtual copy's pipeline and undo cursor. Library export can write those original bytes back out with the original filename and recorded timestamps.
+- A `.rlab` file embeds the original source-file bytes verbatim, plus every virtual copy's pipeline and undo cursor. Library export can write those original bytes back out with the original filename and recorded timestamps, or copy out the whole `.rlab` — edits included — named after the imported file rather than its content hash.
 - Undo/redo, operation enable/disable controls, editable stack entries, and virtual copies make edits reversible without duplicating the source image.
 - Pipeline state is autosaved after changes. Previous unsaved sessions can be restored from **File > Previously Unsaved Work**.
 - Opening another file or library photo while edits are unsaved requires confirmation.
@@ -175,7 +175,7 @@ Current library features include:
 - Import-time collections: choosing **File > Import Photos > Select Folder…** asks, before the import starts, whether the photos should be filed into a collection — one per folder, named after the folder that directly holds them, or a single collection you name for the whole import. A collection that already goes by that name is used as it is, so importing the same folder again adds only what is new. The choice is remembered between imports.
 - Filtering by text, rating, flag, color label, camera, lens, capture date, aperture, shutter speed, ISO, pixel dimensions, and edited state.
 - Sorting by import date, capture date, rating, or filename.
-- Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals.
+- Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals or of the `.rlab` projects themselves.
 - Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
 - Index rebuilding, integrity scrubbing, protected-photo deletion guards, and a library-owned Recently Deleted area that works consistently on local and network filesystems.
 
