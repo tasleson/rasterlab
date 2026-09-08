@@ -23,6 +23,16 @@ use crate::state::VirtualCopyStore;
 
 use super::{AppMode, AppState, BgMessage, workers};
 
+/// Decode a standalone source whose original bytes are already retained for a
+/// future project save. RAW formats retain their seekable-file fallback inside
+/// the registry; ordinary formats never need to reopen `path`.
+fn decode_standalone_bytes(
+    original_bytes: &[u8],
+    path: &std::path::Path,
+) -> rasterlab_core::RasterResult<Image> {
+    FormatRegistry::with_builtins().decode_bytes(original_bytes, Some(path))
+}
+
 #[derive(Debug, Clone, Copy)]
 enum RenderedExportResize {
     None,
@@ -220,11 +230,13 @@ impl AppState {
                         Err(e) => BgMessage::Error(e.to_string()),
                     }
                 } else {
-                    // Read the raw bytes for storage in .rlab saves, then decode.
+                    // Keep the source bytes for future .rlab saves and decode that
+                    // same allocation. `decode_bytes` preserves the path as a format
+                    // hint; RAW sources still use its seekable-file fallback until
+                    // rawler gains an in-memory source API.
                     match std::fs::read(&path) {
                         Ok(original_bytes) => {
-                            let registry = FormatRegistry::with_builtins();
-                            match registry.decode_file(&path) {
+                            match decode_standalone_bytes(&original_bytes, &path) {
                                 Ok(image) => BgMessage::ImageLoaded {
                                     path,
                                     image,
@@ -480,9 +492,9 @@ impl AppState {
         };
         let created_at = rlab.meta.created_at;
         let has_edits = rlab.has_edits();
-        // v4 adds Reed-Solomon parity so the file is repairable by an integrity
+        // v5 adds Reed-Solomon parity so the file is repairable by an integrity
         // scrub; this also avoids downgrading a library photo that was imported
-        // as v4 when its edits are saved back in place.
+        // as v5 when its edits are saved back in place.
         let library_target = self
             .library_context
             .as_ref()
@@ -668,6 +680,29 @@ mod tests {
             .pipeline_state
             .entries[0]
             .clone()
+    }
+
+    #[test]
+    fn standalone_decode_uses_the_retained_bytes_without_reopening_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        let mut source = Image::new(2, 1);
+        source.set_pixel(0, 0, [12, 34, 56, 255]);
+        source.set_pixel(1, 0, [78, 90, 123, 255]);
+        let bytes = FormatRegistry::with_builtins()
+            .encode_file(&source, &path, &EncodeOptions::default())
+            .unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let retained_bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let decoded = decode_standalone_bytes(&retained_bytes, &path).unwrap();
+
+        assert_eq!(
+            (decoded.width, decoded.height),
+            (source.width, source.height)
+        );
+        assert_eq!(decoded.data, source.data);
     }
 
     #[test]
