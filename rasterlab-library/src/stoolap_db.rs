@@ -321,6 +321,27 @@ impl LibraryDb for StoolapDb {
         self.in_transaction(|tx| insert_photo_tx(tx, photo))
     }
 
+    fn insert_photo_with_collection(
+        &self,
+        photo: NewPhoto<'_>,
+        collection_id: Option<CollectionId>,
+    ) -> Result<PhotoId> {
+        self.in_transaction(|tx| {
+            let photo_id = insert_photo_tx(tx, photo)?;
+            if let Some(collection_id) = collection_id {
+                // A freshly allocated photo id cannot already be a member, so
+                // unlike the general selection API this needs no collection-
+                // wide read to protect against duplicate membership rows.
+                tx.execute(
+                    "INSERT INTO collection_photos
+                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3)",
+                    (collection_id, photo_id, unix_now() as i64),
+                )?;
+            }
+            Ok(photo_id)
+        })
+    }
+
     fn replace_photo(&self, photo_id: PhotoId, photo: NewPhoto<'_>) -> Result<()> {
         self.in_transaction(|tx| replace_photo_tx(tx, photo_id, photo))
     }
@@ -1333,9 +1354,47 @@ mod tests {
         assert_eq!(count(&db, "SELECT COUNT(*) FROM user_meta"), 1);
     }
 
-    /// What a rebuild needs from `replace_photo`: the row keeps its id and its
-    /// collection membership, and the rows hanging off it are rewritten from
-    /// the file rather than accumulating alongside what was already there.
+    #[test]
+    fn inserting_a_fresh_photo_with_a_collection_writes_one_membership() {
+        let db = db();
+        let collection = db
+            .create_collection("uuid-favorites", "Favorites", 1_600_000_000)
+            .unwrap();
+
+        let id = db
+            .insert_photo_with_collection(
+                new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")),
+                Some(collection),
+            )
+            .unwrap();
+
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM photos"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM collection_photos"), 1);
+        assert_eq!(db.collection_member_ids(collection).unwrap(), [id]);
+    }
+
+    #[test]
+    fn failed_fresh_photo_insert_does_not_add_a_membership() {
+        let db = db();
+        let collection = db
+            .create_collection("uuid-favorites", "Favorites", 1_600_000_000)
+            .unwrap();
+        db.insert_photo_with_collection(
+            new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")),
+            Some(collection),
+        )
+        .unwrap();
+
+        db.insert_photo_with_collection(
+            new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")),
+            Some(collection),
+        )
+        .expect_err("duplicate hash must roll back the fresh insert");
+
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM photos"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM collection_photos"), 1);
+    }
+
     #[test]
     fn replacing_a_photo_keeps_its_id_and_collections_and_rewrites_the_rest() {
         let db = db();
