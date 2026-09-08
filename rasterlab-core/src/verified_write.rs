@@ -47,7 +47,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::degraded_read::read_degraded;
+use crate::degraded_read::compare_degraded;
 
 /// Distinguishes the staging files of concurrent writers within one process.
 static STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -308,34 +308,41 @@ pub fn verify_written(path: &Path, expected: &[u8]) -> io::Result<()> {
     hint_uncached_reads(&file);
 
     // The degraded reader means a sector that is already unreadable reports as
-    // such instead of collapsing into an opaque EIO.
-    let read_back = read_degraded(&file)?;
+    // such instead of collapsing into an opaque EIO. It compares in bounded
+    // blocks: `expected` already owns the complete output, so retaining a
+    // second complete readback would unnecessarily double that allocation.
+    let read_back = compare_degraded(&file, expected)?;
 
-    if !read_back.is_intact() {
+    if read_back.unreadable_bytes != 0 {
+        let first_unreadable = read_back
+            .first_unreadable
+            .expect("unreadable byte count has a first unreadable range");
         return Err(io::Error::other(format!(
-            "{} bytes of {} were unreadable immediately after writing — the media is failing",
-            read_back.unreadable_bytes(),
-            path.display()
+            "{} bytes of {} were unreadable immediately after writing at bytes {}..{} — the media is failing",
+            read_back.unreadable_bytes,
+            path.display(),
+            first_unreadable.start,
+            first_unreadable.end,
         )));
     }
 
-    if read_back.data.len() != expected.len() {
+    if read_back.source_len != expected.len() {
         return Err(io::Error::other(format!(
             "write verification failed for {}: wrote {} bytes, read back {}",
             path.display(),
             expected.len(),
-            read_back.data.len()
+            read_back.source_len
         )));
     }
 
-    if let Some(at) = first_difference(expected, &read_back.data) {
+    if let Some((at, actual)) = read_back.first_difference {
         return Err(io::Error::other(format!(
             "write verification failed for {}: byte {at} of {} differs \
              (wrote {:#04x}, read back {:#04x})",
             path.display(),
             expected.len(),
             expected[at],
-            read_back.data[at]
+            actual
         )));
     }
 
@@ -352,10 +359,6 @@ fn write_and_sync(staged: &Path, dst: &Path, bytes: &[u8]) -> io::Result<()> {
     file.sync_all()?;
     evict_from_cache(&file);
     Ok(())
-}
-
-fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
-    a.iter().zip(b).position(|(x, y)| x != y)
 }
 
 // ── Cache hints ───────────────────────────────────────────────────────────────

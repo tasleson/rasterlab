@@ -93,31 +93,110 @@ pub fn read_degraded<S: BlockSource + ?Sized>(src: &S) -> io::Result<DegradedRea
     let mut data = vec![0u8; len];
     let mut unreadable: Vec<Range<usize>> = Vec::new();
 
-    let mut pos = 0usize;
-    while pos < len {
-        let end = (pos + BULK_BLOCK).min(len);
-        if read_exact_at(src, pos, &mut data[pos..end]).is_ok() {
-            pos = end;
-            continue;
+    read_degraded_blocks(src, len, |offset, block, block_unreadable| {
+        data[offset..offset + block.len()].copy_from_slice(block);
+        // Through `push_unreadable`, not `extend`: block-at-a-time reading
+        // restarts the range list at every block boundary, and damage that
+        // straddles one is still a single run of dead sectors.
+        for range in block_unreadable {
+            push_unreadable(&mut unreadable, range.clone());
         }
-
-        // The bulk read failed, but a drive failing one sector fails the whole
-        // request it was part of. Re-read the block in sector-sized pieces so
-        // the loss is confined to the sectors actually gone, and so anything
-        // the failed bulk read left half-written is overwritten.
-        let mut sub = pos;
-        while sub < end {
-            let sub_end = (sub + RETRY_BLOCK).min(end);
-            if read_exact_at(src, sub, &mut data[sub..sub_end]).is_err() {
-                data[sub..sub_end].fill(0);
-                push_unreadable(&mut unreadable, sub..sub_end);
-            }
-            sub = sub_end;
-        }
-        pos = end;
-    }
+    })?;
 
     Ok(DegradedRead { data, unreadable })
+}
+
+/// Summary of a bounded degraded readback comparison.
+///
+/// This deliberately records locations rather than retaining the data.  It is
+/// used by durable-write verification, where the expected bytes are already in
+/// memory and another complete file-sized allocation only increases peak
+/// memory.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DegradedComparison {
+    pub source_len: usize,
+    pub unreadable_bytes: usize,
+    pub first_unreadable: Option<Range<usize>>,
+    pub first_difference: Option<(usize, u8)>,
+}
+
+/// Read `src` in bounded blocks and compare it with `expected`.
+///
+/// Like [`read_degraded`], this retries failed bulk reads by sector and
+/// zero-fills unreadable sectors before comparing them.  It reads the complete
+/// source even when the lengths differ, preserving detection of media failures
+/// that happen alongside a short or long file.
+pub(crate) fn compare_degraded<S: BlockSource + ?Sized>(
+    src: &S,
+    expected: &[u8],
+) -> io::Result<DegradedComparison> {
+    let source_len = usize::try_from(src.size()?).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "file larger than address space")
+    })?;
+    let mut comparison = DegradedComparison {
+        source_len,
+        ..DegradedComparison::default()
+    };
+
+    read_degraded_blocks(src, source_len, |offset, block, block_unreadable| {
+        for range in block_unreadable {
+            comparison.unreadable_bytes += range.len();
+            if comparison.first_unreadable.is_none() {
+                comparison.first_unreadable = Some(range.clone());
+            }
+        }
+
+        // The full-buffer implementation only compared equal-length inputs.
+        // Keep that precedence: callers report a length mismatch after all
+        // unreadable regions have been checked, rather than a partial mismatch.
+        if source_len == expected.len()
+            && comparison.first_difference.is_none()
+            && let Some(relative) = block
+                .iter()
+                .zip(&expected[offset..])
+                .position(|(a, b)| a != b)
+        {
+            comparison.first_difference = Some((offset + relative, block[relative]));
+        }
+    })?;
+
+    Ok(comparison)
+}
+
+/// Visit a source a block at a time, preserving degraded-read recovery
+/// semantics while bounding temporary storage to one bulk block.
+fn read_degraded_blocks<S: BlockSource + ?Sized>(
+    src: &S,
+    len: usize,
+    mut visit: impl FnMut(usize, &[u8], &[Range<usize>]),
+) -> io::Result<()> {
+    let mut block = vec![0u8; len.min(BULK_BLOCK)];
+    let mut pos = 0usize;
+    while pos < len {
+        let block_len = (len - pos).min(BULK_BLOCK);
+        let bytes = &mut block[..block_len];
+        let mut unreadable = Vec::new();
+
+        if read_exact_at(src, pos, bytes).is_err() {
+            // The bulk read failed, but a drive failing one sector fails the
+            // whole request it was part of. Re-read it in sector-sized pieces
+            // so the loss is confined to the sectors actually gone, and so
+            // anything the failed bulk read left half-written is overwritten.
+            let mut sub = 0usize;
+            while sub < block_len {
+                let sub_end = (sub + RETRY_BLOCK).min(block_len);
+                if read_exact_at(src, pos + sub, &mut bytes[sub..sub_end]).is_err() {
+                    bytes[sub..sub_end].fill(0);
+                    push_unreadable(&mut unreadable, pos + sub..pos + sub_end);
+                }
+                sub = sub_end;
+            }
+        }
+
+        visit(pos, bytes, &unreadable);
+        pos += block_len;
+    }
+    Ok(())
 }
 
 /// Fill `buf` completely, retrying interrupted reads and treating a premature
@@ -253,6 +332,35 @@ mod tests {
         let got = read_degraded(&src).unwrap();
         assert!(got.is_intact());
         assert_eq!(got.data, src.data);
+    }
+
+    #[test]
+    fn bounded_comparison_retries_short_reads_and_locates_a_mismatch() {
+        let mut src = FlakySource::new(BULK_BLOCK + 200_000, vec![]);
+        src.max_read = 1000;
+        let mut expected = src.data.clone();
+        expected[BULK_BLOCK + 54_321] ^= 0xff;
+
+        let comparison = compare_degraded(&src, &expected).unwrap();
+        assert_eq!(comparison.source_len, expected.len());
+        assert_eq!(comparison.unreadable_bytes, 0);
+        assert_eq!(
+            comparison.first_difference,
+            Some((BULK_BLOCK + 54_321, src.data[BULK_BLOCK + 54_321]))
+        );
+    }
+
+    #[test]
+    fn bounded_comparison_reports_the_first_unreadable_region() {
+        let src = FlakySource::new(2 * BULK_BLOCK, vec![BULK_BLOCK + 10..BULK_BLOCK + 11]);
+        let comparison = compare_degraded(&src, &src.data).unwrap();
+
+        assert_eq!(comparison.unreadable_bytes, RETRY_BLOCK);
+        assert_eq!(
+            comparison.first_unreadable,
+            Some(BULK_BLOCK..BULK_BLOCK + RETRY_BLOCK)
+        );
+        assert_eq!(comparison.first_difference, Some((BULK_BLOCK, 0)),);
     }
 
     #[test]
