@@ -153,11 +153,61 @@ impl FormatRegistry {
             RasterError::UnsupportedFormat(format!("No handler registered for '{}'", fmt))
         })?;
 
+        if handler.supports_shared_bytes() {
+            return handler.decode_shared_bytes(Arc::new(data.to_vec()), hint_path);
+        }
         if handler.needs_file_path() {
             return self.decode_bytes_via_tempfile(&handler, data, hint_path);
         }
 
         handler.decode(data)
+    }
+
+    /// Decode an already-owned source buffer without cloning it for a codec
+    /// that supports shared in-memory input. Other codecs retain the existing
+    /// borrowed-byte or path-only fallback behavior.
+    pub fn decode_shared_bytes(
+        &self,
+        data: Arc<Vec<u8>>,
+        hint_path: Option<&Path>,
+    ) -> RasterResult<Image> {
+        let fmt = detect_format(&data, hint_path).ok_or_else(|| {
+            RasterError::UnsupportedFormat("Cannot determine image format from bytes".into())
+        })?;
+        let handler = self.handler_for_extension(&fmt).ok_or_else(|| {
+            RasterError::UnsupportedFormat(format!("No handler registered for '{}'", fmt))
+        })?;
+        if handler.supports_shared_bytes() {
+            return handler.decode_shared_bytes(data, hint_path);
+        }
+        if handler.needs_file_path() {
+            return self.decode_bytes_via_tempfile(&handler, &data, hint_path);
+        }
+        handler.decode(&data)
+    }
+
+    /// Decode an already-owned source buffer for a library import.
+    ///
+    /// This preserves ordinary decode behavior, but gives codecs an explicit
+    /// import-only path for avoiding editor/export-only metadata allocations.
+    pub fn decode_import_shared_bytes(
+        &self,
+        data: Arc<Vec<u8>>,
+        hint_path: Option<&Path>,
+    ) -> RasterResult<Image> {
+        let fmt = detect_format(&data, hint_path).ok_or_else(|| {
+            RasterError::UnsupportedFormat("Cannot determine image format from bytes".into())
+        })?;
+        let handler = self.handler_for_extension(&fmt).ok_or_else(|| {
+            RasterError::UnsupportedFormat(format!("No handler registered for '{}'", fmt))
+        })?;
+        if handler.supports_shared_bytes() {
+            return handler.decode_import_shared_bytes(data, hint_path);
+        }
+        if handler.needs_file_path() {
+            return self.decode_bytes_via_tempfile(&handler, &data, hint_path);
+        }
+        handler.decode(&data)
     }
 
     /// Decode an image file, transparently unwrapping a `.rlab` container.
@@ -228,5 +278,98 @@ impl FormatRegistry {
     pub fn supported_extensions(&self) -> Vec<String> {
         let map = self.handlers.read().expect("FormatRegistry lock poisoned");
         map.keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct SharedBytesHandler {
+        received_ptr: Mutex<Option<usize>>,
+        import_decode: Mutex<bool>,
+    }
+
+    impl FormatHandler for SharedBytesHandler {
+        fn extensions(&self) -> &[&'static str] {
+            &["shared"]
+        }
+
+        fn decode(&self, _data: &[u8]) -> RasterResult<Image> {
+            unreachable!("shared bytes must use the ownership-preserving path")
+        }
+
+        fn decode_shared_bytes(
+            &self,
+            data: Arc<Vec<u8>>,
+            hint_path: Option<&Path>,
+        ) -> RasterResult<Image> {
+            assert_eq!(hint_path, Some(Path::new("source.shared")));
+            *self.received_ptr.lock().unwrap() = Some(Arc::as_ptr(&data) as usize);
+            Image::from_rgba8(1, 1, vec![1, 2, 3, 255])
+        }
+
+        fn supports_shared_bytes(&self) -> bool {
+            true
+        }
+
+        fn decode_import_shared_bytes(
+            &self,
+            data: Arc<Vec<u8>>,
+            hint_path: Option<&Path>,
+        ) -> RasterResult<Image> {
+            *self.import_decode.lock().unwrap() = true;
+            self.decode_shared_bytes(data, hint_path)
+        }
+
+        fn encode(&self, _image: &Image, _options: &EncodeOptions) -> RasterResult<Vec<u8>> {
+            Err(RasterError::FormatNotEncodable("shared test".into()))
+        }
+
+        fn display_name(&self) -> &'static str {
+            "shared test"
+        }
+    }
+
+    #[test]
+    fn shared_decode_preserves_the_callers_buffer_allocation() {
+        let registry = FormatRegistry::default();
+        let handler = Arc::new(SharedBytesHandler {
+            received_ptr: Mutex::new(None),
+            import_decode: Mutex::new(false),
+        });
+        registry.register(handler.clone());
+        let bytes = Arc::new(b"already-owned source bytes".to_vec());
+        let expected_ptr = Arc::as_ptr(&bytes) as usize;
+
+        let image = registry
+            .decode_shared_bytes(bytes, Some(Path::new("source.shared")))
+            .unwrap();
+
+        assert_eq!(image.data, vec![1, 2, 3, 255]);
+        assert_eq!(*handler.received_ptr.lock().unwrap(), Some(expected_ptr));
+        assert!(!*handler.import_decode.lock().unwrap());
+    }
+
+    #[test]
+    fn import_decode_uses_the_import_specific_handler_path() {
+        let registry = FormatRegistry::default();
+        let handler = Arc::new(SharedBytesHandler {
+            received_ptr: Mutex::new(None),
+            import_decode: Mutex::new(false),
+        });
+        registry.register(handler.clone());
+        let bytes = Arc::new(b"already-owned source bytes".to_vec());
+        let expected_ptr = Arc::as_ptr(&bytes) as usize;
+
+        let image = registry
+            .decode_import_shared_bytes(bytes, Some(Path::new("source.shared")))
+            .unwrap();
+
+        assert_eq!(image.data, vec![1, 2, 3, 255]);
+        assert_eq!(*handler.received_ptr.lock().unwrap(), Some(expected_ptr));
+        assert!(*handler.import_decode.lock().unwrap());
     }
 }

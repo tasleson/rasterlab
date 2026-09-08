@@ -1,5 +1,5 @@
 use crate::{error::RasterResult, image::Image};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 /// Options controlling output encoding quality and metadata handling.
 #[derive(Debug, Clone)]
@@ -47,6 +47,31 @@ pub trait FormatHandler: Send + Sync {
     /// (e.g. for adjacent sidecar files) should override [`decode_file`].
     fn decode(&self, data: &[u8]) -> RasterResult<Image>;
 
+    /// Decode an already-owned shared source buffer. The default is for codecs
+    /// that only need a borrow; codecs with an in-memory seekable source can
+    /// override it to retain the allocation without copying it.
+    fn decode_shared_bytes(
+        &self,
+        data: Arc<Vec<u8>>,
+        hint_path: Option<&Path>,
+    ) -> RasterResult<Image> {
+        let _ = hint_path;
+        self.decode(&data)
+    }
+
+    /// Decode an already-owned source buffer while preparing a library import.
+    ///
+    /// The default keeps decode behavior identical. Handlers may override this
+    /// when metadata needed only for a later editor export would otherwise be
+    /// allocated during an import.
+    fn decode_import_shared_bytes(
+        &self,
+        data: Arc<Vec<u8>>,
+        hint_path: Option<&Path>,
+    ) -> RasterResult<Image> {
+        self.decode_shared_bytes(data, hint_path)
+    }
+
     /// Decode from a file path.
     ///
     /// The default implementation reads the file and delegates to [`decode`].
@@ -73,6 +98,13 @@ pub trait FormatHandler: Send + Sync {
     /// access should return `true`.  The registry will call [`decode_file`]
     /// instead of [`decode`] for these handlers.
     fn needs_file_path(&self) -> bool {
+        false
+    }
+
+    /// Whether [`decode_shared_bytes`](Self::decode_shared_bytes) can replace
+    /// this handler's path-based decoding. This is opt-in to preserve the
+    /// temporary-file fallback for third-party path-only handlers.
+    fn supports_shared_bytes(&self) -> bool {
         false
     }
 
