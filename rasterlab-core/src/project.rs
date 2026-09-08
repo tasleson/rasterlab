@@ -72,6 +72,7 @@
 //! the very parity that could have repaired it.
 
 use std::{
+    borrow::Cow,
     io::Read,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -360,8 +361,8 @@ impl RlabFile {
     /// bracketed by a `RECC` parity copy at each end.
     ///
     /// Prefer this over [`write_v4`](Self::write_v4) for all new files.  Both
-    /// carry the same parity budget (~10 % of the protected region for small
-    /// files, ~20 % for large ones, stored twice), but v5's split placement
+    /// carry the same parity budget (two copies of ~10 % of the protected
+    /// region for small files and ~20 % for large ones), but v5's split placement
     /// keeps one copy reachable when the other end of the file is truncated.
     ///
     /// The write is staged and renamed into place, and read back before it
@@ -1434,18 +1435,26 @@ fn build_recc_payload(protected: &[u8]) -> RasterResult<Vec<u8>> {
     let rs = ReedSolomon::new(data_shards, parity_shards)
         .map_err(|e| RasterError::decode("recc", e.to_string()))?;
 
-    let mut shards: Vec<Vec<u8>> = (0..data_shards)
+    // Reed-Solomon only mutates parity. Keep complete input shards borrowed
+    // from the already-serialised content; only the final partial shard needs
+    // a zero-padded allocation to retain the on-disk parity geometry.
+    let data: Vec<Cow<'_, [u8]>> = (0..data_shards)
         .map(|i| {
             let start = i * shard_size;
             let end = ((i + 1) * shard_size).min(protected.len());
-            let mut s = vec![0u8; shard_size];
-            s[..end - start].copy_from_slice(&protected[start..end]);
-            s
+            let shard = &protected[start..end];
+            if shard.len() == shard_size {
+                Cow::Borrowed(shard)
+            } else {
+                let mut padded = vec![0; shard_size];
+                padded[..shard.len()].copy_from_slice(shard);
+                Cow::Owned(padded)
+            }
         })
-        .chain((0..parity_shards).map(|_| vec![0u8; shard_size]))
         .collect();
+    let mut parity = vec![vec![0u8; shard_size]; parity_shards];
 
-    rs.encode(&mut shards)
+    rs.encode_sep(&data, &mut parity)
         .map_err(|e| RasterError::encode("recc", e.to_string()))?;
 
     let mut payload = Vec::with_capacity(20 + data_shards * 32 + parity_shards * shard_size);
@@ -1457,12 +1466,12 @@ fn build_recc_payload(protected: &[u8]) -> RasterResult<Vec<u8>> {
     payload.extend_from_slice(&(protected.len() as u64).to_le_bytes());
 
     // Per-data-shard hashes (enable precise erasure detection during repair)
-    for shard in shards.iter().take(data_shards) {
+    for shard in &data {
         payload.extend_from_slice(blake3::hash(shard).as_bytes());
     }
 
     // Parity shards
-    for shard in &shards[data_shards..] {
+    for shard in &parity {
         payload.extend_from_slice(shard);
     }
     Ok(payload)
@@ -1521,6 +1530,55 @@ fn unix_now() -> u64 {
 mod tests {
     use super::*;
     use crate::degraded_read::DegradedRead;
+
+    fn build_recc_payload_with_owned_data_shards(protected: &[u8]) -> RasterResult<Vec<u8>> {
+        let (shard_size, data_shards, parity_shards) = compute_shard_plan(protected.len());
+        let rs = ReedSolomon::new(data_shards, parity_shards)
+            .map_err(|e| RasterError::decode("recc", e.to_string()))?;
+        let mut shards: Vec<Vec<u8>> = (0..data_shards)
+            .map(|i| {
+                let start = i * shard_size;
+                let end = ((i + 1) * shard_size).min(protected.len());
+                let mut shard = vec![0; shard_size];
+                shard[..end - start].copy_from_slice(&protected[start..end]);
+                shard
+            })
+            .chain((0..parity_shards).map(|_| vec![0; shard_size]))
+            .collect();
+        rs.encode(&mut shards)
+            .map_err(|e| RasterError::encode("recc", e.to_string()))?;
+
+        let mut payload = Vec::with_capacity(20 + data_shards * 32 + parity_shards * shard_size);
+        payload.extend_from_slice(&(shard_size as u32).to_le_bytes());
+        payload.extend_from_slice(&(data_shards as u32).to_le_bytes());
+        payload.extend_from_slice(&(parity_shards as u32).to_le_bytes());
+        payload.extend_from_slice(&(protected.len() as u64).to_le_bytes());
+        for shard in shards.iter().take(data_shards) {
+            payload.extend_from_slice(blake3::hash(shard).as_bytes());
+        }
+        for shard in &shards[data_shards..] {
+            payload.extend_from_slice(shard);
+        }
+        Ok(payload)
+    }
+
+    #[test]
+    fn borrowed_recc_data_shards_preserve_the_existing_payload_bytes() {
+        for len in [
+            0,
+            1,
+            RECC_MIN_SHARD_SIZE,
+            RECC_MIN_SHARD_SIZE + 1,
+            1_500_000,
+        ] {
+            let protected: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            assert_eq!(
+                build_recc_payload(&protected).unwrap(),
+                build_recc_payload_with_owned_data_shards(&protected).unwrap(),
+                "payload changed for protected length {len}"
+            );
+        }
+    }
 
     #[test]
     fn library_summary_reads_small_display_chunks() {
