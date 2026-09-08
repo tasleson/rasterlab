@@ -371,10 +371,23 @@ impl RlabFile {
     ///
     /// The resulting file can be verified and repaired with [`verify_and_repair`].
     pub fn write_v5(&self, path: &Path) -> RasterResult<()> {
-        let mut content: Vec<u8> = Vec::new();
-        self.write_content_chunks(&mut content)?;
-        write_verified_atomic(path, &assemble_v5(&content)?)?;
+        let buf = self.encode_v5()?;
+        crate::import_phase!("verified_write", write_verified_atomic(path, &buf))?;
         Ok(())
+    }
+
+    /// The complete v5 byte image this project would be written as, without
+    /// touching the filesystem.
+    ///
+    /// Split out from [`write_v5`](Self::write_v5) so a caller that writes many
+    /// projects can build the bytes — serialisation and Reed-Solomon parity,
+    /// which are pure CPU — away from the thread doing the `fsync`s.  The
+    /// result is exactly what `write_v5` stages, so both paths produce
+    /// byte-identical files.
+    pub fn encode_v5(&self) -> RasterResult<Vec<u8>> {
+        let mut content: Vec<u8> = Vec::new();
+        crate::import_phase!("serialization", self.write_content_chunks(&mut content))?;
+        crate::import_phase!("serialization", assemble_v5(&content))
     }
 
     /// Serialise and write the project to `path` as format v4 with `RECC`
@@ -1391,7 +1404,7 @@ fn repair_content(protected: &[u8]) -> RasterResult<&[u8]> {
 /// MAGIC │ VER │ RECC │ content │ RECC │ file hash
 /// ```
 fn assemble_v5(content: &[u8]) -> RasterResult<Vec<u8>> {
-    let recc_payload = build_recc_payload(content)?;
+    let recc_payload = crate::import_phase!("parity", build_recc_payload(content))?;
     let recc_chunk_len = CHUNK_HEADER_LEN + recc_payload.len() + HASH_LEN;
 
     let mut buf =
