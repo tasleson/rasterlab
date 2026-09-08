@@ -1307,22 +1307,24 @@ fn report_partial(what: &str, mut failed: Vec<(PhotoId, anyhow::Error)>) -> Resu
 }
 
 fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf> {
-    let exts: std::collections::HashSet<String> =
-        registry.supported_extensions().into_iter().collect();
+    rasterlab_core::import_phase!("directory_scan", {
+        let exts: std::collections::HashSet<String> =
+            registry.supported_extensions().into_iter().collect();
 
-    walkdir::WalkDir::new(folder)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| exts.contains(&x.to_lowercase()))
-                .unwrap_or(false)
-        })
-        .map(|e| e.into_path())
-        .collect()
+        walkdir::WalkDir::new(folder)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| exts.contains(&x.to_lowercase()))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.into_path())
+            .collect()
+    })
 }
 
 fn unix_now() -> u64 {
