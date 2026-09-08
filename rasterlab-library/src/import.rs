@@ -1,24 +1,25 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
+use rasterlab_core::import_phase;
 use rasterlab_core::{
     formats::{FormatRegistry, exif_util::read_capture_date_from_prefix},
     library_meta::{CollectionRef, FileTimeStamp, LibraryExif, LibraryMeta},
     project::{RlabFile, is_rlab_path},
-    verified_write::create_dir_all_synced,
+    verified_write::{create_dir_all_synced, write_verified_atomic},
 };
 use uuid::Uuid;
 
 use crate::{
-    db_trait::{CollectionId, CollectionRow, LibraryDb, NewPhoto, PhotoId},
+    db_trait::{CollectionId, LibraryDb, NewPhoto},
     library::ImportProgress,
     thumbnail::{generate_thumbnail, write_thumbnail},
 };
@@ -68,19 +69,45 @@ impl ImportCollection {
     }
 }
 
-/// Hands each imported file the collection row it should join, creating
-/// collections the first time a name comes up.
+/// The collection an imported photo joins, as known before the photo is
+/// committed: a stable uuid and display name, plus the index row id once one
+/// exists.
+///
+/// `id` is `None` for a collection this run will have to create.  The uuid is
+/// minted up front because it goes into the `.rlab` that gets serialised on a
+/// preparation worker, long before the committing thread decides whether any
+/// photo actually lands in it.
+#[derive(Clone, Debug)]
+struct AssignedCollection {
+    /// The name as asked for, which is how [`CollectionAssigner`] keys it.
+    key: String,
+    uuid: String,
+    /// The display name — an existing collection matched case-insensitively
+    /// keeps the spelling the user gave it.
+    name: String,
+    id: Option<CollectionId>,
+}
+
+/// Hands each imported file the collection it should join, creating
+/// collections the first time one is actually needed.
 ///
 /// An existing collection of the same name is reused rather than duplicated,
 /// so importing the same folder again — or a second folder of the same name —
 /// adds to the collection the user already has.  The match ignores ASCII case,
 /// matching what the UI refuses to let the user create by hand.
+///
+/// Resolution and creation are deliberately separate.  [`resolve`](Self::resolve)
+/// only reads, so preparation workers can call it concurrently under one lock;
+/// [`realise`](Self::realise) does the single `create_collection` write and runs
+/// on the committing thread for the first photo that survives deduplication.
+/// That ordering is what keeps a folder whose files are all already in the
+/// library from leaving an empty collection behind.
 struct CollectionAssigner<'a> {
     db: &'a dyn LibraryDb,
     mode: ImportCollection,
-    /// Name (as asked for) → the row it resolved to.  Without this the whole
+    /// Name (as asked for) → what it resolved to.  Without this the whole
     /// collection list would be re-read once per imported photo.
-    resolved: HashMap<String, CollectionRow>,
+    resolved: HashMap<String, AssignedCollection>,
 }
 
 impl<'a> CollectionAssigner<'a> {
@@ -92,42 +119,61 @@ impl<'a> CollectionAssigner<'a> {
         }
     }
 
-    fn for_path(&mut self, path: &Path) -> Result<Option<CollectionRow>> {
+    /// Which collection `path` belongs in, without writing anything.
+    fn resolve(&mut self, path: &Path) -> Result<Option<AssignedCollection>> {
         let Some(name) = self.mode.name_for(path) else {
             return Ok(None);
         };
-        if let Some(row) = self.resolved.get(&name) {
-            return Ok(Some(row.clone()));
+        if let Some(assigned) = self.resolved.get(&name) {
+            return Ok(Some(assigned.clone()));
         }
         let existing = self
             .db
             .all_collections()?
             .into_iter()
             .find(|row| row.name.eq_ignore_ascii_case(&name));
-        let row = match existing {
-            Some(row) => row,
-            None => {
-                // Minted here for the same reason `Library::create_collection`
-                // mints it: the uuid goes into every member file and has to
-                // outlive an index rebuild, which reassigns row ids.
-                let uuid = Uuid::new_v4().to_string();
-                let now = unix_now();
-                let id = self
-                    .db
-                    .create_collection(&uuid, &name, now)
-                    .with_context(|| format!("create collection “{name}”"))?;
-                CollectionRow {
-                    id,
-                    uuid,
-                    name: name.clone(),
-                    created_at: now,
-                }
-            }
+        let assigned = match existing {
+            Some(row) => AssignedCollection {
+                key: name.clone(),
+                uuid: row.uuid,
+                name: row.name,
+                id: Some(row.id),
+            },
+            // Minted here for the same reason `Library::create_collection`
+            // mints it: the uuid goes into every member file and has to
+            // outlive an index rebuild, which reassigns row ids.
+            None => AssignedCollection {
+                key: name.clone(),
+                uuid: Uuid::new_v4().to_string(),
+                name: name.clone(),
+                id: None,
+            },
         };
         // Keyed by the name that was asked for, not the row's: a collection
         // matched case-insensitively still has to be found again next time
         // without re-reading the whole collection list.
-        Ok(Some(self.resolved.entry(name).or_insert(row).clone()))
+        Ok(Some(self.resolved.entry(name).or_insert(assigned).clone()))
+    }
+
+    /// The index row id for an already-resolved collection, creating the row on
+    /// first use.  The uuid is the one already written into the member's
+    /// `.rlab`, so the file and the index agree however the run ends.
+    fn realise(&mut self, assigned: &AssignedCollection) -> Result<CollectionId> {
+        if let Some(id) = assigned.id {
+            return Ok(id);
+        }
+        if let Some(id) = self.resolved.get(&assigned.key).and_then(|held| held.id) {
+            return Ok(id);
+        }
+        let now = unix_now();
+        let id = self
+            .db
+            .create_collection(&assigned.uuid, &assigned.name, now)
+            .with_context(|| format!("create collection “{}”", assigned.name))?;
+        if let Some(held) = self.resolved.get_mut(&assigned.key) {
+            held.id = Some(id);
+        }
+        Ok(id)
     }
 }
 
@@ -148,16 +194,21 @@ pub fn import_files(
     // same local day roll into the same session.
     let session_name = chrono_lite_date(now);
 
-    let existing = db
-        .all_sessions()
-        .unwrap_or_default()
-        .into_iter()
-        .find(|s| s.name == session_name);
+    let existing = import_phase!(
+        "database_session",
+        db.all_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|s| s.name == session_name)
+    );
     let (session_id, session_started_at) = match existing {
         Some(s) => (s.id, s.started_at),
         None => {
             let id = Uuid::new_v4().to_string();
-            db.insert_session(&id, &session_name, now, None)?;
+            import_phase!(
+                "database_session",
+                db.insert_session(&id, &session_name, now, None)
+            )?;
             (id, now)
         }
     };
@@ -176,66 +227,48 @@ pub fn import_files(
     let stack_map = detect_stacks(paths);
     // Picking individual files says nothing about which collection they belong
     // in, so this import files nothing.
-    let mut assigner = CollectionAssigner::new(db, ImportCollection::None);
+    let assigner = Mutex::new(CollectionAssigner::new(db, ImportCollection::None));
 
-    let mut processed = 0usize;
-    let mut imported = 0usize;
-    let mut skipped_duplicates = 0usize;
-    let mut errors: Vec<(PathBuf, String)> = Vec::new();
-    let mut imported_hashes: Vec<(PathBuf, String)> = Vec::new();
-
-    for path in paths {
-        if cancelled.load(Ordering::Relaxed) {
-            break;
-        }
-
-        progress_cb(ImportProgress {
-            total: paths.len(),
-            done: processed,
-            imported,
-            current_file: path.clone(),
-            skipped_duplicates,
-            errors: errors.clone(),
-            scanning: false,
-        });
-
-        match import_one(
-            library_root,
-            db,
-            registry,
-            path,
-            &session_id,
-            &stack_map,
-            now,
-            None,
-            &mut assigner,
-        ) {
-            Ok(None) => {
-                skipped_duplicates += 1;
-            }
-            Ok(Some(photo)) => {
-                imported_hashes.push((path.clone(), photo.hash));
-                imported += 1;
-            }
-            Err(e) => {
-                errors.push((path.clone(), format!("{:#}", e)));
-            }
-        }
-        processed += 1;
-    }
+    let jobs: Vec<PipelineJob> = paths
+        .iter()
+        .map(|path| PipelineJob {
+            path: path.clone(),
+            import_date: now,
+            fallback_capture_ts: None,
+        })
+        .collect();
+    let mut tally = ImportTally::default();
+    let mut batch_hashes = HashSet::new();
+    run_import_pipeline(
+        library_root,
+        db,
+        registry,
+        &jobs,
+        &session_id,
+        &stack_map,
+        &assigner,
+        &mut batch_hashes,
+        &cancelled,
+        paths.len(),
+        &mut tally,
+        progress_cb,
+    );
 
     recount_session(db, &session_id)?;
-    if imported > 0 {
-        db.mark_session_imported(&session_id, now)?;
+    if tally.imported > 0 {
+        import_phase!(
+            "database_session",
+            db.mark_session_imported(&session_id, now)
+        )?;
     }
 
     progress_cb(ImportProgress {
         total: paths.len(),
-        done: processed,
-        imported,
+        done: tally.processed,
+        imported: tally.imported,
         current_file: PathBuf::new(),
-        skipped_duplicates,
-        errors: errors.clone(),
+        skipped_duplicates: tally.skipped_duplicates,
+        errors: tally.errors.clone(),
         scanning: false,
     });
 
@@ -243,8 +276,8 @@ pub fn import_files(
         id: session_id,
         name: session_name,
         started_at: session_started_at,
-        photo_count: imported,
-        errors,
+        photo_count: tally.imported,
+        errors: tally.errors,
     })
 }
 
@@ -271,7 +304,7 @@ pub fn import_folder_grouped(
     collection: ImportCollection,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Result<Vec<ImportSession>> {
-    let mut assigner = CollectionAssigner::new(db, collection);
+    let assigner = Mutex::new(CollectionAssigner::new(db, collection));
     let total = paths.len();
     // One clock reading for the whole run, so every group this import creates
     // sorts together in a recent-imports list.
@@ -286,6 +319,9 @@ pub fn import_folder_grouped(
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
+        // Do not drop duplicate paths here. They still count toward a day's
+        // density and can therefore change consecutive-day and heavy-day
+        // session boundaries even though phase 3 skips their photo writes.
         dated.push((path.clone(), capture_timestamp(path)));
         progress_cb(ImportProgress {
             total,
@@ -310,10 +346,11 @@ pub fn import_folder_grouped(
 
     // ── Phase 3: import each group into its own back-dated session ────────
     let mut sessions: Vec<ImportSession> = Vec::new();
-    let mut processed = 0usize;
-    let mut imported = 0usize;
-    let mut skipped_duplicates = 0usize;
-    let mut errors: Vec<(PathBuf, String)> = Vec::new();
+    let mut tally = ImportTally::default();
+    // Run-scoped, because groups are imported one after another: a duplicate of
+    // an earlier group's file is caught by the index, but two identical files
+    // inside one group are only ever seen here.
+    let mut batch_hashes = HashSet::new();
 
     for group in groups {
         if cancelled.load(Ordering::Relaxed) {
@@ -329,63 +366,52 @@ pub fn import_folder_grouped(
 
         // Reuse an existing session with the same name so that re-imports, or
         // multiple source trees that share a shoot date, merge together.
-        let existing = db
-            .all_sessions()
-            .unwrap_or_default()
-            .into_iter()
-            .find(|s| s.name == session_name);
+        let existing = import_phase!(
+            "database_session",
+            db.all_sessions()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|s| s.name == session_name)
+        );
         let (session_id, session_started_at) = match existing {
             Some(s) => (s.id, s.started_at),
             None => {
                 let id = Uuid::new_v4().to_string();
                 let source = source_dir.map(|d| d.to_string_lossy().into_owned());
-                db.insert_session(&id, &session_name, group_start, source.as_deref())?;
+                import_phase!(
+                    "database_session",
+                    db.insert_session(&id, &session_name, group_start, source.as_deref())
+                )?;
                 (id, group_start)
             }
         };
 
-        let mut group_done = 0usize;
-        for (path, ts) in group_slice {
-            if cancelled.load(Ordering::Relaxed) {
-                break;
-            }
-            progress_cb(ImportProgress {
-                total,
-                done: processed,
-                imported,
-                current_file: path.clone(),
-                skipped_duplicates,
-                errors: errors.clone(),
-                scanning: false,
-            });
-            match import_one(
-                library_root,
-                db,
-                registry,
-                path,
-                &session_id,
-                &stack_map,
-                *ts,
-                Some(*ts),
-                &mut assigner,
-            ) {
-                Ok(None) => skipped_duplicates += 1,
-                Ok(Some(photo)) => {
-                    // Recorded as each photo lands rather than in one batch at
-                    // the end, so an import that is cancelled or crashes leaves
-                    // the index agreeing with the files it did write.
-                    if let Some(collection) = photo.collection
-                        && let Err(e) = db.add_to_collection(collection, &[photo.photo_id])
-                    {
-                        errors.push((path.clone(), format!("{:#}", e)));
-                    }
-                    group_done += 1;
-                    imported += 1;
-                }
-                Err(e) => errors.push((path.clone(), format!("{:#}", e))),
-            }
-            processed += 1;
-        }
+        let jobs: Vec<PipelineJob> = group_slice
+            .iter()
+            .map(|(path, ts)| PipelineJob {
+                path: path.clone(),
+                import_date: *ts,
+                fallback_capture_ts: Some(*ts),
+            })
+            .collect();
+        let outcomes = run_import_pipeline(
+            library_root,
+            db,
+            registry,
+            &jobs,
+            &session_id,
+            &stack_map,
+            &assigner,
+            &mut batch_hashes,
+            &cancelled,
+            total,
+            &mut tally,
+            progress_cb,
+        );
+        let group_done = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ImportOutcome::Imported))
+            .count();
 
         recount_session(db, &session_id)?;
         // Stamped with the wall clock, not the back-dated group time, so the
@@ -393,7 +419,10 @@ pub fn import_folder_grouped(
         // shoot whose own date is years back.  Only when something landed: a
         // group that was entirely duplicates should stay where it was.
         if group_done > 0 {
-            db.mark_session_imported(&session_id, import_started)?;
+            import_phase!(
+                "database_session",
+                db.mark_session_imported(&session_id, import_started)
+            )?;
         }
         sessions.push(ImportSession {
             id: session_id,
@@ -406,25 +435,25 @@ pub fn import_folder_grouped(
 
     progress_cb(ImportProgress {
         total,
-        done: processed,
-        imported,
+        done: tally.processed,
+        imported: tally.imported,
         current_file: PathBuf::new(),
-        skipped_duplicates,
-        errors: errors.clone(),
+        skipped_duplicates: tally.skipped_duplicates,
+        errors: tally.errors.clone(),
         scanning: false,
     });
 
     // Surface any per-file errors on the first session (or a synthetic one if
     // nothing imported), so the caller can report them.
     if let Some(first) = sessions.first_mut() {
-        first.errors = errors;
-    } else if !errors.is_empty() {
+        first.errors = tally.errors;
+    } else if !tally.errors.is_empty() {
         sessions.push(ImportSession {
             id: String::new(),
             name: String::new(),
             started_at: unix_now(),
             photo_count: 0,
-            errors,
+            errors: tally.errors,
         });
     }
 
@@ -434,22 +463,24 @@ pub fn import_folder_grouped(
 /// Best-available capture time for `path` in Unix seconds: EXIF
 /// `DateTimeOriginal`, then filesystem modified time, then created time.
 fn capture_timestamp(path: &Path) -> u64 {
-    if let Some(ts) = exif_capture_timestamp(path) {
-        return ts;
-    }
-    if let Ok(fs_meta) = std::fs::metadata(path) {
-        if let Ok(t) = fs_meta.modified()
-            && let Ok(d) = t.duration_since(UNIX_EPOCH)
-        {
-            return d.as_secs();
+    import_phase!("capture_scan", {
+        if let Some(ts) = exif_capture_timestamp(path) {
+            return ts;
         }
-        if let Ok(t) = fs_meta.created()
-            && let Ok(d) = t.duration_since(UNIX_EPOCH)
-        {
-            return d.as_secs();
+        if let Ok(fs_meta) = std::fs::metadata(path) {
+            if let Ok(t) = fs_meta.modified()
+                && let Ok(d) = t.duration_since(UNIX_EPOCH)
+            {
+                return d.as_secs();
+            }
+            if let Ok(t) = fs_meta.created()
+                && let Ok(d) = t.duration_since(UNIX_EPOCH)
+            {
+                return d.as_secs();
+            }
         }
-    }
-    unix_now()
+        unix_now()
+    })
 }
 
 /// Bytes read from the head of a file to extract its EXIF capture date.
@@ -553,40 +584,61 @@ fn utc_day(ts: u64) -> i64 {
 /// session, and two importers running at once all converge on the same count
 /// the next time any of them finishes.
 fn recount_session(db: &dyn LibraryDb, session_id: &str) -> Result<()> {
-    let count = db.session_photo_count(session_id)?;
-    db.update_session_count(session_id, count)
+    import_phase!("database_session", {
+        let count = db.session_photo_count(session_id)?;
+        db.update_session_count(session_id, count)
+    })
 }
 
 // ── Single-file import ────────────────────────────────────────────────────────
 
-/// What one successful [`import_one`] left behind.
-struct Imported {
+/// Everything one source file's preparation produced, waiting to be made
+/// durable.
+///
+/// Preparation is computation and reads only — source read, hash, decode,
+/// thumbnail, serialisation and parity — so it can run on a worker thread while
+/// the importing thread is still inside the previous photo's `fsync`s.
+/// Committing is writes only, and stays single-threaded and in input order.
+struct Prepared {
     /// Blake3 hex of the original file bytes.
     hash: String,
-    photo_id: PhotoId,
-    /// The collection the photo was filed into, already recorded in its
-    /// `.rlab` and still to be recorded in the index.
-    collection: Option<CollectionId>,
+    thumb_bytes: Vec<u8>,
+    /// The finished `.rlab` byte image, parity included.
+    rlab_bytes: Vec<u8>,
+    lmta: LibraryMeta,
+    width: u32,
+    height: u32,
+    stack_id: Option<String>,
+    /// Whether the imported project arrived with edits already in it.
+    has_edits: bool,
+    collection: Option<AssignedCollection>,
 }
 
-/// Returns `Ok(Some(..))` on success, `Ok(None)` if duplicate, `Err` on
-/// failure.
+impl Prepared {
+    /// What this photo occupies of the pipeline's buffer budget.
+    fn buffered_bytes(&self) -> usize {
+        self.rlab_bytes.len() + self.thumb_bytes.len()
+    }
+}
+
+/// Read, decode and serialise one source file without writing anything.
+///
+/// Returns `Ok(None)` for a file already in the library, `Err` on failure.
+/// Nothing here touches the library on disk and the only database calls are
+/// reads, so this is safe to run on several threads at once against the same
+/// import; [`commit_prepared`] performs every write, in input order.
 ///
 /// `import_date` is stored verbatim (callers back-date it for grouped imports),
 /// and `fallback_capture_ts` synthesises an EXIF capture date for files that
 /// carry none, so they still sort coherently by capture time.
 ///
 /// `assigner` decides which collection the photo joins, and is consulted only
-/// once the file is known to be a genuinely new photograph — so a folder whose
-/// files are all already in the library leaves no empty collection behind.  The
-/// membership goes into the `.rlab` before it is written, which costs nothing:
-/// adding it afterwards through `Library::add_to_collection` would re-read and
-/// re-write every freshly written original just to add one line of metadata.
-/// Recording it in the *index* is still the caller's job, which is what the
-/// returned ids are for.
+/// once the file is known to be a genuinely new photograph.  The membership
+/// goes into the `.rlab` before it is written, which costs nothing: adding it
+/// afterwards through `Library::add_to_collection` would re-read and re-write
+/// every freshly written original just to add one line of metadata.
 #[allow(clippy::too_many_arguments)]
-fn import_one(
-    library_root: &Path,
+fn prepare_one(
     db: &dyn LibraryDb,
     registry: &FormatRegistry,
     path: &Path,
@@ -594,11 +646,14 @@ fn import_one(
     stack_map: &[(usize, usize)], // (primary_idx, secondary_idx) pairs by path index
     import_date: u64,
     fallback_capture_ts: Option<u64>,
-    assigner: &mut CollectionAssigner<'_>,
-) -> Result<Option<Imported>> {
+    assigner: &Mutex<CollectionAssigner<'_>>,
+) -> Result<Option<Prepared>> {
     // 1. Read source bytes + capture source-file timestamps.
     //    Stat first so we read the times the file had before we opened it.
-    let fs_meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let fs_meta = import_phase!(
+        "fingerprint_lookup",
+        std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))
+    )?;
     let source_mtime = fs_meta.modified().ok().map(FileTimeStamp::from_system_time);
     let source_atime = fs_meta.accessed().ok().map(FileTimeStamp::from_system_time);
     let source_ctime = fs_meta.created().ok().map(FileTimeStamp::from_system_time);
@@ -610,35 +665,53 @@ fn import_one(
     // network) read plus Blake3 hash just to rediscover the duplicate. Falls
     // through to the read+hash dedup whenever the mtime is unavailable.
     if let Some(mtime) = source_mtime
-        && db.source_already_imported(&path.to_string_lossy(), fs_meta.len(), mtime.secs)?
+        && import_phase!(
+            "fingerprint_lookup",
+            db.source_already_imported(&path.to_string_lossy(), fs_meta.len(), mtime.secs)
+        )?
     {
         return Ok(None);
     }
 
-    let input_bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let input_bytes = import_phase!(
+        "source_read",
+        std::fs::read(path).with_context(|| format!("read {}", path.display()))
+    )?;
 
     // A project import is different from an ordinary image import: ORIG is
     // already the source image and the container may also hold edits, virtual
     // copies, a rendered thumbnail, and library metadata.  Treating the whole
     // `.rlab` byte stream as an image makes format detection fail and, even if
     // it did not, would create a nested project and discard all of that state.
-    let mut imported_project = if is_rlab_path(path) {
-        let mut project = RlabFile::read_bytes(&input_bytes)
-            .with_context(|| format!("read project {}", path.display()))?;
-        project.resolve_relative_paths(path.parent().unwrap_or_else(|| Path::new(".")));
-        Some(project)
-    } else {
-        None
-    };
-    let original_bytes = imported_project
-        .as_ref()
-        .map_or_else(|| input_bytes, |project| project.original_bytes.clone());
+    let (mut imported_project, original_bytes) = import_phase!(
+        "project_parse",
+        if is_rlab_path(path) {
+            let mut project = RlabFile::read_bytes(&input_bytes)
+                .with_context(|| format!("read project {}", path.display()))?;
+            project.resolve_relative_paths(path.parent().unwrap_or_else(|| Path::new(".")));
+            // Drop the source container after parsing rather than retaining its
+            // full ORIG + parity payload alongside the extracted original.
+            let original_bytes = std::mem::take(&mut project.original_bytes);
+            drop(input_bytes);
+            (Some(project), Arc::new(original_bytes))
+        } else {
+            (None, Arc::new(input_bytes))
+        }
+    );
+    // Keep the source allocation through hashing and decoding, then move it
+    // into the project we write. This avoids a second full-original copy on
+    // the common import path.
 
     // 2. Compute hash
-    let hash = blake3::hash(&original_bytes).to_hex().to_string();
+    let hash = import_phase!(
+        "content_hash",
+        blake3::hash(&original_bytes).to_hex().to_string()
+    );
 
-    // 3. Duplicate check
-    if db.photo_by_hash(&hash)?.is_some() {
+    // 3. Duplicate check.  A file that only duplicates another file of the same
+    //    batch cannot be seen here — that pair may be in flight at the same
+    //    moment — so `commit_prepared` checks the batch's own hashes again.
+    if import_phase!("hash_lookup", db.photo_by_hash(&hash))?.is_some() {
         return Ok(None);
     }
 
@@ -650,19 +723,21 @@ fn import_one(
     // Decode the bytes we already transferred from the source. Calling
     // `decode_file` here used to reopen and reread every ordinary import — a
     // particularly expensive mistake when `path` lives on NFS or CIFS. The
-    // path remains a format hint (important for TIFF-based RAW formats); the
-    // registry stages those bytes in a local temporary file when a decoder
-    // requires seekable file access.
+    // path remains a format hint (important for TIFF-based RAW formats). The
+    // installed rawler accepts the same retained allocation as a seekable
+    // in-memory source, while third-party path-only handlers keep their
+    // temporary-file fallback.
     let decode_hint = imported_project.as_ref().map_or(Some(path), |project| {
         project.meta.source_path.as_deref().map(Path::new)
     });
-    let image = decode_import_bytes(registry, &original_bytes, decode_hint).with_context(|| {
-        if imported_project.is_some() {
-            format!("decode original image in {}", path.display())
-        } else {
-            format!("decode {}", path.display())
-        }
-    })?;
+    let image = decode_import_bytes(registry, Arc::clone(&original_bytes), decode_hint)
+        .with_context(|| {
+            if imported_project.is_some() {
+                format!("decode original image in {}", path.display())
+            } else {
+                format!("decode {}", path.display())
+            }
+        })?;
     let (width, height) = (image.width, image.height);
     let mut exif = LibraryExif::from_image_metadata(&image.metadata);
     // Files without an EXIF capture date (PNGs, scans, …) still need a coherent
@@ -674,10 +749,14 @@ fn import_one(
     }
 
     // 6. Generate 512px thumbnail
-    let thumb_bytes = imported_project
-        .as_ref()
-        .and_then(|project| project.thumbnail.clone())
-        .map_or_else(|| generate_thumbnail(&image, 512), Ok)?;
+    let thumb_bytes = import_phase!(
+        "thumbnail",
+        imported_project
+            .as_ref()
+            .and_then(|project| project.thumbnail.clone())
+            .map_or_else(|| generate_thumbnail(&image, 512), Ok)
+    )?;
+    drop(image);
 
     // 8. Build LibraryMeta
     let stack_id = if stack_peer_hash.is_some() {
@@ -739,8 +818,12 @@ fn import_one(
 
     // Recorded in the file itself, so the `.rlab` is right from the moment it
     // exists and a rebuild that never sees the index still finds the
-    // membership.
-    let collection = assigner.for_path(path)?;
+    // membership.  Only the uuid is settled here; the index row is created by
+    // the first photo that actually commits into it.
+    let collection = import_phase!("database_collection_resolve", {
+        let mut assigner = assigner.lock().expect("collection assigner poisoned");
+        assigner.resolve(path)
+    })?;
     if let Some(collection) = collection.as_ref()
         && !lmta
             .collection_refs
@@ -753,119 +836,470 @@ fn import_one(
         });
     }
 
-    // 9. Write thumbnail.
-    //
-    // Steps 9–11 are ordered storage-first: the `.rlab` holds the only copy of
-    // the original, the index can be rebuilt from it, so the file is written
-    // and verified before anything is recorded about it.  An import that stops
-    // between them leaves a complete `.rlab` that no row mentions — invisible
-    // until the next rebuild, and recovered by it.  Re-running the same import
-    // also heals it: with no row to find, the file is simply rewritten (same
-    // hash, same path) and inserted.  Nothing is deleted on failure for the
-    // same reason: the photograph outranks the bookkeeping.
-    let thumb_path = thumb_path(library_root, &hash);
-    write_thumbnail(&thumb_path, &thumb_bytes)?;
+    // The decoder has returned its independent pixel buffer, so its temporary
+    // shared source handle is gone. Recover the original allocation for
+    // serialization; a third-party handler which deliberately retained the
+    // Arc keeps the conservative copy fallback.
+    let original_bytes = Arc::try_unwrap(original_bytes).unwrap_or_else(|bytes| (*bytes).clone());
 
-    // 10. Write .rlab
-    let rlab_path = rlab_path(library_root, &hash);
-    if let Some(parent) = rlab_path.parent() {
-        create_dir_all_synced(parent)?;
-    }
-    if let Some(project) = imported_project.as_mut() {
+    // 9. Serialise the `.rlab`, parity and all.  This is the last of the work
+    //    that does not need the writer thread.
+    let has_edits = imported_project
+        .as_ref()
+        .is_some_and(|project| project.has_edits());
+    let rlab_bytes = if let Some(project) = imported_project.as_mut() {
         project.meta.width = width;
         project.meta.height = height;
+        project.original_bytes = original_bytes;
         project.thumbnail = Some(thumb_bytes.clone());
         project.set_lmta(Some(lmta.clone()));
-        project
-            .write_v5(&rlab_path)
-            .context("write imported .rlab")?;
+        project.encode_v5().context("serialise imported .rlab")?
     } else {
-        write_rlab(
-            &rlab_path,
-            &original_bytes,
-            &lmta,
-            &thumb_bytes,
-            width,
-            height,
-        )?;
-    }
+        encode_rlab(original_bytes, &lmta, &thumb_bytes, width, height)?
+    };
 
-    // 11. Insert into DB
-    let photo_id = db.insert_photo(NewPhoto {
-        hash: &hash,
-        lib_path: &relative_lib_path(&hash),
-        lmta: &lmta,
+    Ok(Some(Prepared {
+        hash,
+        thumb_bytes,
+        rlab_bytes,
+        lmta,
         width,
         height,
-        stack_id: stack_id.as_deref(),
-        // An imported project arrives with its edit history intact, so the
-        // index has to say so from the start: a photo imported already edited
-        // is one the edited-only filter should find straight away rather than
-        // after the next save happens to rewrite its thumbnail.
-        has_edits: imported_project
-            .as_ref()
-            .is_some_and(|project| project.has_edits()),
-    })?;
-
-    Ok(Some(Imported {
-        hash,
-        photo_id,
-        collection: collection.map(|row| row.id),
+        stack_id,
+        has_edits,
+        collection,
     }))
+}
+
+/// Make one prepared photo durable and record it in the index.
+///
+/// The steps are ordered storage-first: the `.rlab` holds the only copy of the
+/// original, the index can be rebuilt from it, so the file is written and
+/// verified before anything is recorded about it.  An import that stops between
+/// them leaves a complete `.rlab` that no row mentions — invisible until the
+/// next rebuild, and recovered by it.  Re-running the same import also heals
+/// it: with no row to find, the file is simply rewritten (same hash, same path)
+/// and inserted.  Nothing is deleted on failure for the same reason: the
+/// photograph outranks the bookkeeping.
+fn commit_prepared(
+    library_root: &Path,
+    db: &dyn LibraryDb,
+    assigner: &Mutex<CollectionAssigner<'_>>,
+    prepared: Prepared,
+) -> Result<()> {
+    let Prepared {
+        hash,
+        thumb_bytes,
+        rlab_bytes,
+        lmta,
+        width,
+        height,
+        stack_id,
+        has_edits,
+        collection,
+    } = prepared;
+
+    // 9. Write thumbnail.
+    let thumb_path = thumb_path(library_root, &hash);
+    import_phase!(
+        "thumbnail_write",
+        write_thumbnail(&thumb_path, &thumb_bytes)
+    )?;
+
+    // 10. Write .rlab.
+    let rlab_path = rlab_path(library_root, &hash);
+    if let Some(parent) = rlab_path.parent() {
+        import_phase!("destination_directory", create_dir_all_synced(parent))?;
+    }
+    import_phase!(
+        "verified_write",
+        write_verified_atomic(&rlab_path, &rlab_bytes)
+    )
+    .with_context(|| format!("write {}", rlab_path.display()))?;
+    drop(rlab_bytes);
+
+    // 11. Insert the index rows and initial membership atomically. The `.rlab`
+    // is already durable, so a database failure leaves one reconstructable
+    // file rather than a partial index entry.  The collection row is created
+    // here rather than during preparation, so a batch that turns out to be all
+    // duplicates leaves no empty collection behind.
+    let collection_id = match collection {
+        Some(collection) => Some(import_phase!("database_collection_resolve", {
+            let mut assigner = assigner.lock().expect("collection assigner poisoned");
+            assigner.realise(&collection)
+        })?),
+        None => None,
+    };
+    import_phase!(
+        "database_insert",
+        db.insert_photo_with_collection(
+            NewPhoto {
+                hash: &hash,
+                lib_path: &relative_lib_path(&hash),
+                lmta: &lmta,
+                width,
+                height,
+                stack_id: stack_id.as_deref(),
+                // An imported project arrives with its edit history intact, so the
+                // index has to say so from the start: a photo imported already edited
+                // is one the edited-only filter should find straight away rather than
+                // after the next save happens to rewrite its thumbnail.
+                has_edits,
+            },
+            collection_id,
+        )
+    )?;
+
+    Ok(())
 }
 
 /// Decode source bytes already loaded by the importer, retaining the source
 /// path solely as a format/extension hint.
 fn decode_import_bytes(
     registry: &FormatRegistry,
-    bytes: &[u8],
+    bytes: Arc<Vec<u8>>,
     hint_path: Option<&Path>,
 ) -> rasterlab_core::error::RasterResult<rasterlab_core::image::Image> {
-    registry.decode_bytes(bytes, hint_path)
+    import_phase!(
+        "decode_exif",
+        registry.decode_import_shared_bytes(bytes, hint_path)
+    )
+}
+
+// ── Bounded prepare/commit pipeline ──────────────────────────────────────────
+
+/// Preparation workers run alongside the committing thread.
+///
+/// Preparation is CPU-bound and committing is dominated by `fsync` latency, so
+/// a few workers are enough to keep the writer fed; more mainly buys peak
+/// memory.  Some decoders parallelise internally, so this stays well below the
+/// core count.
+const MAX_PREPARE_WORKERS: usize = 4;
+
+/// How many bytes of prepared-but-unwritten photos may queue ahead of the
+/// committing thread.  Peak import memory is this plus what the workers hold
+/// while preparing, so it bounds the queue rather than the whole import.
+///
+/// This is what binds on large originals, where a couple of queued photos
+/// already run to hundreds of megabytes.
+const PREPARE_QUEUE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+
+/// How many prepared photos may queue ahead of the committing thread, per
+/// worker.
+///
+/// The byte budget alone would let a folder of small JPEGs buffer thousands of
+/// finished photos, because writing is so much slower than preparing them: the
+/// queue would grow to the budget and stay there for no gain.  Keeping a couple
+/// of photos in hand per worker is all it takes to keep the writer from ever
+/// waiting, so this is what binds on small originals.
+const PREPARE_QUEUE_DEPTH_PER_WORKER: usize = 3;
+
+/// How many bytes of source image may be in preparation at one time.
+///
+/// Decoded pixels, the retained original and the serialised container are all
+/// roughly proportional to the source, so this is what stops four workers on
+/// 45-megapixel originals from holding a gigabyte between them.  A single file
+/// is always admitted however large it is, so one enormous photograph slows the
+/// import rather than stalling it.
+const PREPARE_INFLIGHT_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// One source file as handed to a preparation worker.
+struct PipelineJob {
+    path: PathBuf,
+    import_date: u64,
+    fallback_capture_ts: Option<u64>,
+}
+
+/// What committing one input file did.
+enum ImportOutcome {
+    /// Newly imported.
+    Imported,
+    /// Already in the library, or a duplicate of an earlier file in this batch.
+    Duplicate,
+    Failed,
+}
+
+/// Counts carried across every group of one import run, so progress reports
+/// stay continuous.
+#[derive(Default)]
+struct ImportTally {
+    processed: usize,
+    imported: usize,
+    skipped_duplicates: usize,
+    errors: Vec<(PathBuf, String)>,
+}
+
+/// Work shared between the preparation workers and the committing thread.
+#[derive(Default)]
+struct PipelineQueue {
+    /// Next input index to claim.  Claiming in order guarantees the photo the
+    /// committer is waiting for is already being worked on, so the committer
+    /// can never wait on work nobody has started.
+    next_job: usize,
+    /// Finished preparations by input index, drained in that order.
+    ready: BTreeMap<usize, Result<Option<Prepared>>>,
+    /// Bytes held in `ready`, weighed against [`PREPARE_QUEUE_BUDGET_BYTES`].
+    buffered: usize,
+    /// Source bytes of the preparations currently running, weighed against
+    /// [`PREPARE_INFLIGHT_SOURCE_BYTES`].  Released when a preparation
+    /// finishes, so a worker waiting for queue room never holds a share of it.
+    in_flight: u64,
+    /// Set once no further preparations will arrive, so a waiting committer
+    /// stops rather than blocking on a cancelled run.
+    finished: bool,
+}
+
+/// Marks the queue closed when it goes out of scope, so nobody is left waiting
+/// on work that will never arrive.
+///
+/// The committer holds one for its whole run: reaching the end of the batch,
+/// stopping on cancellation and unwinding all have to release the workers.
+/// Workers hold one that fires only while panicking — a decoder that aborts
+/// must not leave the committer blocked forever on the photo it was preparing.
+/// The panic itself still reaches the caller when the thread scope joins.
+struct CloseQueue<'a> {
+    queue: &'a Mutex<PipelineQueue>,
+    ready: &'a Condvar,
+    only_when_panicking: bool,
+}
+
+impl Drop for CloseQueue<'_> {
+    fn drop(&mut self) {
+        if self.only_when_panicking && !std::thread::panicking() {
+            return;
+        }
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.finished = true;
+        }
+        self.ready.notify_all();
+    }
+}
+
+/// Import `jobs` into `session_id`, preparing on worker threads and committing
+/// on this one, in input order.
+///
+/// Ordering is what makes this behave exactly like the serial import it
+/// replaces: when two files of one batch hold the same bytes, the earlier one
+/// wins and the later is the duplicate, whichever finishes preparing first.
+/// The result is index-aligned with `jobs`, and shorter than it if the run was
+/// cancelled part-way.
+#[allow(clippy::too_many_arguments)]
+fn run_import_pipeline(
+    library_root: &Path,
+    db: &dyn LibraryDb,
+    registry: &FormatRegistry,
+    jobs: &[PipelineJob],
+    session_id: &str,
+    stack_map: &[(usize, usize)],
+    assigner: &Mutex<CollectionAssigner<'_>>,
+    batch_hashes: &mut HashSet<String>,
+    cancelled: &AtomicBool,
+    total: usize,
+    tally: &mut ImportTally,
+    progress_cb: &dyn Fn(ImportProgress),
+) -> Vec<ImportOutcome> {
+    if jobs.is_empty() {
+        return Vec::new();
+    }
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |cores| cores.get())
+        .min(MAX_PREPARE_WORKERS)
+        .min(jobs.len());
+    let depth = workers * PREPARE_QUEUE_DEPTH_PER_WORKER;
+    let queue = Mutex::new(PipelineQueue::default());
+    let ready = Condvar::new();
+    let mut outcomes = Vec::with_capacity(jobs.len());
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                let _close = CloseQueue {
+                    queue: &queue,
+                    ready: &ready,
+                    only_when_panicking: true,
+                };
+                loop {
+                    // Claim work only once the queue has room, so a fast worker
+                    // cannot run far ahead of the writer and buffer the whole
+                    // import.  Nothing is claimed while waiting, which is why
+                    // the committer's next photo is never stuck behind this.
+                    let index = {
+                        let mut queue = queue.lock().expect("import queue poisoned");
+                        while !queue.finished
+                            && (queue.buffered >= PREPARE_QUEUE_BUDGET_BYTES
+                                || queue.ready.len() >= depth)
+                        {
+                            queue = ready.wait(queue).expect("import queue poisoned");
+                        }
+                        if queue.finished || cancelled.load(Ordering::Relaxed) {
+                            // Tell the committer no more work is coming: it may
+                            // be waiting on a photo this worker will now never
+                            // prepare.
+                            queue.finished = true;
+                            ready.notify_all();
+                            return;
+                        }
+                        if queue.next_job == jobs.len() {
+                            return;
+                        }
+                        let index = queue.next_job;
+                        queue.next_job += 1;
+                        index
+                    };
+
+                    let job = &jobs[index];
+                    // Admission by source size.  Statting again costs one call
+                    // on an entry the scan has already warmed, and is the only
+                    // measure of the work's size available before reading it.
+                    let source_bytes = std::fs::metadata(&job.path).map_or(0, |meta| meta.len());
+                    {
+                        let mut queue = queue.lock().expect("import queue poisoned");
+                        while queue.in_flight > 0
+                            && queue.in_flight + source_bytes > PREPARE_INFLIGHT_SOURCE_BYTES
+                        {
+                            queue = ready.wait(queue).expect("import queue poisoned");
+                        }
+                        queue.in_flight += source_bytes;
+                    }
+
+                    let prepared = prepare_one(
+                        db,
+                        registry,
+                        &job.path,
+                        session_id,
+                        stack_map,
+                        job.import_date,
+                        job.fallback_capture_ts,
+                        assigner,
+                    );
+
+                    let mut queue = queue.lock().expect("import queue poisoned");
+                    queue.in_flight -= source_bytes;
+                    if let Ok(Some(prepared)) = &prepared {
+                        queue.buffered += prepared.buffered_bytes();
+                    }
+                    queue.ready.insert(index, prepared);
+                    ready.notify_all();
+                }
+            });
+        }
+
+        // Held for the whole commit loop: reaching the end, cancelling and
+        // unwinding must all release workers waiting for queue room.
+        let _close = CloseQueue {
+            queue: &queue,
+            ready: &ready,
+            only_when_panicking: false,
+        };
+        for (index, job) in jobs.iter().enumerate() {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            let prepared = {
+                let mut queue = queue.lock().expect("import queue poisoned");
+                while !queue.ready.contains_key(&index) && !queue.finished {
+                    queue = ready.wait(queue).expect("import queue poisoned");
+                }
+                match queue.ready.remove(&index) {
+                    Some(prepared) => {
+                        if let Ok(Some(prepared)) = &prepared {
+                            queue.buffered -= prepared.buffered_bytes();
+                        }
+                        ready.notify_all();
+                        prepared
+                    }
+                    // Cancelled before this photo was prepared.
+                    None => break,
+                }
+            };
+
+            progress_cb(ImportProgress {
+                total,
+                done: tally.processed,
+                imported: tally.imported,
+                current_file: job.path.clone(),
+                skipped_duplicates: tally.skipped_duplicates,
+                errors: tally.errors.clone(),
+                scanning: false,
+            });
+
+            // Two files of one batch holding the same bytes are prepared
+            // concurrently, so neither can see the other in the index.  The
+            // earlier one has already committed by the time this runs.
+            let outcome = match prepared {
+                Ok(Some(prepared)) if batch_hashes.contains(&prepared.hash) => {
+                    ImportOutcome::Duplicate
+                }
+                Ok(Some(prepared)) => {
+                    let hash = prepared.hash.clone();
+                    match commit_prepared(library_root, db, assigner, prepared) {
+                        Ok(()) => {
+                            batch_hashes.insert(hash);
+                            ImportOutcome::Imported
+                        }
+                        Err(e) => {
+                            tally.errors.push((job.path.clone(), format!("{:#}", e)));
+                            ImportOutcome::Failed
+                        }
+                    }
+                }
+                Ok(None) => ImportOutcome::Duplicate,
+                Err(e) => {
+                    tally.errors.push((job.path.clone(), format!("{:#}", e)));
+                    ImportOutcome::Failed
+                }
+            };
+            match &outcome {
+                ImportOutcome::Imported => tally.imported += 1,
+                ImportOutcome::Duplicate => tally.skipped_duplicates += 1,
+                ImportOutcome::Failed => {}
+            }
+            tally.processed += 1;
+            outcomes.push(outcome);
+        }
+    });
+
+    outcomes
 }
 
 // ── Write .rlab ───────────────────────────────────────────────────────────────
 
-fn write_rlab(
-    path: &Path,
-    original_bytes: &[u8],
+/// Serialise a freshly imported original as a v5 project, ready to be written.
+fn encode_rlab(
+    original_bytes: Vec<u8>,
     lmta: &LibraryMeta,
     thumb_bytes: &[u8],
     width: u32,
     height: u32,
-) -> Result<()> {
-    use rasterlab_core::pipeline::PipelineState;
-    use rasterlab_core::project::{RlabFile, RlabMeta, SavedCopy};
+) -> Result<Vec<u8>> {
+    import_phase!("project_preparation", {
+        use rasterlab_core::pipeline::PipelineState;
+        use rasterlab_core::project::{RlabFile, RlabMeta, SavedCopy};
 
-    let meta = RlabMeta::new(
-        env!("CARGO_PKG_VERSION"),
-        lmta.source_path
-            .as_deref()
-            .or(lmta.original_filename.as_deref()),
-        width,
-        height,
-    );
-    let empty_pipeline = PipelineState {
-        entries: Vec::new(),
-        cursor: 0,
-    };
-    let copies = vec![SavedCopy {
-        name: "Copy 1".into(),
-        pipeline_state: empty_pipeline,
-    }];
-    let mut rlab = RlabFile::new(
-        meta,
-        original_bytes.to_vec(),
-        copies,
-        0,
-        Some(thumb_bytes.to_vec()),
-    );
-    rlab.set_lmta(Some(lmta.clone()));
-    // Write v4 with Reed-Solomon `RECC` parity (~20% overhead) so a later
-    // integrity scrub can repair bitrot in place. See `crate::scrub`.
-    rlab.write_v5(path).context("write .rlab")
+        let meta = RlabMeta::new(
+            env!("CARGO_PKG_VERSION"),
+            lmta.source_path
+                .as_deref()
+                .or(lmta.original_filename.as_deref()),
+            width,
+            height,
+        );
+        let empty_pipeline = PipelineState {
+            entries: Vec::new(),
+            cursor: 0,
+        };
+        let copies = vec![SavedCopy {
+            name: "Copy 1".into(),
+            pipeline_state: empty_pipeline,
+        }];
+        let mut rlab = RlabFile::new(meta, original_bytes, copies, 0, Some(thumb_bytes.to_vec()));
+        rlab.set_lmta(Some(lmta.clone()));
+        // v5 carries two Reed-Solomon `RECC` parity copies (about 40% total
+        // overhead for large projects) so a later integrity scrub can repair
+        // bitrot in place. See `crate::scrub`.
+        rlab.encode_v5().context("serialise .rlab")
+    })
 }
-
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 pub fn relative_lib_path(hash: &str) -> String {
@@ -1164,7 +1598,7 @@ mod tests {
 
         let registry = FormatRegistry::default();
         registry.register(Arc::new(BytesOnlyTestHandler));
-        let image = decode_import_bytes(&registry, &bytes, Some(&source)).unwrap();
+        let image = decode_import_bytes(&registry, Arc::new(bytes), Some(&source)).unwrap();
 
         assert_eq!((image.width, image.height), (1, 1));
     }
@@ -1179,7 +1613,7 @@ mod tests {
 
         let registry = FormatRegistry::default();
         registry.register(Arc::new(PathRequiredTestHandler));
-        let image = decode_import_bytes(&registry, &bytes, Some(&source)).unwrap();
+        let image = decode_import_bytes(&registry, Arc::new(bytes), Some(&source)).unwrap();
 
         assert_eq!((image.width, image.height), (1, 1));
     }

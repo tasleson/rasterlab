@@ -785,6 +785,61 @@ fn a_folder_of_only_duplicates_creates_no_collection() {
     );
 }
 
+/// Several files of one batch can hold identical bytes.  Preparation runs them
+/// concurrently, so none of them can find the others in the index; only the
+/// commit-time check stops the same photograph landing more than once, and it
+/// has to leave the same tally a strictly serial import would have.
+#[test]
+fn identical_files_in_one_batch_are_imported_once() {
+    const BASE: i64 = 1_600_000_000;
+    const COPIES: [&str; 6] = ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"];
+    let src = tempfile::tempdir().unwrap();
+    let sub = src.path().join("Harbour");
+    std::fs::create_dir_all(&sub).unwrap();
+    for name in COPIES {
+        write_png_with_mtime(&sub.join(name), 1, BASE);
+    }
+    write_png_with_mtime(&sub.join("other.png"), 2, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_sink = progress.clone();
+    let sessions = lib
+        .import_folder_into_collection(src.path(), ImportCollection::PerFolder, move |p| {
+            progress_sink.lock().unwrap().push(p)
+        })
+        .unwrap();
+
+    let imported: usize = sessions.iter().map(|s| s.photo_count).sum();
+    assert_eq!(imported, 2, "six identical files are one photograph");
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 2);
+    assert!(
+        sessions.iter().all(|s| s.errors.is_empty()),
+        "an in-batch duplicate is a skip, not a failure: {:?}",
+        sessions.iter().flat_map(|s| &s.errors).collect::<Vec<_>>()
+    );
+
+    let progress = progress.lock().unwrap();
+    let last = progress
+        .iter()
+        .rev()
+        .find(|p| !p.scanning)
+        .expect("final import progress");
+    assert_eq!(last.done, COPIES.len() + 1);
+    assert_eq!(last.imported, 2);
+    assert_eq!(last.skipped_duplicates, COPIES.len() - 1);
+
+    assert_eq!(collection_names(&lib), ["Harbour"]);
+    let collection = lib.all_collections().unwrap()[0].id;
+    assert_eq!(
+        lib.collection_photos(collection).unwrap().len(),
+        2,
+        "a skipped duplicate must not add a second membership row"
+    );
+}
+
 /// Membership is written into the `.rlab` at import time, so it is a property
 /// of the photograph rather than of the index — a rebuild after total index
 /// loss has to bring it back.
