@@ -479,6 +479,43 @@ fn folder_import_groups_jpeg_by_exif_capture_date_not_mtime() {
     );
 }
 
+/// A file already in the library is skipped for writing, but it must still
+/// count toward its capture day: dropping duplicates from the dated list would
+/// move session boundaries on every reimport.  Here the two duplicates bridge
+/// the new photo back into the run they already belong to.
+#[test]
+fn grouped_reimport_keeps_duplicates_in_clusters() {
+    const DAY: i64 = 86_400;
+    const EXIF_CAPTURE: i64 = 1_718_447_400; // 2024-06-15 10:30 UTC
+    const WRONG_MTIME: i64 = 1_262_304_000;
+
+    let tmp_src = tempfile::tempdir().unwrap();
+    let jpeg = tmp_src.path().join("shot.jpg");
+    let prior_png = tmp_src.path().join("prior.png");
+    std::fs::copy(jpeg_path(), &jpeg).unwrap();
+    // Deliberately misleading: the scan must date this by EXIF, not by mtime.
+    filetime::set_file_mtime(&jpeg, filetime::FileTime::from_unix_time(WRONG_MTIME, 0)).unwrap();
+    write_png_with_mtime(&prior_png, 1, EXIF_CAPTURE + DAY);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    let first = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].started_at, EXIF_CAPTURE as u64);
+    assert_eq!(first[0].photo_count, 2);
+
+    write_png_with_mtime(&tmp_src.path().join("new.png"), 2, EXIF_CAPTURE + 2 * DAY);
+    let second = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+
+    assert_eq!(second.len(), 1, "all three dated paths remain one run");
+    assert_eq!(
+        second[0].started_at, EXIF_CAPTURE as u64,
+        "the duplicates still anchor the run to the original shoot day"
+    );
+    assert_eq!(second[0].photo_count, 1);
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 3);
+}
+
 // ── Import collections ──────────────────────────────────────────────────────
 
 /// A folder of shoot directories, each holding one distinct photo, plus one
@@ -563,6 +600,42 @@ fn a_cancelled_import_stops_without_importing() {
 
     assert!(sessions.is_empty(), "a cancelled run made a session");
     assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+}
+
+/// Cancellation is polled between photos. Each completed photo must already
+/// have both its durable project and its matching collection row, rather than
+/// waiting for a batch-final membership pass that cancellation could skip.
+#[test]
+fn cancelling_a_collection_import_keeps_completed_memberships() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    let cancel = no_cancel();
+    let cancel_from_callback = Arc::clone(&cancel);
+
+    let sessions = lib
+        .import_paths(
+            &[src.path().to_path_buf()],
+            ImportCollection::Named("Cancelled collection".into()),
+            cancel,
+            move |progress| {
+                if !progress.scanning && progress.done == 0 {
+                    cancel_from_callback.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        sessions
+            .iter()
+            .map(|session| session.photo_count)
+            .sum::<usize>(),
+        1
+    );
+    let collection = lib.all_collections().unwrap().remove(0);
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+    assert_eq!(lib.collection_photos(collection.id).unwrap().len(), 1);
 }
 
 /// Naming a folder and a file inside it is an easy thing to type, and has to
