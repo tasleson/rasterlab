@@ -236,8 +236,8 @@ cargo run --release -p rasterlab-cli -- info photo.jpg
 
 ### Libraries
 
-Creating a library, importing into it, rebuilding its index and scrubbing its
-files are all CLI commands, so a library on a headless machine can be filled
+Creating a library, importing into it, rebuilding its index, scrubbing its
+files and comparing two of them are all CLI commands, so a library on a headless machine can be filled
 and maintained over ssh or from cron rather than being mounted on a desktop
 first. They all take the library root and stop cleanly on Ctrl-C after the file
 they are on; a second Ctrl-C quits immediately, which is safe because every
@@ -263,6 +263,9 @@ rasterlab library rebuild /srv/photos
 
 # Verify every file and repair what its parity can recover
 rasterlab library scrub /srv/photos --quiet
+
+# Check that two libraries hold the same photos, filed the same way
+rasterlab library compare /srv/photos-before /srv/photos-after
 ```
 
 An import groups what it brings in into back-dated sessions by capture date,
@@ -272,6 +275,16 @@ in the library are skipped by content hash, which makes re-running an import
 over the same source cheap — and is why an interrupted import is finished by
 simply running it again. `--create` makes the library as part of the import for
 the first run.
+
+`compare` answers "did that change alter what ends up in the library?" — import
+the same sources with the old code and with the new, then compare the two
+libraries. Ids, uuids and import timestamps are minted per run and are never
+compared; the photographs, every `LMTA` field, the virtual-copy edit stacks,
+the thumbnails, and the collections and import sessions photos are filed in all
+are, in the index as well as in the files. It exits non-zero when the libraries
+differ, listing each difference as the field that disagrees and the two values.
+`--index-only` compares the rows alone, which is much faster on a large or
+network-mounted library but sees nothing of what was written into each file.
 
 Every command exits non-zero if any file failed, so a scheduled scrub is worth
 running under a job that reports failures. Uncorrectable corruption is listed
