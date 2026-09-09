@@ -69,6 +69,7 @@
 //! locking is really passed to the server (an NFS mount with `nolock` or
 //! `local_lock=flock` admits two writers).
 
+pub mod compare;
 pub mod db_trait;
 pub mod import;
 pub mod library;
@@ -78,6 +79,7 @@ pub mod search;
 pub mod stoolap_db;
 pub mod thumbnail;
 
+pub use compare::{CompareOptions, CompareOutcome, CompareProgress, Difference, Scope, Side};
 pub use db_trait::{
     CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
     RecentlyDeletedRow, SortOrder,
