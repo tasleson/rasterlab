@@ -16,7 +16,7 @@ use rasterlab_core::panic_guard;
 use rasterlab_library::CollectionId;
 
 use super::{AppMode, AppState, BgMessage, workers};
-use crate::state::library_state::{DeleteKind, DeleteTask};
+use crate::state::library_state::{DeleteKind, DeleteTask, ImportKind, plural};
 
 /// Number of worker threads servicing thumbnail loads. Fixed and small so a
 /// large library grid can't spawn thousands of threads at once.
@@ -182,6 +182,7 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
+        let job = self.start_import_job(plural(paths.len(), "file"), ImportKind::Files);
         let progress_tx = self.bg_tx.clone();
         let progress_ctx = self.ctx.clone();
         workers::spawn(
@@ -189,21 +190,37 @@ impl AppState {
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            BgMessage::ImportFailed,
+            move |message| BgMessage::ImportFailed { job, message },
             move || {
-                let result = lib.import_files(&paths, move |p| {
-                    let _ = progress_tx.send(BgMessage::ImportProgress(p));
+                let result = lib.import_files(&paths, move |progress| {
+                    let _ = progress_tx.send(BgMessage::ImportProgress { job, progress });
                     progress_ctx.request_repaint();
                 });
                 match result {
                     Ok(session) => {
                         let errors = session.errors.clone();
-                        BgMessage::ImportComplete { errors, session }
+                        BgMessage::ImportComplete {
+                            job,
+                            errors,
+                            session,
+                        }
                     }
-                    Err(e) => BgMessage::ImportFailed(e.to_string()),
+                    Err(e) => BgMessage::ImportFailed {
+                        job,
+                        message: e.to_string(),
+                    },
                 }
             },
         );
+    }
+
+    /// Register a new import with the library state and hand back the id that
+    /// tells its messages apart from those of the imports already running.
+    fn start_import_job(&mut self, label: String, kind: ImportKind) -> u64 {
+        let id = self.next_import_id;
+        self.next_import_id += 1;
+        self.library.start_import_job(id, label, kind);
+        id
     }
 
     /// Ask what collection a folder import should file its photos into, rather
@@ -235,6 +252,11 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
+        let label = folder.file_name().map_or_else(
+            || folder.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let job = self.start_import_job(label, ImportKind::Folder);
         let progress_tx = self.bg_tx.clone();
         let progress_ctx = self.ctx.clone();
         workers::spawn(
@@ -242,12 +264,13 @@ impl AppState {
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            BgMessage::ImportFailed,
+            move |message| BgMessage::ImportFailed { job, message },
             move || {
-                let result = lib.import_folder_into_collection(&folder, collection, move |p| {
-                    let _ = progress_tx.send(BgMessage::ImportProgress(p));
-                    progress_ctx.request_repaint();
-                });
+                let result =
+                    lib.import_folder_into_collection(&folder, collection, move |progress| {
+                        let _ = progress_tx.send(BgMessage::ImportProgress { job, progress });
+                        progress_ctx.request_repaint();
+                    });
                 match result {
                     Ok(sessions) => {
                         let total: usize = sessions.iter().map(|s| s.photo_count).sum();
@@ -263,70 +286,111 @@ impl AppState {
                             errors: Vec::new(),
                         };
                         BgMessage::ImportComplete {
+                            job,
                             errors,
                             session: summary,
                         }
                     }
-                    Err(e) => BgMessage::ImportFailed(e.to_string()),
+                    Err(e) => BgMessage::ImportFailed {
+                        job,
+                        message: e.to_string(),
+                    },
                 }
             },
         );
     }
 
-    pub(super) fn on_import_progress(&mut self, progress: rasterlab_library::ImportProgress) {
-        // Mirror the running error list into `last_import_errors` so the
-        // "⚠ N import error(s)" button and its detail window work mid-import,
-        // not only once the whole run completes.
-        self.library.last_import_errors = progress.errors.clone();
-        self.library.import_progress = Some(progress);
+    pub(super) fn on_import_progress(
+        &mut self,
+        job: u64,
+        progress: rasterlab_library::ImportProgress,
+    ) {
+        // A report can outlive the job it belongs to, since its completion
+        // message travels the same channel; applying it would put a finished
+        // import back on the status line.
+        if !self.library.apply_import_progress(job, progress) {
+            return;
+        }
+        // Follow the import along in the sidebar and the grid rather than
+        // leaving both frozen until it ends. Throttled, and a no-op unless
+        // photos have actually landed since the last one.
+        self.library.refresh_during_import();
     }
 
     pub(super) fn on_import_complete(
         &mut self,
+        job: u64,
         session: rasterlab_library::ImportSession,
         errors: Vec<(StdPathBuf, String)>,
     ) {
-        self.library.import_progress = None;
+        // Dump details to the terminal for quick diagnosis, and keep them in
+        // state (merged across the batch) so the UI can show them on demand.
+        for (path, message) in &errors {
+            eprintln!("import error: {}: {message}", path.display());
+        }
+        let Some(batch) = self
+            .library
+            .finish_import_job(job, errors, session.photo_count)
+        else {
+            return;
+        };
+        if batch.remaining > 0 {
+            // Other imports are still running: their progress line stays, and
+            // the final tally waits for the last of them.
+            self.library.refresh();
+            return;
+        }
         self.library.thumbs.clear();
         // Always reveal a successful individual-file import. Otherwise a
         // photo added while viewing a collection or an older session is in the
         // database but appears to have vanished because the old scope remains
-        // active.
-        if session.photo_count > 0 && !session.id.is_empty() {
+        // active. Only when it was the batch's only import, though: with
+        // several, whichever finished last is an arbitrary place to land.
+        if batch.was_alone() && session.photo_count > 0 && !session.id.is_empty() {
             self.library.view =
                 crate::state::library_state::LibraryView::Session(session.id.clone());
         }
         self.library.refresh();
-        if errors.is_empty() {
-            self.status = format!(
-                "Import complete: {} photos in \"{}\"",
-                session.photo_count, session.name
-            );
+        let failures = self.library.last_import_errors.len();
+        self.status = if failures > 0 {
+            format!("Import: {} photos, {failures} error(s)", batch.photos)
+        } else if batch.jobs > 1 {
+            format!(
+                "Import complete: {} photos from {} imports",
+                batch.photos, batch.jobs
+            )
         } else {
-            // Dump details to the terminal for quick diagnosis, and keep them in
-            // state so the UI can show them on demand.
-            for (path, msg) in &errors {
-                eprintln!("import error: {}: {msg}", path.display());
-            }
-            self.status = format!(
-                "Import: {} photos, {} error(s)",
-                session.photo_count,
-                errors.len()
-            );
-        }
-        self.library.last_import_errors = errors;
+            format!(
+                "Import complete: {} photos in \"{}\"",
+                batch.photos, session.name
+            )
+        };
     }
 
     /// Terminal handler for an import that will never report progress again.
     ///
-    /// Tears the progress bar down and refreshes the grid: an import that died
-    /// partway through still committed the photos it had already written, and
-    /// they should be visible rather than waiting for the next library open.
-    pub(super) fn on_import_failed(&mut self, message: String) {
-        self.library.import_progress = None;
-        self.library.thumbs.clear();
+    /// Takes down only the job that died: any other import sharing the batch
+    /// is still running and still owns its share of the status line. Refreshes
+    /// like a completed one, because an import that died partway through still
+    /// committed the photos it had already written, and they should be visible
+    /// rather than waiting for the next library open.
+    pub(super) fn on_import_failed(&mut self, job: u64, message: String) {
+        let Some(batch) = self.library.fail_import_job(job) else {
+            return;
+        };
+        if batch.remaining == 0 {
+            self.library.thumbs.clear();
+        }
         self.library.refresh();
-        self.status = format!("Import failed: {message}");
+        // Name the survivors: with a batch running, "Import failed" on its own
+        // reads as though everything stopped, when the rest carries on.
+        self.status = match batch.remaining {
+            0 => format!("Import failed: {message}"),
+            remaining => format!(
+                "Import failed: {message} ({} still running)",
+                plural(remaining, "import")
+            ),
+        };
     }
 
     // -----------------------------------------------------------------------

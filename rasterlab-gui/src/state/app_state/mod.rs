@@ -80,16 +80,21 @@ enum BgMessage {
     /// A background thread failed at loading the open document. Terminal for
     /// the editor's `loading` flag.
     Error(String),
-    /// Progress update from a running import.
-    ImportProgress(rasterlab_library::ImportProgress),
+    /// Progress update from a running import. `job` says which one: several
+    /// imports can run at once, and they all report on this one channel.
+    ImportProgress {
+        job: u64,
+        progress: rasterlab_library::ImportProgress,
+    },
     /// Import finished; thumbnail cache should be invalidated.
     ImportComplete {
+        job: u64,
         session: rasterlab_library::ImportSession,
         errors: Vec<(StdPathBuf, String)>,
     },
     /// The import worker gave up, panicked, or never started. Terminal, so the
-    /// progress bar it owns has to be torn down.
-    ImportFailed(String),
+    /// progress this job owns has to be torn down.
+    ImportFailed { job: u64, message: String },
     /// A thumbnail image was loaded from disk; ready to upload to egui.
     ThumbLoaded { hash: String, bytes: Vec<u8> },
     LibraryDetailLoaded {
@@ -272,6 +277,10 @@ pub struct AppState {
     /// `(library_root, hash)` — on save triggers thumb regen + DB sync.
     pub library_context: Option<(StdPathBuf, String)>,
 
+    /// Source of the job ids that tell concurrent imports apart in the
+    /// messages their workers post back.
+    next_import_id: u64,
+
     /// Cancellation flag for a running integrity scrub. `Some` while a scrub is
     /// in flight (drives the File-menu Start/Stop toggle); cleared on completion.
     scrub_cancel: Option<Arc<AtomicBool>>,
@@ -377,6 +386,7 @@ impl AppState {
                 ..Default::default()
             },
             library_context: None,
+            next_import_id: 0,
             scrub_cancel: None,
             rebuild_cancel: None,
             delete_cancel: None,
@@ -405,11 +415,15 @@ impl AppState {
                     self.status = format!("Error: {}", e);
                     self.loading = false;
                 }
-                BgMessage::ImportProgress(p) => self.on_import_progress(p),
-                BgMessage::ImportComplete { session, errors } => {
-                    self.on_import_complete(session, errors)
+                BgMessage::ImportProgress { job, progress } => {
+                    self.on_import_progress(job, progress)
                 }
-                BgMessage::ImportFailed(e) => self.on_import_failed(e),
+                BgMessage::ImportComplete {
+                    job,
+                    session,
+                    errors,
+                } => self.on_import_complete(job, session, errors),
+                BgMessage::ImportFailed { job, message } => self.on_import_failed(job, message),
                 BgMessage::ThumbLoaded { hash, bytes } => self.on_thumb_loaded(hash, bytes),
                 BgMessage::LibraryDetailLoaded {
                     id,

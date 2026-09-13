@@ -340,6 +340,81 @@ fn open_failure(path: &Path, err: &anyhow::Error) -> (String, Option<PathBuf>) {
     (format!("Failed to open library: {err}"), None)
 }
 
+// ── Imports ─────────────────────────────────────────────────────────────
+
+/// How often a running import re-reads the library so the sidebar and the
+/// grid catch up with what has landed so far.
+const IMPORT_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Which flavour of import a job is, which decides what the aggregated status
+/// line calls several of them at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    /// A recursive folder import.
+    Folder,
+    /// A set of individually chosen files.
+    Files,
+}
+
+/// One import running in the background.
+///
+/// Imports are not mutually exclusive: the folder-import dialog can be run
+/// again while an earlier folder is still being read, and each run gets a
+/// worker thread of its own. Every run is tracked separately, because a single
+/// progress slot meant concurrent workers overwrote each other's numbers and
+/// the status line flipped between them.
+pub struct ImportJob {
+    /// Identifies the job in the progress, completion and failure messages its
+    /// worker posts back.
+    pub id: u64,
+    /// What the hover detail calls this job: the folder's file name for a
+    /// folder import, or e.g. "12 files" for an individual-file import.
+    pub label: String,
+    pub kind: ImportKind,
+    pub progress: ImportProgress,
+}
+
+/// Where a batch of imports stands after one of its jobs finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportBatchStatus {
+    /// Jobs of the batch still running.
+    pub remaining: usize,
+    /// How many jobs the batch has held in all, finished ones included.
+    pub jobs: usize,
+    /// Photos imported by the jobs of the batch that have finished.
+    pub photos: usize,
+}
+
+impl ImportBatchStatus {
+    /// True when the job that just finished was the batch's only one — the
+    /// only case in which it may decide what the grid shows, since with
+    /// several in flight the one that happens to finish first is arbitrary.
+    pub fn was_alone(self) -> bool {
+        self.remaining == 0 && self.jobs == 1
+    }
+}
+
+/// The one-line progress text for a single import job, without its error
+/// tally: callers append the whole batch's, which is what the rest of the
+/// toolbar reports.
+fn import_progress_text(progress: &ImportProgress) -> String {
+    if progress.scanning {
+        return format!("Scanning dates… {}/{}", progress.done, progress.total);
+    }
+    format!(
+        "Importing… {}/{} processed, {} new, {} skipped",
+        progress.done, progress.total, progress.imported, progress.skipped_duplicates
+    )
+}
+
+/// Suffix a status line with its error tally, which is left off entirely when
+/// there is nothing to report.
+fn append_error_count(text: &mut String, errors: usize) {
+    if errors > 0 {
+        text.push_str(&format!(", {errors} error(s)"));
+    }
+}
+
 // ── LibraryState ──────────────────────────────────────────────────────────────
 
 pub struct LibraryState {
@@ -350,7 +425,25 @@ pub struct LibraryState {
     pub results: Vec<PhotoRow>,
     pub selected: Vec<PhotoId>,
     pub thumb_scale: f32,
-    pub import_progress: Option<ImportProgress>,
+    /// Every import running right now, in the order they were started.
+    /// Jobs are removed as they finish; see [`ImportJob`].
+    pub imports: Vec<ImportJob>,
+
+    /// Errors of the jobs of the current batch that have already finished.
+    /// `last_import_errors` is these plus whatever the running jobs report.
+    pub(crate) finished_import_errors: Vec<(PathBuf, String)>,
+
+    /// Photos imported by the finished jobs of the current batch.
+    pub(crate) import_batch_photos: usize,
+
+    /// How many jobs the current batch has held, finished ones included.
+    pub(crate) import_batch_jobs: usize,
+
+    /// When the live mid-import refresh last ran, and how many photos had been
+    /// imported by then: the refresh is throttled on both, so a long scan or a
+    /// folder of pure duplicates does not re-query the library every second.
+    pub(crate) import_last_refresh: Option<Instant>,
+    pub(crate) import_refreshed_imported: usize,
 
     /// Bounded thumbnail texture cache (evicts oldest beyond a fixed cap so a
     /// large library can't grow GPU/texture memory without limit).
@@ -498,7 +591,12 @@ impl Default for LibraryState {
             results: Vec::new(),
             selected: Vec::new(),
             thumb_scale: 0.5,
-            import_progress: None,
+            imports: Vec::new(),
+            finished_import_errors: Vec::new(),
+            import_batch_photos: 0,
+            import_batch_jobs: 0,
+            import_last_refresh: None,
+            import_refreshed_imported: 0,
             thumbs: ThumbCache::new(THUMB_CACHE_CAP),
             sessions: Vec::new(),
             collections: Vec::new(),
@@ -976,6 +1074,208 @@ impl LibraryState {
 
     pub fn select_none(&mut self) {
         self.selected.clear();
+    }
+
+    // ── Imports ─────────────────────────────────────────────────
+
+    /// Start tracking a new import job.
+    ///
+    /// A job started while nothing else is importing opens a fresh batch: the
+    /// previous batch's errors are what the "⚠ N import error(s)" button still
+    /// shows, and this run replaces them. One started while others run joins
+    /// their batch, so a single status line and a single error list cover the
+    /// lot.
+    pub(crate) fn start_import_job(&mut self, id: u64, label: String, kind: ImportKind) {
+        if self.imports.is_empty() {
+            self.finished_import_errors.clear();
+            self.last_import_errors.clear();
+            self.import_batch_photos = 0;
+            self.import_batch_jobs = 0;
+            self.import_last_refresh = None;
+            self.import_refreshed_imported = 0;
+        }
+        self.import_batch_jobs += 1;
+        self.imports.push(ImportJob {
+            id,
+            label,
+            kind,
+            progress: ImportProgress::default(),
+        });
+    }
+
+    /// Apply a progress report to the job that sent it, reporting whether that
+    /// job is still around.
+    ///
+    /// A report for a job that has gone is dropped rather than resurrecting
+    /// it: a worker's last progress message can arrive behind its completion
+    /// message, and every import posts to the same channel.
+    pub(crate) fn apply_import_progress(&mut self, id: u64, progress: ImportProgress) -> bool {
+        let Some(job) = self.imports.iter_mut().find(|job| job.id == id) else {
+            return false;
+        };
+        job.progress = progress;
+        self.sync_import_errors();
+        true
+    }
+
+    /// Remove a job that completed, folding its errors and photo count into
+    /// the batch's. `None` if the id is not one of the running jobs.
+    pub(crate) fn finish_import_job(
+        &mut self,
+        id: u64,
+        errors: Vec<(PathBuf, String)>,
+        photos: usize,
+    ) -> Option<ImportBatchStatus> {
+        self.remove_import_job(id, Some(errors), Some(photos))
+    }
+
+    /// Remove a job whose worker died, keeping the errors and the photos it
+    /// had reported before it did.
+    ///
+    /// A death partway through still committed everything written up to it, so
+    /// those photos belong in the batch tally; counting them as zero would
+    /// have the final line undercount what is actually in the library.
+    pub(crate) fn fail_import_job(&mut self, id: u64) -> Option<ImportBatchStatus> {
+        self.remove_import_job(id, None, None)
+    }
+
+    fn remove_import_job(
+        &mut self,
+        id: u64,
+        errors: Option<Vec<(PathBuf, String)>>,
+        photos: Option<usize>,
+    ) -> Option<ImportBatchStatus> {
+        let position = self.imports.iter().position(|job| job.id == id)?;
+        let job = self.imports.remove(position);
+        self.import_batch_photos += photos.unwrap_or(job.progress.imported);
+        self.finished_import_errors
+            .extend(errors.unwrap_or(job.progress.errors));
+        self.sync_import_errors();
+        // The refresh watermark counts running jobs only, so it has to come
+        // down with the one that left; otherwise the jobs still going would
+        // have to out-import a departed one before the grid moved again.
+        self.import_refreshed_imported = self.running_imported();
+        Some(ImportBatchStatus {
+            remaining: self.imports.len(),
+            jobs: self.import_batch_jobs,
+            photos: self.import_batch_photos,
+        })
+    }
+
+    /// Photos imported so far by the jobs that are still running.
+    fn running_imported(&self) -> usize {
+        self.imports.iter().map(|job| job.progress.imported).sum()
+    }
+
+    /// Rebuild `last_import_errors` as the union over the batch: the errors of
+    /// the jobs still running plus those of the ones that have finished.
+    /// Anything less loses one concurrent import's failures to another's.
+    fn sync_import_errors(&mut self) {
+        self.last_import_errors = self
+            .finished_import_errors
+            .iter()
+            .cloned()
+            .chain(
+                self.imports
+                    .iter()
+                    .flat_map(|job| job.progress.errors.iter().cloned()),
+            )
+            .collect();
+    }
+
+    /// Re-read the library mid-import so the sidebar, the counts and the grid
+    /// follow an import along instead of standing still until it ends.
+    ///
+    /// Deliberately cheap to call every frame: it does nothing unless photos
+    /// have actually been imported since the last time it ran, and then at
+    /// most once per [`IMPORT_REFRESH_INTERVAL`]. It leaves the thumbnail
+    /// cache and the current view alone — this runs under the user's hands.
+    pub(crate) fn refresh_during_import(&mut self) {
+        let imported = self.running_imported();
+        if imported <= self.import_refreshed_imported {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .import_last_refresh
+            .is_some_and(|last| now.duration_since(last) < IMPORT_REFRESH_INTERVAL)
+        {
+            return;
+        }
+        self.import_last_refresh = Some(now);
+        self.import_refreshed_imported = imported;
+        self.refresh();
+    }
+
+    /// Human-readable one-liner for the running imports, or `None` when none
+    /// are running.
+    ///
+    /// Several imports share one line rather than taking turns in it: the
+    /// toolbar is a single row, and a line that flips between concurrent
+    /// folders reads as numbers jumping about at random.
+    pub fn import_status_text(&self) -> Option<String> {
+        match self.imports.as_slice() {
+            [] => None,
+            [job] => {
+                let mut text = import_progress_text(&job.progress);
+                append_error_count(&mut text, self.last_import_errors.len());
+                Some(text)
+            }
+            jobs => {
+                // "folders" is only honest when every running job is one.
+                let noun = if jobs.iter().all(|job| job.kind == ImportKind::Folder) {
+                    "folders"
+                } else {
+                    "imports"
+                };
+                let scanning = jobs.iter().filter(|job| job.progress.scanning).count();
+                let mut text = if scanning == jobs.len() {
+                    let done: usize = jobs.iter().map(|job| job.progress.done).sum();
+                    let total: usize = jobs.iter().map(|job| job.progress.total).sum();
+                    format!("Scanning dates in {} {noun}… {done}/{total}", jobs.len())
+                } else {
+                    // Sum over the importing jobs only: a job still reading
+                    // capture dates has no import tally to contribute, and its
+                    // scan counters are not files processed.
+                    let importing = || jobs.iter().filter(|job| !job.progress.scanning);
+                    let done: usize = importing().map(|job| job.progress.done).sum();
+                    let total: usize = importing().map(|job| job.progress.total).sum();
+                    let imported: usize = importing().map(|job| job.progress.imported).sum();
+                    let skipped: usize =
+                        importing().map(|job| job.progress.skipped_duplicates).sum();
+                    let mut text = format!(
+                        "Importing {} {noun}… {done}/{total} processed, {imported} new, \
+                         {skipped} skipped",
+                        jobs.len()
+                    );
+                    if scanning > 0 {
+                        text.push_str(&format!(", {scanning} scanning"));
+                    }
+                    text
+                };
+                // The batch's tally, not the running jobs', so the line and
+                // the "⚠ N import error(s)" button beside it agree once a job
+                // that hit trouble has finished.
+                append_error_count(&mut text, self.last_import_errors.len());
+                Some(text)
+            }
+        }
+    }
+
+    /// One line per running import, naming it, for the status line's hover
+    /// detail. Only worth showing when more than one is running; a single
+    /// job's detail is the status line itself.
+    pub fn import_detail_lines(&self) -> Vec<String> {
+        self.imports
+            .iter()
+            .map(|job| {
+                let mut text = format!("{}: {}", job.label, import_progress_text(&job.progress));
+                // Per job here, unlike the summary line: whose failures they
+                // are is the whole reason to open the detail.
+                append_error_count(&mut text, job.progress.errors.len());
+                text
+            })
+            .collect()
     }
 
     /// Human-readable one-liner for a running bulk Recently Deleted operation,
@@ -1742,5 +2042,391 @@ mod tests {
             );
             assert!(thumb_target_side(scale, ppp) <= THUMB_SOURCE_SIDE);
         }
+    }
+
+    /// One import job's worth of counters, as the status-line cases describe
+    /// it. `Default` is an idle folder import, so each case names only the
+    /// fields it cares about.
+    #[derive(Clone, Copy, Default)]
+    struct JobSpec {
+        files: bool,
+        scanning: bool,
+        done: usize,
+        total: usize,
+        imported: usize,
+        skipped: usize,
+        errors: usize,
+    }
+
+    fn import_state(specs: &[JobSpec]) -> LibraryState {
+        let mut state = LibraryState::default();
+        for (index, spec) in specs.iter().enumerate() {
+            let kind = if spec.files {
+                ImportKind::Files
+            } else {
+                ImportKind::Folder
+            };
+            let id = index as u64;
+            state.start_import_job(id, format!("job{id}"), kind);
+            state.apply_import_progress(
+                id,
+                ImportProgress {
+                    total: spec.total,
+                    done: spec.done,
+                    imported: spec.imported,
+                    skipped_duplicates: spec.skipped,
+                    scanning: spec.scanning,
+                    errors: failures(spec.errors),
+                    ..Default::default()
+                },
+            );
+        }
+        state
+    }
+
+    /// `n` distinct per-file failures, which is all the status line and the
+    /// error merge ever look at.
+    fn failures(n: usize) -> Vec<(PathBuf, String)> {
+        (0..n)
+            .map(|i| (PathBuf::from(format!("/photos/bad{i}.jpg")), "boom".into()))
+            .collect()
+    }
+
+    /// The line the toolbar shows while imports run. A single import has to
+    /// keep its old wording, and concurrent ones have to aggregate rather than
+    /// take turns in the line — taking turns is the bug this replaced.
+    #[test]
+    fn import_status_text_aggregates_concurrent_jobs() {
+        let importing = JobSpec {
+            done: 5,
+            total: 10,
+            imported: 3,
+            skipped: 2,
+            ..Default::default()
+        };
+        let cases: &[(&str, &[JobSpec], &str)] = &[
+            (
+                "one import keeps the original wording",
+                &[importing],
+                "Importing… 5/10 processed, 3 new, 2 skipped",
+            ),
+            (
+                "one import with failures",
+                &[JobSpec {
+                    errors: 2,
+                    ..importing
+                }],
+                "Importing… 5/10 processed, 3 new, 2 skipped, 2 error(s)",
+            ),
+            (
+                "one import still reading capture dates",
+                &[JobSpec {
+                    scanning: true,
+                    done: 4,
+                    total: 40,
+                    ..Default::default()
+                }],
+                "Scanning dates… 4/40",
+            ),
+            (
+                "three folders sum into one line",
+                &[
+                    JobSpec {
+                        done: 200,
+                        total: 600,
+                        imported: 190,
+                        skipped: 10,
+                        ..Default::default()
+                    },
+                    JobSpec {
+                        done: 112,
+                        total: 300,
+                        imported: 105,
+                        skipped: 5,
+                        ..Default::default()
+                    },
+                    JobSpec {
+                        done: 100,
+                        total: 300,
+                        imported: 85,
+                        skipped: 5,
+                        ..Default::default()
+                    },
+                ],
+                "Importing 3 folders… 412/1200 processed, 380 new, 20 skipped",
+            ),
+            (
+                "a file import among them is not a folder",
+                &[
+                    importing,
+                    JobSpec {
+                        files: true,
+                        ..importing
+                    },
+                ],
+                "Importing 2 imports… 10/20 processed, 6 new, 4 skipped",
+            ),
+            (
+                "every job scanning shows the scan aggregate",
+                &[
+                    JobSpec {
+                        scanning: true,
+                        done: 4,
+                        total: 100,
+                        ..Default::default()
+                    },
+                    JobSpec {
+                        scanning: true,
+                        done: 6,
+                        total: 100,
+                        ..Default::default()
+                    },
+                ],
+                "Scanning dates in 2 folders… 10/200",
+            ),
+            (
+                "a scanning job is counted, not summed into the import tally",
+                &[
+                    JobSpec {
+                        done: 100,
+                        total: 500,
+                        imported: 90,
+                        skipped: 10,
+                        ..Default::default()
+                    },
+                    JobSpec {
+                        scanning: true,
+                        done: 7,
+                        total: 70,
+                        ..Default::default()
+                    },
+                ],
+                "Importing 2 folders… 100/500 processed, 90 new, 10 skipped, 1 scanning",
+            ),
+            (
+                "failures across jobs are tallied together",
+                &[
+                    JobSpec {
+                        errors: 1,
+                        ..importing
+                    },
+                    JobSpec {
+                        errors: 2,
+                        ..importing
+                    },
+                ],
+                "Importing 2 folders… 10/20 processed, 6 new, 4 skipped, 3 error(s)",
+            ),
+        ];
+
+        assert_eq!(
+            LibraryState::default().import_status_text(),
+            None,
+            "nothing importing, nothing to say"
+        );
+        for (name, specs, expected) in cases {
+            let state = import_state(specs);
+            assert_eq!(
+                state.import_status_text().as_deref(),
+                Some(*expected),
+                "{name}"
+            );
+        }
+    }
+
+    /// The hover detail names each import, so the single line can be trusted
+    /// to be the sum of jobs the user can still see individually.
+    #[test]
+    fn import_detail_lines_name_each_job() {
+        let state = import_state(&[
+            JobSpec {
+                done: 1,
+                total: 2,
+                ..Default::default()
+            },
+            JobSpec {
+                scanning: true,
+                done: 3,
+                total: 4,
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(
+            state.import_detail_lines(),
+            vec![
+                "job0: Importing… 1/2 processed, 0 new, 0 skipped".to_string(),
+                "job1: Scanning dates… 3/4".to_string(),
+            ]
+        );
+    }
+
+    /// Each worker's reports have to land on its own job, and a report or a
+    /// completion for a job that has gone must be dropped rather than putting
+    /// a finished import back on screen.
+    #[test]
+    fn import_messages_reach_only_their_own_job() {
+        let mut state = LibraryState::default();
+        state.start_import_job(1, "first".into(), ImportKind::Folder);
+        state.start_import_job(2, "second".into(), ImportKind::Folder);
+
+        assert!(state.apply_import_progress(
+            2,
+            ImportProgress {
+                imported: 7,
+                ..Default::default()
+            }
+        ));
+        assert_eq!(state.imports[0].progress.imported, 0);
+        assert_eq!(state.imports[1].progress.imported, 7);
+        assert!(
+            !state.apply_import_progress(99, ImportProgress::default()),
+            "an unknown job id is ignored"
+        );
+        assert_eq!(state.imports.len(), 2, "and creates nothing");
+
+        let batch = state
+            .finish_import_job(1, Vec::new(), 30)
+            .expect("the first job was running");
+        assert_eq!((batch.remaining, batch.jobs, batch.photos), (1, 2, 30));
+        assert!(!batch.was_alone(), "a two-import batch never reveals one");
+        assert_eq!(
+            state.imports.iter().map(|job| job.id).collect::<Vec<_>>(),
+            vec![2],
+            "only the finished job leaves"
+        );
+        assert!(
+            state.finish_import_job(1, Vec::new(), 5).is_none(),
+            "a second completion for a gone job changes nothing"
+        );
+        assert_eq!(state.imports.len(), 1);
+
+        let batch = state
+            .fail_import_job(2)
+            .expect("the second job was running");
+        assert_eq!(
+            (batch.remaining, batch.jobs, batch.photos),
+            (0, 2, 37),
+            "a job that dies still contributes the photos it had imported"
+        );
+        assert!(state.imports.is_empty(), "the batch is over");
+        assert!(state.fail_import_job(2).is_none(), "and it stays gone");
+    }
+
+    /// A lone import may still reveal what it imported; that is what
+    /// `was_alone` gates.
+    #[test]
+    fn a_single_import_batch_is_alone() {
+        let mut state = LibraryState::default();
+        state.start_import_job(4, "only".into(), ImportKind::Files);
+        let batch = state.finish_import_job(4, Vec::new(), 2).unwrap();
+        assert!(batch.was_alone());
+    }
+
+    /// Concurrent imports used to clobber each other's error list, so whose
+    /// failures the "⚠ N import error(s)" button showed depended on which
+    /// worker reported last.
+    #[test]
+    fn import_errors_merge_over_the_batch_and_reset_with_it() {
+        let mut state = LibraryState::default();
+        state.start_import_job(1, "first".into(), ImportKind::Folder);
+        state.start_import_job(2, "second".into(), ImportKind::Folder);
+
+        state.apply_import_progress(
+            1,
+            ImportProgress {
+                errors: vec![(PathBuf::from("/photos/a.jpg"), "no".into())],
+                ..Default::default()
+            },
+        );
+        state.apply_import_progress(
+            2,
+            ImportProgress {
+                errors: vec![(PathBuf::from("/photos/b.jpg"), "no".into())],
+                ..Default::default()
+            },
+        );
+        let paths = |state: &LibraryState| {
+            state
+                .last_import_errors
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(&state), ["/photos/a.jpg", "/photos/b.jpg"]);
+
+        state.finish_import_job(1, vec![(PathBuf::from("/photos/a.jpg"), "no".into())], 10);
+        assert_eq!(
+            paths(&state),
+            ["/photos/a.jpg", "/photos/b.jpg"],
+            "a finished job's failures survive it"
+        );
+        state.fail_import_job(2);
+        assert_eq!(
+            paths(&state),
+            ["/photos/a.jpg", "/photos/b.jpg"],
+            "and so do those of one that died"
+        );
+
+        state.start_import_job(3, "third".into(), ImportKind::Folder);
+        assert!(
+            state.last_import_errors.is_empty(),
+            "a new batch starts with a clean list"
+        );
+    }
+
+    /// The mid-import refresh is throttled on two counts — elapsed time and
+    /// photos actually landed — so a scan phase or a folder of pure duplicates
+    /// does not re-query the library every second. `refresh` itself is a no-op
+    /// without an open library, so what is asserted here is the bookkeeping
+    /// that decides whether it is called at all.
+    #[test]
+    fn the_mid_import_refresh_waits_for_photos_and_for_the_interval() {
+        let mut state = LibraryState::default();
+        state.start_import_job(1, "first".into(), ImportKind::Folder);
+
+        let progress = |imported| ImportProgress {
+            imported,
+            ..Default::default()
+        };
+
+        // Scanning, or importing nothing but duplicates: nothing has landed,
+        // so there is nothing to look at again.
+        state.apply_import_progress(1, progress(0));
+        state.refresh_during_import();
+        assert!(state.import_last_refresh.is_none(), "no photos, no refresh");
+
+        state.apply_import_progress(1, progress(5));
+        state.refresh_during_import();
+        assert!(state.import_last_refresh.is_some(), "the first photos show");
+        assert_eq!(state.import_refreshed_imported, 5);
+
+        // Still inside the interval: the counter moves, the grid does not.
+        let first = state.import_last_refresh;
+        state.apply_import_progress(1, progress(9));
+        state.refresh_during_import();
+        assert_eq!(state.import_last_refresh, first, "throttled");
+        assert_eq!(state.import_refreshed_imported, 5);
+
+        state.import_last_refresh = Some(Instant::now() - IMPORT_REFRESH_INTERVAL);
+        state.refresh_during_import();
+        assert_ne!(state.import_last_refresh, first, "the interval elapsed");
+        assert_eq!(state.import_refreshed_imported, 9);
+
+        // A job leaving takes its photos out of the running tally, so the
+        // watermark has to come down with it: otherwise the job still going
+        // would have to out-import the departed one before the grid moved
+        // again.
+        state.start_import_job(2, "second".into(), ImportKind::Folder);
+        state.apply_import_progress(2, progress(3));
+        state.finish_import_job(1, Vec::new(), 9);
+        assert_eq!(state.import_refreshed_imported, 3, "the watermark follows");
+
+        state.import_last_refresh = Some(Instant::now() - IMPORT_REFRESH_INTERVAL);
+        state.apply_import_progress(2, progress(4));
+        state.refresh_during_import();
+        assert_eq!(
+            state.import_refreshed_imported, 4,
+            "and one more photo is enough to trigger again"
+        );
     }
 }

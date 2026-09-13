@@ -186,22 +186,15 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
-        // Import progress
-        if let Some(ref p) = state.library.import_progress {
+        // Import progress. Concurrent imports share this one line — the
+        // toolbar is a single row, and a line that took turns between them
+        // read as numbers jumping about — with the per-import detail on hover.
+        if let Some(text) = state.library.import_status_text() {
             ui.separator();
             ui.spinner();
-            if p.scanning {
-                ui.label(format!("Scanning dates… {}/{}", p.done, p.total));
-            } else {
-                let errors = p.errors.len();
-                let mut detail = format!(
-                    "Importing… {}/{} processed, {} new, {} skipped",
-                    p.done, p.total, p.imported, p.skipped_duplicates
-                );
-                if errors > 0 {
-                    detail.push_str(&format!(", {errors} error(s)"));
-                }
-                ui.label(detail);
+            let label = ui.label(text);
+            if state.library.imports.len() > 1 {
+                label.on_hover_text(state.library.import_detail_lines().join("\n"));
             }
         }
 
