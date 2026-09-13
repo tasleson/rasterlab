@@ -13,10 +13,10 @@ use std::{
 
 use image as img_crate;
 use rasterlab_core::panic_guard;
-use rasterlab_library::CollectionId;
+use rasterlab_library::{CollectionId, PhotoId};
 
 use super::{AppMode, AppState, BgMessage, workers};
-use crate::state::library_state::{DeleteKind, DeleteTask, ImportKind, plural};
+use crate::state::library_state::{CollectionTask, DeleteKind, DeleteTask, ImportKind, plural};
 
 /// Number of worker threads servicing thumbnail loads. Fixed and small so a
 /// large library grid can't spawn thousands of threads at once.
@@ -578,6 +578,168 @@ impl AppState {
             .take()
             .map(|task| task.kind)
             .unwrap_or(DeleteKind::ToRecentlyDeleted)
+    }
+
+    // -----------------------------------------------------------------------
+    // Collection membership
+    // -----------------------------------------------------------------------
+
+    /// True while a collection-membership change is running.
+    pub fn collection_running(&self) -> bool {
+        self.collection_cancel.is_some()
+    }
+
+    /// Create a collection and start filing the photos it was asked for into
+    /// it.
+    ///
+    /// The row is created here so the sidebar shows it at once; the photos
+    /// follow on the worker, because each of them is a `.rlab` rewrite.  An
+    /// `Err` is the name's — the dialog stays open showing it.
+    pub fn create_collection(&mut self, name: &str, photos: Vec<PhotoId>) -> Result<(), String> {
+        // Checked before the row is created: a collection that came up empty
+        // because the worker was busy is worse than being asked to wait, and
+        // the dialog is still on screen to say so.
+        if !photos.is_empty() && self.collection_running() {
+            return Err("Another collection change is still running.".to_owned());
+        }
+        let id = self.library.create_collection(name)?;
+        self.start_collection_task(id, photos, true);
+        Ok(())
+    }
+
+    /// Add every selected photo to a collection; the ones already in it stay
+    /// as they are.
+    pub fn add_selected_to_collection(&mut self, id: CollectionId) {
+        let photos = self.library.selected.clone();
+        self.start_collection_task(id, photos, true);
+    }
+
+    /// Take every selected photo out of a collection.
+    pub fn remove_selected_from_collection(&mut self, id: CollectionId) {
+        let photos = self.library.selected.clone();
+        self.start_collection_task(id, photos, false);
+    }
+
+    /// Spawn the worker that rewrites each photo's `.rlab` and then brings the
+    /// index in line with it.
+    ///
+    /// The photos are taken as the task starts rather than read from the
+    /// selection as it goes: the grid stays live while this runs, and the
+    /// batch that is filed must be the batch the user asked for.
+    fn start_collection_task(&mut self, id: CollectionId, photos: Vec<PhotoId>, member: bool) {
+        if self.collection_running() || photos.is_empty() {
+            return;
+        }
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        let name = self
+            .library
+            .collection_name(id)
+            .unwrap_or("collection")
+            .to_owned();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.collection_cancel = Some(cancel.clone());
+        self.library.collection_task = Some(CollectionTask {
+            member,
+            name: name.clone(),
+            progress: rasterlab_library::BulkProgress {
+                total: photos.len(),
+                ..Default::default()
+            },
+            stopping: false,
+        });
+        self.status = format!(
+            "{} “{name}”…",
+            if member { "Adding to" } else { "Removing from" }
+        );
+
+        let progress_tx = self.bg_tx.clone();
+        let progress_ctx = self.ctx.clone();
+        workers::spawn(
+            "rasterlab-library-collection",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            BgMessage::CollectionFailed,
+            move || {
+                let report = move |p: rasterlab_library::BulkProgress| {
+                    let _ = progress_tx.send(BgMessage::CollectionProgress(p));
+                    progress_ctx.request_repaint();
+                };
+                match lib.change_collection_membership(id, &photos, member, cancel, report) {
+                    Ok(outcome) => BgMessage::CollectionComplete { outcome },
+                    Err(e) => BgMessage::CollectionFailed(e.to_string()),
+                }
+            },
+        );
+    }
+
+    /// Request that a running collection change stop after the current photo.
+    pub fn stop_collection_change(&mut self) {
+        if let Some(cancel) = &self.collection_cancel {
+            cancel.store(true, Ordering::Relaxed);
+            if let Some(task) = &mut self.library.collection_task {
+                task.stopping = true;
+            }
+        }
+    }
+
+    pub(super) fn on_collection_progress(&mut self, progress: rasterlab_library::BulkProgress) {
+        if let Some(task) = &mut self.library.collection_task {
+            task.progress = progress;
+        }
+    }
+
+    pub(super) fn on_collection_complete(&mut self, outcome: rasterlab_library::BulkOutcome) {
+        let (verb, name) = self.finish_collection_task();
+        self.library.refresh();
+        self.status = if outcome.cancelled {
+            format!(
+                "{verb} “{name}” stopped after {}",
+                plural(outcome.done, "photo")
+            )
+        } else {
+            format!("{verb} “{name}”: {}", plural(outcome.done, "photo"))
+        };
+        // Photos whose file could not be rewritten are not in the collection,
+        // and the status line is gone by the next action, so the one that
+        // matters gets the banner rather than only a count.
+        if let Some((photo, error)) = outcome.errors.first() {
+            let more = outcome.errors.len() - 1;
+            let mut text = format!("{verb} “{name}” failed for {photo}: {error}");
+            if more > 0 {
+                text.push_str(&format!(" (and {} more)", plural(more, "photo")));
+            }
+            self.status
+                .push_str(&format!(", {} error(s)", outcome.errors.len()));
+            self.library.last_error = Some(text);
+        }
+    }
+
+    /// Terminal handler for a collection change that will never report again.
+    ///
+    /// Refreshes like a completed one: a run that died partway through still
+    /// filed the photos it had already written, and the grid should show them
+    /// where they now are.
+    pub(super) fn on_collection_failed(&mut self, message: String) {
+        let (verb, name) = self.finish_collection_task();
+        self.library.refresh();
+        let text = format!("{verb} “{name}” failed: {message}");
+        self.status = text.clone();
+        self.library.last_error = Some(text);
+    }
+
+    /// Release the in-flight state the change owns, reporting what it was for
+    /// the status line that follows it.
+    fn finish_collection_task(&mut self) -> (&'static str, String) {
+        self.collection_cancel = None;
+        self.library
+            .collection_task
+            .take()
+            .map(|task| (task.past_verb(), task.name))
+            .unwrap_or(("Added to", "collection".to_owned()))
     }
 
     // -----------------------------------------------------------------------

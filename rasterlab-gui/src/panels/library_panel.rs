@@ -186,6 +186,27 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
+        // Collection membership progress. Filing a large selection is as long
+        // a job as a bulk delete — every photo is a full `.rlab` rewrite — so
+        // it gets the same line and the same way out.
+        if let Some(text) = state.library.collection_status_text() {
+            ui.separator();
+            ui.spinner();
+            ui.label(text);
+            let stopping = state
+                .library
+                .collection_task
+                .as_ref()
+                .is_some_and(|task| task.stopping);
+            if ui
+                .add_enabled(!stopping, egui::Button::new("Stop"))
+                .on_hover_text("Stop after the current photo; what is already done is kept")
+                .clicked()
+            {
+                state.stop_collection_change();
+            }
+        }
+
         // Import progress. Concurrent imports share this one line — the
         // toolbar is a single row, and a line that took turns between them
         // read as numbers jumping about — with the per-import detail on hover.
@@ -803,7 +824,7 @@ fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
 
     let (result, mut prompt) = match state.library.collection_prompt.take() {
         Some(CollectionPrompt::New { entry, photos }) => (
-            state.library.create_collection(&entry.name, &photos),
+            state.create_collection(&entry.name, photos.clone()),
             CollectionPrompt::New { entry, photos },
         ),
         Some(CollectionPrompt::Rename { id, entry }) => (
@@ -2026,6 +2047,9 @@ fn thumb_cell(
 /// because with the marks in front of the names it is also the answer to
 /// "which collections is this photo in?".
 fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
+    // One membership change at a time: a second would fight the first over the
+    // same `.rlab` files, and the entry would only be ignored anyway.
+    let idle = !state.collection_running();
     ui.menu_button("Collections", |ui| {
         for coll in state.library.collections.clone() {
             let membership = state.library.selection_membership(coll.id);
@@ -2037,14 +2061,14 @@ fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
                 Membership::None => (" ", format!("Add these {selection} photos")),
             };
             if ui
-                .button(format!("{mark}  {}", coll.name))
+                .add_enabled(idle, egui::Button::new(format!("{mark}  {}", coll.name)))
                 .on_hover_text(hover)
                 .clicked()
             {
                 if membership == Membership::All {
-                    state.library.remove_selected_from_collection(coll.id);
+                    state.remove_selected_from_collection(coll.id);
                 } else {
-                    state.library.add_selected_to_collection(coll.id);
+                    state.add_selected_to_collection(coll.id);
                 }
                 ui.close();
             }
@@ -2053,7 +2077,10 @@ fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
         if !state.library.collections.is_empty() {
             ui.separator();
         }
-        if ui.button("New Collection…").clicked() {
+        if ui
+            .add_enabled(idle, egui::Button::new("New Collection…"))
+            .clicked()
+        {
             let photos = state.library.selected.clone();
             state.library.collection_prompt = Some(CollectionPrompt::new_collection(photos));
             ui.close();

@@ -122,6 +122,15 @@ enum BgMessage {
     /// The delete worker gave up, panicked, or never started. Terminal, so the
     /// cancellation handle that gates the delete buttons has to be released.
     DeleteFailed(String),
+    /// Progress update from a running collection-membership change.
+    CollectionProgress(rasterlab_library::BulkProgress),
+    /// A collection-membership change finished (completed or stopped).
+    CollectionComplete {
+        outcome: rasterlab_library::BulkOutcome,
+    },
+    /// The collection worker gave up, panicked, or never started. Terminal, so
+    /// the cancellation handle that gates the collection menus is released.
+    CollectionFailed(String),
     /// Progress update from a running integrity scrub.
     ScrubProgress(rasterlab_library::ScrubProgress),
     /// Progress update from a running index rebuild.
@@ -293,6 +302,11 @@ pub struct AppState {
     /// same terms as `scrub_cancel`. It is also what gates the delete buttons,
     /// so only one such operation can be in flight at a time.
     delete_cancel: Option<Arc<AtomicBool>>,
+
+    /// Cancellation flag for a running collection-membership change, on the
+    /// same terms as `delete_cancel`: it gates the collection menus so a
+    /// second change cannot fight the first over the same `.rlab` files.
+    collection_cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Largest centred 2:1 rectangle that fits inside the image.
@@ -390,6 +404,7 @@ impl AppState {
             scrub_cancel: None,
             rebuild_cancel: None,
             delete_cancel: None,
+            collection_cancel: None,
         }
     }
 
@@ -464,6 +479,9 @@ impl AppState {
                 BgMessage::DeleteProgress(p) => self.on_delete_progress(p),
                 BgMessage::DeleteComplete { outcome } => self.on_delete_complete(outcome),
                 BgMessage::DeleteFailed(e) => self.on_delete_failed(e),
+                BgMessage::CollectionProgress(p) => self.on_collection_progress(p),
+                BgMessage::CollectionComplete { outcome } => self.on_collection_complete(outcome),
+                BgMessage::CollectionFailed(e) => self.on_collection_failed(e),
                 BgMessage::ScrubProgress(p) => self.on_scrub_progress(p),
                 BgMessage::RebuildProgress(p) => self.on_rebuild_progress(p),
                 BgMessage::RebuildComplete { outcome, fatal } => {

@@ -87,6 +87,44 @@ pub struct DeleteTask {
     pub stopping: bool,
 }
 
+/// A collection-membership change running in the background.
+///
+/// Same reason as [`DeleteTask`], and the same cost: a photo joins or leaves a
+/// collection by having its `.rlab` rewritten, original bytes and all.  Filing
+/// a grid selection from the UI thread is what left the window unable to paint
+/// while an import had the disk busy, so this reports progress and takes an
+/// answer of "stop" too.
+pub struct CollectionTask {
+    /// Whether the photos are joining the collection or leaving it.
+    pub member: bool,
+    /// The collection's name, for the progress line — the user picked it by
+    /// name, and an id means nothing to them.
+    pub name: String,
+    pub progress: BulkProgress,
+    /// True once the user has asked it to stop, until the worker reports back.
+    pub stopping: bool,
+}
+
+impl CollectionTask {
+    /// "Adding to" / "Removing from", for the line that names what is running.
+    pub fn progress_verb(&self) -> &'static str {
+        if self.member {
+            "Adding to"
+        } else {
+            "Removing from"
+        }
+    }
+
+    /// "Added to" / "Removed from", for the line that says it finished.
+    pub fn past_verb(&self) -> &'static str {
+        if self.member {
+            "Added to"
+        } else {
+            "Removed from"
+        }
+    }
+}
+
 /// "1 photo" / "3 photos", for the status lines that count them.
 pub fn plural(n: usize, noun: &str) -> String {
     if n == 1 {
@@ -515,6 +553,12 @@ pub struct LibraryState {
     /// answer is `AppState::delete_running`.
     pub delete_task: Option<DeleteTask>,
 
+    /// The running collection-membership change, or `None` when idle.
+    ///
+    /// Only the progress line reads it; the authoritative "is one running"
+    /// answer is `AppState::collection_running`.
+    pub collection_task: Option<CollectionTask>,
+
     /// Per-photo `(name, message)` failures from the most recent bulk Recently
     /// Deleted operation. Retained after it finishes so the user can review
     /// which photos did not move.
@@ -617,6 +661,7 @@ impl Default for LibraryState {
             last_scrub_errors: Vec::new(),
             show_scrub_errors: false,
             delete_task: None,
+            collection_task: None,
             last_delete_errors: Vec::new(),
             show_delete_errors: false,
             confirm_delete: false,
@@ -1278,6 +1323,23 @@ impl LibraryState {
             .collect()
     }
 
+    /// Human-readable one-liner for a running collection-membership change, or
+    /// `None` when idle.
+    pub fn collection_status_text(&self) -> Option<String> {
+        let task = self.collection_task.as_ref()?;
+        let progress = &task.progress;
+        let verb = if task.stopping {
+            "Stopping".to_owned()
+        } else {
+            format!("{} “{}”", task.progress_verb(), task.name)
+        };
+        let mut text = format!("{verb}… {}/{}", progress.done, progress.total);
+        if !progress.errors.is_empty() {
+            text.push_str(&format!(", {} error(s)", progress.errors.len()));
+        }
+        Some(text)
+    }
+
     /// Human-readable one-liner for a running bulk Recently Deleted operation,
     /// or `None` when idle.
     pub fn delete_status_text(&self) -> Option<String> {
@@ -1372,13 +1434,19 @@ impl LibraryState {
         }
     }
 
-    /// Create a collection and put `photos` in it.
+    /// Create an empty collection and show it in the sidebar.
     ///
     /// The message in `Err` belongs in the dialog next to the name field: it
     /// says the name cannot be used, and the dialog stays open so the user can
     /// change it. Failures past that point are the library's rather than the
     /// name's, and are reported through `last_error` like every other one.
-    pub fn create_collection(&mut self, name: &str, photos: &[PhotoId]) -> Result<(), String> {
+    ///
+    /// Filling the collection is a separate, much longer job — see
+    /// `AppState::create_collection`, which starts it once the row exists.
+    /// Creating the row here rather than on that worker is what puts the new
+    /// collection in the sidebar straight away instead of when the last photo
+    /// has been filed into it.
+    pub fn create_collection(&mut self, name: &str) -> Result<CollectionId, String> {
         let name = name.trim();
         self.check_collection_name(name, None)?;
         let Some(lib) = self.library.clone() else {
@@ -1388,13 +1456,8 @@ impl LibraryState {
         let collection = lib
             .create_collection(name)
             .map_err(|e| format!("Could not create the collection: {e}"))?;
-        if !photos.is_empty()
-            && let Err(e) = lib.add_to_collection(collection.id, photos)
-        {
-            self.last_error = Some(format!("Add to collection failed: {e}"));
-        }
         self.refresh();
-        Ok(())
+        Ok(collection.id)
     }
 
     /// Rename a collection, under the same name rules as creating one.
@@ -1461,37 +1524,6 @@ impl LibraryState {
             self.select_none();
             self.refresh();
         }
-    }
-
-    /// Add every selected photo to a collection; the ones already in it stay
-    /// as they are.
-    pub fn add_selected_to_collection(&mut self, id: CollectionId) {
-        self.change_collection_membership(id, true);
-    }
-
-    /// Take every selected photo out of a collection.
-    pub fn remove_selected_from_collection(&mut self, id: CollectionId) {
-        self.change_collection_membership(id, false);
-    }
-
-    fn change_collection_membership(&mut self, id: CollectionId, member: bool) {
-        let Some(lib) = self.library.clone() else {
-            return;
-        };
-        let photos = self.selected.clone();
-        if photos.is_empty() {
-            return;
-        }
-        let result = if member {
-            lib.add_to_collection(id, &photos)
-        } else {
-            lib.remove_from_collection(id, &photos)
-        };
-        if let Err(e) = result {
-            let what = if member { "Add to" } else { "Remove from" };
-            self.last_error = Some(format!("{what} collection failed: {e}"));
-        }
-        self.refresh();
     }
 
     /// True if every selected photo is currently protected (and there is at
@@ -1846,15 +1878,15 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(state.create_collection("   ", &[]).is_err());
+        assert!(state.create_collection("   ").is_err());
         let taken = state
-            .create_collection("portfolio", &[])
+            .create_collection("portfolio")
             .expect_err("a name differing only in case is the same name");
         assert!(taken.contains("already exists"), "{taken}");
 
         // A usable name gets past both rules and only then wants a library.
         let no_library = state
-            .create_collection("Landscapes", &[])
+            .create_collection("Landscapes")
             .expect_err("no library is open");
         assert!(no_library.contains("No library"), "{no_library}");
     }
@@ -1891,7 +1923,8 @@ mod tests {
         let coll = lib.create_collection("Portfolio").unwrap();
         let first = state.results[0].clone();
         state.select_only(first.id);
-        state.add_selected_to_collection(coll.id);
+        lib.add_to_collection(coll.id, &[first.id]).unwrap();
+        state.refresh();
 
         state.view = LibraryView::Collection(coll.id);
         state.refresh();
@@ -1940,7 +1973,7 @@ mod tests {
         // is showing that collection.
         let photo = state.results[0].id;
         state.select_only(photo);
-        state.add_selected_to_collection(doomed[0]);
+        lib.add_to_collection(doomed[0], &[photo]).unwrap();
         state.view = LibraryView::Collection(doomed[0]);
         state.marked_collections = doomed.clone();
         state.refresh();
