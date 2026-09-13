@@ -1581,6 +1581,86 @@ fn collection_membership_survives_a_rebuild() {
     assert_eq!(members[0].hash, photos[0].hash);
 }
 
+/// Filing a selection into a collection is a `.rlab` rewrite per photo, so it
+/// has to be stoppable — and what it got through before stopping has to be in
+/// the index, or the files and the index disagree about who is a member.
+#[test]
+fn a_stopped_collection_change_keeps_what_it_already_filed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(
+        &[
+            jpeg_path(),
+            png_path(),
+            test_images_dir().join("hue_wheel.png"),
+        ],
+        |_| {},
+    )
+    .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let ids: Vec<PhotoId> = photos.iter().map(|row| row.id).collect();
+    let coll = lib.create_collection("Portfolio").unwrap();
+
+    // Ask to stop once the first photo is filed. The report that carries that
+    // count comes after the second photo has been claimed, so the run gets as
+    // far as two and the third is never attempted.
+    let cancel = no_cancel();
+    let watcher = cancel.clone();
+    let outcome = lib
+        .change_collection_membership(coll.id, &ids, true, cancel, move |progress| {
+            if progress.done >= 1 {
+                watcher.store(true, Ordering::Relaxed);
+            }
+        })
+        .expect("the run itself must not fail");
+
+    assert!(outcome.cancelled, "the run should report that it stopped");
+    assert_eq!(outcome.done, 2, "what it got to before stopping");
+    let mut members: Vec<String> = lib
+        .collection_photos(coll.id)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.hash)
+        .collect();
+    members.sort();
+    let mut filed: Vec<String> = photos[..2].iter().map(|row| row.hash.clone()).collect();
+    filed.sort();
+    assert_eq!(
+        members, filed,
+        "the index must list exactly the photos whose files were written"
+    );
+}
+
+/// Photos the index no longer lists are dropped before the run starts rather
+/// than counted and skipped, so the progress bar counts down real work.
+#[test]
+fn a_collection_change_counts_only_photos_it_can_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].id;
+    let coll = lib.create_collection("Portfolio").unwrap();
+
+    let totals = Arc::new(Mutex::new(Vec::new()));
+    let seen = totals.clone();
+    let outcome = lib
+        .change_collection_membership(coll.id, &[photo, 9999], true, no_cancel(), move |p| {
+            seen.lock().unwrap().push(p.total);
+        })
+        .unwrap();
+
+    assert_eq!(outcome.done, 1);
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert!(
+        totals.lock().unwrap().iter().all(|&total| total == 1),
+        "a photo that cannot be written must not be counted: {:?}",
+        totals.lock().unwrap()
+    );
+    assert_eq!(lib.collection_photos(coll.id).unwrap().len(), 1);
+}
+
 /// The point of keeping the name in the index: a rename must not be undone by
 /// the stale hints every member file still carries.
 #[test]

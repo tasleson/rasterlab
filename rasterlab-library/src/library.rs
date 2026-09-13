@@ -834,7 +834,14 @@ impl Library {
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
-        self.set_collection_membership(collection_id, photo_ids, true)
+        let outcome = self.change_collection_membership(
+            collection_id,
+            photo_ids,
+            true,
+            idle_cancel(),
+            |_| {},
+        )?;
+        membership_result(true, &outcome)
     }
 
     /// Mirror of [`Library::add_to_collection`]: the `.rlab` files lose the
@@ -844,20 +851,38 @@ impl Library {
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
-        self.set_collection_membership(collection_id, photo_ids, false)
+        let outcome = self.change_collection_membership(
+            collection_id,
+            photo_ids,
+            false,
+            idle_cancel(),
+            |_| {},
+        )?;
+        membership_result(false, &outcome)
     }
 
     /// Body of both directions: rewrite every `.rlab` first, then apply the
     /// same change to the index for the photos whose file was written.
     ///
+    /// Every photo costs a full read and rewrite of its `.rlab` — the original
+    /// bytes included, because the file is hashed as a whole — so a selection
+    /// of a few hundred RAWs is gigabytes of verified writes and minutes of
+    /// work, more when an import is already using the disk.  Hence the same
+    /// shape as the bulk delete operations: a report before every photo and a
+    /// way out that does not wait for the batch to end.
+    ///
     /// Photo ids the index doesn't know are skipped rather than added to the
     /// collection, which would leave a membership row pointing at nothing.
-    fn set_collection_membership(
+    /// A cancelled run still writes the index for the files it got to, so the
+    /// two never disagree about a photo.
+    pub fn change_collection_membership(
         &self,
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
         member: bool,
-    ) -> Result<()> {
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         let collections = self.db.all_collections()?;
         let collection = collections
             .iter()
@@ -870,37 +895,41 @@ impl Library {
         // Recently Deleted is read as well: a photo waiting there still has a
         // file recording its collections, and dropping a collection has to
         // reach it or a restore would bring the collection back with it.
-        let hashes: HashMap<PhotoId, String> = self
-            .db
-            .all_photos(SortOrder::default())?
-            .into_iter()
-            .chain(self.db.recently_deleted()?.into_iter().map(|row| row.photo))
-            .map(|row| (row.id, row.hash))
+        let index = photo_index(
+            self.db
+                .all_photos(SortOrder::default())?
+                .into_iter()
+                .chain(self.db.recently_deleted()?.into_iter().map(|row| row.photo))
+                .collect(),
+        );
+        // Unknown ids are dropped here rather than inside the loop so that the
+        // total the progress bar counts down is the work actually to be done.
+        let targets: Vec<PhotoId> = photo_ids
+            .iter()
+            .copied()
+            .filter(|id| index.contains_key(id))
             .collect();
 
-        let mut written = Vec::with_capacity(photo_ids.len());
-        let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
-        for &pid in photo_ids {
-            let Some(hash) = hashes.get(&pid) else {
-                continue;
+        let mut written = Vec::with_capacity(targets.len());
+        let outcome = bulk_op(&targets, &cancel, progress_cb, |id| {
+            let Some(row) = index.get(&id) else {
+                return Step::missing(id, "in the library index");
             };
-            match self.set_collection_in_file(hash, collection, &collections, member) {
-                Ok(()) => written.push(pid),
-                Err(e) => failed.push((pid, e)),
+            match self.set_collection_in_file(&row.hash, collection, &collections, member) {
+                Ok(()) => {
+                    written.push(id);
+                    Step::Done
+                }
+                Err(error) => Step::failed(row, &error),
             }
-        }
+        });
 
         if member {
             self.db.add_to_collection(collection_id, &written)?;
         } else {
             self.db.remove_from_collection(collection_id, &written)?;
         }
-        let what = if member {
-            "add to collection"
-        } else {
-            "remove from collection"
-        };
-        report_partial(what, failed)
+        Ok(outcome)
     }
 
     pub fn collection_photos(&self, id: CollectionId) -> Result<Vec<PhotoRow>> {
@@ -1260,6 +1289,25 @@ fn bulk_op<T: Copy>(
         purged: Vec::new(),
         cancelled,
     }
+}
+
+/// Reduce a membership run to the plain success-or-failure the uncancellable
+/// entry points promise, on the same terms as [`report_partial`]: the index has
+/// already been brought in line with the files that were written, and what is
+/// reported is what did not get that far.
+fn membership_result(member: bool, outcome: &BulkOutcome) -> Result<()> {
+    let what = if member {
+        "add to collection"
+    } else {
+        "remove from collection"
+    };
+    if let Some((photo, error)) = outcome.errors.first() {
+        bail!(
+            "{what}: {} photo(s) could not be written, starting with {photo}: {error}",
+            outcome.errors.len()
+        );
+    }
+    Ok(())
 }
 
 /// Reduce a one-photo bulk run to the plain success-or-failure the
