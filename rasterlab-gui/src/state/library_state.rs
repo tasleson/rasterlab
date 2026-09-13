@@ -7,8 +7,8 @@ use std::{
 
 use rasterlab_library::{
     BulkProgress, CollectionId, CollectionRow, ImportCollection, ImportProgress, ImportSessionRow,
-    Library, LibraryBusy, LibraryMeta, NotALibrary, PhotoId, PhotoRow, RebuildProgress,
-    ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
+    Library, LibraryBusy, LibraryMeta, MembershipChange, NotALibrary, PhotoId, PhotoRow,
+    RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -95,8 +95,8 @@ pub struct DeleteTask {
 /// while an import had the disk busy, so this reports progress and takes an
 /// answer of "stop" too.
 pub struct CollectionTask {
-    /// Whether the photos are joining the collection or leaving it.
-    pub member: bool,
+    /// What the run is doing to the photos' collections.
+    pub change: MembershipChange,
     /// The collection's name, for the progress line — the user picked it by
     /// name, and an id means nothing to them.
     pub name: String,
@@ -106,21 +106,22 @@ pub struct CollectionTask {
 }
 
 impl CollectionTask {
-    /// "Adding to" / "Removing from", for the line that names what is running.
+    /// "Adding to" / "Removing from" / "Moving to", for the line that names
+    /// what is running.
     pub fn progress_verb(&self) -> &'static str {
-        if self.member {
-            "Adding to"
-        } else {
-            "Removing from"
+        match self.change {
+            MembershipChange::Add => "Adding to",
+            MembershipChange::Remove => "Removing from",
+            MembershipChange::Move => "Moving to",
         }
     }
 
-    /// "Added to" / "Removed from", for the line that says it finished.
+    /// The same verbs in the past tense, for the line that says it finished.
     pub fn past_verb(&self) -> &'static str {
-        if self.member {
-            "Added to"
-        } else {
-            "Removed from"
+        match self.change {
+            MembershipChange::Add => "Added to",
+            MembershipChange::Remove => "Removed from",
+            MembershipChange::Move => "Moved to",
         }
     }
 }
@@ -160,6 +161,10 @@ pub enum CollectionPrompt {
         /// so a click in the grid's Collections menu still lands on the photos
         /// the user right-clicked even if the selection moves on.
         photos: Vec<PhotoId>,
+        /// [`MembershipChange::Move`] when the photos should also leave the
+        /// collections they are in now, [`MembershipChange::Add`] when they
+        /// keep them.
+        change: MembershipChange,
     },
     /// Renaming an existing one.
     Rename { id: CollectionId, entry: NameEntry },
@@ -170,10 +175,11 @@ pub enum CollectionPrompt {
 }
 
 impl CollectionPrompt {
-    pub fn new_collection(photos: Vec<PhotoId>) -> Self {
+    pub fn new_collection(photos: Vec<PhotoId>, change: MembershipChange) -> Self {
         Self::New {
             entry: NameEntry::default(),
             photos,
+            change,
         }
     }
 

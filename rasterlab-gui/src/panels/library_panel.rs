@@ -1,7 +1,7 @@
 use egui::{ScrollArea, Sense, Vec2};
 use rasterlab_library::{
-    CollectionId, ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, Resolution, SearchFilter,
-    SortOrder, ymd_from_unix,
+    CollectionId, ImportSessionRow, MONTH_NAMES, MembershipChange, PhotoId, PhotoRow, Resolution,
+    SearchFilter, SortOrder, ymd_from_unix,
 };
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
@@ -753,9 +753,13 @@ fn collection_dialogs(ctx: &egui::Context, state: &mut AppState) {
 /// in it and the cursor back in the field, rather than making the user start
 /// again.
 fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
-    let (title, action, photo_count) = match &state.library.collection_prompt {
-        Some(CollectionPrompt::New { photos, .. }) => ("New Collection", "Create", photos.len()),
-        Some(CollectionPrompt::Rename { .. }) => ("Rename Collection", "Rename", 0),
+    let (title, action, photo_count, change) = match &state.library.collection_prompt {
+        Some(CollectionPrompt::New { photos, change, .. }) => {
+            ("New Collection", "Create", photos.len(), *change)
+        }
+        Some(CollectionPrompt::Rename { .. }) => {
+            ("Rename Collection", "Rename", 0, MembershipChange::Add)
+        }
         _ => return,
     };
 
@@ -795,7 +799,13 @@ fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
 
             if photo_count > 0 {
                 let noun = if photo_count == 1 { "photo" } else { "photos" };
-                ui.weak(format!("{photo_count} selected {noun} will be added."));
+                // A move empties the photos' other collections, which is not
+                // something to discover afterwards.
+                let fate = match change {
+                    MembershipChange::Move => "will be moved here out of every other collection",
+                    _ => "will be added",
+                };
+                ui.weak(format!("{photo_count} selected {noun} {fate}."));
             }
             if let Some(error) = error {
                 ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
@@ -823,9 +833,17 @@ fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
 
     let (result, mut prompt) = match state.library.collection_prompt.take() {
-        Some(CollectionPrompt::New { entry, photos }) => (
-            state.create_collection(&entry.name, photos.clone()),
-            CollectionPrompt::New { entry, photos },
+        Some(CollectionPrompt::New {
+            entry,
+            photos,
+            change,
+        }) => (
+            state.create_collection(&entry.name, photos.clone(), change),
+            CollectionPrompt::New {
+                entry,
+                photos,
+                change,
+            },
         ),
         Some(CollectionPrompt::Rename { id, entry }) => (
             state.library.rename_collection(id, &entry.name),
@@ -1010,8 +1028,10 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 .on_hover_text("Create an empty collection")
                 .clicked()
             {
-                state.library.collection_prompt =
-                    Some(CollectionPrompt::new_collection(Vec::new()));
+                state.library.collection_prompt = Some(CollectionPrompt::new_collection(
+                    Vec::new(),
+                    MembershipChange::Add,
+                ));
             }
         });
         collections_ui(ui, state);
@@ -2082,7 +2102,64 @@ fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
             .clicked()
         {
             let photos = state.library.selected.clone();
-            state.library.collection_prompt = Some(CollectionPrompt::new_collection(photos));
+            state.library.collection_prompt = Some(CollectionPrompt::new_collection(
+                photos,
+                MembershipChange::Add,
+            ));
+            ui.close();
+        }
+        move_to_menu(ui, state, selection, idle);
+    });
+}
+
+/// The "Move to" submenu inside Collections: file the selection somewhere and
+/// out of everywhere else.
+///
+/// Its own list rather than a modifier on the rows above, because the rows say
+/// what a collection already holds and a move is about the ones it doesn't.
+/// Worth the extra menu: rehoming a selection with add-then-remove rewrites
+/// every `.rlab` twice, which on a few hundred RAWs is minutes of writing
+/// rather than one pass.
+fn move_to_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize, idle: bool) {
+    let photos = if selection == 1 {
+        "this photo".to_owned()
+    } else {
+        format!("these {selection} photos")
+    };
+    ui.menu_button("Move to", |ui| {
+        for coll in state.library.collections.clone() {
+            // A collection that already holds the whole selection can still be
+            // moved to: the photos may be in others as well, and that is what
+            // the move is for.
+            if ui
+                .add_enabled(idle, egui::Button::new(coll.name.clone()))
+                .on_hover_text(format!(
+                    "Put {photos} in “{}” and take them out of every other collection",
+                    coll.name
+                ))
+                .clicked()
+            {
+                state.move_selected_to_collection(coll.id);
+                ui.close();
+            }
+        }
+
+        if !state.library.collections.is_empty() {
+            ui.separator();
+        }
+        if ui
+            .add_enabled(idle, egui::Button::new("New Collection…"))
+            .on_hover_text(format!(
+                "Make a collection holding {photos} and nothing else, and take them out of the \
+                 collections they are in now"
+            ))
+            .clicked()
+        {
+            let photos = state.library.selected.clone();
+            state.library.collection_prompt = Some(CollectionPrompt::new_collection(
+                photos,
+                MembershipChange::Move,
+            ));
             ui.close();
         }
     });

@@ -13,7 +13,7 @@ use std::{
 
 use image as img_crate;
 use rasterlab_core::panic_guard;
-use rasterlab_library::{CollectionId, PhotoId};
+use rasterlab_library::{CollectionId, MembershipChange, PhotoId};
 
 use super::{AppMode, AppState, BgMessage, workers};
 use crate::state::library_state::{CollectionTask, DeleteKind, DeleteTask, ImportKind, plural};
@@ -595,7 +595,12 @@ impl AppState {
     /// The row is created here so the sidebar shows it at once; the photos
     /// follow on the worker, because each of them is a `.rlab` rewrite.  An
     /// `Err` is the name's — the dialog stays open showing it.
-    pub fn create_collection(&mut self, name: &str, photos: Vec<PhotoId>) -> Result<(), String> {
+    pub fn create_collection(
+        &mut self,
+        name: &str,
+        photos: Vec<PhotoId>,
+        change: MembershipChange,
+    ) -> Result<(), String> {
         // Checked before the row is created: a collection that came up empty
         // because the worker was busy is worse than being asked to wait, and
         // the dialog is still on screen to say so.
@@ -603,7 +608,7 @@ impl AppState {
             return Err("Another collection change is still running.".to_owned());
         }
         let id = self.library.create_collection(name)?;
-        self.start_collection_task(id, photos, true);
+        self.start_collection_task(id, photos, change);
         Ok(())
     }
 
@@ -611,13 +616,21 @@ impl AppState {
     /// as they are.
     pub fn add_selected_to_collection(&mut self, id: CollectionId) {
         let photos = self.library.selected.clone();
-        self.start_collection_task(id, photos, true);
+        self.start_collection_task(id, photos, MembershipChange::Add);
     }
 
     /// Take every selected photo out of a collection.
     pub fn remove_selected_from_collection(&mut self, id: CollectionId) {
         let photos = self.library.selected.clone();
-        self.start_collection_task(id, photos, false);
+        self.start_collection_task(id, photos, MembershipChange::Remove);
+    }
+
+    /// File every selected photo into a collection and out of the ones it is
+    /// in now, in the single pass over the `.rlab` files that a remove
+    /// followed by an add would take twice.
+    pub fn move_selected_to_collection(&mut self, id: CollectionId) {
+        let photos = self.library.selected.clone();
+        self.start_collection_task(id, photos, MembershipChange::Move);
     }
 
     /// Spawn the worker that rewrites each photo's `.rlab` and then brings the
@@ -626,7 +639,12 @@ impl AppState {
     /// The photos are taken as the task starts rather than read from the
     /// selection as it goes: the grid stays live while this runs, and the
     /// batch that is filed must be the batch the user asked for.
-    fn start_collection_task(&mut self, id: CollectionId, photos: Vec<PhotoId>, member: bool) {
+    fn start_collection_task(
+        &mut self,
+        id: CollectionId,
+        photos: Vec<PhotoId>,
+        change: MembershipChange,
+    ) {
         if self.collection_running() || photos.is_empty() {
             return;
         }
@@ -642,7 +660,7 @@ impl AppState {
         let cancel = Arc::new(AtomicBool::new(false));
         self.collection_cancel = Some(cancel.clone());
         self.library.collection_task = Some(CollectionTask {
-            member,
+            change,
             name: name.clone(),
             progress: rasterlab_library::BulkProgress {
                 total: photos.len(),
@@ -650,10 +668,12 @@ impl AppState {
             },
             stopping: false,
         });
-        self.status = format!(
-            "{} “{name}”…",
-            if member { "Adding to" } else { "Removing from" }
-        );
+        let verb = match change {
+            MembershipChange::Add => "Adding to",
+            MembershipChange::Remove => "Removing from",
+            MembershipChange::Move => "Moving to",
+        };
+        self.status = format!("{verb} “{name}”…");
 
         let progress_tx = self.bg_tx.clone();
         let progress_ctx = self.ctx.clone();
@@ -668,7 +688,7 @@ impl AppState {
                     let _ = progress_tx.send(BgMessage::CollectionProgress(p));
                     progress_ctx.request_repaint();
                 };
-                match lib.change_collection_membership(id, &photos, member, cancel, report) {
+                match lib.change_collection_membership(id, &photos, change, cancel, report) {
                     Ok(outcome) => BgMessage::CollectionComplete { outcome },
                     Err(e) => BgMessage::CollectionFailed(e.to_string()),
                 }
