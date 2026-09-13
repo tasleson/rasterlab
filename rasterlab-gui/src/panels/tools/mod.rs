@@ -78,6 +78,18 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     });
     ui.separator();
 
+    // The header stays put; only the tool sections below scroll, so the
+    // expand/collapse buttons remain reachable with many tools open.
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        tool_sections(ui, state);
+    });
+
+    // Clear the one-frame force-open and reveal flags
+    state.tools_force_open = None;
+    state.tools.reveal_tool = None;
+}
+
+fn tool_sections(ui: &mut Ui, state: &mut AppState) {
     // Edit-session banner
     if let Some(session) = state.editing {
         let frame = egui::Frame::group(ui.style())
@@ -133,10 +145,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.separator();
 
     metadata::ui(ui, state, has_image);
-
-    // Clear the one-frame force-open and reveal flags
-    state.tools_force_open = None;
-    state.tools.reveal_tool = None;
 }
 
 fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {

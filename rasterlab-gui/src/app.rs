@@ -946,9 +946,7 @@ impl eframe::App for RasterLabApp {
                     .default_size(220.0)
                     .min_size(180.0)
                     .show_inside(ui, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            tools::ui(ui, &mut self.state);
-                        });
+                        tools::ui(ui, &mut self.state);
                     });
 
                 egui::Panel::right("right_panel")
