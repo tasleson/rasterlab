@@ -150,6 +150,7 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
     let id = tool.id();
     let display_name = tool.display_name();
     let editing_tool = tool.editing_tool();
+    let help_text = tool.help_text();
     let default_open = state.prefs.is_tool_open(id);
 
     // A tool that was just handed its input from outside the panel opens and
@@ -198,11 +199,16 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
             tool.render_ui(ui, &ctx)
         });
 
-    if reveal {
-        resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+    let mut header_response = resp.header_response;
+    if let Some(help) = help_text {
+        header_response = header_response.on_hover_text(help);
     }
 
-    if resp.header_response.clicked() {
+    if reveal {
+        header_response.scroll_to_me(Some(egui::Align::TOP));
+    }
+
+    if header_response.clicked() {
         state.prefs.tools_open.insert(id.to_string(), !default_open);
     }
 

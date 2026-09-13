@@ -93,6 +93,9 @@ pub struct CanvasState {
     mask_drag_start: Option<Pos2>,
     /// Dragging index for heal spots: (spot_index, is_src_circle).
     heal_dragging: Option<(usize, bool)>,
+    /// Last pointer position over the canvas while healing, in image
+    /// coordinates — where the brush-size ring parks once the pointer leaves.
+    heal_hover: Option<Pos2>,
     /// Endpoints of the horizon line being dragged, in image coordinates.
     /// None when not active.
     straighten_line: Option<[Pos2; 2]>,
@@ -125,6 +128,7 @@ impl Default for CanvasState {
             mask_overlay_hash: 0,
             mask_drag_start: None,
             heal_dragging: None,
+            heal_hover: None,
             straighten_line: None,
             straighten_dragging: None,
         }

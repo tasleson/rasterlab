@@ -7,6 +7,20 @@ use rasterlab_core::traits::operation::Operation;
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
 use crate::state::EditingTool;
 
+const HELP: &str = "\
+Heal covers a blemish with clean pixels copied from elsewhere in the photo.
+
+\u{2022} Set Radius so the ring on the canvas just covers the spot. The ring \
+follows the pointer, and parks on the image while you adjust the radius.
+\u{2022} Press Start Painting, then click each blemish. A matching source patch \
+nearby is picked for you.
+\u{2022} Drag the green circle to pick a different source, or the red one to move \
+the repair \u{2014} the source follows it.
+\u{2022} Right-click a circle to drop that spot.
+\u{2022} Press Apply Heal to commit every spot as one step.
+
+Works best on even backgrounds \u{2014} sky, skin, a plain wall.";
+
 pub struct HealTool {
     pub active: bool,
     pub radius: u32,
@@ -32,6 +46,9 @@ impl Tool for HealTool {
     }
     fn editing_tool(&self) -> Option<EditingTool> {
         Some(EditingTool::Heal)
+    }
+    fn help_text(&self) -> Option<&'static str> {
+        Some(HELP)
     }
 
     fn activate_preview(&mut self) {}
