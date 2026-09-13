@@ -37,6 +37,8 @@ pub mod degraded_read;
 pub mod error;
 pub mod formats;
 pub mod image;
+#[cfg(feature = "import-timing")]
+pub mod import_timing;
 pub mod library_meta;
 pub mod ops;
 pub mod panic_guard;
@@ -51,3 +53,21 @@ pub mod verified_write;
 pub use error::{RasterError, RasterResult};
 pub use image::Image;
 pub use pipeline::EditPipeline;
+
+/// Measure an expression only in builds with the `import-timing` feature.
+/// Nested phases report exclusive calling-thread wall time; no output is emitted.
+#[cfg(feature = "import-timing")]
+#[macro_export]
+macro_rules! import_phase {
+    ($name:literal, $body:expr) => {{
+        let _phase = $crate::import_timing::Span::new($name);
+        $body
+    }};
+}
+
+/// With timing disabled, evaluate the original expression without instrumentation.
+#[cfg(not(feature = "import-timing"))]
+#[macro_export]
+macro_rules! import_phase {
+    ($name:literal, $body:expr) => {{ $body }};
+}

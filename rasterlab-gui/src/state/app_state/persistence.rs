@@ -23,6 +23,16 @@ use crate::state::VirtualCopyStore;
 
 use super::{AppMode, AppState, BgMessage, workers};
 
+/// Decode a standalone source whose original bytes are already retained for a
+/// future project save. RAW formats retain their seekable-file fallback inside
+/// the registry; ordinary formats never need to reopen `path`.
+fn decode_standalone_bytes(
+    original_bytes: &[u8],
+    path: &std::path::Path,
+) -> rasterlab_core::RasterResult<Image> {
+    FormatRegistry::with_builtins().decode_bytes(original_bytes, Some(path))
+}
+
 #[derive(Debug, Clone, Copy)]
 enum RenderedExportResize {
     None,
@@ -220,11 +230,13 @@ impl AppState {
                         Err(e) => BgMessage::Error(e.to_string()),
                     }
                 } else {
-                    // Read the raw bytes for storage in .rlab saves, then decode.
+                    // Keep the source bytes for future .rlab saves and decode that
+                    // same allocation. `decode_bytes` preserves the path as a format
+                    // hint; RAW sources still use its seekable-file fallback until
+                    // rawler gains an in-memory source API.
                     match std::fs::read(&path) {
                         Ok(original_bytes) => {
-                            let registry = FormatRegistry::with_builtins();
-                            match registry.decode_file(&path) {
+                            match decode_standalone_bytes(&original_bytes, &path) {
                                 Ok(image) => BgMessage::ImageLoaded {
                                     path,
                                     image,
@@ -405,8 +417,14 @@ impl AppState {
         }
     }
 
-    /// Save the current project to `path` as a `.rlab` file.
-    pub fn save_project(&mut self, path: std::path::PathBuf) {
+    /// Assemble the `.rlab` container describing the current document.
+    ///
+    /// Shared by [`save_project`](Self::save_project) and the export dialog's
+    /// project export, so a container written into an export directory carries
+    /// the same edits, thumbnail and library metadata an in-place save writes.
+    /// The thumbnail comes back alongside the file because a save also
+    /// publishes it to the library's thumbnail cache.
+    pub(crate) fn build_project_file(&mut self) -> Result<(RlabFile, Vec<u8>), String> {
         // An edit session temporarily disables the committed operation while
         // its replacement is shown as a live preview. Neither state is a valid
         // save boundary: serialising now would persist the disabled operation
@@ -414,43 +432,27 @@ impl AppState {
         // chooser that was already open (or any other direct caller) cannot
         // write transient state.
         if self.editing.is_some() {
-            self.status = "Finish or cancel the active edit before saving".into();
-            return;
+            return Err("Finish or cancel the active edit before saving".into());
         }
         let Some(original_bytes) = self.original_bytes.clone() else {
-            self.status = "Nothing to save — open an image first".into();
-            return;
+            return Err("Nothing to save — open an image first".into());
         };
         let Some(store) = &mut self.copies else {
-            self.status = "Nothing to save — no active pipeline".into();
-            return;
+            return Err("Nothing to save — no active pipeline".into());
         };
 
         // Render the committed active copy once and carry its thumbnail in the
         // same authoritative write. Previously the save omitted PREV and then
         // thumbnail regeneration read and rewrote the whole remote container.
-        let rendered = match store.active_pipeline_mut().render() {
-            Ok(image) => image,
-            Err(e) => {
-                self.status = format!("Save failed (thumbnail render): {e}");
-                return;
-            }
-        };
-        let thumbnail = match rasterlab_library::thumbnail::generate_thumbnail(&rendered, 512) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                self.status = format!("Save failed (thumbnail): {e}");
-                return;
-            }
-        };
-
-        let (copies_saved, active_idx) = match store.save_states() {
-            Ok(s) => s,
-            Err(e) => {
-                self.status = format!("Save failed (pipeline): {}", e);
-                return;
-            }
-        };
+        let rendered = store
+            .active_pipeline_mut()
+            .render()
+            .map_err(|e| format!("Save failed (thumbnail render): {e}"))?;
+        let thumbnail = rasterlab_library::thumbnail::generate_thumbnail(&rendered, 512)
+            .map_err(|e| format!("Save failed (thumbnail): {e}"))?;
+        let (copies_saved, active_idx) = store
+            .save_states()
+            .map_err(|e| format!("Save failed (pipeline): {e}"))?;
 
         let source = store.source();
         let (w, h) = (source.width, source.height);
@@ -468,7 +470,6 @@ impl AppState {
         }
         meta = meta.touch();
 
-        let created_at = meta.created_at;
         let mut rlab = RlabFile::new(
             meta,
             original_bytes,
@@ -477,10 +478,23 @@ impl AppState {
             Some(thumbnail.clone()),
         );
         rlab.set_lmta(self.project_lmta.clone());
+        Ok((rlab, thumbnail))
+    }
+
+    /// Save the current project to `path` as a `.rlab` file.
+    pub fn save_project(&mut self, path: std::path::PathBuf) {
+        let (rlab, thumbnail) = match self.build_project_file() {
+            Ok(built) => built,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let created_at = rlab.meta.created_at;
         let has_edits = rlab.has_edits();
-        // v4 adds Reed-Solomon parity so the file is repairable by an integrity
+        // v5 adds Reed-Solomon parity so the file is repairable by an integrity
         // scrub; this also avoids downgrading a library photo that was imported
-        // as v4 when its edits are saved back in place.
+        // as v5 when its edits are saved back in place.
         let library_target = self
             .library_context
             .as_ref()
@@ -666,6 +680,29 @@ mod tests {
             .pipeline_state
             .entries[0]
             .clone()
+    }
+
+    #[test]
+    fn standalone_decode_uses_the_retained_bytes_without_reopening_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        let mut source = Image::new(2, 1);
+        source.set_pixel(0, 0, [12, 34, 56, 255]);
+        source.set_pixel(1, 0, [78, 90, 123, 255]);
+        let bytes = FormatRegistry::with_builtins()
+            .encode_file(&source, &path, &EncodeOptions::default())
+            .unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let retained_bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let decoded = decode_standalone_bytes(&retained_bytes, &path).unwrap();
+
+        assert_eq!(
+            (decoded.width, decoded.height),
+            (source.width, source.height)
+        );
+        assert_eq!(decoded.data, source.data);
     }
 
     #[test]

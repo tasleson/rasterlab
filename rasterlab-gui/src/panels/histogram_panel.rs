@@ -48,11 +48,16 @@ pub fn ui(ui: &mut Ui, hist: Option<&HistogramData>) {
     );
 }
 
+/// Tallest of the interior buckets, ignoring 0 and 255.
+///
+/// Those two often hold large clipping spikes — scaling a chart to them
+/// squashes everything else into an unreadable strip along the bottom.
+pub fn interior_peak(data: &[u64; 256]) -> u64 {
+    data[1..255].iter().copied().max().unwrap_or(0)
+}
+
 fn draw_channel(ui: &mut Ui, data: &[u64; 256], color: Color32, width: f32, label: &str) {
-    // Scale to the tallest interior bucket, ignoring 0/255 which often hold
-    // large clipping spikes that would otherwise flatten the rest of the chart.
-    let interior_peak = data[1..255].iter().copied().max().unwrap_or(0);
-    let peak = interior_peak.max(1) as f32;
+    let peak = interior_peak(data).max(1) as f32;
 
     ui.label(label);
     let (resp, painter) =

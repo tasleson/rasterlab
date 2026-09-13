@@ -44,6 +44,28 @@ use crate::{
 #[error("the library is already open in another RasterLab process")]
 pub struct LibraryBusy;
 
+/// Opening the library failed because there is no library at that path.
+///
+/// A path stops being a library between one session and the next more often
+/// than it sounds: an external drive is unplugged, a network share has not
+/// been mounted yet, a directory is renamed or deleted.  Answering any of
+/// those with [`Library::open_or_create`] loses the failure — the user is
+/// shown an empty library that is really a new one — and on a mount point it
+/// also writes that new library into the directory the real one mounts over.
+#[derive(Debug, thiserror::Error)]
+#[error("{} is not a RasterLab library", .0.display())]
+pub struct NotALibrary(pub PathBuf);
+
+/// Whether `path` is the root of a library.
+///
+/// `files/` is the marker rather than `library.db`: it is created with the
+/// library and holds the photographs themselves, and the index can be rebuilt
+/// from them, so a library that has lost its index is still a library.  An
+/// unmounted volume has neither, which is the case this exists to catch.
+pub fn is_library_root(path: &Path) -> bool {
+    path.join("files").is_dir()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ImportProgress {
     pub total: usize,
@@ -61,29 +83,35 @@ pub struct ImportProgress {
     pub scanning: bool,
 }
 
-/// Progress of a running bulk operation on the Recently Deleted area.
+/// Progress of a running bulk operation over a list of photos.
+///
+/// Shared by the Recently Deleted operations and by collection membership
+/// changes: both walk a selection a file at a time, and both report the same
+/// way.
 #[derive(Debug, Clone, Default)]
-pub struct DeleteProgress {
+pub struct BulkProgress {
     pub total: usize,
     /// Photos attempted so far.
     pub done: usize,
     /// Names of photos left where they are because they are protected.
+    /// Only the delete operations honour protection.
     pub protected: Vec<String>,
     /// Per-photo `(name, message)` failures so far.
     pub errors: Vec<(String, String)>,
 }
 
-/// Final tally of a bulk operation on the Recently Deleted area.
+/// Final tally of a bulk operation over a list of photos.
 ///
 /// Every photo is attempted, so a run that hits trouble reports what it did
 /// manage alongside what it could not: one missing file in a selection of five
 /// hundred should not decide the fate of the other four hundred and ninety
 /// nine.
 #[derive(Debug, Clone, Default)]
-pub struct DeleteOutcome {
-    /// Photos moved, restored, or erased.
+pub struct BulkOutcome {
+    /// Photos moved, restored, erased, or filed into a collection.
     pub done: usize,
-    /// Names of photos left alone because they are protected.
+    /// Names of photos left alone because they are protected.  Only the
+    /// delete operations honour protection.
     pub protected: Vec<String>,
     /// Per-photo `(name, message)` failures.
     ///
@@ -92,10 +120,27 @@ pub struct DeleteOutcome {
     /// their photographs did not move.
     pub errors: Vec<(String, String)>,
     /// Content hashes whose files and thumbnails are now gone for good, so a
-    /// caller holding cached thumbnails knows which of them to drop.
+    /// caller holding cached thumbnails knows which of them to drop.  Only a
+    /// permanent delete fills this in.
     pub purged: Vec<String>,
     /// True when the run stopped early because `cancel` was raised.
     pub cancelled: bool,
+}
+
+/// What a collection-membership change does to each photo it touches.
+///
+/// [`MembershipChange::Move`] exists because filing a selection somewhere else
+/// used to be two runs — remove, then add — and each of them rewrites every
+/// `.rlab` in full.  Doing it in one pass halves the writes, and leaves no
+/// window in which the photos belong to nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipChange {
+    /// Join the collection, keeping any others the photo is already in.
+    Add,
+    /// Leave the collection, keeping any others.
+    Remove,
+    /// Join the collection and leave every other one.
+    Move,
 }
 
 /// What became of one item inside a bulk operation.
@@ -103,7 +148,7 @@ pub struct DeleteOutcome {
 /// A failure is a value rather than an `Err` because none of these is fatal to
 /// the run: the loop records it and carries on to the next item.
 enum Step {
-    /// The item was moved, restored, or erased as asked.
+    /// The item was moved, restored, erased, or rewritten as asked.
     Done,
     /// It is protected, so it was left where it is.
     Protected(String),
@@ -146,6 +191,18 @@ impl Library {
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let db = StoolapDb::open(path)?;
         Self::with_db(path, Box::new(db))
+    }
+
+    /// Open a library that already exists at `path`, never creating one.
+    ///
+    /// What every caller that did not just ask for a new library wants:
+    /// opening a recent library, a path from the command line, the library the
+    /// last session had open.  Failing here is the point — see [`NotALibrary`].
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        if !is_library_root(path) {
+            return Err(anyhow::Error::new(NotALibrary(path.to_path_buf())));
+        }
+        Self::open_or_create(path)
     }
 
     /// Open (or create) a library at `path` with an injected DB backend
@@ -383,8 +440,8 @@ impl Library {
         &self,
         photos: &[PhotoId],
         cancel: Arc<AtomicBool>,
-        progress_cb: impl Fn(DeleteProgress),
-    ) -> Result<DeleteOutcome> {
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         let index = photo_index(self.db.all_photos(SortOrder::default())?);
         Ok(bulk_op(photos, &cancel, progress_cb, |id| {
             let Some(row) = index.get(&id) else {
@@ -434,8 +491,8 @@ impl Library {
         &self,
         photos: &[PhotoId],
         cancel: Arc<AtomicBool>,
-        progress_cb: impl Fn(DeleteProgress),
-    ) -> Result<DeleteOutcome> {
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         let index = photo_index(self.deleted_rows()?);
         Ok(bulk_op(photos, &cancel, progress_cb, |id| {
             let Some(row) = index.get(&id) else {
@@ -463,8 +520,8 @@ impl Library {
         &self,
         photos: Option<&[PhotoId]>,
         cancel: Arc<AtomicBool>,
-        progress_cb: impl Fn(DeleteProgress),
-    ) -> Result<DeleteOutcome> {
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         let rows = self.deleted_rows()?;
         let everything: Vec<PhotoId> = rows.iter().map(|row| row.id).collect();
         let index = photo_index(rows);
@@ -664,6 +721,11 @@ impl Library {
 
     // ── Sessions ──────────────────────────────────────────────────────────
 
+    /// How many photos the library holds outside Recently Deleted.
+    pub fn photo_count(&self) -> Result<i64> {
+        self.db.active_photo_count()
+    }
+
     pub fn all_sessions(&self) -> Result<Vec<ImportSessionRow>> {
         self.db.all_sessions()
     }
@@ -739,8 +801,8 @@ impl Library {
         &self,
         ids: &[CollectionId],
         cancel: Arc<AtomicBool>,
-        progress_cb: impl Fn(DeleteProgress),
-    ) -> Result<DeleteOutcome> {
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         // Named up front: once a collection is deleted the index can no longer
         // say what it was called, and an id is no use in an error message.
         let names: HashMap<CollectionId, String> = self
@@ -788,7 +850,14 @@ impl Library {
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
-        self.set_collection_membership(collection_id, photo_ids, true)
+        let outcome = self.change_collection_membership(
+            collection_id,
+            photo_ids,
+            MembershipChange::Add,
+            idle_cancel(),
+            |_| {},
+        )?;
+        membership_result(MembershipChange::Add, &outcome)
     }
 
     /// Mirror of [`Library::add_to_collection`]: the `.rlab` files lose the
@@ -798,20 +867,55 @@ impl Library {
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
     ) -> Result<()> {
-        self.set_collection_membership(collection_id, photo_ids, false)
+        let outcome = self.change_collection_membership(
+            collection_id,
+            photo_ids,
+            MembershipChange::Remove,
+            idle_cancel(),
+            |_| {},
+        )?;
+        membership_result(MembershipChange::Remove, &outcome)
+    }
+
+    /// Put photos in a collection and take them out of every other one, at the
+    /// cost of a single rewrite per photo.
+    pub fn move_to_collection(
+        &self,
+        collection_id: CollectionId,
+        photo_ids: &[PhotoId],
+    ) -> Result<()> {
+        let outcome = self.change_collection_membership(
+            collection_id,
+            photo_ids,
+            MembershipChange::Move,
+            idle_cancel(),
+            |_| {},
+        )?;
+        membership_result(MembershipChange::Move, &outcome)
     }
 
     /// Body of both directions: rewrite every `.rlab` first, then apply the
     /// same change to the index for the photos whose file was written.
     ///
+    /// Every photo costs a full read and rewrite of its `.rlab` — the original
+    /// bytes included, because the file is hashed as a whole — so a selection
+    /// of a few hundred RAWs is gigabytes of verified writes and minutes of
+    /// work, more when an import is already using the disk.  Hence the same
+    /// shape as the bulk delete operations: a report before every photo and a
+    /// way out that does not wait for the batch to end.
+    ///
     /// Photo ids the index doesn't know are skipped rather than added to the
     /// collection, which would leave a membership row pointing at nothing.
-    fn set_collection_membership(
+    /// A cancelled run still writes the index for the files it got to, so the
+    /// two never disagree about a photo.
+    pub fn change_collection_membership(
         &self,
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
-        member: bool,
-    ) -> Result<()> {
+        change: MembershipChange,
+        cancel: Arc<AtomicBool>,
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         let collections = self.db.all_collections()?;
         let collection = collections
             .iter()
@@ -824,37 +928,70 @@ impl Library {
         // Recently Deleted is read as well: a photo waiting there still has a
         // file recording its collections, and dropping a collection has to
         // reach it or a restore would bring the collection back with it.
-        let hashes: HashMap<PhotoId, String> = self
-            .db
-            .all_photos(SortOrder::default())?
-            .into_iter()
-            .chain(self.db.recently_deleted()?.into_iter().map(|row| row.photo))
-            .map(|row| (row.id, row.hash))
+        let index = photo_index(
+            self.db
+                .all_photos(SortOrder::default())?
+                .into_iter()
+                .chain(self.db.recently_deleted()?.into_iter().map(|row| row.photo))
+                .collect(),
+        );
+        // Unknown ids are dropped here rather than inside the loop so that the
+        // total the progress bar counts down is the work actually to be done.
+        let targets: Vec<PhotoId> = photo_ids
+            .iter()
+            .copied()
+            .filter(|id| index.contains_key(id))
             .collect();
 
-        let mut written = Vec::with_capacity(photo_ids.len());
-        let mut failed: Vec<(PhotoId, anyhow::Error)> = Vec::new();
-        for &pid in photo_ids {
-            let Some(hash) = hashes.get(&pid) else {
-                continue;
+        let mut written = Vec::with_capacity(targets.len());
+        let outcome = bulk_op(&targets, &cancel, progress_cb, |id| {
+            let Some(row) = index.get(&id) else {
+                return Step::missing(id, "in the library index");
             };
-            match self.set_collection_in_file(hash, collection, &collections, member) {
-                Ok(()) => written.push(pid),
-                Err(e) => failed.push((pid, e)),
+            match self.set_collection_in_file(&row.hash, collection, &collections, change) {
+                Ok(()) => {
+                    written.push(id);
+                    Step::Done
+                }
+                Err(error) => Step::failed(row, &error),
+            }
+        });
+
+        match change {
+            MembershipChange::Add => self.db.add_to_collection(collection_id, &written)?,
+            MembershipChange::Remove => self.db.remove_from_collection(collection_id, &written)?,
+            MembershipChange::Move => {
+                // The files already say the photos are only in the target, so
+                // the index has to agree everywhere, not just here — and that
+                // is one index write per collection involved rather than the
+                // single one the other two modes get away with.
+                //
+                // The target is written first so that a write that fails
+                // partway leaves the photos in more collections than they
+                // should be in rather than in none at all: the first is a
+                // stale row a rebuild clears up, the second hides the photos
+                // from the collection the user just filed them into.
+                self.db.add_to_collection(collection_id, &written)?;
+                // Each of the other collections is asked who it holds rather
+                // than reading every membership pair at once: a pair read
+                // leaves out photos waiting in Recently Deleted, whose files
+                // were rewritten too, and whose stale rows would come back
+                // with them on a restore.
+                let moved: HashSet<PhotoId> = written.iter().copied().collect();
+                for row in collections.iter().filter(|row| row.id != collection_id) {
+                    let leaving: Vec<PhotoId> = self
+                        .db
+                        .collection_member_ids(row.id)?
+                        .into_iter()
+                        .filter(|id| moved.contains(id))
+                        .collect();
+                    if !leaving.is_empty() {
+                        self.db.remove_from_collection(row.id, &leaving)?;
+                    }
+                }
             }
         }
-
-        if member {
-            self.db.add_to_collection(collection_id, &written)?;
-        } else {
-            self.db.remove_from_collection(collection_id, &written)?;
-        }
-        let what = if member {
-            "add to collection"
-        } else {
-            "remove from collection"
-        };
-        report_partial(what, failed)
+        Ok(outcome)
     }
 
     pub fn collection_photos(&self, id: CollectionId) -> Result<Vec<PhotoRow>> {
@@ -1069,7 +1206,7 @@ impl Library {
         hash: &str,
         collection: &CollectionRow,
         all: &[CollectionRow],
-        member: bool,
+        change: MembershipChange,
     ) -> Result<()> {
         // The guard has to be held across resolving the path and the existence
         // check as well as the rewrite. Checking first lets a delete move the
@@ -1092,17 +1229,32 @@ impl Library {
             .collection_refs
             .iter()
             .any(|held| held.id == collection.uuid);
-        if listed == member && !migrated {
+        let already = match change {
+            MembershipChange::Add => listed,
+            MembershipChange::Remove => !listed,
+            MembershipChange::Move => {
+                listed && lmta.collection_refs.len() == 1 && lmta.legacy_collections.is_empty()
+            }
+        };
+        if already && !migrated {
             return Ok(());
         }
-        if member {
-            lmta.collection_refs.push(CollectionRef {
-                id: collection.uuid.clone(),
-                name: collection.name.clone(),
-            });
-        } else {
-            lmta.collection_refs
-                .retain(|held| held.id != collection.uuid);
+        let reference = CollectionRef {
+            id: collection.uuid.clone(),
+            name: collection.name.clone(),
+        };
+        match change {
+            MembershipChange::Add => lmta.collection_refs.push(reference),
+            MembershipChange::Remove => lmta
+                .collection_refs
+                .retain(|held| held.id != collection.uuid),
+            MembershipChange::Move => {
+                lmta.collection_refs = vec![reference];
+                // Pre-uuid memberships the index has never heard of go too: a
+                // move says the photo belongs here and nowhere else, and a
+                // rebuild reading them would put it back where it was.
+                lmta.legacy_collections.clear();
+            }
         }
         rlab.meta = rlab.meta.touch();
         rlab.write_v5(&rlab_path)?;
@@ -1179,10 +1331,10 @@ fn photo_index(rows: Vec<PhotoRow>) -> HashMap<PhotoId, PhotoRow> {
 fn bulk_op<T: Copy>(
     items: &[T],
     cancel: &AtomicBool,
-    progress_cb: impl Fn(DeleteProgress),
+    progress_cb: impl Fn(BulkProgress),
     mut step: impl FnMut(T) -> Step,
-) -> DeleteOutcome {
-    let mut progress = DeleteProgress {
+) -> BulkOutcome {
+    let mut progress = BulkProgress {
         total: items.len(),
         ..Default::default()
     };
@@ -1207,7 +1359,7 @@ fn bulk_op<T: Copy>(
     }
     progress_cb(progress.clone());
 
-    DeleteOutcome {
+    BulkOutcome {
         done,
         protected: progress.protected,
         errors: progress.errors,
@@ -1216,9 +1368,28 @@ fn bulk_op<T: Copy>(
     }
 }
 
+/// Reduce a membership run to the plain success-or-failure the uncancellable
+/// entry points promise, on the same terms as [`report_partial`]: the index has
+/// already been brought in line with the files that were written, and what is
+/// reported is what did not get that far.
+fn membership_result(change: MembershipChange, outcome: &BulkOutcome) -> Result<()> {
+    let what = match change {
+        MembershipChange::Add => "add to collection",
+        MembershipChange::Remove => "remove from collection",
+        MembershipChange::Move => "move to collection",
+    };
+    if let Some((photo, error)) = outcome.errors.first() {
+        bail!(
+            "{what}: {} photo(s) could not be written, starting with {photo}: {error}",
+            outcome.errors.len()
+        );
+    }
+    Ok(())
+}
+
 /// Reduce a one-photo bulk run to the plain success-or-failure the
 /// single-photo entry points promise.
-fn single_photo_result(outcome: &DeleteOutcome) -> Result<()> {
+fn single_photo_result(outcome: &BulkOutcome) -> Result<()> {
     if let Some(name) = outcome.protected.first() {
         bail!("\"{name}\" is protected and cannot be deleted");
     }
@@ -1273,22 +1444,24 @@ fn report_partial(what: &str, mut failed: Vec<(PhotoId, anyhow::Error)>) -> Resu
 }
 
 fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf> {
-    let exts: std::collections::HashSet<String> =
-        registry.supported_extensions().into_iter().collect();
+    rasterlab_core::import_phase!("directory_scan", {
+        let exts: std::collections::HashSet<String> =
+            registry.supported_extensions().into_iter().collect();
 
-    walkdir::WalkDir::new(folder)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| exts.contains(&x.to_lowercase()))
-                .unwrap_or(false)
-        })
-        .map(|e| e.into_path())
-        .collect()
+        walkdir::WalkDir::new(folder)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| exts.contains(&x.to_lowercase()))
+                    .unwrap_or(false)
+            })
+            .map(|e| e.into_path())
+            .collect()
+    })
 }
 
 fn unix_now() -> u64 {

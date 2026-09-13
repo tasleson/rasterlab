@@ -78,6 +78,18 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     });
     ui.separator();
 
+    // The header stays put; only the tool sections below scroll, so the
+    // expand/collapse buttons remain reachable with many tools open.
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        tool_sections(ui, state);
+    });
+
+    // Clear the one-frame force-open and reveal flags
+    state.tools_force_open = None;
+    state.tools.reveal_tool = None;
+}
+
+fn tool_sections(ui: &mut Ui, state: &mut AppState) {
     // Edit-session banner
     if let Some(session) = state.editing {
         let frame = egui::Frame::group(ui.style())
@@ -133,10 +145,6 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     ui.separator();
 
     metadata::ui(ui, state, has_image);
-
-    // Clear the one-frame force-open and reveal flags
-    state.tools_force_open = None;
-    state.tools.reveal_tool = None;
 }
 
 fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
@@ -150,6 +158,7 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
     let id = tool.id();
     let display_name = tool.display_name();
     let editing_tool = tool.editing_tool();
+    let help_text = tool.help_text();
     let default_open = state.prefs.is_tool_open(id);
 
     // A tool that was just handed its input from outside the panel opens and
@@ -198,11 +207,16 @@ fn render_tool(ui: &mut Ui, state: &mut AppState, idx: usize) {
             tool.render_ui(ui, &ctx)
         });
 
-    if reveal {
-        resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+    let mut header_response = resp.header_response;
+    if let Some(help) = help_text {
+        header_response = header_response.on_hover_text(help);
     }
 
-    if resp.header_response.clicked() {
+    if reveal {
+        header_response.scroll_to_me(Some(egui::Align::TOP));
+    }
+
+    if header_response.clicked() {
         state.prefs.tools_open.insert(id.to_string(), !default_open);
     }
 

@@ -11,7 +11,7 @@
 //!
 //! The handler requires the `raw` feature (enabled by default).
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use crate::{
     error::{RasterError, RasterResult},
@@ -52,11 +52,48 @@ impl FormatHandler for RawHandler {
         true
     }
 
-    fn decode(&self, _data: &[u8]) -> RasterResult<Image> {
-        // rawler requires a seekable file path; delegate to decode_file.
-        Err(RasterError::UnsupportedFormat(
-            "RAW decoding requires a file path — use decode_file".into(),
-        ))
+    fn decode(&self, data: &[u8]) -> RasterResult<Image> {
+        self.decode_shared_bytes(Arc::new(data.to_vec()), None)
+    }
+
+    fn decode_shared_bytes(
+        &self,
+        data: Arc<Vec<u8>>,
+        hint_path: Option<&Path>,
+    ) -> RasterResult<Image> {
+        #[cfg(feature = "raw")]
+        {
+            decode_raw_rawler_bytes(data, hint_path, true)
+        }
+        #[cfg(not(feature = "raw"))]
+        {
+            let _ = (data, hint_path);
+            Err(RasterError::UnsupportedFormat(
+                "RAW support is disabled — rebuild with --features raw".into(),
+            ))
+        }
+    }
+
+    fn decode_import_shared_bytes(
+        &self,
+        data: Arc<Vec<u8>>,
+        hint_path: Option<&Path>,
+    ) -> RasterResult<Image> {
+        #[cfg(feature = "raw")]
+        {
+            decode_raw_rawler_bytes(data, hint_path, false)
+        }
+        #[cfg(not(feature = "raw"))]
+        {
+            let _ = (data, hint_path);
+            Err(RasterError::UnsupportedFormat(
+                "RAW support is disabled — rebuild with --features raw".into(),
+            ))
+        }
+    }
+
+    fn supports_shared_bytes(&self) -> bool {
+        true
     }
 
     fn decode_file(&self, path: &Path) -> RasterResult<Image> {
@@ -136,5 +173,59 @@ fn decode_raw_rawler(path: &Path) -> RasterResult<Image> {
     image.metadata = metadata;
     image.metadata.original_path = Some(path.to_path_buf());
 
+    Ok(image)
+}
+
+/// Decode a RAW source already retained by the caller. rawler 0.7.2 exposes a
+/// public shared, seekable memory source, so no temporary file is needed.
+#[cfg(feature = "raw")]
+fn decode_raw_rawler_bytes(
+    data: Arc<Vec<u8>>,
+    hint_path: Option<&Path>,
+    preserve_export_exif: bool,
+) -> RasterResult<Image> {
+    use rawler::{decoders::RawDecodeParams, imgop::develop::RawDevelop, rawsource::RawSource};
+
+    let path = hint_path.unwrap_or_else(|| Path::new("raw"));
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("raw")
+        .to_lowercase();
+    let rawfile = RawSource::new_from_shared_vec(data).with_path(path);
+    let params = RawDecodeParams::default();
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let decoder = rawler::get_decoder(&rawfile)?;
+        let raw_image = decoder.raw_image(&rawfile, &params, false)?;
+        let developed = RawDevelop::default().develop_intermediate(&raw_image)?;
+        developed
+            .to_dynamic_image()
+            .ok_or_else(|| rawler::RawlerError::from("RAW development produced no image"))
+    }))
+    .map_err(|_| {
+        RasterError::decode(
+            &ext,
+            "RAW decoder panicked — the file is corrupt or this camera variant is unsupported",
+        )
+    })?;
+    let dyn_image = decoded.map_err(|e| RasterError::decode(&ext, format!("{:?}", e)))?;
+    let rgba = dyn_image.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut metadata = if preserve_export_exif {
+        crate::formats::exif_util::read_raw_exif_from_bytes(rawfile.buf())
+    } else {
+        crate::formats::exif_util::read_raw_metadata_from_bytes(rawfile.buf())
+    };
+    let (data, w, h) =
+        crate::formats::exif_util::apply_orientation(rgba.into_raw(), w, h, metadata.orientation);
+    if metadata.orientation != 1 {
+        if let Some(ref mut bytes) = metadata.raw_exif {
+            crate::formats::exif_util::normalize_tiff_orientation(bytes);
+        }
+        metadata.orientation = 1;
+    }
+    let mut image = Image::from_rgba8(w, h, data)?;
+    image.metadata = metadata;
+    image.metadata.original_path = hint_path.map(Path::to_path_buf);
     Ok(image)
 }

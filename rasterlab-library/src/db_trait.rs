@@ -126,6 +126,21 @@ pub trait LibraryDb: Send + Sync {
 
     fn insert_photo(&self, photo: NewPhoto<'_>) -> anyhow::Result<PhotoId>;
 
+    /// Insert one newly durable photo and, when requested, its initial
+    /// collection membership in the same index transaction.
+    ///
+    /// This is intentionally distinct from [`LibraryDb::add_to_collection`]:
+    /// the latter accepts arbitrary existing photos and must retain its
+    /// duplicate protection. Here the photo id was just allocated, so a
+    /// collection-wide membership read cannot find it and is unnecessary.
+    /// If the membership insert fails, neither the photo nor its dependent
+    /// index rows land; the already-durable `.rlab` remains reconstructable.
+    fn insert_photo_with_collection(
+        &self,
+        photo: NewPhoto<'_>,
+        collection_id: Option<CollectionId>,
+    ) -> anyhow::Result<PhotoId>;
+
     /// Rewrite an existing photo's row, and every row that hangs off it, from
     /// what its `.rlab` now says — keeping the row's id.
     ///
@@ -206,6 +221,14 @@ pub trait LibraryDb: Send + Sync {
     /// recomputing instead of incrementing is what lets an import that was
     /// cancelled, crashed, or run twice still leave a correct count behind.
     fn session_photo_count(&self, session_id: &str) -> anyhow::Result<i64>;
+
+    /// Every photo in the library that is not in Recently Deleted.
+    ///
+    /// Counted from the `photos` rows rather than summed over the sessions'
+    /// cached `photo_count`, which is only brought up to date when an import
+    /// finishes a session: mid-import that sum stands still while photos are
+    /// visibly landing in the grid.
+    fn active_photo_count(&self) -> anyhow::Result<i64>;
 
     /// Drop sessions no photo belongs to, returning how many went.  Empty
     /// sessions are what an interrupted import or a deleted batch leaves.

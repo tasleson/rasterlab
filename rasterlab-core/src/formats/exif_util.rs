@@ -42,18 +42,40 @@ pub fn read_exif_from_bytes(data: &[u8]) -> ImageMetadata {
 /// file, so it fits inside a JPEG APP1 segment for metadata-preserving
 /// export.
 pub fn read_exif_from_file(path: &Path) -> ImageMetadata {
-    let mut meta = ImageMetadata::default();
-
     let data = match std::fs::read(path) {
         Ok(d) => d,
-        Err(_) => return meta,
+        Err(_) => return ImageMetadata::default(),
     };
 
-    if let Ok(exif) = exif::Reader::new().read_raw(data.clone()) {
+    read_raw_exif_from_bytes(&data)
+}
+
+/// Extract EXIF from already-loaded TIFF-based RAW bytes.
+///
+/// This has the same metadata and export-attachment behavior as
+/// [`read_exif_from_file`], without reopening the source file.
+pub fn read_raw_exif_from_bytes(data: &[u8]) -> ImageMetadata {
+    let mut meta = ImageMetadata::default();
+
+    if let Ok(exif) = exif::Reader::new().read_raw(data.to_vec()) {
         populate_metadata(&mut meta, &exif);
-        meta.raw_exif = extract_exif_tiff(&data);
+        meta.raw_exif = extract_exif_tiff_from_parsed(data, &exif);
     }
 
+    meta
+}
+
+/// Extract metadata from already-loaded TIFF-based RAW bytes without building
+/// the compact EXIF attachment used only by metadata-preserving export.
+///
+/// Library import stores parsed fields in `LMTA`, while retaining the original
+/// bytes in `ORIG`; it does not export the just-decoded image. Avoiding that
+/// attachment prevents a second TIFF walk and allocation on this path.
+pub fn read_raw_metadata_from_bytes(data: &[u8]) -> ImageMetadata {
+    let mut meta = ImageMetadata::default();
+    if let Ok(exif) = exif::Reader::new().read_raw(data.to_vec()) {
+        populate_metadata(&mut meta, &exif);
+    }
     meta
 }
 
@@ -113,15 +135,22 @@ const MAX_EXIF_TIFF_BYTES: usize = 65_000;
 /// is dropped and we retry.  Returns `None` if the input cannot be
 /// parsed or the output is still too large.
 pub fn extract_exif_tiff(input: &[u8]) -> Option<Vec<u8>> {
-    let little_endian = matches!(input.first()?, b'I');
     let exif = exif::Reader::new().read_raw(input.to_vec()).ok()?;
 
-    if let Some(buf) = write_minimal_tiff(&exif, little_endian, false)
+    extract_exif_tiff_from_parsed(input, &exif)
+}
+
+/// Build an export attachment from an already-parsed TIFF EXIF directory.
+/// This keeps the normal RAW editor path to one parser pass.
+fn extract_exif_tiff_from_parsed(input: &[u8], exif: &exif::Exif) -> Option<Vec<u8>> {
+    let little_endian = matches!(input.first()?, b'I');
+
+    if let Some(buf) = write_minimal_tiff(exif, little_endian, false)
         && buf.len() <= MAX_EXIF_TIFF_BYTES
     {
         return Some(buf);
     }
-    let buf = write_minimal_tiff(&exif, little_endian, true)?;
+    let buf = write_minimal_tiff(exif, little_endian, true)?;
     (buf.len() <= MAX_EXIF_TIFF_BYTES).then_some(buf)
 }
 
@@ -789,6 +818,21 @@ mod tests {
     fn extract_returns_none_for_garbage() {
         assert!(extract_exif_tiff(b"not a tiff").is_none());
         assert!(extract_exif_tiff(&[]).is_none());
+    }
+
+    #[test]
+    fn raw_import_metadata_omits_export_attachment() {
+        let raw = fake_raw_tiff(2_000_000);
+
+        let metadata = read_raw_metadata_from_bytes(&raw);
+        let export_metadata = read_raw_exif_from_bytes(&raw);
+
+        assert_eq!(metadata.camera_make.as_deref(), Some("TestCam"));
+        assert_eq!(metadata.camera_model.as_deref(), Some("FakeModel"));
+        assert!(metadata.raw_exif.is_none());
+        assert_eq!(export_metadata.camera_make, metadata.camera_make);
+        assert_eq!(export_metadata.camera_model, metadata.camera_model);
+        assert!(export_metadata.raw_exif.is_some());
     }
 
     #[test]

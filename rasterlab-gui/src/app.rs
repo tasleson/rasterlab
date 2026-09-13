@@ -92,14 +92,20 @@ impl RasterLabApp {
         if let Some(ppp) = state.prefs.ui_scale {
             cc.egui_ctx.set_pixels_per_point(ppp);
         }
+        // Auto-open the last library if one was open when the app last exited.
+        // One that has gone missing is opened anyway so that it fails and says
+        // so: skipping it quietly leaves the user in front of a library that
+        // looks like it simply has nothing in it.
+        //
+        // This runs before any file named on the command line: opening a
+        // library switches to Library mode, and a file the user asked for by
+        // name is what they want to see, so it has to be the last thing to
+        // pick the mode.
+        if let Some(lib_path) = state.prefs.last_library.clone() {
+            state.open_library(lib_path);
+        }
         if let Some(path) = initial_file {
             state.open_file(path);
-        }
-        // Auto-open the last library if one was open when the app last exited.
-        if let Some(lib_path) = state.prefs.last_library.clone()
-            && lib_path.exists()
-        {
-            state.open_library(lib_path);
         }
         #[cfg(not(target_arch = "wasm32"))]
         let use_native = state.prefs.use_native_dialogs;
@@ -940,9 +946,7 @@ impl eframe::App for RasterLabApp {
                     .default_size(220.0)
                     .min_size(180.0)
                     .show_inside(ui, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            tools::ui(ui, &mut self.state);
-                        });
+                        tools::ui(ui, &mut self.state);
                     });
 
                 egui::Panel::right("right_panel")

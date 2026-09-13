@@ -34,6 +34,8 @@ img-parts    = { workspace = true }
 libc = { workspace = true }
 
 [features]
+# Opt-in, calling-thread phase attribution for disposable import benchmarks.
+import-timing = []
 default = ["raw"]
 raw     = ["dep:rawler"]
 nef     = ["raw"]   # backward-compat alias

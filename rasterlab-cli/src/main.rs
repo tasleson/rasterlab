@@ -29,6 +29,7 @@
 //! rasterlab library create /srv/photos
 //! rasterlab library import /srv/photos ~/cards/DCIM --collection-per-folder
 //! rasterlab library rebuild /srv/photos
+//! rasterlab library compare /srv/photos-before /srv/photos-after
 //! rasterlab library scrub /srv/photos
 //! ```
 

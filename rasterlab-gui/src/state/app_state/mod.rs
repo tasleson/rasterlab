@@ -80,16 +80,21 @@ enum BgMessage {
     /// A background thread failed at loading the open document. Terminal for
     /// the editor's `loading` flag.
     Error(String),
-    /// Progress update from a running import.
-    ImportProgress(rasterlab_library::ImportProgress),
+    /// Progress update from a running import. `job` says which one: several
+    /// imports can run at once, and they all report on this one channel.
+    ImportProgress {
+        job: u64,
+        progress: rasterlab_library::ImportProgress,
+    },
     /// Import finished; thumbnail cache should be invalidated.
     ImportComplete {
+        job: u64,
         session: rasterlab_library::ImportSession,
         errors: Vec<(StdPathBuf, String)>,
     },
     /// The import worker gave up, panicked, or never started. Terminal, so the
-    /// progress bar it owns has to be torn down.
-    ImportFailed(String),
+    /// progress this job owns has to be torn down.
+    ImportFailed { job: u64, message: String },
     /// A thumbnail image was loaded from disk; ready to upload to egui.
     ThumbLoaded { hash: String, bytes: Vec<u8> },
     LibraryDetailLoaded {
@@ -109,14 +114,23 @@ enum BgMessage {
         result: Result<Vec<u8>, String>,
     },
     /// Progress update from a running bulk Recently Deleted operation.
-    DeleteProgress(rasterlab_library::DeleteProgress),
+    DeleteProgress(rasterlab_library::BulkProgress),
     /// A bulk Recently Deleted operation finished (completed or stopped).
     DeleteComplete {
-        outcome: rasterlab_library::DeleteOutcome,
+        outcome: rasterlab_library::BulkOutcome,
     },
     /// The delete worker gave up, panicked, or never started. Terminal, so the
     /// cancellation handle that gates the delete buttons has to be released.
     DeleteFailed(String),
+    /// Progress update from a running collection-membership change.
+    CollectionProgress(rasterlab_library::BulkProgress),
+    /// A collection-membership change finished (completed or stopped).
+    CollectionComplete {
+        outcome: rasterlab_library::BulkOutcome,
+    },
+    /// The collection worker gave up, panicked, or never started. Terminal, so
+    /// the cancellation handle that gates the collection menus is released.
+    CollectionFailed(String),
     /// Progress update from a running integrity scrub.
     ScrubProgress(rasterlab_library::ScrubProgress),
     /// Progress update from a running index rebuild.
@@ -272,6 +286,10 @@ pub struct AppState {
     /// `(library_root, hash)` — on save triggers thumb regen + DB sync.
     pub library_context: Option<(StdPathBuf, String)>,
 
+    /// Source of the job ids that tell concurrent imports apart in the
+    /// messages their workers post back.
+    next_import_id: u64,
+
     /// Cancellation flag for a running integrity scrub. `Some` while a scrub is
     /// in flight (drives the File-menu Start/Stop toggle); cleared on completion.
     scrub_cancel: Option<Arc<AtomicBool>>,
@@ -284,6 +302,11 @@ pub struct AppState {
     /// same terms as `scrub_cancel`. It is also what gates the delete buttons,
     /// so only one such operation can be in flight at a time.
     delete_cancel: Option<Arc<AtomicBool>>,
+
+    /// Cancellation flag for a running collection-membership change, on the
+    /// same terms as `delete_cancel`: it gates the collection menus so a
+    /// second change cannot fight the first over the same `.rlab` files.
+    collection_cancel: Option<Arc<AtomicBool>>,
 }
 
 /// Largest centred 2:1 rectangle that fits inside the image.
@@ -377,9 +400,11 @@ impl AppState {
                 ..Default::default()
             },
             library_context: None,
+            next_import_id: 0,
             scrub_cancel: None,
             rebuild_cancel: None,
             delete_cancel: None,
+            collection_cancel: None,
         }
     }
 
@@ -405,11 +430,15 @@ impl AppState {
                     self.status = format!("Error: {}", e);
                     self.loading = false;
                 }
-                BgMessage::ImportProgress(p) => self.on_import_progress(p),
-                BgMessage::ImportComplete { session, errors } => {
-                    self.on_import_complete(session, errors)
+                BgMessage::ImportProgress { job, progress } => {
+                    self.on_import_progress(job, progress)
                 }
-                BgMessage::ImportFailed(e) => self.on_import_failed(e),
+                BgMessage::ImportComplete {
+                    job,
+                    session,
+                    errors,
+                } => self.on_import_complete(job, session, errors),
+                BgMessage::ImportFailed { job, message } => self.on_import_failed(job, message),
                 BgMessage::ThumbLoaded { hash, bytes } => self.on_thumb_loaded(hash, bytes),
                 BgMessage::LibraryDetailLoaded {
                     id,
@@ -450,6 +479,9 @@ impl AppState {
                 BgMessage::DeleteProgress(p) => self.on_delete_progress(p),
                 BgMessage::DeleteComplete { outcome } => self.on_delete_complete(outcome),
                 BgMessage::DeleteFailed(e) => self.on_delete_failed(e),
+                BgMessage::CollectionProgress(p) => self.on_collection_progress(p),
+                BgMessage::CollectionComplete { outcome } => self.on_collection_complete(outcome),
+                BgMessage::CollectionFailed(e) => self.on_collection_failed(e),
                 BgMessage::ScrubProgress(p) => self.on_scrub_progress(p),
                 BgMessage::RebuildProgress(p) => self.on_rebuild_progress(p),
                 BgMessage::RebuildComplete { outcome, fatal } => {

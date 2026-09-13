@@ -69,6 +69,7 @@
 //! locking is really passed to the server (an NFS mount with `nolock` or
 //! `local_lock=flock` admits two writers).
 
+pub mod compare;
 pub mod db_trait;
 pub mod import;
 pub mod library;
@@ -78,12 +79,16 @@ pub mod search;
 pub mod stoolap_db;
 pub mod thumbnail;
 
+pub use compare::{CompareOptions, CompareOutcome, CompareProgress, Difference, Scope, Side};
 pub use db_trait::{
     CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
     RecentlyDeletedRow, SortOrder,
 };
 pub use import::{ImportCollection, ImportSession, MONTH_NAMES, ymd_from_unix};
-pub use library::{DeleteOutcome, DeleteProgress, ImportProgress, Library, LibraryBusy};
+pub use library::{
+    BulkOutcome, BulkProgress, ImportProgress, Library, LibraryBusy, MembershipChange, NotALibrary,
+    is_library_root,
+};
 pub use rasterlab_core::library_meta::{CollectionRef, LibraryExif, LibraryMeta};
 pub use reconstruct::{RebuildOutcome, RebuildProgress};
 pub use scrub::{ScrubOutcome, ScrubProgress};

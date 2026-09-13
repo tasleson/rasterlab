@@ -7,7 +7,7 @@ use std::{
 };
 
 use rasterlab_library::{
-    ImportCollection, Library,
+    ImportCollection, Library, MembershipChange, NotALibrary,
     db_trait::{PhotoId, PhotoRow, SortOrder},
     search::{Resolution, SearchFilter},
 };
@@ -479,6 +479,43 @@ fn folder_import_groups_jpeg_by_exif_capture_date_not_mtime() {
     );
 }
 
+/// A file already in the library is skipped for writing, but it must still
+/// count toward its capture day: dropping duplicates from the dated list would
+/// move session boundaries on every reimport.  Here the two duplicates bridge
+/// the new photo back into the run they already belong to.
+#[test]
+fn grouped_reimport_keeps_duplicates_in_clusters() {
+    const DAY: i64 = 86_400;
+    const EXIF_CAPTURE: i64 = 1_718_447_400; // 2024-06-15 10:30 UTC
+    const WRONG_MTIME: i64 = 1_262_304_000;
+
+    let tmp_src = tempfile::tempdir().unwrap();
+    let jpeg = tmp_src.path().join("shot.jpg");
+    let prior_png = tmp_src.path().join("prior.png");
+    std::fs::copy(jpeg_path(), &jpeg).unwrap();
+    // Deliberately misleading: the scan must date this by EXIF, not by mtime.
+    filetime::set_file_mtime(&jpeg, filetime::FileTime::from_unix_time(WRONG_MTIME, 0)).unwrap();
+    write_png_with_mtime(&prior_png, 1, EXIF_CAPTURE + DAY);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    let first = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].started_at, EXIF_CAPTURE as u64);
+    assert_eq!(first[0].photo_count, 2);
+
+    write_png_with_mtime(&tmp_src.path().join("new.png"), 2, EXIF_CAPTURE + 2 * DAY);
+    let second = lib.import_folder(tmp_src.path(), |_| {}).unwrap();
+
+    assert_eq!(second.len(), 1, "all three dated paths remain one run");
+    assert_eq!(
+        second[0].started_at, EXIF_CAPTURE as u64,
+        "the duplicates still anchor the run to the original shoot day"
+    );
+    assert_eq!(second[0].photo_count, 1);
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 3);
+}
+
 // ── Import collections ──────────────────────────────────────────────────────
 
 /// A folder of shoot directories, each holding one distinct photo, plus one
@@ -563,6 +600,42 @@ fn a_cancelled_import_stops_without_importing() {
 
     assert!(sessions.is_empty(), "a cancelled run made a session");
     assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+}
+
+/// Cancellation is polled between photos. Each completed photo must already
+/// have both its durable project and its matching collection row, rather than
+/// waiting for a batch-final membership pass that cancellation could skip.
+#[test]
+fn cancelling_a_collection_import_keeps_completed_memberships() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    let cancel = no_cancel();
+    let cancel_from_callback = Arc::clone(&cancel);
+
+    let sessions = lib
+        .import_paths(
+            &[src.path().to_path_buf()],
+            ImportCollection::Named("Cancelled collection".into()),
+            cancel,
+            move |progress| {
+                if !progress.scanning && progress.done == 0 {
+                    cancel_from_callback.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .unwrap();
+
+    assert_eq!(
+        sessions
+            .iter()
+            .map(|session| session.photo_count)
+            .sum::<usize>(),
+        1
+    );
+    let collection = lib.all_collections().unwrap().remove(0);
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+    assert_eq!(lib.collection_photos(collection.id).unwrap().len(), 1);
 }
 
 /// Naming a folder and a file inside it is an easy thing to type, and has to
@@ -709,6 +782,61 @@ fn a_folder_of_only_duplicates_creates_no_collection() {
     assert!(
         lib.all_collections().unwrap().is_empty(),
         "nothing was imported, so there is nothing to file and no collection to make"
+    );
+}
+
+/// Several files of one batch can hold identical bytes.  Preparation runs them
+/// concurrently, so none of them can find the others in the index; only the
+/// commit-time check stops the same photograph landing more than once, and it
+/// has to leave the same tally a strictly serial import would have.
+#[test]
+fn identical_files_in_one_batch_are_imported_once() {
+    const BASE: i64 = 1_600_000_000;
+    const COPIES: [&str; 6] = ["a.png", "b.png", "c.png", "d.png", "e.png", "f.png"];
+    let src = tempfile::tempdir().unwrap();
+    let sub = src.path().join("Harbour");
+    std::fs::create_dir_all(&sub).unwrap();
+    for name in COPIES {
+        write_png_with_mtime(&sub.join(name), 1, BASE);
+    }
+    write_png_with_mtime(&sub.join("other.png"), 2, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_sink = progress.clone();
+    let sessions = lib
+        .import_folder_into_collection(src.path(), ImportCollection::PerFolder, move |p| {
+            progress_sink.lock().unwrap().push(p)
+        })
+        .unwrap();
+
+    let imported: usize = sessions.iter().map(|s| s.photo_count).sum();
+    assert_eq!(imported, 2, "six identical files are one photograph");
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 2);
+    assert!(
+        sessions.iter().all(|s| s.errors.is_empty()),
+        "an in-batch duplicate is a skip, not a failure: {:?}",
+        sessions.iter().flat_map(|s| &s.errors).collect::<Vec<_>>()
+    );
+
+    let progress = progress.lock().unwrap();
+    let last = progress
+        .iter()
+        .rev()
+        .find(|p| !p.scanning)
+        .expect("final import progress");
+    assert_eq!(last.done, COPIES.len() + 1);
+    assert_eq!(last.imported, 2);
+    assert_eq!(last.skipped_duplicates, COPIES.len() - 1);
+
+    assert_eq!(collection_names(&lib), ["Harbour"]);
+    let collection = lib.all_collections().unwrap()[0].id;
+    assert_eq!(
+        lib.collection_photos(collection).unwrap().len(),
+        2,
+        "a skipped duplicate must not add a second membership row"
     );
 }
 
@@ -1451,6 +1579,98 @@ fn collection_membership_survives_a_rebuild() {
     let members = lib.collection_photos(coll.id).unwrap();
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].hash, photos[0].hash);
+}
+
+/// Filing a selection into a collection is a `.rlab` rewrite per photo, so it
+/// has to be stoppable — and what it got through before stopping has to be in
+/// the index, or the files and the index disagree about who is a member.
+#[test]
+fn a_stopped_collection_change_keeps_what_it_already_filed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(
+        &[
+            jpeg_path(),
+            png_path(),
+            test_images_dir().join("hue_wheel.png"),
+        ],
+        |_| {},
+    )
+    .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let ids: Vec<PhotoId> = photos.iter().map(|row| row.id).collect();
+    let coll = lib.create_collection("Portfolio").unwrap();
+
+    // Ask to stop once the first photo is filed. The report that carries that
+    // count comes after the second photo has been claimed, so the run gets as
+    // far as two and the third is never attempted.
+    let cancel = no_cancel();
+    let watcher = cancel.clone();
+    let outcome = lib
+        .change_collection_membership(
+            coll.id,
+            &ids,
+            MembershipChange::Add,
+            cancel,
+            move |progress| {
+                if progress.done >= 1 {
+                    watcher.store(true, Ordering::Relaxed);
+                }
+            },
+        )
+        .expect("the run itself must not fail");
+
+    assert!(outcome.cancelled, "the run should report that it stopped");
+    assert_eq!(outcome.done, 2, "what it got to before stopping");
+    let mut members: Vec<String> = lib
+        .collection_photos(coll.id)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.hash)
+        .collect();
+    members.sort();
+    let mut filed: Vec<String> = photos[..2].iter().map(|row| row.hash.clone()).collect();
+    filed.sort();
+    assert_eq!(
+        members, filed,
+        "the index must list exactly the photos whose files were written"
+    );
+}
+
+/// Photos the index no longer lists are dropped before the run starts rather
+/// than counted and skipped, so the progress bar counts down real work.
+#[test]
+fn a_collection_change_counts_only_photos_it_can_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].id;
+    let coll = lib.create_collection("Portfolio").unwrap();
+
+    let totals = Arc::new(Mutex::new(Vec::new()));
+    let seen = totals.clone();
+    let outcome = lib
+        .change_collection_membership(
+            coll.id,
+            &[photo, 9999],
+            MembershipChange::Add,
+            no_cancel(),
+            move |p| {
+                seen.lock().unwrap().push(p.total);
+            },
+        )
+        .unwrap();
+
+    assert_eq!(outcome.done, 1);
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert!(
+        totals.lock().unwrap().iter().all(|&total| total == 1),
+        "a photo that cannot be written must not be counted: {:?}",
+        totals.lock().unwrap()
+    );
+    assert_eq!(lib.collection_photos(coll.id).unwrap().len(), 1);
 }
 
 /// The point of keeping the name in the index: a rename must not be undone by
@@ -2302,6 +2522,232 @@ fn re_adding_a_photo_changes_neither_the_index_nor_the_file() {
     );
 }
 
+/// The point of the move: one pass over each `.rlab` leaves the photo in the
+/// collection it was sent to and out of the ones it was in, in the file and in
+/// the index alike.
+#[test]
+fn moving_photos_takes_them_out_of_their_other_collections() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let ids: Vec<_> = photos.iter().map(|row| row.id).collect();
+    let portfolio = lib.create_collection("Portfolio").unwrap();
+    let prints = lib.create_collection("Prints").unwrap();
+    let archive = lib.create_collection("Archive").unwrap();
+    lib.add_to_collection(portfolio.id, &ids).unwrap();
+    lib.add_to_collection(prints.id, &ids[..1]).unwrap();
+
+    lib.move_to_collection(archive.id, &ids).unwrap();
+
+    assert_eq!(lib.collection_photos(archive.id).unwrap().len(), 2);
+    assert!(
+        lib.collection_photos(portfolio.id).unwrap().is_empty()
+            && lib.collection_photos(prints.id).unwrap().is_empty(),
+        "a moved photo is still listed where it came from"
+    );
+    for photo in &photos {
+        let lmta = rasterlab_core::project::RlabFile::read(&lib.rlab_path(&photo.hash))
+            .unwrap()
+            .lmta
+            .unwrap();
+        assert_eq!(
+            lmta.collection_refs
+                .iter()
+                .map(|held| held.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Archive"],
+            "the file disagrees with the index about where the photo now lives"
+        );
+    }
+}
+
+/// A move to where the photo already exclusively lives is no work at all: the
+/// file must not be rewritten, or re-filing an overlapping selection would
+/// churn the mtime of every photo that was already in the right place.
+#[test]
+fn moving_a_photo_that_is_already_only_there_rewrites_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let archive = lib.create_collection("Archive").unwrap();
+    lib.move_to_collection(archive.id, &[photo.id]).unwrap();
+    let written = std::fs::metadata(lib.rlab_path(&photo.hash))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    lib.move_to_collection(archive.id, &[photo.id]).unwrap();
+
+    assert_eq!(lib.collection_photos(archive.id).unwrap().len(), 1);
+    assert_eq!(
+        std::fs::metadata(lib.rlab_path(&photo.hash))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        written,
+        "a file that already listed only the target was rewritten"
+    );
+}
+
+/// Pre-uuid membership is a collection the photo is in as far as the file is
+/// concerned, so a move has to take it out of that one too.  Left behind, the
+/// name would put the photo back in a collection it was moved out of the next
+/// time the index was rebuilt from the files.
+#[test]
+fn moving_a_photo_clears_the_collection_names_it_predates_uuids_with() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let path = lib.rlab_path(&photo.hash);
+
+    // Both shapes at once: a name the index knows, and one it does not.
+    let mut rlab = rasterlab_core::project::RlabFile::read(&path).unwrap();
+    let mut lmta = rlab.lmta.clone().unwrap();
+    lmta.legacy_collections = vec!["Portfolio".to_owned(), "Forgotten".to_owned()];
+    rlab.set_lmta(Some(lmta));
+    rlab.write_v5(&path).unwrap();
+    let portfolio = lib.create_collection("Portfolio").unwrap();
+    let archive = lib.create_collection("Archive").unwrap();
+
+    lib.move_to_collection(archive.id, &[photo.id]).unwrap();
+
+    let lmta = rasterlab_core::project::RlabFile::read(&path)
+        .unwrap()
+        .lmta
+        .unwrap();
+    assert_eq!(
+        lmta.collection_refs
+            .iter()
+            .map(|held| held.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Archive"]
+    );
+    assert!(
+        lmta.legacy_collections.is_empty(),
+        "a moved photo still names a collection it was moved out of"
+    );
+
+    assert!(
+        lib.collection_photos(portfolio.id).unwrap().is_empty(),
+        "migrating the name on the way through must not file the photo there"
+    );
+
+    lib.rebuild_index(Arc::new(AtomicBool::new(false)), |_| {})
+        .expect("rebuild_index");
+    let names: Vec<String> = lib
+        .all_collections()
+        .unwrap()
+        .into_iter()
+        .filter(|row| !lib.collection_photos(row.id).unwrap().is_empty())
+        .map(|row| row.name)
+        .collect();
+    assert_eq!(
+        names,
+        ["Archive"],
+        "a rebuild put the photo back where it had been moved out of"
+    );
+}
+
+/// A stopped move is the case where the index has the most to keep straight:
+/// unlike an add, it touches collections the user never named.  What it filed
+/// before it stopped must be filed everywhere, and what it did not reach must
+/// be left exactly as it was.
+#[test]
+fn a_stopped_move_leaves_the_photos_it_did_not_reach_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let ids: Vec<_> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .iter()
+        .map(|row| row.id)
+        .collect();
+    let portfolio = lib.create_collection("Portfolio").unwrap();
+    let archive = lib.create_collection("Archive").unwrap();
+    lib.add_to_collection(portfolio.id, &ids).unwrap();
+
+    // Raised as the first photo is reported, so the second is never written.
+    let cancel = no_cancel();
+    let flag = cancel.clone();
+    let outcome = lib
+        .change_collection_membership(
+            archive.id,
+            &ids,
+            MembershipChange::Move,
+            cancel,
+            move |_| {
+                flag.store(true, Ordering::Relaxed);
+            },
+        )
+        .unwrap();
+
+    assert!(outcome.cancelled);
+    assert_eq!(outcome.done, 1);
+    assert_eq!(
+        lib.collection_photos(archive.id).unwrap().len(),
+        1,
+        "the photo that was written is not in the collection it was moved to"
+    );
+    assert_eq!(
+        lib.collection_photos(portfolio.id).unwrap().len(),
+        1,
+        "the photo the run never reached must keep the collection it was in"
+    );
+}
+
+/// A photo waiting in Recently Deleted keeps its membership rows so a restore
+/// can put it back where it was.  A move has to clear them anyway: its file no
+/// longer records the old collections, so a restore would otherwise bring back
+/// a membership nothing on disk agrees with.
+#[test]
+fn moving_a_deleted_photo_clears_the_memberships_a_restore_would_use() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let portfolio = lib.create_collection("Portfolio").unwrap();
+    let archive = lib.create_collection("Archive").unwrap();
+    lib.add_to_collection(portfolio.id, &[photo.id]).unwrap();
+    lib.delete_photo(photo.id)
+        .expect("move to Recently Deleted");
+
+    lib.move_to_collection(archive.id, &[photo.id]).unwrap();
+
+    // The file has to be the one in Recently Deleted: a move that quietly
+    // skipped it would still look right in the index until the restore.
+    assert_eq!(
+        rasterlab_core::project::RlabFile::read(&lib.recently_deleted_path(&photo.hash))
+            .unwrap()
+            .lmta
+            .unwrap()
+            .collection_refs
+            .iter()
+            .map(|held| held.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Archive"],
+        "the deleted photo's file was not moved with it"
+    );
+
+    lib.restore_photo(photo.id).expect("restore");
+
+    assert_eq!(lib.collection_photos(archive.id).unwrap().len(), 1);
+    assert!(
+        lib.collection_photos(portfolio.id).unwrap().is_empty(),
+        "a restored photo came back to a collection it had been moved out of"
+    );
+}
+
 /// A membership row for a photo the index has never heard of would survive
 /// every cleanup path, since they all key off the photo.
 #[test]
@@ -2753,4 +3199,45 @@ fn purging_recently_deleted_names_the_hashes_it_erased() {
         assert!(!lib.recently_deleted_path(&row.hash).exists());
         assert!(!lib.thumb_path(&row.hash).exists());
     }
+}
+
+/// A path that is not a library must fail rather than quietly become one.
+///
+/// The GUI opens recent libraries and the last session's library by path, and
+/// a drive that is not plugged in looks exactly like a directory that is not
+/// there.  Creating one on the spot hides that, and on a mount point it writes
+/// the new library into the directory the real one mounts over.
+#[test]
+fn open_existing_refuses_a_path_that_is_no_longer_a_library() {
+    let tmp = tempfile::tempdir().unwrap();
+    let gone = tmp.path().join("Main Library");
+
+    // `Library` is not Debug, so the failures are matched rather than unwrapped.
+    let Err(error) = Library::open_existing(&gone) else {
+        panic!("a missing library must not open");
+    };
+    assert!(
+        error.downcast_ref::<NotALibrary>().is_some(),
+        "callers tell this apart from a broken library by its type: {error}"
+    );
+    assert!(!gone.exists(), "the failed open left a library behind");
+
+    // An empty directory where a library used to be — an unmounted volume's
+    // mount point — is the same answer.
+    std::fs::create_dir(&gone).unwrap();
+    let Err(error) = Library::open_existing(&gone) else {
+        panic!("an empty directory is not a library");
+    };
+    assert!(error.downcast_ref::<NotALibrary>().is_some(), "{error}");
+    assert!(
+        gone.read_dir().unwrap().next().is_none(),
+        "the failed open wrote into the directory"
+    );
+
+    // The real thing still opens. Dropped first: the index holds an flock.
+    drop(open_library(&gone));
+    assert!(
+        Library::open_existing(&gone).is_ok(),
+        "a real library must open by the same path"
+    );
 }

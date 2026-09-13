@@ -13,10 +13,10 @@ use std::{
 
 use image as img_crate;
 use rasterlab_core::panic_guard;
-use rasterlab_library::CollectionId;
+use rasterlab_library::{CollectionId, MembershipChange, PhotoId};
 
 use super::{AppMode, AppState, BgMessage, workers};
-use crate::state::library_state::{DeleteKind, DeleteTask};
+use crate::state::library_state::{CollectionTask, DeleteKind, DeleteTask, ImportKind, plural};
 
 /// Number of worker threads servicing thumbnail loads. Fixed and small so a
 /// large library grid can't spawn thousands of threads at once.
@@ -40,13 +40,25 @@ impl AppState {
             self.library.last_error = Some(format!("Failed to create directory: {e}"));
             return;
         }
-        self.open_library(path);
+        self.flush_library_metadata_drafts();
+        let scale = self.prefs.library_thumb_scale;
+        self.library.create_library(path.clone(), scale);
+        self.remember_open_library(path);
     }
 
     pub fn open_library(&mut self, path: std::path::PathBuf) {
         self.flush_library_metadata_drafts();
         let scale = self.prefs.library_thumb_scale;
         self.library.open_library(path.clone(), scale);
+        self.remember_open_library(path);
+    }
+
+    /// Record the library the user just opened, and show it.
+    ///
+    /// Runs whether or not the open succeeded: a library on a disconnected
+    /// drive is still the one the user means to come back to, and the Library
+    /// mode is where the error banner explaining the failure lives.
+    fn remember_open_library(&mut self, path: std::path::PathBuf) {
         self.prefs.push_recent_library(path.clone());
         self.prefs.last_library = Some(path);
         self.prefs.save();
@@ -170,6 +182,7 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
+        let job = self.start_import_job(plural(paths.len(), "file"), ImportKind::Files);
         let progress_tx = self.bg_tx.clone();
         let progress_ctx = self.ctx.clone();
         workers::spawn(
@@ -177,21 +190,37 @@ impl AppState {
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            BgMessage::ImportFailed,
+            move |message| BgMessage::ImportFailed { job, message },
             move || {
-                let result = lib.import_files(&paths, move |p| {
-                    let _ = progress_tx.send(BgMessage::ImportProgress(p));
+                let result = lib.import_files(&paths, move |progress| {
+                    let _ = progress_tx.send(BgMessage::ImportProgress { job, progress });
                     progress_ctx.request_repaint();
                 });
                 match result {
                     Ok(session) => {
                         let errors = session.errors.clone();
-                        BgMessage::ImportComplete { errors, session }
+                        BgMessage::ImportComplete {
+                            job,
+                            errors,
+                            session,
+                        }
                     }
-                    Err(e) => BgMessage::ImportFailed(e.to_string()),
+                    Err(e) => BgMessage::ImportFailed {
+                        job,
+                        message: e.to_string(),
+                    },
                 }
             },
         );
+    }
+
+    /// Register a new import with the library state and hand back the id that
+    /// tells its messages apart from those of the imports already running.
+    fn start_import_job(&mut self, label: String, kind: ImportKind) -> u64 {
+        let id = self.next_import_id;
+        self.next_import_id += 1;
+        self.library.start_import_job(id, label, kind);
+        id
     }
 
     /// Ask what collection a folder import should file its photos into, rather
@@ -223,6 +252,11 @@ impl AppState {
         let Some(lib) = self.library.library.clone() else {
             return;
         };
+        let label = folder.file_name().map_or_else(
+            || folder.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let job = self.start_import_job(label, ImportKind::Folder);
         let progress_tx = self.bg_tx.clone();
         let progress_ctx = self.ctx.clone();
         workers::spawn(
@@ -230,12 +264,13 @@ impl AppState {
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            BgMessage::ImportFailed,
+            move |message| BgMessage::ImportFailed { job, message },
             move || {
-                let result = lib.import_folder_into_collection(&folder, collection, move |p| {
-                    let _ = progress_tx.send(BgMessage::ImportProgress(p));
-                    progress_ctx.request_repaint();
-                });
+                let result =
+                    lib.import_folder_into_collection(&folder, collection, move |progress| {
+                        let _ = progress_tx.send(BgMessage::ImportProgress { job, progress });
+                        progress_ctx.request_repaint();
+                    });
                 match result {
                     Ok(sessions) => {
                         let total: usize = sessions.iter().map(|s| s.photo_count).sum();
@@ -251,70 +286,111 @@ impl AppState {
                             errors: Vec::new(),
                         };
                         BgMessage::ImportComplete {
+                            job,
                             errors,
                             session: summary,
                         }
                     }
-                    Err(e) => BgMessage::ImportFailed(e.to_string()),
+                    Err(e) => BgMessage::ImportFailed {
+                        job,
+                        message: e.to_string(),
+                    },
                 }
             },
         );
     }
 
-    pub(super) fn on_import_progress(&mut self, progress: rasterlab_library::ImportProgress) {
-        // Mirror the running error list into `last_import_errors` so the
-        // "⚠ N import error(s)" button and its detail window work mid-import,
-        // not only once the whole run completes.
-        self.library.last_import_errors = progress.errors.clone();
-        self.library.import_progress = Some(progress);
+    pub(super) fn on_import_progress(
+        &mut self,
+        job: u64,
+        progress: rasterlab_library::ImportProgress,
+    ) {
+        // A report can outlive the job it belongs to, since its completion
+        // message travels the same channel; applying it would put a finished
+        // import back on the status line.
+        if !self.library.apply_import_progress(job, progress) {
+            return;
+        }
+        // Follow the import along in the sidebar and the grid rather than
+        // leaving both frozen until it ends. Throttled, and a no-op unless
+        // photos have actually landed since the last one.
+        self.library.refresh_during_import();
     }
 
     pub(super) fn on_import_complete(
         &mut self,
+        job: u64,
         session: rasterlab_library::ImportSession,
         errors: Vec<(StdPathBuf, String)>,
     ) {
-        self.library.import_progress = None;
+        // Dump details to the terminal for quick diagnosis, and keep them in
+        // state (merged across the batch) so the UI can show them on demand.
+        for (path, message) in &errors {
+            eprintln!("import error: {}: {message}", path.display());
+        }
+        let Some(batch) = self
+            .library
+            .finish_import_job(job, errors, session.photo_count)
+        else {
+            return;
+        };
+        if batch.remaining > 0 {
+            // Other imports are still running: their progress line stays, and
+            // the final tally waits for the last of them.
+            self.library.refresh();
+            return;
+        }
         self.library.thumbs.clear();
         // Always reveal a successful individual-file import. Otherwise a
         // photo added while viewing a collection or an older session is in the
         // database but appears to have vanished because the old scope remains
-        // active.
-        if session.photo_count > 0 && !session.id.is_empty() {
+        // active. Only when it was the batch's only import, though: with
+        // several, whichever finished last is an arbitrary place to land.
+        if batch.was_alone() && session.photo_count > 0 && !session.id.is_empty() {
             self.library.view =
                 crate::state::library_state::LibraryView::Session(session.id.clone());
         }
         self.library.refresh();
-        if errors.is_empty() {
-            self.status = format!(
-                "Import complete: {} photos in \"{}\"",
-                session.photo_count, session.name
-            );
+        let failures = self.library.last_import_errors.len();
+        self.status = if failures > 0 {
+            format!("Import: {} photos, {failures} error(s)", batch.photos)
+        } else if batch.jobs > 1 {
+            format!(
+                "Import complete: {} photos from {} imports",
+                batch.photos, batch.jobs
+            )
         } else {
-            // Dump details to the terminal for quick diagnosis, and keep them in
-            // state so the UI can show them on demand.
-            for (path, msg) in &errors {
-                eprintln!("import error: {}: {msg}", path.display());
-            }
-            self.status = format!(
-                "Import: {} photos, {} error(s)",
-                session.photo_count,
-                errors.len()
-            );
-        }
-        self.library.last_import_errors = errors;
+            format!(
+                "Import complete: {} photos in \"{}\"",
+                batch.photos, session.name
+            )
+        };
     }
 
     /// Terminal handler for an import that will never report progress again.
     ///
-    /// Tears the progress bar down and refreshes the grid: an import that died
-    /// partway through still committed the photos it had already written, and
-    /// they should be visible rather than waiting for the next library open.
-    pub(super) fn on_import_failed(&mut self, message: String) {
-        self.library.import_progress = None;
-        self.library.thumbs.clear();
+    /// Takes down only the job that died: any other import sharing the batch
+    /// is still running and still owns its share of the status line. Refreshes
+    /// like a completed one, because an import that died partway through still
+    /// committed the photos it had already written, and they should be visible
+    /// rather than waiting for the next library open.
+    pub(super) fn on_import_failed(&mut self, job: u64, message: String) {
+        let Some(batch) = self.library.fail_import_job(job) else {
+            return;
+        };
+        if batch.remaining == 0 {
+            self.library.thumbs.clear();
+        }
         self.library.refresh();
-        self.status = format!("Import failed: {message}");
+        // Name the survivors: with a batch running, "Import failed" on its own
+        // reads as though everything stopped, when the rest carries on.
+        self.status = match batch.remaining {
+            0 => format!("Import failed: {message}"),
+            remaining => format!(
+                "Import failed: {message} ({} still running)",
+                plural(remaining, "import")
+            ),
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -400,7 +476,7 @@ impl AppState {
         self.delete_cancel = Some(cancel.clone());
         self.library.delete_task = Some(DeleteTask {
             kind,
-            progress: rasterlab_library::DeleteProgress {
+            progress: rasterlab_library::BulkProgress {
                 total,
                 ..Default::default()
             },
@@ -418,7 +494,7 @@ impl AppState {
             self.ctx.clone(),
             BgMessage::DeleteFailed,
             move || {
-                let report = move |p: rasterlab_library::DeleteProgress| {
+                let report = move |p: rasterlab_library::BulkProgress| {
                     let _ = progress_tx.send(BgMessage::DeleteProgress(p));
                     progress_ctx.request_repaint();
                 };
@@ -441,7 +517,7 @@ impl AppState {
         );
     }
 
-    pub(super) fn on_delete_progress(&mut self, progress: rasterlab_library::DeleteProgress) {
+    pub(super) fn on_delete_progress(&mut self, progress: rasterlab_library::BulkProgress) {
         // Mirror the running error list so the "⚠ N delete error(s)" button and
         // its detail window work mid-run, not only once the whole run completes.
         self.library.last_delete_errors = progress.errors.clone();
@@ -450,7 +526,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn on_delete_complete(&mut self, outcome: rasterlab_library::DeleteOutcome) {
+    pub(super) fn on_delete_complete(&mut self, outcome: rasterlab_library::BulkOutcome) {
         let kind = self.finish_delete_task();
         // Permanently erased photos will never be shown again, so their
         // thumbnails are dead weight in the texture cache.
@@ -502,6 +578,188 @@ impl AppState {
             .take()
             .map(|task| task.kind)
             .unwrap_or(DeleteKind::ToRecentlyDeleted)
+    }
+
+    // -----------------------------------------------------------------------
+    // Collection membership
+    // -----------------------------------------------------------------------
+
+    /// True while a collection-membership change is running.
+    pub fn collection_running(&self) -> bool {
+        self.collection_cancel.is_some()
+    }
+
+    /// Create a collection and start filing the photos it was asked for into
+    /// it.
+    ///
+    /// The row is created here so the sidebar shows it at once; the photos
+    /// follow on the worker, because each of them is a `.rlab` rewrite.  An
+    /// `Err` is the name's — the dialog stays open showing it.
+    pub fn create_collection(
+        &mut self,
+        name: &str,
+        photos: Vec<PhotoId>,
+        change: MembershipChange,
+    ) -> Result<(), String> {
+        // Checked before the row is created: a collection that came up empty
+        // because the worker was busy is worse than being asked to wait, and
+        // the dialog is still on screen to say so.
+        if !photos.is_empty() && self.collection_running() {
+            return Err("Another collection change is still running.".to_owned());
+        }
+        let id = self.library.create_collection(name)?;
+        self.start_collection_task(id, photos, change);
+        Ok(())
+    }
+
+    /// Add every selected photo to a collection; the ones already in it stay
+    /// as they are.
+    pub fn add_selected_to_collection(&mut self, id: CollectionId) {
+        let photos = self.library.selected.clone();
+        self.start_collection_task(id, photos, MembershipChange::Add);
+    }
+
+    /// Take every selected photo out of a collection.
+    pub fn remove_selected_from_collection(&mut self, id: CollectionId) {
+        let photos = self.library.selected.clone();
+        self.start_collection_task(id, photos, MembershipChange::Remove);
+    }
+
+    /// File every selected photo into a collection and out of the ones it is
+    /// in now, in the single pass over the `.rlab` files that a remove
+    /// followed by an add would take twice.
+    pub fn move_selected_to_collection(&mut self, id: CollectionId) {
+        let photos = self.library.selected.clone();
+        self.start_collection_task(id, photos, MembershipChange::Move);
+    }
+
+    /// Spawn the worker that rewrites each photo's `.rlab` and then brings the
+    /// index in line with it.
+    ///
+    /// The photos are taken as the task starts rather than read from the
+    /// selection as it goes: the grid stays live while this runs, and the
+    /// batch that is filed must be the batch the user asked for.
+    fn start_collection_task(
+        &mut self,
+        id: CollectionId,
+        photos: Vec<PhotoId>,
+        change: MembershipChange,
+    ) {
+        if self.collection_running() || photos.is_empty() {
+            return;
+        }
+        let Some(lib) = self.library.library.clone() else {
+            return;
+        };
+        let name = self
+            .library
+            .collection_name(id)
+            .unwrap_or("collection")
+            .to_owned();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.collection_cancel = Some(cancel.clone());
+        self.library.collection_task = Some(CollectionTask {
+            change,
+            name: name.clone(),
+            progress: rasterlab_library::BulkProgress {
+                total: photos.len(),
+                ..Default::default()
+            },
+            stopping: false,
+        });
+        let verb = match change {
+            MembershipChange::Add => "Adding to",
+            MembershipChange::Remove => "Removing from",
+            MembershipChange::Move => "Moving to",
+        };
+        self.status = format!("{verb} “{name}”…");
+
+        let progress_tx = self.bg_tx.clone();
+        let progress_ctx = self.ctx.clone();
+        workers::spawn(
+            "rasterlab-library-collection",
+            workers::IMAGE_WORKER_STACK,
+            self.bg_tx.clone(),
+            self.ctx.clone(),
+            BgMessage::CollectionFailed,
+            move || {
+                let report = move |p: rasterlab_library::BulkProgress| {
+                    let _ = progress_tx.send(BgMessage::CollectionProgress(p));
+                    progress_ctx.request_repaint();
+                };
+                match lib.change_collection_membership(id, &photos, change, cancel, report) {
+                    Ok(outcome) => BgMessage::CollectionComplete { outcome },
+                    Err(e) => BgMessage::CollectionFailed(e.to_string()),
+                }
+            },
+        );
+    }
+
+    /// Request that a running collection change stop after the current photo.
+    pub fn stop_collection_change(&mut self) {
+        if let Some(cancel) = &self.collection_cancel {
+            cancel.store(true, Ordering::Relaxed);
+            if let Some(task) = &mut self.library.collection_task {
+                task.stopping = true;
+            }
+        }
+    }
+
+    pub(super) fn on_collection_progress(&mut self, progress: rasterlab_library::BulkProgress) {
+        if let Some(task) = &mut self.library.collection_task {
+            task.progress = progress;
+        }
+    }
+
+    pub(super) fn on_collection_complete(&mut self, outcome: rasterlab_library::BulkOutcome) {
+        let (verb, name) = self.finish_collection_task();
+        self.library.refresh();
+        self.status = if outcome.cancelled {
+            format!(
+                "{verb} “{name}” stopped after {}",
+                plural(outcome.done, "photo")
+            )
+        } else {
+            format!("{verb} “{name}”: {}", plural(outcome.done, "photo"))
+        };
+        // Photos whose file could not be rewritten are not in the collection,
+        // and the status line is gone by the next action, so the one that
+        // matters gets the banner rather than only a count.
+        if let Some((photo, error)) = outcome.errors.first() {
+            let more = outcome.errors.len() - 1;
+            let mut text = format!("{verb} “{name}” failed for {photo}: {error}");
+            if more > 0 {
+                text.push_str(&format!(" (and {} more)", plural(more, "photo")));
+            }
+            self.status
+                .push_str(&format!(", {} error(s)", outcome.errors.len()));
+            self.library.last_error = Some(text);
+        }
+    }
+
+    /// Terminal handler for a collection change that will never report again.
+    ///
+    /// Refreshes like a completed one: a run that died partway through still
+    /// filed the photos it had already written, and the grid should show them
+    /// where they now are.
+    pub(super) fn on_collection_failed(&mut self, message: String) {
+        let (verb, name) = self.finish_collection_task();
+        self.library.refresh();
+        let text = format!("{verb} “{name}” failed: {message}");
+        self.status = text.clone();
+        self.library.last_error = Some(text);
+    }
+
+    /// Release the in-flight state the change owns, reporting what it was for
+    /// the status line that follows it.
+    fn finish_collection_task(&mut self) -> (&'static str, String) {
+        self.collection_cancel = None;
+        self.library
+            .collection_task
+            .take()
+            .map(|task| (task.past_verb(), task.name))
+            .unwrap_or(("Added to", "collection".to_owned()))
     }
 
     // -----------------------------------------------------------------------

@@ -35,6 +35,13 @@ pub trait Tool: Any {
     fn editing_tool(&self) -> Option<EditingTool> {
         None
     }
+    /// Short "how to use this" text shown when hovering the tool's header.
+    ///
+    /// Worth writing for tools whose panel alone does not explain them —
+    /// anything with a canvas interaction, for instance.
+    fn help_text(&self) -> Option<&'static str> {
+        None
+    }
     fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction;
     fn is_preview_active(&self) -> bool {
         false

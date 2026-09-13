@@ -21,12 +21,18 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use rasterlab_library::{
-    ImportCollection, ImportProgress, ImportSession, Library, RebuildOutcome, ScrubOutcome,
+    CompareOptions, CompareOutcome, ImportCollection, ImportProgress, ImportSession, Library,
+    RebuildOutcome, ScrubOutcome, Side,
 };
 
 /// Exit status for a run the user interrupted, following the shell convention
 /// of 128 + SIGINT.
 const EXIT_INTERRUPTED: i32 = 130;
+
+/// Differences `library compare` lists before summarising the rest.  Enough to
+/// see the shape of a divergence without a page of output when two libraries
+/// share nothing at all.
+const DEFAULT_DIFF_LIMIT: usize = 50;
 
 #[derive(Debug, Args)]
 pub struct LibraryArgs {
@@ -57,6 +63,16 @@ pub enum LibraryCommand {
     /// re-run, and safe to interrupt.
     Rebuild(MaintenanceArgs),
 
+    /// Report every way two libraries differ.
+    ///
+    /// Import the same sources into a library with the old code and with the
+    /// new, then compare the two: a clean run says the change did not alter
+    /// what the library ends up holding. Ids, uuids and import timestamps are
+    /// minted per run and never compared; the photographs, their metadata,
+    /// their edit stacks, and the collections and sessions they are filed in
+    /// all are.
+    Compare(CompareArgs),
+
     /// Verify every `.rlab` file and repair what its parity can recover.
     ///
     /// Damaged files are backed up under `recovered/` before being repaired
@@ -72,6 +88,31 @@ pub struct MaintenanceArgs {
     pub library: PathBuf,
 
     /// Print only the final tally, no running progress.
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CompareArgs {
+    /// The library to compare against — the "before" one.
+    pub left: PathBuf,
+
+    /// The library being checked — the "after" one.
+    pub right: PathBuf,
+
+    /// Compare the index rows alone, without opening a single `.rlab`.
+    ///
+    /// Much faster on a large or network-mounted library, at the cost of
+    /// seeing nothing about what was actually written into each file:
+    /// metadata, edit stacks and thumbnails all go unchecked.
+    #[arg(long)]
+    pub index_only: bool,
+
+    /// Differences to list before the rest are summarised; 0 lists them all.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_LIMIT)]
+    pub limit: usize,
+
+    /// Print only the final verdict, no running progress.
     #[arg(short, long)]
     pub quiet: bool,
 }
@@ -125,6 +166,7 @@ pub fn run(args: LibraryArgs) -> Result<()> {
     match args.command {
         LibraryCommand::Create(args) => create(args),
         LibraryCommand::Import(args) => import(args),
+        LibraryCommand::Compare(args) => compare(args),
         LibraryCommand::Rebuild(args) => rebuild(args),
         LibraryCommand::Scrub(args) => scrub(args),
     }
@@ -209,6 +251,51 @@ fn import(args: ImportArgs) -> Result<()> {
 
     progress.borrow_mut().finish();
     report_import(&root, &sessions, &last.into_inner(), &cancel)
+}
+
+fn compare(args: CompareArgs) -> Result<()> {
+    let left = library_root(&args.left)?;
+    let right = library_root(&args.right)?;
+    if left == right {
+        bail!("both paths are the same library: {}", left.display());
+    }
+
+    println!("Comparing");
+    println!("  left:  {}", left.display());
+    println!("  right: {}", right.display());
+    let cancel = cancel_on_interrupt();
+    let progress = RefCell::new(Progress::comparing(&left, args.quiet));
+
+    let outcome = rasterlab_library::compare::compare(
+        &left,
+        &right,
+        CompareOptions {
+            index_only: args.index_only,
+        },
+        cancel,
+        &|p| {
+            let mut progress = progress.borrow_mut();
+            // Each library is read in turn, and they are rarely the same size,
+            // so the count and the estimate restart with the second one.
+            progress.phase(
+                match p.side {
+                    Side::Left => "Reading left",
+                    Side::Right => "Reading right",
+                },
+                "photos",
+            );
+            progress.update(Status {
+                done: p.done,
+                total: p.total,
+                tallies: &[],
+                errors: 0,
+                current: &p.current,
+            });
+        },
+    )?;
+
+    progress.borrow_mut().finish();
+    report_compare(&left, &outcome, args.limit)
 }
 
 fn rebuild(args: MaintenanceArgs) -> Result<()> {
@@ -299,6 +386,64 @@ fn report_import(
     finish(root, &tally.errors, cancelled)
 }
 
+/// Report what the two libraries hold, then how they disagree.
+///
+/// The verdict is the point of the command — this is meant to be run from a
+/// script that only wants to know whether a change moved anything — so it is
+/// one line, and the exit status matches it.
+fn report_compare(root: &Path, outcome: &CompareOutcome, limit: usize) -> Result<()> {
+    println!(
+        "{} on the left, {} on the right",
+        count(outcome.photos_left, "photo"),
+        count(outcome.photos_right, "photo")
+    );
+
+    if outcome.differences.is_empty() {
+        println!("No differences.");
+    } else {
+        let (photos, collections, sessions) = outcome.counts();
+        println!(
+            "{}: {photos} in photos, {collections} in collections, {sessions} in import sessions",
+            count(outcome.differences.len(), "difference")
+        );
+        println!();
+        let shown = if limit == 0 {
+            outcome.differences.len()
+        } else {
+            limit.min(outcome.differences.len())
+        };
+        for difference in &outcome.differences[..shown] {
+            println!("  {}: {}", difference.subject, difference.detail);
+        }
+        if shown < outcome.differences.len() {
+            println!(
+                "  … and {} more — pass --limit 0 to list them all",
+                outcome.differences.len() - shown
+            );
+        }
+    }
+
+    print_errors(root, &outcome.errors);
+    if outcome.cancelled {
+        // Half a comparison cannot say the libraries match, so it does not get
+        // to exit as though it had.
+        println!();
+        println!("Comparison stopped before it finished — run it again for a verdict.");
+        let _ = std::io::stdout().flush();
+        std::process::exit(EXIT_INTERRUPTED);
+    }
+    if !outcome.errors.is_empty() {
+        bail!(
+            "{} could not be read — the comparison is incomplete",
+            count(outcome.errors.len(), "file")
+        );
+    }
+    if !outcome.differences.is_empty() {
+        bail!("the libraries differ");
+    }
+    Ok(())
+}
+
 fn report_rebuild(root: &Path, outcome: &RebuildOutcome) -> Result<()> {
     let verb = if outcome.cancelled {
         "Rebuild stopped"
@@ -347,11 +492,7 @@ fn report_scrub(root: &Path, outcome: &ScrubOutcome) -> Result<()> {
 /// interrupted run, which finished nothing it was asked to.
 fn finish(root: &Path, errors: &[(PathBuf, String)], cancelled: bool) -> Result<()> {
     if !errors.is_empty() {
-        eprintln!();
-        for (path, message) in errors {
-            let name = relative_to(root, path).unwrap_or_else(|| path.display().to_string());
-            eprintln!("  {name}: {message}");
-        }
+        print_errors(root, errors);
         bail!("{} could not be processed", count(errors.len(), "file"));
     }
     if cancelled {
@@ -359,6 +500,19 @@ fn finish(root: &Path, errors: &[(PathBuf, String)], cancelled: bool) -> Result<
         std::process::exit(EXIT_INTERRUPTED);
     }
     Ok(())
+}
+
+/// List the per-file failures on stderr, one to a line and named relative to
+/// the library, so a run that is piped somewhere still shows what went wrong.
+fn print_errors(root: &Path, errors: &[(PathBuf, String)]) {
+    if errors.is_empty() {
+        return;
+    }
+    eprintln!();
+    for (path, message) in errors {
+        let name = relative_to(root, path).unwrap_or_else(|| path.display().to_string());
+        eprintln!("  {name}: {message}");
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -494,6 +648,13 @@ impl Progress {
         // The labels here are placeholders: an import moves between phases and
         // sets them itself as it goes.
         Self::new("Importing", "files", root, quiet, false)
+    }
+
+    fn comparing(root: &Path, quiet: bool) -> Self {
+        // A comparison collects its unreadable files and reports them at the
+        // end.  The labels are placeholders: it names the library it is on as
+        // it reaches each one.
+        Self::new("Comparing", "photos", root, quiet, false)
     }
 
     fn rebuilding(root: &Path, quiet: bool) -> Self {

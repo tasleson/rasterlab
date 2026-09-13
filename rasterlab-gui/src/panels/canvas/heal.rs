@@ -21,6 +21,8 @@ impl CanvasState {
         let CanvasView {
             image_tl,
             over_canvas,
+            img_w,
+            img_h,
             ..
         } = *view;
 
@@ -45,22 +47,39 @@ impl CanvasState {
 
         let heal_radius = state.tools.find::<HealTool>().unwrap().radius;
 
-        // Draw cursor ring at hover position
+        // Brush-size ring.  It follows the pointer across the canvas, and once
+        // the pointer leaves it parks at the last spot hovered (or the centre
+        // of the image) — otherwise changing Radius in the tools panel, where
+        // the pointer is nowhere near the canvas, would show nothing at all.
         if let Some(ptr) = ptr_pos
             && over_canvas
         {
-            let r_screen = heal_radius as f32 * self.zoom;
-            painter.circle_stroke(
-                ptr,
-                r_screen,
-                egui::Stroke::new(1.5_f32, Color32::from_white_alpha(200)),
-            );
-            painter.circle_stroke(
-                ptr,
-                r_screen,
-                egui::Stroke::new(0.5_f32, Color32::from_black_alpha(120)),
-            );
+            self.heal_hover = Some(screen_to_image(ptr, image_tl, self.zoom));
         }
+        let (ring_centre, following) = match ptr_pos {
+            Some(ptr) if over_canvas => (ptr, true),
+            _ => {
+                // Clamped: the remembered position may predate an image that
+                // is smaller, or a crop.
+                let centre = Pos2::new(img_w as f32 / 2.0, img_h as f32 / 2.0);
+                let parked = self.heal_hover.map_or(centre, |p| {
+                    Pos2::new(p.x.clamp(0.0, img_w as f32), p.y.clamp(0.0, img_h as f32))
+                });
+                (image_to_screen(parked, image_tl, self.zoom), false)
+            }
+        };
+        let (white_alpha, black_alpha) = if following { (200, 120) } else { (110, 70) };
+        let r_screen = heal_radius as f32 * self.zoom;
+        painter.circle_stroke(
+            ring_centre,
+            r_screen,
+            egui::Stroke::new(1.5_f32, Color32::from_white_alpha(white_alpha)),
+        );
+        painter.circle_stroke(
+            ring_centre,
+            r_screen,
+            egui::Stroke::new(0.5_f32, Color32::from_black_alpha(black_alpha)),
+        );
 
         // Hit-test existing spots for drag / remove
         let hit_spot = ptr_pos.and_then(|ptr| {

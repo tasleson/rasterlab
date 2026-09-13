@@ -1,7 +1,7 @@
 use egui::{ScrollArea, Sense, Vec2};
 use rasterlab_library::{
-    CollectionId, ImportSessionRow, MONTH_NAMES, PhotoId, PhotoRow, Resolution, SearchFilter,
-    SortOrder, ymd_from_unix,
+    CollectionId, ImportSessionRow, MONTH_NAMES, MembershipChange, PhotoId, PhotoRow, Resolution,
+    SearchFilter, SortOrder, ymd_from_unix,
 };
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
@@ -186,22 +186,36 @@ fn toolbar_ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         }
 
-        // Import progress
-        if let Some(ref p) = state.library.import_progress {
+        // Collection membership progress. Filing a large selection is as long
+        // a job as a bulk delete — every photo is a full `.rlab` rewrite — so
+        // it gets the same line and the same way out.
+        if let Some(text) = state.library.collection_status_text() {
             ui.separator();
             ui.spinner();
-            if p.scanning {
-                ui.label(format!("Scanning dates… {}/{}", p.done, p.total));
-            } else {
-                let errors = p.errors.len();
-                let mut detail = format!(
-                    "Importing… {}/{} processed, {} new, {} skipped",
-                    p.done, p.total, p.imported, p.skipped_duplicates
-                );
-                if errors > 0 {
-                    detail.push_str(&format!(", {errors} error(s)"));
-                }
-                ui.label(detail);
+            ui.label(text);
+            let stopping = state
+                .library
+                .collection_task
+                .as_ref()
+                .is_some_and(|task| task.stopping);
+            if ui
+                .add_enabled(!stopping, egui::Button::new("Stop"))
+                .on_hover_text("Stop after the current photo; what is already done is kept")
+                .clicked()
+            {
+                state.stop_collection_change();
+            }
+        }
+
+        // Import progress. Concurrent imports share this one line — the
+        // toolbar is a single row, and a line that took turns between them
+        // read as numbers jumping about — with the per-import detail on hover.
+        if let Some(text) = state.library.import_status_text() {
+            ui.separator();
+            ui.spinner();
+            let label = ui.label(text);
+            if state.library.imports.len() > 1 {
+                label.on_hover_text(state.library.import_detail_lines().join("\n"));
             }
         }
 
@@ -320,13 +334,13 @@ fn error_banner_ui(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
         if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
             state.library.last_error = None;
-            state.library.busy_library = None;
+            state.library.retry_library = None;
         }
         ui.colored_label(
             egui::Color32::from_rgb(255, 140, 140),
             format!("⚠ {}", error),
         );
-        if let Some(path) = state.library.busy_library.clone()
+        if let Some(path) = state.library.retry_library.clone()
             && ui
                 .small_button("Retry")
                 .on_hover_text(format!("Try opening {} again", path.display()))
@@ -739,9 +753,13 @@ fn collection_dialogs(ctx: &egui::Context, state: &mut AppState) {
 /// in it and the cursor back in the field, rather than making the user start
 /// again.
 fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
-    let (title, action, photo_count) = match &state.library.collection_prompt {
-        Some(CollectionPrompt::New { photos, .. }) => ("New Collection", "Create", photos.len()),
-        Some(CollectionPrompt::Rename { .. }) => ("Rename Collection", "Rename", 0),
+    let (title, action, photo_count, change) = match &state.library.collection_prompt {
+        Some(CollectionPrompt::New { photos, change, .. }) => {
+            ("New Collection", "Create", photos.len(), *change)
+        }
+        Some(CollectionPrompt::Rename { .. }) => {
+            ("Rename Collection", "Rename", 0, MembershipChange::Add)
+        }
         _ => return,
     };
 
@@ -781,7 +799,13 @@ fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
 
             if photo_count > 0 {
                 let noun = if photo_count == 1 { "photo" } else { "photos" };
-                ui.weak(format!("{photo_count} selected {noun} will be added."));
+                // A move empties the photos' other collections, which is not
+                // something to discover afterwards.
+                let fate = match change {
+                    MembershipChange::Move => "will be moved here out of every other collection",
+                    _ => "will be added",
+                };
+                ui.weak(format!("{photo_count} selected {noun} {fate}."));
             }
             if let Some(error) = error {
                 ui.colored_label(egui::Color32::from_rgb(255, 140, 140), error);
@@ -809,9 +833,17 @@ fn collection_name_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
 
     let (result, mut prompt) = match state.library.collection_prompt.take() {
-        Some(CollectionPrompt::New { entry, photos }) => (
-            state.library.create_collection(&entry.name, &photos),
-            CollectionPrompt::New { entry, photos },
+        Some(CollectionPrompt::New {
+            entry,
+            photos,
+            change,
+        }) => (
+            state.create_collection(&entry.name, photos.clone(), change),
+            CollectionPrompt::New {
+                entry,
+                photos,
+                change,
+            },
         ),
         Some(CollectionPrompt::Rename { id, entry }) => (
             state.library.rename_collection(id, &entry.name),
@@ -996,8 +1028,10 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 .on_hover_text("Create an empty collection")
                 .clicked()
             {
-                state.library.collection_prompt =
-                    Some(CollectionPrompt::new_collection(Vec::new()));
+                state.library.collection_prompt = Some(CollectionPrompt::new_collection(
+                    Vec::new(),
+                    MembershipChange::Add,
+                ));
             }
         });
         collections_ui(ui, state);
@@ -2033,6 +2067,9 @@ fn thumb_cell(
 /// because with the marks in front of the names it is also the answer to
 /// "which collections is this photo in?".
 fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
+    // One membership change at a time: a second would fight the first over the
+    // same `.rlab` files, and the entry would only be ignored anyway.
+    let idle = !state.collection_running();
     ui.menu_button("Collections", |ui| {
         for coll in state.library.collections.clone() {
             let membership = state.library.selection_membership(coll.id);
@@ -2044,14 +2081,14 @@ fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
                 Membership::None => (" ", format!("Add these {selection} photos")),
             };
             if ui
-                .button(format!("{mark}  {}", coll.name))
+                .add_enabled(idle, egui::Button::new(format!("{mark}  {}", coll.name)))
                 .on_hover_text(hover)
                 .clicked()
             {
                 if membership == Membership::All {
-                    state.library.remove_selected_from_collection(coll.id);
+                    state.remove_selected_from_collection(coll.id);
                 } else {
-                    state.library.add_selected_to_collection(coll.id);
+                    state.add_selected_to_collection(coll.id);
                 }
                 ui.close();
             }
@@ -2060,9 +2097,69 @@ fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
         if !state.library.collections.is_empty() {
             ui.separator();
         }
-        if ui.button("New Collection…").clicked() {
+        if ui
+            .add_enabled(idle, egui::Button::new("New Collection…"))
+            .clicked()
+        {
             let photos = state.library.selected.clone();
-            state.library.collection_prompt = Some(CollectionPrompt::new_collection(photos));
+            state.library.collection_prompt = Some(CollectionPrompt::new_collection(
+                photos,
+                MembershipChange::Add,
+            ));
+            ui.close();
+        }
+        move_to_menu(ui, state, selection, idle);
+    });
+}
+
+/// The "Move to" submenu inside Collections: file the selection somewhere and
+/// out of everywhere else.
+///
+/// Its own list rather than a modifier on the rows above, because the rows say
+/// what a collection already holds and a move is about the ones it doesn't.
+/// Worth the extra menu: rehoming a selection with add-then-remove rewrites
+/// every `.rlab` twice, which on a few hundred RAWs is minutes of writing
+/// rather than one pass.
+fn move_to_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize, idle: bool) {
+    let photos = if selection == 1 {
+        "this photo".to_owned()
+    } else {
+        format!("these {selection} photos")
+    };
+    ui.menu_button("Move to", |ui| {
+        for coll in state.library.collections.clone() {
+            // A collection that already holds the whole selection can still be
+            // moved to: the photos may be in others as well, and that is what
+            // the move is for.
+            if ui
+                .add_enabled(idle, egui::Button::new(coll.name.clone()))
+                .on_hover_text(format!(
+                    "Put {photos} in “{}” and take them out of every other collection",
+                    coll.name
+                ))
+                .clicked()
+            {
+                state.move_selected_to_collection(coll.id);
+                ui.close();
+            }
+        }
+
+        if !state.library.collections.is_empty() {
+            ui.separator();
+        }
+        if ui
+            .add_enabled(idle, egui::Button::new("New Collection…"))
+            .on_hover_text(format!(
+                "Make a collection holding {photos} and nothing else, and take them out of the \
+                 collections they are in now"
+            ))
+            .clicked()
+        {
+            let photos = state.library.selected.clone();
+            state.library.collection_prompt = Some(CollectionPrompt::new_collection(
+                photos,
+                MembershipChange::Move,
+            ));
             ui.close();
         }
     });

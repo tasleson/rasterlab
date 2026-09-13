@@ -36,7 +36,7 @@ RasterLab began as a one-month AI-assisted development experiment and has contin
 | Recognized RAW extensions | `3fr`, `arw`, `cr2`, `cr3`, `dng`, `erf`, `iiq`, `nef`, `nrw`, `orf`, `pef`, `raf`, `raw`, `rw2`, `sr2`, `srf`, `srw` |
 | Rendered export | JPEG and PNG |
 | Native project | `.rlab` |
-| Library export | Rendered JPEG/PNG or the verbatim imported original |
+| Library export | Rendered JPEG/PNG, the verbatim imported original, or the `.rlab` project |
 
 RAW files are decoded to an editable sRGB image. RasterLab retains the original file bytes in a saved `.rlab` project or managed library item; it does not write changes back into a RAW file.
 
@@ -104,7 +104,7 @@ RasterLab uses several independent mechanisms because no single checksum, undo s
 ### Non-destructive editing and recovery from user mistakes
 
 - Editing operations are stored as parameters in a pipeline; the source pixels are not overwritten.
-- A `.rlab` file embeds the original source-file bytes verbatim, plus every virtual copy's pipeline and undo cursor. Library export can write those original bytes back out with the original filename and recorded timestamps.
+- A `.rlab` file embeds the original source-file bytes verbatim, plus every virtual copy's pipeline and undo cursor. Library export can write those original bytes back out with the original filename and recorded timestamps, or copy out the whole `.rlab` — edits included — named after the imported file rather than its content hash.
 - Undo/redo, operation enable/disable controls, editable stack entries, and virtual copies make edits reversible without duplicating the source image.
 - Pipeline state is autosaved after changes. Previous unsaved sessions can be restored from **File > Previously Unsaved Work**.
 - Opening another file or library photo while edits are unsaved requires confirmation.
@@ -171,11 +171,11 @@ Current library features include:
 - File or recursive folder import, duplicate detection, RAW+JPEG pairing, and 512 px thumbnails.
 - Import-session grouping; folder imports use capture dates, with filesystem timestamps as fallback, to rebuild a useful historical timeline. Consecutive shooting days merge into one session, except that a day of more than 100 photos is kept as a session of its own. A **Recent Imports** list in the sidebar shows the last 10 sessions in the order they were imported, so a folder of old photographs is one click away instead of buried under its capture date.
 - Ratings, pick/reject flags, color labels, captions, keywords, and batch metadata edits.
-- Collections: create one from the sidebar, then right-click a selection in the grid and use **Collections** to put photos in or take them out. Right-clicking a collection in the sidebar renames or deletes it, and selecting a photo lists the collections it belongs to. Ctrl-click and shift-click mark several collections in the sidebar the way they select several photos in the grid, so a batch of them can be deleted in one confirmation, which runs in the background like the Recently Deleted operations. A photo can be in as many collections as you like, and each membership is stored in that photo's own `.rlab`, so it survives an index rebuild. Deleting a collection leaves its photos alone. Files record a collection's identity rather than its name, so renaming one is instant however many photos are in it; the name each file carries is only a fallback for rebuilding an index that has been lost outright, and may be a rename behind.
+- Collections: create one from the sidebar, then right-click a selection in the grid and use **Collections** to put photos in or take them out. **Collections › Move to** files the selection into one collection and out of every other one it is in, which re-homes a batch in a single pass over the files instead of the two an add and a remove would take. Right-clicking a collection in the sidebar renames or deletes it, and selecting a photo lists the collections it belongs to. Ctrl-click and shift-click mark several collections in the sidebar the way they select several photos in the grid, so a batch of them can be deleted in one confirmation, which runs in the background like the Recently Deleted operations. A photo can be in as many collections as you like, and each membership is stored in that photo's own `.rlab`, so it survives an index rebuild. Deleting a collection leaves its photos alone. Files record a collection's identity rather than its name, so renaming one is instant however many photos are in it; the name each file carries is only a fallback for rebuilding an index that has been lost outright, and may be a rename behind.
 - Import-time collections: choosing **File > Import Photos > Select Folder…** asks, before the import starts, whether the photos should be filed into a collection — one per folder, named after the folder that directly holds them, or a single collection you name for the whole import. A collection that already goes by that name is used as it is, so importing the same folder again adds only what is new. The choice is remembered between imports.
 - Filtering by text, rating, flag, color label, camera, lens, capture date, aperture, shutter speed, ISO, pixel dimensions, and edited state.
 - Sorting by import date, capture date, rating, or filename.
-- Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals.
+- Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals or of the `.rlab` projects themselves.
 - Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
 - Index rebuilding, integrity scrubbing, protected-photo deletion guards, and a library-owned Recently Deleted area that works consistently on local and network filesystems.
 
@@ -236,8 +236,8 @@ cargo run --release -p rasterlab-cli -- info photo.jpg
 
 ### Libraries
 
-Creating a library, importing into it, rebuilding its index and scrubbing its
-files are all CLI commands, so a library on a headless machine can be filled
+Creating a library, importing into it, rebuilding its index, scrubbing its
+files and comparing two of them are all CLI commands, so a library on a headless machine can be filled
 and maintained over ssh or from cron rather than being mounted on a desktop
 first. They all take the library root and stop cleanly on Ctrl-C after the file
 they are on; a second Ctrl-C quits immediately, which is safe because every
@@ -263,6 +263,9 @@ rasterlab library rebuild /srv/photos
 
 # Verify every file and repair what its parity can recover
 rasterlab library scrub /srv/photos --quiet
+
+# Check that two libraries hold the same photos, filed the same way
+rasterlab library compare /srv/photos-before /srv/photos-after
 ```
 
 An import groups what it brings in into back-dated sessions by capture date,
@@ -272,6 +275,16 @@ in the library are skipped by content hash, which makes re-running an import
 over the same source cheap — and is why an interrupted import is finished by
 simply running it again. `--create` makes the library as part of the import for
 the first run.
+
+`compare` answers "did that change alter what ends up in the library?" — import
+the same sources with the old code and with the new, then compare the two
+libraries. Ids, uuids and import timestamps are minted per run and are never
+compared; the photographs, every `LMTA` field, the virtual-copy edit stacks,
+the thumbnails, and the collections and import sessions photos are filed in all
+are, in the index as well as in the files. It exits non-zero when the libraries
+differ, listing each difference as the field that disagrees and the two values.
+`--index-only` compares the rows alone, which is much faster on a large or
+network-mounted library but sees nothing of what was written into each file.
 
 Every command exits non-zero if any file failed, so a scheduled scrub is worth
 running under a job that reports failures. Uncorrectable corruption is listed
