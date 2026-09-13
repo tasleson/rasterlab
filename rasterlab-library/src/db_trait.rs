@@ -222,6 +222,14 @@ pub trait LibraryDb: Send + Sync {
     /// cancelled, crashed, or run twice still leave a correct count behind.
     fn session_photo_count(&self, session_id: &str) -> anyhow::Result<i64>;
 
+    /// Every photo in the library that is not in Recently Deleted.
+    ///
+    /// Counted from the `photos` rows rather than summed over the sessions'
+    /// cached `photo_count`, which is only brought up to date when an import
+    /// finishes a session: mid-import that sum stands still while photos are
+    /// visibly landing in the grid.
+    fn active_photo_count(&self) -> anyhow::Result<i64>;
+
     /// Drop sessions no photo belongs to, returning how many went.  Empty
     /// sessions are what an interrupted import or a deleted batch leaves.
     fn delete_empty_sessions(&self) -> anyhow::Result<usize>;

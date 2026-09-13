@@ -698,6 +698,11 @@ impl Library {
 
     // ── Sessions ──────────────────────────────────────────────────────────
 
+    /// How many photos the library holds outside Recently Deleted.
+    pub fn photo_count(&self) -> Result<i64> {
+        self.db.active_photo_count()
+    }
+
     pub fn all_sessions(&self) -> Result<Vec<ImportSessionRow>> {
         self.db.all_sessions()
     }

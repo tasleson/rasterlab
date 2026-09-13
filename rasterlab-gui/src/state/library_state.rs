@@ -871,11 +871,12 @@ impl LibraryState {
                 .or_default()
                 .insert(photo);
         }
-        self.all_photo_count = self
-            .sessions
-            .iter()
-            .map(|session| session.photo_count.max(0) as usize)
-            .sum();
+        // Straight from the photo rows. Summing the sessions' cached counts
+        // left this frozen through an import — those are only written when a
+        // session finishes — while the grid beside it filled up.
+        if let Ok(count) = lib.photo_count() {
+            self.all_photo_count = count.max(0) as usize;
+        }
     }
 
     /// Human-readable one-liner for a running index rebuild, or `None` when

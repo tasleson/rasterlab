@@ -723,6 +723,12 @@ impl LibraryDb for StoolapDb {
             .context("count session photos")
     }
 
+    fn active_photo_count(&self) -> Result<i64> {
+        self.db
+            .query_one("SELECT COUNT(*) FROM photos WHERE deleted_at = 0", ())
+            .context("count active photos")
+    }
+
     fn delete_empty_sessions(&self) -> Result<usize> {
         // Counted per session rather than with a `NOT IN` subquery: sessions
         // number in the hundreds at most, and an anti-join against a column
@@ -1508,6 +1514,40 @@ mod tests {
         assert_eq!(db.session_photo_count("s1").unwrap(), 1);
         assert_eq!(db.all_sessions().unwrap()[0].photo_count, 1);
         assert_eq!(db.session_photo_count("nonexistent").unwrap(), 0);
+    }
+
+    #[test]
+    fn active_photo_count_counts_rows_not_cached_session_totals() {
+        let db = db();
+        db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
+            .unwrap();
+        db.insert_session("s2", "Jun 4 2025", 1_600_086_400, None)
+            .unwrap();
+        assert_eq!(db.active_photo_count().unwrap(), 0);
+
+        let id = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        db.insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s2")))
+            .unwrap();
+        // Neither session's cached count has been written yet — which is
+        // exactly the mid-import state the sidebar used to under-report.
+        assert_eq!(
+            db.all_sessions()
+                .unwrap()
+                .iter()
+                .map(|s| s.photo_count)
+                .sum::<i64>(),
+            0
+        );
+        assert_eq!(db.active_photo_count().unwrap(), 2);
+
+        db.mark_photo_deleted(id, 1_600_000_100).unwrap();
+        assert_eq!(
+            db.active_photo_count().unwrap(),
+            1,
+            "Recently Deleted is not part of All Photos"
+        );
     }
 
     #[test]
