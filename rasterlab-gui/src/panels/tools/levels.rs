@@ -5,6 +5,7 @@ use rasterlab_core::ops::{HistogramData, LevelsOp};
 use rasterlab_core::traits::operation::Operation;
 
 use super::tool_trait::{Tool, ToolAction, ToolUiCtx};
+use crate::panels::histogram_panel::interior_peak;
 use crate::state::EditingTool;
 
 pub struct LevelsTool {
@@ -179,15 +180,14 @@ fn draw_combined_histogram(
         return;
     };
 
-    let peak = hist
-        .red
-        .iter()
-        .chain(hist.green.iter())
-        .chain(hist.blue.iter())
-        .chain(hist.luma.iter())
-        .copied()
-        .max()
-        .unwrap_or(1)
+    // Share one scale across the channels so their relative heights stay
+    // comparable, but take it from the interior buckets only: clamping the
+    // black or white point piles the clipped pixels into bucket 0 or 255, and
+    // scaling to that spike flattens the rest of the chart.
+    let peak = interior_peak(&hist.red)
+        .max(interior_peak(&hist.green))
+        .max(interior_peak(&hist.blue))
+        .max(interior_peak(&hist.luma))
         .max(1) as f32;
 
     let bar_w = (width / 256.0).max(1.0);
@@ -213,7 +213,7 @@ fn draw_combined_histogram(
             if count == 0 {
                 continue;
             }
-            let bar_h = (count as f32 / peak) * HEIGHT;
+            let bar_h = ((count as f32 / peak) * HEIGHT).min(HEIGHT);
             let x = rect.left() + i as f32 * bar_w;
             painter.rect_filled(
                 Rect::from_min_size(
