@@ -86,7 +86,8 @@ pub use db_trait::{
 };
 pub use import::{ImportCollection, ImportSession, MONTH_NAMES, ymd_from_unix};
 pub use library::{
-    BulkOutcome, BulkProgress, ImportProgress, Library, LibraryBusy, NotALibrary, is_library_root,
+    BulkOutcome, BulkProgress, ImportProgress, Library, LibraryBusy, MembershipChange, NotALibrary,
+    is_library_root,
 };
 pub use rasterlab_core::library_meta::{CollectionRef, LibraryExif, LibraryMeta};
 pub use reconstruct::{RebuildOutcome, RebuildProgress};

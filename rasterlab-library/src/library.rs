@@ -127,6 +127,22 @@ pub struct BulkOutcome {
     pub cancelled: bool,
 }
 
+/// What a collection-membership change does to each photo it touches.
+///
+/// [`MembershipChange::Move`] exists because filing a selection somewhere else
+/// used to be two runs — remove, then add — and each of them rewrites every
+/// `.rlab` in full.  Doing it in one pass halves the writes, and leaves no
+/// window in which the photos belong to nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipChange {
+    /// Join the collection, keeping any others the photo is already in.
+    Add,
+    /// Leave the collection, keeping any others.
+    Remove,
+    /// Join the collection and leave every other one.
+    Move,
+}
+
 /// What became of one item inside a bulk operation.
 ///
 /// A failure is a value rather than an `Err` because none of these is fatal to
@@ -837,11 +853,11 @@ impl Library {
         let outcome = self.change_collection_membership(
             collection_id,
             photo_ids,
-            true,
+            MembershipChange::Add,
             idle_cancel(),
             |_| {},
         )?;
-        membership_result(true, &outcome)
+        membership_result(MembershipChange::Add, &outcome)
     }
 
     /// Mirror of [`Library::add_to_collection`]: the `.rlab` files lose the
@@ -854,11 +870,28 @@ impl Library {
         let outcome = self.change_collection_membership(
             collection_id,
             photo_ids,
-            false,
+            MembershipChange::Remove,
             idle_cancel(),
             |_| {},
         )?;
-        membership_result(false, &outcome)
+        membership_result(MembershipChange::Remove, &outcome)
+    }
+
+    /// Put photos in a collection and take them out of every other one, at the
+    /// cost of a single rewrite per photo.
+    pub fn move_to_collection(
+        &self,
+        collection_id: CollectionId,
+        photo_ids: &[PhotoId],
+    ) -> Result<()> {
+        let outcome = self.change_collection_membership(
+            collection_id,
+            photo_ids,
+            MembershipChange::Move,
+            idle_cancel(),
+            |_| {},
+        )?;
+        membership_result(MembershipChange::Move, &outcome)
     }
 
     /// Body of both directions: rewrite every `.rlab` first, then apply the
@@ -879,7 +912,7 @@ impl Library {
         &self,
         collection_id: CollectionId,
         photo_ids: &[PhotoId],
-        member: bool,
+        change: MembershipChange,
         cancel: Arc<AtomicBool>,
         progress_cb: impl Fn(BulkProgress),
     ) -> Result<BulkOutcome> {
@@ -915,7 +948,7 @@ impl Library {
             let Some(row) = index.get(&id) else {
                 return Step::missing(id, "in the library index");
             };
-            match self.set_collection_in_file(&row.hash, collection, &collections, member) {
+            match self.set_collection_in_file(&row.hash, collection, &collections, change) {
                 Ok(()) => {
                     written.push(id);
                     Step::Done
@@ -924,10 +957,39 @@ impl Library {
             }
         });
 
-        if member {
-            self.db.add_to_collection(collection_id, &written)?;
-        } else {
-            self.db.remove_from_collection(collection_id, &written)?;
+        match change {
+            MembershipChange::Add => self.db.add_to_collection(collection_id, &written)?,
+            MembershipChange::Remove => self.db.remove_from_collection(collection_id, &written)?,
+            MembershipChange::Move => {
+                // The files already say the photos are only in the target, so
+                // the index has to agree everywhere, not just here — and that
+                // is one index write per collection involved rather than the
+                // single one the other two modes get away with.
+                //
+                // The target is written first so that a write that fails
+                // partway leaves the photos in more collections than they
+                // should be in rather than in none at all: the first is a
+                // stale row a rebuild clears up, the second hides the photos
+                // from the collection the user just filed them into.
+                self.db.add_to_collection(collection_id, &written)?;
+                // Each of the other collections is asked who it holds rather
+                // than reading every membership pair at once: a pair read
+                // leaves out photos waiting in Recently Deleted, whose files
+                // were rewritten too, and whose stale rows would come back
+                // with them on a restore.
+                let moved: HashSet<PhotoId> = written.iter().copied().collect();
+                for row in collections.iter().filter(|row| row.id != collection_id) {
+                    let leaving: Vec<PhotoId> = self
+                        .db
+                        .collection_member_ids(row.id)?
+                        .into_iter()
+                        .filter(|id| moved.contains(id))
+                        .collect();
+                    if !leaving.is_empty() {
+                        self.db.remove_from_collection(row.id, &leaving)?;
+                    }
+                }
+            }
         }
         Ok(outcome)
     }
@@ -1144,7 +1206,7 @@ impl Library {
         hash: &str,
         collection: &CollectionRow,
         all: &[CollectionRow],
-        member: bool,
+        change: MembershipChange,
     ) -> Result<()> {
         // The guard has to be held across resolving the path and the existence
         // check as well as the rewrite. Checking first lets a delete move the
@@ -1167,17 +1229,32 @@ impl Library {
             .collection_refs
             .iter()
             .any(|held| held.id == collection.uuid);
-        if listed == member && !migrated {
+        let already = match change {
+            MembershipChange::Add => listed,
+            MembershipChange::Remove => !listed,
+            MembershipChange::Move => {
+                listed && lmta.collection_refs.len() == 1 && lmta.legacy_collections.is_empty()
+            }
+        };
+        if already && !migrated {
             return Ok(());
         }
-        if member {
-            lmta.collection_refs.push(CollectionRef {
-                id: collection.uuid.clone(),
-                name: collection.name.clone(),
-            });
-        } else {
-            lmta.collection_refs
-                .retain(|held| held.id != collection.uuid);
+        let reference = CollectionRef {
+            id: collection.uuid.clone(),
+            name: collection.name.clone(),
+        };
+        match change {
+            MembershipChange::Add => lmta.collection_refs.push(reference),
+            MembershipChange::Remove => lmta
+                .collection_refs
+                .retain(|held| held.id != collection.uuid),
+            MembershipChange::Move => {
+                lmta.collection_refs = vec![reference];
+                // Pre-uuid memberships the index has never heard of go too: a
+                // move says the photo belongs here and nowhere else, and a
+                // rebuild reading them would put it back where it was.
+                lmta.legacy_collections.clear();
+            }
         }
         rlab.meta = rlab.meta.touch();
         rlab.write_v5(&rlab_path)?;
@@ -1295,11 +1372,11 @@ fn bulk_op<T: Copy>(
 /// entry points promise, on the same terms as [`report_partial`]: the index has
 /// already been brought in line with the files that were written, and what is
 /// reported is what did not get that far.
-fn membership_result(member: bool, outcome: &BulkOutcome) -> Result<()> {
-    let what = if member {
-        "add to collection"
-    } else {
-        "remove from collection"
+fn membership_result(change: MembershipChange, outcome: &BulkOutcome) -> Result<()> {
+    let what = match change {
+        MembershipChange::Add => "add to collection",
+        MembershipChange::Remove => "remove from collection",
+        MembershipChange::Move => "move to collection",
     };
     if let Some((photo, error)) = outcome.errors.first() {
         bail!(
