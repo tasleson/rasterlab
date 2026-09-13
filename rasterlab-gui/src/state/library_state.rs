@@ -6,9 +6,9 @@ use std::{
 };
 
 use rasterlab_library::{
-    CollectionId, CollectionRow, DeleteProgress, ImportCollection, ImportProgress,
-    ImportSessionRow, Library, LibraryBusy, LibraryMeta, NotALibrary, PhotoId, PhotoRow,
-    RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
+    BulkProgress, CollectionId, CollectionRow, ImportCollection, ImportProgress, ImportSessionRow,
+    Library, LibraryBusy, LibraryMeta, NotALibrary, PhotoId, PhotoRow, RebuildProgress,
+    ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
 };
 use serde::{Deserialize, Serialize};
 
@@ -82,7 +82,7 @@ impl DeleteKind {
 /// these report progress and take an answer of "stop" instead.
 pub struct DeleteTask {
     pub kind: DeleteKind,
-    pub progress: DeleteProgress,
+    pub progress: BulkProgress,
     /// True once the user has asked it to stop, until the worker reports back.
     pub stopping: bool,
 }

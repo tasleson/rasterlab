@@ -83,29 +83,35 @@ pub struct ImportProgress {
     pub scanning: bool,
 }
 
-/// Progress of a running bulk operation on the Recently Deleted area.
+/// Progress of a running bulk operation over a list of photos.
+///
+/// Shared by the Recently Deleted operations and by collection membership
+/// changes: both walk a selection a file at a time, and both report the same
+/// way.
 #[derive(Debug, Clone, Default)]
-pub struct DeleteProgress {
+pub struct BulkProgress {
     pub total: usize,
     /// Photos attempted so far.
     pub done: usize,
     /// Names of photos left where they are because they are protected.
+    /// Only the delete operations honour protection.
     pub protected: Vec<String>,
     /// Per-photo `(name, message)` failures so far.
     pub errors: Vec<(String, String)>,
 }
 
-/// Final tally of a bulk operation on the Recently Deleted area.
+/// Final tally of a bulk operation over a list of photos.
 ///
 /// Every photo is attempted, so a run that hits trouble reports what it did
 /// manage alongside what it could not: one missing file in a selection of five
 /// hundred should not decide the fate of the other four hundred and ninety
 /// nine.
 #[derive(Debug, Clone, Default)]
-pub struct DeleteOutcome {
-    /// Photos moved, restored, or erased.
+pub struct BulkOutcome {
+    /// Photos moved, restored, erased, or filed into a collection.
     pub done: usize,
-    /// Names of photos left alone because they are protected.
+    /// Names of photos left alone because they are protected.  Only the
+    /// delete operations honour protection.
     pub protected: Vec<String>,
     /// Per-photo `(name, message)` failures.
     ///
@@ -114,7 +120,8 @@ pub struct DeleteOutcome {
     /// their photographs did not move.
     pub errors: Vec<(String, String)>,
     /// Content hashes whose files and thumbnails are now gone for good, so a
-    /// caller holding cached thumbnails knows which of them to drop.
+    /// caller holding cached thumbnails knows which of them to drop.  Only a
+    /// permanent delete fills this in.
     pub purged: Vec<String>,
     /// True when the run stopped early because `cancel` was raised.
     pub cancelled: bool,
@@ -125,7 +132,7 @@ pub struct DeleteOutcome {
 /// A failure is a value rather than an `Err` because none of these is fatal to
 /// the run: the loop records it and carries on to the next item.
 enum Step {
-    /// The item was moved, restored, or erased as asked.
+    /// The item was moved, restored, erased, or rewritten as asked.
     Done,
     /// It is protected, so it was left where it is.
     Protected(String),
@@ -417,8 +424,8 @@ impl Library {
         &self,
         photos: &[PhotoId],
         cancel: Arc<AtomicBool>,
-        progress_cb: impl Fn(DeleteProgress),
-    ) -> Result<DeleteOutcome> {
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         let index = photo_index(self.db.all_photos(SortOrder::default())?);
         Ok(bulk_op(photos, &cancel, progress_cb, |id| {
             let Some(row) = index.get(&id) else {
@@ -468,8 +475,8 @@ impl Library {
         &self,
         photos: &[PhotoId],
         cancel: Arc<AtomicBool>,
-        progress_cb: impl Fn(DeleteProgress),
-    ) -> Result<DeleteOutcome> {
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         let index = photo_index(self.deleted_rows()?);
         Ok(bulk_op(photos, &cancel, progress_cb, |id| {
             let Some(row) = index.get(&id) else {
@@ -497,8 +504,8 @@ impl Library {
         &self,
         photos: Option<&[PhotoId]>,
         cancel: Arc<AtomicBool>,
-        progress_cb: impl Fn(DeleteProgress),
-    ) -> Result<DeleteOutcome> {
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         let rows = self.deleted_rows()?;
         let everything: Vec<PhotoId> = rows.iter().map(|row| row.id).collect();
         let index = photo_index(rows);
@@ -778,8 +785,8 @@ impl Library {
         &self,
         ids: &[CollectionId],
         cancel: Arc<AtomicBool>,
-        progress_cb: impl Fn(DeleteProgress),
-    ) -> Result<DeleteOutcome> {
+        progress_cb: impl Fn(BulkProgress),
+    ) -> Result<BulkOutcome> {
         // Named up front: once a collection is deleted the index can no longer
         // say what it was called, and an id is no use in an error message.
         let names: HashMap<CollectionId, String> = self
@@ -1218,10 +1225,10 @@ fn photo_index(rows: Vec<PhotoRow>) -> HashMap<PhotoId, PhotoRow> {
 fn bulk_op<T: Copy>(
     items: &[T],
     cancel: &AtomicBool,
-    progress_cb: impl Fn(DeleteProgress),
+    progress_cb: impl Fn(BulkProgress),
     mut step: impl FnMut(T) -> Step,
-) -> DeleteOutcome {
-    let mut progress = DeleteProgress {
+) -> BulkOutcome {
+    let mut progress = BulkProgress {
         total: items.len(),
         ..Default::default()
     };
@@ -1246,7 +1253,7 @@ fn bulk_op<T: Copy>(
     }
     progress_cb(progress.clone());
 
-    DeleteOutcome {
+    BulkOutcome {
         done,
         protected: progress.protected,
         errors: progress.errors,
@@ -1257,7 +1264,7 @@ fn bulk_op<T: Copy>(
 
 /// Reduce a one-photo bulk run to the plain success-or-failure the
 /// single-photo entry points promise.
-fn single_photo_result(outcome: &DeleteOutcome) -> Result<()> {
+fn single_photo_result(outcome: &BulkOutcome) -> Result<()> {
     if let Some(name) = outcome.protected.first() {
         bail!("\"{name}\" is protected and cannot be deleted");
     }

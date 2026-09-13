@@ -114,10 +114,10 @@ enum BgMessage {
         result: Result<Vec<u8>, String>,
     },
     /// Progress update from a running bulk Recently Deleted operation.
-    DeleteProgress(rasterlab_library::DeleteProgress),
+    DeleteProgress(rasterlab_library::BulkProgress),
     /// A bulk Recently Deleted operation finished (completed or stopped).
     DeleteComplete {
-        outcome: rasterlab_library::DeleteOutcome,
+        outcome: rasterlab_library::BulkOutcome,
     },
     /// The delete worker gave up, panicked, or never started. Terminal, so the
     /// cancellation handle that gates the delete buttons has to be released.

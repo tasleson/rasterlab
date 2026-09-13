@@ -476,7 +476,7 @@ impl AppState {
         self.delete_cancel = Some(cancel.clone());
         self.library.delete_task = Some(DeleteTask {
             kind,
-            progress: rasterlab_library::DeleteProgress {
+            progress: rasterlab_library::BulkProgress {
                 total,
                 ..Default::default()
             },
@@ -494,7 +494,7 @@ impl AppState {
             self.ctx.clone(),
             BgMessage::DeleteFailed,
             move || {
-                let report = move |p: rasterlab_library::DeleteProgress| {
+                let report = move |p: rasterlab_library::BulkProgress| {
                     let _ = progress_tx.send(BgMessage::DeleteProgress(p));
                     progress_ctx.request_repaint();
                 };
@@ -517,7 +517,7 @@ impl AppState {
         );
     }
 
-    pub(super) fn on_delete_progress(&mut self, progress: rasterlab_library::DeleteProgress) {
+    pub(super) fn on_delete_progress(&mut self, progress: rasterlab_library::BulkProgress) {
         // Mirror the running error list so the "⚠ N delete error(s)" button and
         // its detail window work mid-run, not only once the whole run completes.
         self.library.last_delete_errors = progress.errors.clone();
@@ -526,7 +526,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn on_delete_complete(&mut self, outcome: rasterlab_library::DeleteOutcome) {
+    pub(super) fn on_delete_complete(&mut self, outcome: rasterlab_library::BulkOutcome) {
         let kind = self.finish_delete_task();
         // Permanently erased photos will never be shown again, so their
         // thumbnails are dead weight in the texture cache.
