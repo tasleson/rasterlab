@@ -29,6 +29,7 @@ pub struct GpuContext {
     pub(crate) sharpen: Arc<SharpenKernel>,
     pub(crate) faux_hdr: Arc<FauxHdrKernel>,
     pub(crate) clarity_texture: Arc<ClarityTextureKernel>,
+    pub(crate) intensify_hdr: Arc<IntensifyHdrKernel>,
 }
 
 impl GpuContext {
@@ -55,6 +56,7 @@ impl GpuContext {
         let sharpen = Arc::new(SharpenKernel::new(&device));
         let faux_hdr = Arc::new(FauxHdrKernel::new(&device));
         let clarity_texture = Arc::new(ClarityTextureKernel::new(&device));
+        let intensify_hdr = Arc::new(IntensifyHdrKernel::new(&device));
         Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
@@ -81,6 +83,7 @@ impl GpuContext {
             sharpen,
             faux_hdr,
             clarity_texture,
+            intensify_hdr,
         }
     }
 

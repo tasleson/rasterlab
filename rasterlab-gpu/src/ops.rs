@@ -4,8 +4,8 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, BwMode, ClarityTextureOp, ColorBalanceOp,
         ColorSpaceConversion, ColorSpaceOp, CurvesOp, DenoiseOp, FauxHdrOp, HighlightsShadowsOp,
-        HslPanelOp, HueShiftOp, LevelsOp, NoiseReductionOp, NrMethod, SaturationOp, SepiaOp,
-        ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        HslPanelOp, HueShiftOp, IntensifyHdrOp, LevelsOp, NoiseReductionOp, NrMethod, SaturationOp,
+        SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::operation::Operation,
 };
@@ -23,7 +23,7 @@ use crate::{
 /// dispatch test asserts it against its sample op per variant, so every new
 /// kernel gets checked for an `Operation::as_any` override.
 #[cfg(test)]
-pub(crate) const SUPPORTED_GPU_OP_COUNT: usize = 22;
+pub(crate) const SUPPORTED_GPU_OP_COUNT: usize = 23;
 
 enum SupportedGpuOp<'a> {
     BrightnessContrast(&'a BrightnessContrastOp),
@@ -48,6 +48,7 @@ enum SupportedGpuOp<'a> {
     Sharpen(&'a SharpenOp),
     FauxHdr(&'a FauxHdrOp),
     ClarityTexture(&'a ClarityTextureOp),
+    IntensifyHdr(&'a IntensifyHdrOp),
 }
 
 fn classify(op: &dyn Operation) -> Option<SupportedGpuOp<'_>> {
@@ -98,9 +99,11 @@ fn classify(op: &dyn Operation) -> Option<SupportedGpuOp<'_>> {
         Some(SupportedGpuOp::Sharpen(op))
     } else if let Some(op) = any.downcast_ref::<FauxHdrOp>() {
         Some(SupportedGpuOp::FauxHdr(op))
+    } else if let Some(op) = any.downcast_ref::<ClarityTextureOp>() {
+        Some(SupportedGpuOp::ClarityTexture(op))
     } else {
-        any.downcast_ref::<ClarityTextureOp>()
-            .map(SupportedGpuOp::ClarityTexture)
+        any.downcast_ref::<IntensifyHdrOp>()
+            .map(SupportedGpuOp::IntensifyHdr)
     }
 }
 
@@ -136,6 +139,7 @@ pub fn apply_one(
         Some(SupportedGpuOp::Sharpen(op)) => apply_sharpen(ctx, op, image),
         Some(SupportedGpuOp::FauxHdr(op)) => apply_faux_hdr(ctx, op, image),
         Some(SupportedGpuOp::ClarityTexture(op)) => apply_clarity_texture(ctx, op, image),
+        Some(SupportedGpuOp::IntensifyHdr(op)) => apply_intensify_hdr(ctx, op, image),
         None => Err(GpuError::UnsupportedOperation(op.name())),
     }
 }
@@ -1581,17 +1585,22 @@ struct LumaScratch<'a> {
 /// the result in the wrong buffer of the ping-pong.
 const BOX_BLUR_PASSES: usize = 3;
 
-fn encode_unsharp_stage(
+/// Extract `src`'s luma and blur it into `scratch.a`, which is where every
+/// caller's final per-pixel pass then reads the base layer from.
+///
+/// Shared by Clarity/Texture and Intensify HDR: both want the same three
+/// separable box-blur passes the CPU ops run, over the same ping-pong pair,
+/// and differ only in what they do with the result.
+fn encode_blurred_luma(
     ctx: &GpuContext,
     encoder: &mut wgpu::CommandEncoder,
-    stage: UnsharpStage<'_>,
+    name: &str,
+    src: &wgpu::Buffer,
+    radius: u32,
     scratch: &LumaScratch<'_>,
     dimensions: [u32; 2],
 ) {
     let [w, h] = dimensions;
-    let pixel_count = w.saturating_mul(h);
-    let name = stage.name;
-
     let blur_params = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1599,24 +1608,8 @@ fn encode_unsharp_stage(
             contents: bytemuck::bytes_of(&ClarityBlurParams {
                 width: w,
                 height: h,
-                pixel_count,
-                radius: stage.radius,
-            }),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-    let detail_params = ctx
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("rasterlab {name} detail params")),
-            contents: bytemuck::bytes_of(&ClarityDetailParams {
-                width: w,
-                height: h,
-                pixel_count,
-                midtone_weight: stage.midtone_weight,
-                amount: stage.amount,
-                _pad1: 0.0,
-                _pad2: 0.0,
-                _pad3: 0.0,
+                pixel_count: w.saturating_mul(h),
+                radius,
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -1629,7 +1622,7 @@ fn encode_unsharp_stage(
             &ctx.clarity_texture.three_bind_layout,
         ),
         &format!("{name} extract_luma"),
-        [stage.src, scratch.a, scratch.params],
+        [src, scratch.a, scratch.params],
         dimensions,
     );
 
@@ -1659,6 +1652,45 @@ fn encode_unsharp_stage(
             dimensions,
         );
     }
+}
+
+fn encode_unsharp_stage(
+    ctx: &GpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    stage: UnsharpStage<'_>,
+    scratch: &LumaScratch<'_>,
+    dimensions: [u32; 2],
+) {
+    let [w, h] = dimensions;
+    let pixel_count = w.saturating_mul(h);
+    let name = stage.name;
+
+    encode_blurred_luma(
+        ctx,
+        encoder,
+        name,
+        stage.src,
+        stage.radius,
+        scratch,
+        dimensions,
+    );
+
+    let detail_params = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("rasterlab {name} detail params")),
+            contents: bytemuck::bytes_of(&ClarityDetailParams {
+                width: w,
+                height: h,
+                pixel_count,
+                midtone_weight: stage.midtone_weight,
+                amount: stage.amount,
+                _pad1: 0.0,
+                _pad2: 0.0,
+                _pad3: 0.0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
     encode_compute(
         &ctx.device,
@@ -1809,5 +1841,162 @@ fn apply_clarity_texture(
         width: w,
         height: h,
         buffer: final_buf,
+    })
+}
+
+// Intensify HDR's tuning constants.  The CPU op keeps its own private copies
+// in `rasterlab-core/src/ops/intensify_hdr.rs`, where they are documented and
+// where the measurements behind them live; these mirror them so the shader
+// and the reference stay the same effect.  The parity tests in this crate are
+// what catch them drifting apart.
+const INTENSIFY_TONE_POINTS: [[f32; 2]; 14] = [
+    [0.000, 0.000],
+    [0.016, 0.000],
+    [0.031, 0.082],
+    [0.063, 0.216],
+    [0.078, 0.267],
+    [0.125, 0.282],
+    [0.251, 0.352],
+    [0.376, 0.384],
+    [0.502, 0.404],
+    [0.627, 0.486],
+    [0.753, 0.627],
+    [0.878, 0.780],
+    [0.941, 0.875],
+    [1.000, 1.000],
+];
+const INTENSIFY_BASE_RADIUS_FRAC: f32 = 0.03;
+const INTENSIFY_DETAIL_GAIN: f32 = 1.77;
+const INTENSIFY_SATURATION: f32 = 1.78;
+const INTENSIFY_RATIO_FLOOR: f32 = 1.0;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct IntensifyHdrParams {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    amount: f32,
+    detail_gain: f32,
+    saturation: f32,
+    ratio_floor: f32,
+}
+
+/// Intensify HDR: a fixed compressive tone curve on a large-radius blurred
+/// base, the detail the blur removed put back over it with gain, and a plain
+/// saturation multiply — then blended back over the source.
+///
+/// The base layer is Clarity's luma-and-box-blur passes verbatim, so only the
+/// final per-pixel kernel is specific to this op.
+fn apply_intensify_hdr(
+    ctx: &GpuContext,
+    op: &IntensifyHdrOp,
+    image: GpuImage,
+) -> Result<GpuImage, GpuError> {
+    if op.amount <= f32::EPSILON {
+        return Ok(image);
+    }
+
+    let w = image.width;
+    let h = image.height;
+    let pixel_count = w.saturating_mul(h);
+    let rgba_byte_len = expected_rgba_len(w, h) as u64;
+    let luma_byte_len = pixel_count as u64 * 4;
+    let radius = ((INTENSIFY_BASE_RADIUS_FRAC * w.min(h) as f32).round() as u32).max(1);
+
+    let luma_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab intensify_hdr luma_a"),
+        size: luma_byte_len,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let luma_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rasterlab intensify_hdr luma_b"),
+        size: luma_byte_len,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let output = output_buffer(ctx, "rasterlab intensify_hdr output", rgba_byte_len);
+
+    let luma_params = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab intensify_hdr luma params"),
+            contents: bytemuck::bytes_of(&ClarityLumaParams {
+                width: w,
+                height: h,
+                pixel_count,
+                _pad: 0,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    let apply_params = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab intensify_hdr apply params"),
+            contents: bytemuck::bytes_of(&IntensifyHdrParams {
+                width: w,
+                height: h,
+                pixel_count,
+                _pad: 0,
+                amount: op.amount.clamp(0.0, 1.0),
+                detail_gain: INTENSIFY_DETAIL_GAIN,
+                saturation: INTENSIFY_SATURATION,
+                ratio_floor: INTENSIFY_RATIO_FLOOR,
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    let tone_lut: [u32; 256] = CurvesOp::build_lut(&INTENSIFY_TONE_POINTS).map(u32::from);
+    let tone_lut_buffer = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rasterlab intensify_hdr tone lut"),
+            contents: bytemuck::cast_slice(&tone_lut),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rasterlab intensify_hdr encoder"),
+        });
+    let scratch = LumaScratch {
+        a: &luma_a,
+        b: &luma_b,
+        params: &luma_params,
+    };
+    encode_blurred_luma(
+        ctx,
+        &mut encoder,
+        "intensify_hdr",
+        &image.buffer,
+        radius,
+        &scratch,
+        [w, h],
+    );
+    encode_compute(
+        &ctx.device,
+        &mut encoder,
+        Kernel::new(
+            &ctx.intensify_hdr.apply_pipeline,
+            &ctx.intensify_hdr.five_bind_layout,
+        ),
+        "intensify_hdr apply",
+        [
+            &image.buffer,
+            &output,
+            &apply_params,
+            &luma_a,
+            &tone_lut_buffer,
+        ],
+        [w, h],
+    );
+    submit_and_wait(ctx, encoder)?;
+
+    Ok(GpuImage {
+        width: w,
+        height: h,
+        buffer: output,
     })
 }

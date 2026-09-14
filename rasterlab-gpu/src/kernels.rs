@@ -101,6 +101,15 @@ pub(crate) struct FauxHdrKernel {
     pub(crate) bind_group_layout: wgpu::BindGroupLayout,
 }
 
+/// Intensify HDR's own pass.  The blurred base it reads is produced by
+/// `ClarityTextureKernel`'s luma and box-blur pipelines, which are the same
+/// three separable passes the CPU op runs, so only the final per-pixel kernel
+/// is new here.
+pub(crate) struct IntensifyHdrKernel {
+    pub(crate) five_bind_layout: wgpu::BindGroupLayout,
+    pub(crate) apply_pipeline: wgpu::ComputePipeline,
+}
+
 pub(crate) struct ClarityTextureKernel {
     pub(crate) three_bind_layout: wgpu::BindGroupLayout,
     pub(crate) extract_luma_pipeline: wgpu::ComputePipeline,
@@ -262,6 +271,19 @@ fn make_4binding_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLa
             storage_entry(1, false),
             uniform_entry(2),
             storage_entry(3, true),
+        ],
+    })
+}
+
+fn make_5binding_layout(device: &wgpu::Device, label: &str) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            storage_entry(0, true),
+            storage_entry(1, false),
+            uniform_entry(2),
+            storage_entry(3, true),
+            storage_entry(4, true),
         ],
     })
 }
@@ -597,6 +619,24 @@ impl ClarityTextureKernel {
             box_blur_v_pipeline,
             four_bind_layout,
             apply_detail_pipeline,
+        }
+    }
+}
+
+impl IntensifyHdrKernel {
+    pub(crate) fn new(device: &wgpu::Device) -> Self {
+        let five_bind_layout =
+            make_5binding_layout(device, "rasterlab intensify_hdr 5-bind layout");
+        let apply_pipeline = make_simple_pipeline(
+            device,
+            INTENSIFY_HDR_APPLY_WGSL,
+            &five_bind_layout,
+            "rasterlab intensify_hdr apply shader",
+            "rasterlab intensify_hdr apply pipeline",
+        );
+        Self {
+            five_bind_layout,
+            apply_pipeline,
         }
     }
 }

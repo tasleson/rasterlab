@@ -5,8 +5,8 @@ use rasterlab_core::{
     ops::{
         BlackAndWhiteOp, BlurOp, BrightnessContrastOp, BwMode, ClarityTextureOp, ColorBalanceOp,
         ColorSpaceConversion, ColorSpaceOp, CurvesOp, DenoiseOp, FauxHdrOp, HighlightsShadowsOp,
-        HslPanelOp, HueShiftOp, LevelsOp, NoiseReductionOp, NrMethod, SaturationOp, SepiaOp,
-        ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
+        HslPanelOp, HueShiftOp, IntensifyHdrOp, LevelsOp, NoiseReductionOp, NrMethod, SaturationOp,
+        SepiaOp, ShadowExposureOp, SharpenOp, SplitToneOp, VibranceOp, VignetteOp, WhiteBalanceOp,
     },
     traits::operation::Operation,
 };
@@ -752,6 +752,106 @@ fn clarity_texture_roughly_matches_cpu() {
     assert_matches_cpu(&actual, &expected, WINDOW_PASS, "clarity_texture");
 }
 
+/// Intensify HDR's tolerance.
+///
+/// The base layer is three separable box-blur passes, so the blur alone earns
+/// `WINDOW_PASS`.  On top of that the kernel divides the retoned luminance by
+/// the source luminance, and that ratio multiplies whatever the blur got
+/// wrong: a base off by a fraction of a level moves `l1` by the detail gain
+/// of 1.77, and the saturation multiply of 1.78 spreads it across the
+/// channels again.  Three levels is `WINDOW_PASS` carried through those two
+/// gains, and is the budget the shader has to hit — not a number tuned until
+/// the test passed.  In practice an AMD Radeon 780M reproduces the CPU
+/// byte-for-byte on every case below — the budget is headroom for adapters
+/// that contract their multiply-adds differently, not slack the kernel needs.
+const INTENSIFY_HDR_PASS: u8 = 3;
+
+#[test]
+#[ignore = "requires a working wgpu adapter"]
+fn intensify_hdr_runs_on_gpu() {
+    let Some(ctx) = pollster::block_on(make_context()) else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let src = test_image(64, 48);
+    let op = IntensifyHdrOp::new(1.0);
+    let (out, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+    assert_eq!(out.width, src.width);
+    assert_eq!(out.height, src.height);
+    assert_ne!(
+        out.data, src.data,
+        "the full effect should change something"
+    );
+    for (i, o) in src.data.chunks(4).zip(out.data.chunks(4)) {
+        assert_eq!(o[3], i[3], "alpha must survive untouched");
+    }
+}
+
+/// The sub-1.0 amounts are the interesting ones: the CPU quantises the look
+/// to 8 bits *before* blending it back over the source, and a kernel that
+/// blends the unrounded value instead drifts by about half a level
+/// everywhere, which is what these catch.
+#[test]
+#[ignore = "requires a working wgpu adapter"]
+fn intensify_hdr_matches_cpu_across_amounts() {
+    let Some(ctx) = pollster::block_on(make_context()) else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let src = test_image(48, 36);
+    for amount in [0.25, 0.5, 0.75, 1.0] {
+        let op = IntensifyHdrOp::new(amount);
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_matches_cpu(
+            &actual,
+            &expected,
+            INTENSIFY_HDR_PASS,
+            &format!("intensify_hdr amount={amount}"),
+        );
+    }
+}
+
+/// Zero amount is an identity on both sides, byte for byte — the GPU op bails
+/// before it encodes anything, the same way the CPU one returns the image
+/// untouched.
+#[test]
+#[ignore = "requires a working wgpu adapter"]
+fn intensify_hdr_zero_amount_is_identity() {
+    let Some(ctx) = pollster::block_on(make_context()) else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let src = test_image(32, 24);
+    let op = IntensifyHdrOp::new(0.0);
+    let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+    assert_eq!(actual.data, src.data);
+}
+
+/// A hard edge is where the large-radius base and the CPU's clamped-window
+/// box blur disagree most, and a flat field is where the tone curve is read
+/// off directly.  Both are far harsher on the kernel than the smooth gradient
+/// `test_image` produces.
+#[test]
+#[ignore = "requires a working wgpu adapter"]
+fn intensify_hdr_matches_cpu_on_a_hard_edge() {
+    let Some(ctx) = pollster::block_on(make_context()) else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let mut src = Image::new(96, 72);
+    for y in 0..72 {
+        for x in 0..96 {
+            let v = if x < 48 { 24u8 } else { 212 };
+            src.set_pixel(x, y, [v, v / 2, 255 - v, 137]);
+        }
+    }
+    let op = IntensifyHdrOp::new(1.0);
+    let expected = op.apply(src.deep_clone()).unwrap();
+    let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+    assert_matches_cpu(&actual, &expected, INTENSIFY_HDR_PASS, "intensify_hdr edge");
+}
+
 /// One instance of every op the dispatcher claims to support.  Kept in sync
 /// with the `SupportedGpuOp` variants by `every_supported_op_is_dispatchable`.
 fn supported_op_samples() -> Vec<Box<dyn Operation>> {
@@ -798,6 +898,7 @@ fn supported_op_samples() -> Vec<Box<dyn Operation>> {
         Box::new(SharpenOp::new(1.0)),
         Box::new(FauxHdrOp::new(0.8)),
         Box::new(ClarityTextureOp::new(0.5, 0.3)),
+        Box::new(IntensifyHdrOp::new(0.8)),
     ]
 }
 

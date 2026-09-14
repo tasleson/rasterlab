@@ -1358,6 +1358,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#,
 );
 
+/// Horizontal box blur, one invocation per row.
+///
+/// The window slides: each step adds the sample entering on the right and
+/// subtracts the one leaving on the left, so the cost is O(1) per pixel
+/// instead of O(radius).  `count` tracks how many samples the window actually
+/// holds, which is fewer than `2*radius+1` near the edges and is what the
+/// naive gather divided by — the edges have to keep averaging the clamped
+/// window or a bright/dark frame appears around the border.
+///
+/// This mirrors `box_blur_h_1ch` in `rasterlab-core`'s ops, down to the order
+/// the samples are added, so the two accumulate float error the same way.
 pub(crate) const CLARITY_BOX_BLUR_H_WGSL: &str = r#"
 struct Params { width: u32, height: u32, pixel_count: u32, radius: u32 };
 
@@ -1379,6 +1390,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// Vertical box blur, one invocation per column.
+///
+/// Same sliding window as the horizontal pass.  Walking columns rather than
+/// rows is what makes this one fast: neighbouring invocations sit on
+/// neighbouring columns of the same row at every step, so their loads
+/// coalesce into whole cache lines.
 pub(crate) const CLARITY_BOX_BLUR_V_WGSL: &str = r#"
 struct Params { width: u32, height: u32, pixel_count: u32, radius: u32 };
 
@@ -1437,6 +1454,100 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     output_pixels[i] = u32(nr * 255.0 + 0.5) | (u32(ng * 255.0 + 0.5) << 8u)
         | (u32(nb * 255.0 + 0.5) << 16u) | a;
+}
+"#,
+);
+
+/// The per-pixel half of Intensify HDR: retone the blurred base, put the
+/// detail back over it, saturate, and blend the quantised look back over the
+/// source.
+///
+/// The blur passes ahead of this are Clarity's, which work in 0..1, while the
+/// tone curve and the ratio floor are both defined on the CPU's 0..255 scale.
+/// Everything here is therefore on the 0..255 scale, with the incoming
+/// blurred luma scaled up as it is read.
+pub(crate) const INTENSIFY_HDR_APPLY_WGSL: &str = concat!(
+    r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pixel_count: u32,
+    _pad: u32,
+    amount: f32,
+    detail_gain: f32,
+    saturation: f32,
+    ratio_floor: f32,
+};
+
+@group(0) @binding(0) var<storage, read> input_pixels: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output_pixels: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read> blurred_luma: array<f32>;
+@group(0) @binding(4) var<storage, read> tone_lut: array<u32>;
+
+const LUMA_WEIGHTS = vec3<f32>(0.2126, 0.7152, 0.0722);
+
+// The CPU's `tone_at`: a linear read of the 256-entry curve LUT at a
+// luminance on the 0..255 scale.
+fn tone_at(v: f32) -> f32 {
+    let c = clamp(v, 0.0, 255.0);
+    let floor_c = floor(c);
+    let i = u32(floor_c);
+    if (i >= 255u) {
+        return f32(tone_lut[255]);
+    }
+    let f = c - floor_c;
+    return f32(tone_lut[i]) * (1.0 - f) + f32(tone_lut[i + 1u]) * f;
+}
+
+// Rust's `f32::round` breaks ties away from zero, WGSL's `round` to even.
+// Both call sites clamp to 0..255 first, so `floor(x + 0.5)` is the form that
+// matches the CPU on the halves.
+fn round_ties_up(v: vec3<f32>) -> vec3<f32> {
+    return floor(v + vec3<f32>(0.5));
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+"#,
+    bounds_guard!(),
+    r#"    let px = input_pixels[i];
+    let a = px & 0xff000000u;
+    let src = vec3<f32>(
+        f32(px & 0xffu),
+        f32((px >> 8u) & 0xffu),
+        f32((px >> 16u) & 0xffu),
+    );
+
+    let l0 = dot(LUMA_WEIGHTS, src);
+    let base = blurred_luma[i] * 255.0;
+    let l1 = clamp(tone_at(base) + params.detail_gain * (l0 - base), 0.0, 255.0);
+
+    // A ratio preserves hue, but near black the denominator stops meaning
+    // anything, so the move becomes a plain offset there.
+    var rgb: vec3<f32>;
+    if (l0 > params.ratio_floor) {
+        rgb = src * (l1 / l0);
+    } else {
+        rgb = src + vec3<f32>(l1 - l0);
+    }
+
+    let grey = dot(LUMA_WEIGHTS, rgb);
+    let look = round_ties_up(clamp(
+        vec3<f32>(grey) + (rgb - vec3<f32>(grey)) * params.saturation,
+        vec3<f32>(0.0),
+        vec3<f32>(255.0),
+    ));
+
+    // The look is quantised above, before the blend, exactly as on the CPU:
+    // blending the unrounded value instead drifts the sub-1.0 amounts.
+    let out = round_ties_up(clamp(
+        src + (look - src) * params.amount,
+        vec3<f32>(0.0),
+        vec3<f32>(255.0),
+    ));
+
+    output_pixels[i] = u32(out.x) | (u32(out.y) << 8u) | (u32(out.z) << 16u) | a;
 }
 "#,
 );
