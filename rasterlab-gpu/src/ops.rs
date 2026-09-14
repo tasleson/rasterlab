@@ -12,7 +12,7 @@ use rasterlab_core::{
 use wgpu::util::DeviceExt;
 
 use crate::{
-    common::{NLM_WORKGROUP_SIZE, WORKGROUP_SIZE, expected_rgba_len},
+    common::{BOX_BLUR_WORKGROUP_SIZE, NLM_WORKGROUP_SIZE, WORKGROUP_SIZE, expected_rgba_len},
     context::GpuContext,
     error::GpuError,
     image::GpuImage,
@@ -1628,28 +1628,34 @@ fn encode_blurred_luma(
 
     // Each iteration is a horizontal pass into `b` and a vertical one back
     // into `a`, so the blurred luma ends up in `a` however many run.
+    //
+    // Both blur kernels slide a window along a whole line, so they dispatch
+    // one invocation per line — rows for the horizontal pass, columns for the
+    // vertical one — not one per pixel like everything else here.
     for _ in 0..BOX_BLUR_PASSES {
         encode_compute(
             &ctx.device,
             encoder,
-            Kernel::new(
+            Kernel::with_workgroup(
                 &ctx.clarity_texture.box_blur_h_pipeline,
                 &ctx.clarity_texture.three_bind_layout,
+                BOX_BLUR_WORKGROUP_SIZE,
             ),
             &format!("{name} box_blur_h"),
             [scratch.a, scratch.b, &blur_params],
-            dimensions,
+            [h, 1],
         );
         encode_compute(
             &ctx.device,
             encoder,
-            Kernel::new(
+            Kernel::with_workgroup(
                 &ctx.clarity_texture.box_blur_v_pipeline,
                 &ctx.clarity_texture.three_bind_layout,
+                BOX_BLUR_WORKGROUP_SIZE,
             ),
             &format!("{name} box_blur_v"),
             [scratch.b, scratch.a, &blur_params],
-            dimensions,
+            [w, 1],
         );
     }
 }

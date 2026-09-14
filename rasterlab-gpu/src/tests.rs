@@ -852,6 +852,99 @@ fn intensify_hdr_matches_cpu_on_a_hard_edge() {
     assert_matches_cpu(&actual, &expected, INTENSIFY_HDR_PASS, "intensify_hdr edge");
 }
 
+/// Dimensions where the box blur's window is wider than the image it is
+/// sliding across, plus the degenerate single-row and single-column cases.
+///
+/// Both ops derive their radius from `min(width, height)`, and both floor it
+/// (at 2 and at 1), so every shape here asks the blur for a window that
+/// overhangs at least one axis entirely.  A sliding window gets this wrong by
+/// seeding past the end of the line or by letting `count` drift, and the
+/// symptom is a border that comes out brighter or darker than the CPU's.
+const DEGENERATE_BLUR_SHAPES: &[(u32, u32)] = &[
+    (1, 1),
+    (8, 1),
+    (1, 8),
+    (3, 2),
+    (2, 3),
+    (5, 5),
+    (2, 64),
+    (64, 2),
+    (17, 3),
+];
+
+/// The blur window has to keep averaging only the samples that fall inside
+/// the image, the way the CPU's does, even when it is wider than the image.
+#[test]
+#[ignore = "requires a working wgpu adapter"]
+fn box_blur_handles_a_radius_wider_than_the_image() {
+    let Some(ctx) = pollster::block_on(make_context()) else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    for &(width, height) in DEGENERATE_BLUR_SHAPES {
+        let src = test_image(width, height);
+
+        let op = ClarityTextureOp::new(0.6, 0.4);
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_matches_cpu(
+            &actual,
+            &expected,
+            WINDOW_PASS,
+            &format!("clarity_texture {width}x{height}"),
+        );
+
+        let op = IntensifyHdrOp::new(1.0);
+        let expected = op.apply(src.deep_clone()).unwrap();
+        let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+        assert_matches_cpu(
+            &actual,
+            &expected,
+            INTENSIFY_HDR_PASS,
+            &format!("intensify_hdr {width}x{height}"),
+        );
+    }
+}
+
+/// A bright frame around a flat field puts all the contrast in the pixels
+/// whose blur window is clamped, so a window that normalises by the wrong
+/// sample count shows up here as a border that disagrees with the CPU while
+/// the interior still matches.
+#[test]
+#[ignore = "requires a working wgpu adapter"]
+fn box_blur_border_matches_cpu() {
+    let Some(ctx) = pollster::block_on(make_context()) else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let (width, height) = (96u32, 72u32);
+    let mut src = Image::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            // A three-pixel frame, wide enough that the clamped window covers
+            // several different sample counts across it.
+            let on_frame = x < 3 || y < 3 || x >= width - 3 || y >= height - 3;
+            let v = if on_frame { 245u8 } else { 20 };
+            src.set_pixel(x, y, [v, v, v, 200]);
+        }
+    }
+
+    let op = ClarityTextureOp::new(0.5, 0.35);
+    let expected = op.apply(src.deep_clone()).unwrap();
+    let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+    assert_matches_cpu(&actual, &expected, WINDOW_PASS, "clarity_texture border");
+
+    let op = IntensifyHdrOp::new(1.0);
+    let expected = op.apply(src.deep_clone()).unwrap();
+    let (actual, _) = apply_one_to_image(&ctx, &op, &src).unwrap();
+    assert_matches_cpu(
+        &actual,
+        &expected,
+        INTENSIFY_HDR_PASS,
+        "intensify_hdr border",
+    );
+}
+
 /// One instance of every op the dispatcher claims to support.  Kept in sync
 /// with the `SupportedGpuOp` variants by `every_supported_op_is_dispatchable`.
 fn supported_op_samples() -> Vec<Box<dyn Operation>> {

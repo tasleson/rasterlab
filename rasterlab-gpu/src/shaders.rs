@@ -1376,17 +1376,35 @@ struct Params { width: u32, height: u32, pixel_count: u32, radius: u32 };
 @group(0) @binding(1) var<storage, read_write> output_luma: array<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(64, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let y = gid.x;
+    let w = params.width;
+    if (y >= params.height || w == 0u) { return; }
     let r = params.radius;
-    let x0 = u32(max(i32(gid.x) - i32(r), 0));
-    let x1 = min(gid.x + r, params.width - 1u);
+    let row = y * w;
+
+    // Seed the window with [0, min(r, w-1)] — a radius wider than the image
+    // leaves it covering the whole row.
+    let seed_end = min(r, w - 1u);
     var sum = 0.0;
-    for (var x = x0; x <= x1; x += 1u) {
-        sum += input_luma[gid.y * params.width + x];
+    for (var x = 0u; x <= seed_end; x += 1u) {
+        sum += input_luma[row + x];
     }
-    output_luma[gid.y * params.width + gid.x] = sum / f32(x1 - x0 + 1u);
+    var count = f32(seed_end + 1u);
+
+    for (var x = 0u; x < w; x += 1u) {
+        output_luma[row + x] = sum / count;
+        let entering = x + r + 1u;
+        if (entering < w) {
+            sum += input_luma[row + entering];
+            count += 1.0;
+        }
+        if (x >= r) {
+            sum -= input_luma[row + x - r];
+            count -= 1.0;
+        }
+    }
 }
 "#;
 
@@ -1403,17 +1421,33 @@ struct Params { width: u32, height: u32, pixel_count: u32, radius: u32 };
 @group(0) @binding(1) var<storage, read_write> output_luma: array<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(64, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= params.width || gid.y >= params.height) { return; }
+    let x = gid.x;
+    let w = params.width;
+    let h = params.height;
+    if (x >= w || h == 0u) { return; }
     let r = params.radius;
-    let y0 = u32(max(i32(gid.y) - i32(r), 0));
-    let y1 = min(gid.y + r, params.height - 1u);
+
+    let seed_end = min(r, h - 1u);
     var sum = 0.0;
-    for (var y = y0; y <= y1; y += 1u) {
-        sum += input_luma[y * params.width + gid.x];
+    for (var y = 0u; y <= seed_end; y += 1u) {
+        sum += input_luma[y * w + x];
     }
-    output_luma[gid.y * params.width + gid.x] = sum / f32(y1 - y0 + 1u);
+    var count = f32(seed_end + 1u);
+
+    for (var y = 0u; y < h; y += 1u) {
+        output_luma[y * w + x] = sum / count;
+        let entering = y + r + 1u;
+        if (entering < h) {
+            sum += input_luma[entering * w + x];
+            count += 1.0;
+        }
+        if (y >= r) {
+            sum -= input_luma[(y - r) * w + x];
+            count -= 1.0;
+        }
+    }
 }
 "#;
 
