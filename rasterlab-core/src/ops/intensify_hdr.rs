@@ -114,8 +114,16 @@ impl IntensifyHdrOp {
         }
     }
 
-    /// The full-strength look, before `amount` blends it back over the source.
-    fn render(&self, image: &Image) -> Image {
+    /// Renders the look into `image` in place, blending it back over the
+    /// source bytes by `amount` as each pixel is written.
+    ///
+    /// In place because `apply` owns the frame: the look used to be rendered
+    /// into a clone and then blended over the original in a second pass, which
+    /// cost a 48 MB copy at 12 MP and a full read-modify-write on top of it.
+    /// Folding the blend into the pixel loop is byte-for-byte the same result
+    /// — the look is still rounded to a whole level before it is blended, so
+    /// the arithmetic the old second pass did is unchanged.
+    fn render_into(&self, image: &mut Image) {
         let (w, h) = (image.width as usize, image.height as usize);
         let luma = luma_f32(image);
         let radius = ((BASE_RADIUS_FRAC * w.min(h) as f32).round() as usize).max(1);
@@ -132,9 +140,16 @@ impl IntensifyHdrOp {
             tone[i] as f32 * (1.0 - f) + tone[i + 1] as f32 * f
         };
 
-        let mut out = image.deep_clone();
-        let stride = out.row_stride();
-        out.data
+        // `amount` is a public field that arrives from disk deserialised, so
+        // it is clamped here rather than trusted.  Full strength then takes a
+        // branch of its own: the blend below would be exact at 1.0, but paying
+        // for the read-back and the multiply on every channel costs about a
+        // quarter of the op's runtime.
+        let amount = self.amount.clamp(0.0, 1.0);
+        let full_strength = amount >= 1.0;
+        let stride = image.row_stride();
+        image
+            .data
             .par_chunks_mut(stride)
             .enumerate()
             .for_each(|(y, row)| {
@@ -158,14 +173,22 @@ impl IntensifyHdrOp {
                     }
 
                     let grey = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-                    for c in 0..3 {
-                        pixel[c] = (grey + (rgb[c] - grey) * SATURATION)
-                            .round()
-                            .clamp(0.0, 255.0) as u8;
+                    let look =
+                        rgb.map(|c| (grey + (c - grey) * SATURATION).round().clamp(0.0, 255.0));
+
+                    if full_strength {
+                        for c in 0..3 {
+                            pixel[c] = look[c] as u8;
+                        }
+                    } else {
+                        for c in 0..3 {
+                            let src = pixel[c] as f32;
+                            pixel[c] =
+                                (src + (look[c] - src) * amount).round().clamp(0.0, 255.0) as u8;
+                        }
                     }
                 }
             });
-        out
     }
 }
 
@@ -183,38 +206,12 @@ impl Operation for IntensifyHdrOp {
         Some(self)
     }
 
-    fn apply(&self, image: Image) -> RasterResult<Image> {
+    fn apply(&self, mut image: Image) -> RasterResult<Image> {
         if self.amount <= f32::EPSILON {
             return Ok(image);
         }
-
-        let mut rendered = self.render(&image);
-        if self.amount >= 1.0 {
-            return Ok(rendered);
-        }
-
-        let amount = self.amount;
-        let stride = rendered.row_stride();
-        rendered
-            .data
-            .par_chunks_mut(stride)
-            .zip(image.data.par_chunks(stride))
-            .for_each(|(out_row, src_row)| {
-                for (out, src) in out_row
-                    .as_chunks_mut::<4>()
-                    .0
-                    .iter_mut()
-                    .zip(src_row.as_chunks::<4>().0)
-                {
-                    for c in 0..3 {
-                        out[c] = (src[c] as f32 + (out[c] as f32 - src[c] as f32) * amount)
-                            .round()
-                            .clamp(0.0, 255.0) as u8;
-                    }
-                    out[3] = src[3];
-                }
-            });
-        Ok(rendered)
+        self.render_into(&mut image);
+        Ok(image)
     }
 
     fn describe(&self) -> String {

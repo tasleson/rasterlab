@@ -131,13 +131,22 @@ where
 
 /// Rec. 709 luminance per pixel, on the same 0–255 scale as the channels it
 /// came from.  Shared by the ops that measure structure rather than colour:
-/// focus stacking, panorama feature detection, and frame alignment.
+/// focus stacking, panorama feature detection, frame alignment, and the
+/// Intensify HDR base layer.
+///
+/// Parallel because in Intensify HDR this is the opening stage and a serial
+/// pass over a 12 MP frame cost more than the six blur passes that follow it
+/// (27 ms against 34 ms; 3.2 ms once threaded).  It moves as many bytes out as
+/// it reads in, so it looks like the memory-bandwidth-bound map that CLAUDE.md
+/// says not to parallelise — but the serial version only reaches ~3.5 GB/s.
+/// It is bound by the latency of the byte-to-float converts and the multiply
+/// chain, not by the bus, and that headroom is what threads claim here.
 pub(super) fn luma_f32(image: &crate::image::Image) -> Vec<f32> {
     image
         .data
         .as_chunks::<4>()
         .0
-        .iter()
+        .par_iter()
         .map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
         .collect()
 }
