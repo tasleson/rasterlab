@@ -77,6 +77,7 @@ The table follows the tool order in the GUI.
 | Highlights / Shadows | Adjusts highlight and shadow regions independently. |
 | HSL Panel | Adjusts hue, saturation, and luminance in eight color bands. |
 | Hue Shift | Rotates hue globally. |
+| Intensify HDR | Applies an Intensify-inspired local HDR look with a 0–100% effect control. |
 | Levels | Sets black, mid, and white points with LUT-based remapping. |
 | Local Tone | Uses edge-aware local Laplacian filtering to compress large-scale contrast while retaining or boosting texture. |
 | LUT / Color Grading | Applies a `.cube` 3D LUT with adjustable blend strength. |

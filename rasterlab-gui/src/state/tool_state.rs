@@ -11,12 +11,12 @@ use crate::panels::tools::{
     color_space::ColorSpaceTool, crop::CropTool, curves::CurvesTool, denoise::DenoiseTool,
     faux_hdr::FauxHdrTool, focus_stack::FocusStackTool, grain::GrainTool, hdr_merge::HdrMergeTool,
     heal::HealTool, highlights_shadows::HighlightsShadowsTool, hsl::HslTool,
-    hue_shift::HueShiftTool, levels::LevelsTool, local_laplacian::LocalLaplacianTool, lut::LutTool,
-    noise_reduction::NoiseReductionTool, panorama::PanoramaTool, perspective::PerspectiveTool,
-    resize::ResizeTool, rotate::RotateTool, saturation::SaturationTool, sepia::SepiaTool,
-    shadow_exposure::ShadowExposureTool, sharpen::SharpenTool, split_tone::SplitToneTool,
-    straighten::StraightenTool, tool_trait::Tool, vibrance::VibranceTool, vignette::VignetteTool,
-    white_balance::WhiteBalanceTool,
+    hue_shift::HueShiftTool, intensify_hdr::IntensifyHdrTool, levels::LevelsTool,
+    local_laplacian::LocalLaplacianTool, lut::LutTool, noise_reduction::NoiseReductionTool,
+    panorama::PanoramaTool, perspective::PerspectiveTool, resize::ResizeTool, rotate::RotateTool,
+    saturation::SaturationTool, sepia::SepiaTool, shadow_exposure::ShadowExposureTool,
+    sharpen::SharpenTool, split_tone::SplitToneTool, straighten::StraightenTool, tool_trait::Tool,
+    vibrance::VibranceTool, vignette::VignetteTool, white_balance::WhiteBalanceTool,
 };
 
 /// All tool state: trait-based tools in a Vec, plus masking, export, and dialog fields.
@@ -110,6 +110,7 @@ impl ToolState {
             Box::new(HighlightsShadowsTool::new()),
             Box::new(HslTool::new()),
             Box::new(HueShiftTool::new()),
+            Box::new(IntensifyHdrTool::new()),
             Box::new(LevelsTool::new()),
             Box::new(LocalLaplacianTool::new()),
             Box::new(LutTool::new()),
