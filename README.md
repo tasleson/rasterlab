@@ -287,14 +287,22 @@ over the same source cheap — and is why an interrupted import is finished by
 simply running it again. `--create` makes the library as part of the import for
 the first run.
 
-`--delete-source` removes each source file once the library is holding its
-contents, which is what makes an import an "empty the card" run. A file the
-library already had is deleted too — it is no less imported for having arrived
-on an earlier run — so a second pass over a half-emptied card finishes emptying
-it. Nothing is deleted until the `.rlab` holding those bytes has been found on
-disk, a file that failed to import is always left where it is, and a source
-that had to be kept is reported as an error like any other. Sidecars and
-anything else the import did not take in are left alone.
+`--delete-source` removes each source file once the library is proved to hold
+its photograph, which is what makes an import an "empty the card" run. A file
+the library already had is deleted too — it is no less imported for having
+arrived on an earlier run — so a second pass over a half-emptied card finishes
+emptying it. A file that failed to import is left where it is, as are sidecars
+and anything else the import did not take in.
+
+The proof is the point, and it costs a read. Every source is hashed rather than
+recognised by its path, size and mtime in the index, because that fingerprint
+describes the file that was imported and not the one on the card now; and the
+library's own `.rlab` is read back and verified in full — every digest in it,
+against the photograph the source hashed to — before that source is unlinked.
+The exception is a photo this run just wrote, which was already staged, synced,
+read back and compared on the way in. A source the library cannot account for
+is kept and reported as an error like any other, so the run exits non-zero and
+says which file it left behind.
 
 `compare` answers "did that change alter what ends up in the library?" — import
 the same sources with the old code and with the new, then compare the two

@@ -3575,3 +3575,99 @@ fn rlab_sessions_are_dated_by_the_capture_date_inside_the_project() {
         "sessions were dated by file mtime, not by the projects' capture dates"
     );
 }
+
+/// The fingerprint shortcut says the file that was imported from this path had
+/// this size and mtime, which is not the same as saying the file sitting there
+/// now is that file. A run that only skips it loses nothing by being wrong; a
+/// run that deletes it loses the photograph.
+#[test]
+fn a_delete_run_does_not_take_the_index_fingerprints_word_for_it() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    let path = src.path().join("shot.png");
+    write_png_with_mtime(&path, 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder(src.path(), |_| {}).unwrap();
+    let first = lib.all_photos(SortOrder::default()).unwrap().remove(0).hash;
+
+    // A different photograph, of the same size, under the same name and mtime:
+    // everything the fingerprint looks at, and none of the bytes.
+    write_png_with_mtime(&path, 2, BASE);
+    assert_ne!(
+        std::fs::read(&path).unwrap(),
+        std::fs::read(lib.rlab_path(&first)).unwrap(),
+        "the replacement has to differ for this test to mean anything"
+    );
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.imported, 1, "the replacement was skipped on a stat");
+    assert_eq!(last.deleted_sources, 1);
+    let hashes: Vec<String> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .map(|photo| photo.hash)
+        .collect();
+    assert_eq!(hashes.len(), 2, "the second photograph never landed");
+    assert!(hashes.contains(&first));
+}
+
+/// A photo can be in the index while its file is no longer readable. Deleting
+/// the source on the index's word would leave the library holding a row and a
+/// ruin, so the copy is read back and verified first.
+#[test]
+fn a_source_is_kept_when_the_library_copy_does_not_verify() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    write_png_with_mtime(&src.path().join("shot.png"), 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder(src.path(), |_| {}).unwrap();
+
+    // Rot in the middle of the stored file: every digest in it still says what
+    // it said, and none of them match any more.
+    let stored = lib.rlab_path(&lib.all_photos(SortOrder::default()).unwrap()[0].hash);
+    let mut bytes = std::fs::read(&stored).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xff;
+    std::fs::write(&stored, &bytes).unwrap();
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.deleted_sources, 0, "deleted the only readable copy");
+    assert_eq!(last.errors.len(), 1);
+    assert!(
+        last.errors[0].1.contains("did not verify"),
+        "unhelpful about what it kept and why: {}",
+        last.errors[0].1
+    );
+    assert!(src.path().join("shot.png").is_file());
+}

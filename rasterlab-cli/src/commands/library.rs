@@ -149,14 +149,20 @@ pub struct ImportArgs {
     #[arg(long)]
     pub create: bool,
 
-    /// Delete each source file once the library holds its contents.
+    /// Delete each source file once the library is proved to hold its
+    /// photograph.
     ///
     /// A file the library already had is deleted too — it is no less imported
     /// for having arrived on an earlier run — so emptying a card takes the
-    /// same command whether or not part of it got there already. Nothing is
-    /// deleted until the `.rlab` holding those bytes has been found on disk,
-    /// and a file that failed to import is always left where it is. Sidecars
-    /// and anything else the import did not take in are left alone.
+    /// same command whether or not part of it got there already. A file that
+    /// failed to import is left where it is, as are sidecars and anything else
+    /// the import did not take in.
+    ///
+    /// Proving it costs a read: every source is hashed rather than recognised
+    /// by its fingerprint in the index, and the library's own copy is read
+    /// back and verified before the source goes. A run that deletes nothing is
+    /// therefore cheaper than this one, and a source the library cannot
+    /// account for is kept and reported as an error.
     #[arg(long)]
     pub delete_source: bool,
 

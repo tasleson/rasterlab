@@ -77,14 +77,23 @@ impl ImportCollection {
 pub struct ImportOptions {
     /// What collection, if any, newly imported photos are filed into.
     pub collection: ImportCollection,
-    /// Delete each source file once the library is holding its contents.
+    /// Delete each source file once the library is proved to be holding its
+    /// photograph.
     ///
     /// This covers duplicates as well as new photographs: a file skipped
     /// because the library already has those exact bytes is no less imported
     /// for having been imported earlier, and leaving it behind would mean a
-    /// re-run over a half-emptied card never finishes emptying it.  Nothing is
-    /// deleted until the `.rlab` holding the contents has been found on disk,
-    /// and a file that failed to import is always left alone.
+    /// re-run over a half-emptied card never finishes emptying it.  A file
+    /// that failed to import is always left alone.
+    ///
+    /// The proof is what makes this safe to hand a card to, and it costs
+    /// something: every source is read and hashed, because the shortcuts that
+    /// call a file a duplicate without reading it — its fingerprint in the
+    /// index, a project's record of its own original — describe the file that
+    /// was imported rather than the one in front of us now.  The library's
+    /// copy is then read back and verified in full before the source it
+    /// duplicates is unlinked, except where this run wrote it, which
+    /// [`write_verified_atomic`] already confirmed on the device.
     pub delete_sources: bool,
 }
 
@@ -445,7 +454,7 @@ pub fn import_folder_grouped(
         );
         let group_done = outcomes
             .iter()
-            .filter(|outcome| matches!(outcome, ImportOutcome::Imported(_)))
+            .filter(|outcome| matches!(outcome, ImportOutcome::Imported))
             .count();
 
         recount_session(db, &session_id)?;
@@ -701,6 +710,11 @@ enum Preparation {
 /// and `fallback_capture_ts` synthesises an EXIF capture date for files that
 /// carry none, so they still sort coherently by capture time.
 ///
+/// `delete_sources` turns off both of the shortcuts that decide a file is a
+/// duplicate without reading it — the source fingerprint and a project's own
+/// record of its original's hash.  The run is about to unlink the file, so the
+/// hash it is judged by has to come from its bytes.
+///
 /// `assigner` decides which collection the photo joins, and is consulted only
 /// once the file is known to be a genuinely new photograph.  The membership
 /// goes into the `.rlab` before it is written, which costs nothing: adding it
@@ -716,6 +730,7 @@ fn prepare_one(
     import_date: u64,
     fallback_capture_ts: Option<u64>,
     assigner: &Mutex<CollectionAssigner<'_>>,
+    delete_sources: bool,
 ) -> Result<Preparation> {
     // 1. Read source bytes + capture source-file timestamps.
     //    Stat first so we read the times the file had before we opened it.
@@ -733,7 +748,12 @@ fn prepare_one(
     // imported files cost a single indexed lookup instead of a full (often
     // network) read plus Blake3 hash just to rediscover the duplicate. Falls
     // through to the read+hash dedup whenever the mtime is unavailable.
-    if let Some(mtime) = source_mtime
+    //
+    // A run that deletes its sources does not take it: a stat says the file at
+    // this path was imported, not that the file in front of us now is the one
+    // that was, and that is not something to unlink a photograph on.
+    if !delete_sources
+        && let Some(mtime) = source_mtime
         && let Some(hash) = import_phase!(
             "fingerprint_lookup",
             db.source_already_imported(&path.to_string_lossy(), fs_meta.len(), mtime.secs)
@@ -747,7 +767,12 @@ fn prepare_one(
     // has this photograph costs a seek instead of reading (and re-hashing) a
     // whole original.  Worth doing before the read: importing another
     // library's files is mostly a run of photographs this one already has.
-    if is_rlab_path(path)
+    //
+    // Skipped for the same reason as the fingerprint above when the source is
+    // to be deleted: this hash is the container's claim about itself, and a
+    // deletion is made against bytes that were read, not claims.
+    if !delete_sources
+        && is_rlab_path(path)
         && let Some(hash) = import_phase!(
             "hash_lookup",
             read_original_hash(path)
@@ -1096,25 +1121,14 @@ struct PipelineJob {
     fallback_capture_ts: Option<u64>,
 }
 
-/// What committing one input file did, carrying the content hash the library
-/// now holds those bytes under.
+/// What committing one input file did.
 enum ImportOutcome {
-    /// Newly imported.
-    Imported(String),
-    /// Already in the library, or a duplicate of an earlier file in this batch.
+    /// Newly imported, and so written — and read back — during this run.
+    Imported,
+    /// Already in the library, or a duplicate of an earlier file in this
+    /// batch, under this content hash.
     Duplicate(String),
     Failed,
-}
-
-impl ImportOutcome {
-    /// The hash the library holds this file's contents under, or `None` when
-    /// it does not hold them at all.
-    fn library_hash(&self) -> Option<&str> {
-        match self {
-            Self::Imported(hash) | Self::Duplicate(hash) => Some(hash),
-            Self::Failed => None,
-        }
-    }
 }
 
 /// Counts carried across every group of one import run, so progress reports
@@ -1272,6 +1286,7 @@ fn run_import_pipeline(
                         job.import_date,
                         job.fallback_capture_ts,
                         assigner,
+                        delete_sources,
                     );
 
                     let mut queue = queue.lock().expect("import queue poisoned");
@@ -1336,8 +1351,8 @@ fn run_import_pipeline(
                     let hash = prepared.hash.clone();
                     match commit_prepared(library_root, db, assigner, *prepared) {
                         Ok(()) => {
-                            batch_hashes.insert(hash.clone());
-                            ImportOutcome::Imported(hash)
+                            batch_hashes.insert(hash);
+                            ImportOutcome::Imported
                         }
                         Err(e) => {
                             tally.errors.push((job.path.clone(), format!("{:#}", e)));
@@ -1352,14 +1367,16 @@ fn run_import_pipeline(
                 }
             };
             match &outcome {
-                ImportOutcome::Imported(_) => tally.imported += 1,
+                ImportOutcome::Imported => tally.imported += 1,
                 ImportOutcome::Duplicate(_) => tally.skipped_duplicates += 1,
                 ImportOutcome::Failed => {}
             }
-            // Only once the library is known to be holding these bytes, and
-            // never for a file that failed: the source is the other copy.
-            if delete_sources && let Some(hash) = outcome.library_hash() {
-                match delete_source(library_root, &job.path, hash) {
+            // Only once the library is proved to be holding this photograph,
+            // and never for a file that failed: the source is the other copy.
+            if delete_sources
+                && let Some(deleted) = delete_verified_source(library_root, &job.path, &outcome)
+            {
+                match deleted {
                     Ok(()) => tally.deleted_sources += 1,
                     Err(e) => tally.errors.push((job.path.clone(), format!("{:#}", e))),
                 }
@@ -1412,24 +1429,74 @@ fn encode_rlab(
 }
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
-/// Remove a source file whose contents the library is now holding.
+/// Remove a source file whose photograph the library is now holding, or say
+/// why it was kept.  `None` is a file the library does not hold at all.
 ///
-/// The stored `.rlab` is located first, and the source is kept whenever it
-/// cannot be: a photo can be in the index while its file is not — a library
-/// restored without its `files/`, a mount that dropped out mid-run — and this
-/// is the last moment at which the source is still the other copy.  A photo
-/// the user has moved to Recently Deleted counts as held: it is still in the
-/// library, and still restorable.
-fn delete_source(library_root: &Path, source: &Path, hash: &str) -> Result<()> {
+/// This is the last moment at which the source is the other copy, so what the
+/// library has is proved rather than assumed — except for a photo this run
+/// just wrote, which [`write_verified_atomic`] staged, fsynced, read back and
+/// compared before installing.  Proving it again would re-read a file whose
+/// bytes were confirmed on the device seconds ago.
+fn delete_verified_source(
+    library_root: &Path,
+    source: &Path,
+    outcome: &ImportOutcome,
+) -> Option<Result<()>> {
+    let held = match outcome {
+        ImportOutcome::Failed => return None,
+        ImportOutcome::Imported => Ok(()),
+        ImportOutcome::Duplicate(hash) => verify_library_copy(library_root, hash),
+    };
+    Some(held.and_then(|()| {
+        std::fs::remove_file(source).with_context(|| format!("delete source {}", source.display()))
+    }))
+}
+
+/// Prove the library's copy of `hash` is there, reads back whole, and holds
+/// that exact photograph.
+///
+/// Every digest in the file is checked on the way through, so a `.rlab` that
+/// has rotted, been truncated, or been restored from somewhere else entirely
+/// fails here rather than after the source is gone.  Damage a scrub could
+/// repair also fails: repairing is that command's job, and the answer to
+/// "is this photograph safe?" in the meantime is no.
+///
+/// A photo the user has moved to Recently Deleted counts as held — it is still
+/// in the library, and still restorable — so both places it can live are
+/// looked in.
+fn verify_library_copy(library_root: &Path, hash: &str) -> Result<()> {
     let active = rlab_path(library_root, hash);
-    let deleted = rlab_path(&library_root.join("recently_deleted"), hash);
-    if !active.is_file() && !deleted.is_file() {
+    let stored = if active.is_file() {
+        active
+    } else {
+        let deleted = rlab_path(&library_root.join("recently_deleted"), hash);
+        if !deleted.is_file() {
+            anyhow::bail!(
+                "kept source: the library has no file at {}",
+                active.display()
+            );
+        }
+        deleted
+    };
+
+    let project = import_phase!(
+        "verify_library_copy",
+        RlabFile::read(&stored)
+            .with_context(|| format!("kept source: {} did not verify", stored.display()))
+    )?;
+    // `read` has already checked this hash against the bytes it covers, so
+    // matching it against the one the source was judged by is what ties the
+    // two files together.
+    let held = blake3::Hash::from(project.original_hash)
+        .to_hex()
+        .to_string();
+    if held != hash {
         anyhow::bail!(
-            "kept source: the library has no file at {}",
-            active.display()
+            "kept source: {} holds a different photograph ({held})",
+            stored.display()
         );
     }
-    std::fs::remove_file(source).with_context(|| format!("delete source {}", source.display()))
+    Ok(())
 }
 
 pub fn relative_lib_path(hash: &str) -> String {
