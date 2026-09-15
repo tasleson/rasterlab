@@ -6,7 +6,9 @@ use rasterlab_library::{
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
 use crate::state::library_state::thumb_target_side;
-use crate::state::{AppState, CollectionPrompt, ImportCollectionChoice, LibraryView, Membership};
+use crate::state::{
+    AppState, CollectionPrompt, ImportCollectionChoice, LibraryView, Membership, MenuFilter,
+};
 
 /// Scroll-margin multiple for the resident texture cap: keep roughly this many
 /// screens of thumbnails so scrolling in either direction rarely hits a cold
@@ -1031,6 +1033,7 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 state.library.collection_prompt = Some(CollectionPrompt::new_collection(
                     Vec::new(),
                     MembershipChange::Add,
+                    "",
                 ));
             }
         });
@@ -2071,28 +2074,43 @@ fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
     // same `.rlab` files, and the entry would only be ignored anyway.
     let idle = !state.collection_running();
     ui.menu_button("Collections", |ui| {
-        for coll in state.library.collections.clone() {
-            let membership = state.library.selection_membership(coll.id);
-            let (mark, hover) = match membership {
-                Membership::All if selection == 1 => ("✔", "Remove this photo".to_owned()),
-                Membership::All => ("✔", format!("Remove these {selection} photos")),
-                Membership::Partial => ("–", "Add the rest of the selection".to_owned()),
-                Membership::None if selection == 1 => (" ", "Add this photo".to_owned()),
-                Membership::None => (" ", format!("Add these {selection} photos")),
-            };
-            if ui
-                .add_enabled(idle, egui::Button::new(format!("{mark}  {}", coll.name)))
-                .on_hover_text(hover)
-                .clicked()
-            {
-                if membership == Membership::All {
-                    state.remove_selected_from_collection(coll.id);
-                } else {
-                    state.add_selected_to_collection(coll.id);
+        let total = state.library.collections.len();
+        collection_search(
+            ui,
+            &mut state.library.collections_menu_filter,
+            "coll_menu_search",
+            total,
+        );
+        let mut shown = 0;
+        collection_rows_scroll(ui, "coll_menu_scroll", |ui| {
+            for coll in state.library.collections.clone() {
+                if !state.library.collections_menu_filter.matches(&coll.name) {
+                    continue;
                 }
-                ui.close();
+                shown += 1;
+                let membership = state.library.selection_membership(coll.id);
+                let (mark, hover) = match membership {
+                    Membership::All if selection == 1 => ("✔", "Remove this photo".to_owned()),
+                    Membership::All => ("✔", format!("Remove these {selection} photos")),
+                    Membership::Partial => ("–", "Add the rest of the selection".to_owned()),
+                    Membership::None if selection == 1 => (" ", "Add this photo".to_owned()),
+                    Membership::None => (" ", format!("Add these {selection} photos")),
+                };
+                if ui
+                    .add_enabled(idle, egui::Button::new(format!("{mark}  {}", coll.name)))
+                    .on_hover_text(hover)
+                    .clicked()
+                {
+                    if membership == Membership::All {
+                        state.remove_selected_from_collection(coll.id);
+                    } else {
+                        state.add_selected_to_collection(coll.id);
+                    }
+                    ui.close();
+                }
             }
-        }
+            no_matches_note(ui, shown, &state.library.collections_menu_filter);
+        });
 
         if !state.library.collections.is_empty() {
             ui.separator();
@@ -2102,15 +2120,74 @@ fn collections_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize) {
             .clicked()
         {
             let photos = state.library.selected.clone();
+            let name = state.library.collections_menu_filter.text.clone();
             state.library.collection_prompt = Some(CollectionPrompt::new_collection(
                 photos,
                 MembershipChange::Add,
+                &name,
             ));
             ui.close();
         }
         move_to_menu(ui, state, selection, idle);
     });
 }
+
+/// The search box above a collections menu's rows.
+///
+/// Only drawn once there are more collections than are comfortable to read
+/// down: on a handful of them the box is noise, and on a test library of
+/// hundreds scrolling alone is not enough. Takes keyboard focus as the menu
+/// opens, so the name can just be typed.
+fn collection_search(ui: &mut egui::Ui, filter: &mut MenuFilter, id_salt: &str, total: usize) {
+    if total <= COLLECTION_SEARCH_THRESHOLD {
+        filter.text.clear();
+        return;
+    }
+    let opening = filter.opening(ui.ctx().cumulative_pass_nr());
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut filter.text)
+            .id(egui::Id::new(id_salt))
+            .desired_width(COLLECTION_SEARCH_WIDTH)
+            .hint_text("Search collections"),
+    );
+    if opening {
+        resp.request_focus();
+    }
+    ui.separator();
+}
+
+/// Say so when the search box has filtered every collection out, rather than
+/// leaving the menu looking empty.
+fn no_matches_note(ui: &mut egui::Ui, shown: usize, filter: &MenuFilter) {
+    if shown == 0 && !filter.text.is_empty() {
+        ui.weak("No matching collections");
+    }
+}
+
+/// Width of that search box, wide enough for a typical collection name.
+const COLLECTION_SEARCH_WIDTH: f32 = 180.0;
+
+/// How many collections a menu lists before it is worth offering a search box.
+const COLLECTION_SEARCH_THRESHOLD: usize = 8;
+
+/// Put the collection rows of a menu in their own scroll area, so a library
+/// with more collections than fit on screen can still reach the ones at the
+/// bottom. The rows scroll; whatever the caller draws after this call (the
+/// separator, "New Collection…", "Move to") stays put below them.
+fn collection_rows_scroll(ui: &mut egui::Ui, id_salt: &str, rows: impl FnOnce(&mut egui::Ui)) {
+    // A fraction of the window rather than a fixed height: the cap has to leave
+    // room for the rows the caller draws underneath, so that the submenu itself
+    // never ends up taller than the screen.
+    let max_height = ui.ctx().content_rect().height() * COLLECTION_MENU_HEIGHT_FRACTION;
+    ScrollArea::vertical()
+        .id_salt(id_salt)
+        .max_height(max_height)
+        .show(ui, rows);
+}
+
+/// How tall the scrolling part of a collections menu may grow, as a fraction
+/// of the window height.
+const COLLECTION_MENU_HEIGHT_FRACTION: f32 = 0.6;
 
 /// The "Move to" submenu inside Collections: file the selection somewhere and
 /// out of everywhere else.
@@ -2127,22 +2204,37 @@ fn move_to_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize, idle:
         format!("these {selection} photos")
     };
     ui.menu_button("Move to", |ui| {
-        for coll in state.library.collections.clone() {
-            // A collection that already holds the whole selection can still be
-            // moved to: the photos may be in others as well, and that is what
-            // the move is for.
-            if ui
-                .add_enabled(idle, egui::Button::new(coll.name.clone()))
-                .on_hover_text(format!(
-                    "Put {photos} in “{}” and take them out of every other collection",
-                    coll.name
-                ))
-                .clicked()
-            {
-                state.move_selected_to_collection(coll.id);
-                ui.close();
+        let total = state.library.collections.len();
+        collection_search(
+            ui,
+            &mut state.library.move_to_menu_filter,
+            "move_to_menu_search",
+            total,
+        );
+        let mut shown = 0;
+        collection_rows_scroll(ui, "move_to_menu_scroll", |ui| {
+            for coll in state.library.collections.clone() {
+                if !state.library.move_to_menu_filter.matches(&coll.name) {
+                    continue;
+                }
+                shown += 1;
+                // A collection that already holds the whole selection can still
+                // be moved to: the photos may be in others as well, and that is
+                // what the move is for.
+                if ui
+                    .add_enabled(idle, egui::Button::new(coll.name.clone()))
+                    .on_hover_text(format!(
+                        "Put {photos} in “{}” and take them out of every other collection",
+                        coll.name
+                    ))
+                    .clicked()
+                {
+                    state.move_selected_to_collection(coll.id);
+                    ui.close();
+                }
             }
-        }
+            no_matches_note(ui, shown, &state.library.move_to_menu_filter);
+        });
 
         if !state.library.collections.is_empty() {
             ui.separator();
@@ -2156,9 +2248,11 @@ fn move_to_menu(ui: &mut egui::Ui, state: &mut AppState, selection: usize, idle:
             .clicked()
         {
             let photos = state.library.selected.clone();
+            let name = state.library.move_to_menu_filter.text.clone();
             state.library.collection_prompt = Some(CollectionPrompt::new_collection(
                 photos,
                 MembershipChange::Move,
+                &name,
             ));
             ui.close();
         }

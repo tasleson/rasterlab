@@ -152,6 +152,38 @@ pub enum Membership {
     All,
 }
 
+/// The search box at the top of a collections menu.
+///
+/// Menus have no open/close event to hook, so the box tracks the frame it was
+/// last drawn on: a gap means the menu closed and reopened in between, and the
+/// text starts empty again rather than still filtering by whatever was typed
+/// the last time.
+#[derive(Default)]
+pub struct MenuFilter {
+    pub text: String,
+    last_frame: Option<u64>,
+}
+
+impl MenuFilter {
+    /// Call once per frame the menu is drawn, before reading `text`.  Returns
+    /// whether this is the menu's first frame, which is when the caller claims
+    /// keyboard focus for the box.
+    pub fn opening(&mut self, frame: u64) -> bool {
+        let fresh = self.last_frame != Some(frame.saturating_sub(1));
+        if fresh {
+            self.text.clear();
+        }
+        self.last_frame = Some(frame);
+        fresh
+    }
+
+    /// Whether `name` should be listed.  Case-insensitive substring match, as
+    /// in the grid's own search; an empty box matches everything.
+    pub fn matches(&self, name: &str) -> bool {
+        self.text.is_empty() || name.to_lowercase().contains(&self.text.to_lowercase())
+    }
+}
+
 /// The collection dialog currently on screen, if any.
 pub enum CollectionPrompt {
     /// Naming a new collection.
@@ -175,9 +207,13 @@ pub enum CollectionPrompt {
 }
 
 impl CollectionPrompt {
-    pub fn new_collection(photos: Vec<PhotoId>, change: MembershipChange) -> Self {
+    /// Naming a new collection for `photos`.  `name` seeds the field — the
+    /// menus pass what was typed in their search box, so a search that came up
+    /// empty turns into the collection the user was looking for; pass `""`
+    /// where there is nothing to seed it with.
+    pub fn new_collection(photos: Vec<PhotoId>, change: MembershipChange, name: &str) -> Self {
         Self::New {
-            entry: NameEntry::default(),
+            entry: NameEntry::seeded(name),
             photos,
             change,
         }
@@ -507,6 +543,11 @@ pub struct LibraryState {
     /// current selection for every collection, every frame a menu is open.
     pub collection_members: HashMap<CollectionId, HashSet<PhotoId>>,
 
+    /// Search boxes for the grid context menu's collection lists, one per menu
+    /// so opening "Move to" doesn't inherit the filter typed above it.
+    pub collections_menu_filter: MenuFilter,
+    pub move_to_menu_filter: MenuFilter,
+
     /// The open collection dialog (new / delete confirmation), if any.
     pub collection_prompt: Option<CollectionPrompt>,
 
@@ -652,6 +693,8 @@ impl Default for LibraryState {
             collections: Vec::new(),
             marked_collections: Vec::new(),
             collection_members: HashMap::new(),
+            collections_menu_filter: MenuFilter::default(),
+            move_to_menu_filter: MenuFilter::default(),
             collection_prompt: None,
             folder_import_prompt: None,
             all_photo_count: 0,
@@ -2467,5 +2510,35 @@ mod tests {
             state.import_refreshed_imported, 4,
             "and one more photo is enough to trigger again"
         );
+    }
+
+    #[test]
+    fn menu_filter_matches_case_insensitively() {
+        let mut filter = MenuFilter::default();
+        // An empty box lists everything.
+        assert!(filter.matches("Iceland 2024"));
+
+        for needle in ["ice", "ICE", "land 20"] {
+            filter.text = needle.to_owned();
+            assert!(filter.matches("Iceland 2024"), "{needle} should match");
+            assert!(!filter.matches("Portraits"), "{needle} should not match");
+        }
+    }
+
+    #[test]
+    fn menu_filter_clears_when_the_menu_reopens() {
+        let mut filter = MenuFilter::default();
+        assert!(filter.opening(10), "the first frame is an opening one");
+        filter.text = "ice".to_owned();
+
+        // Consecutive frames are the same menu still open, so what was typed
+        // stays.
+        assert!(!filter.opening(11));
+        assert!(!filter.opening(12));
+        assert_eq!(filter.text, "ice");
+
+        // A gap means it closed and came back: start from an empty box.
+        assert!(filter.opening(40));
+        assert!(filter.text.is_empty());
     }
 }
