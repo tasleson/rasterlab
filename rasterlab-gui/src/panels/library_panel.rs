@@ -8,6 +8,7 @@ use crate::panels::tools::shared::MIN_STACK_FRAMES;
 use crate::state::library_state::thumb_target_side;
 use crate::state::{
     AppState, CollectionPrompt, ImportCollectionChoice, LibraryView, Membership, MenuFilter,
+    name_matches,
 };
 
 /// Scroll-margin multiple for the resident texture cap: keep roughly this many
@@ -1023,21 +1024,7 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         // Collections — user-made groupings, filled from the grid's right-click
         // menu. Membership is per photo, so a photo can be in several.
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.strong("Collections");
-            if ui
-                .small_button("➕")
-                .on_hover_text("Create an empty collection")
-                .clicked()
-            {
-                state.library.collection_prompt = Some(CollectionPrompt::new_collection(
-                    Vec::new(),
-                    MembershipChange::Add,
-                    "",
-                ));
-            }
-        });
-        collections_ui(ui, state);
+        collections_section_ui(ui, state);
 
         ui.add_space(8.0);
         ui.separator();
@@ -1287,6 +1274,52 @@ fn select_view(state: &mut AppState, view: LibraryView) {
 
 // ── Collections ───────────────────────────────────────────────────────────────
 
+/// The sidebar's Collections section: a collapsible header carrying the
+/// new-collection button, over a filtered list of the collections themselves.
+///
+/// Collapsible for the same reason the import-session years are: a library
+/// with a few dozen collections otherwise pushes the filter controls below it
+/// off the bottom of the sidebar.  Open by default, since an empty-looking
+/// Collections section would be a poor first impression.
+fn collections_section_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    let id = ui.make_persistent_id("lib_collections_section");
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+        .show_header(ui, |ui| {
+            ui.strong("Collections");
+            if ui
+                .small_button("➕")
+                .on_hover_text("Create an empty collection")
+                .clicked()
+            {
+                state.library.collection_prompt = Some(CollectionPrompt::new_collection(
+                    Vec::new(),
+                    MembershipChange::Add,
+                    "",
+                ));
+            }
+        })
+        .body(|ui| collections_ui(ui, state));
+}
+
+/// The sidebar's collections filter box.
+///
+/// Only drawn once the list is longer than is comfortable to read down, on the
+/// same reasoning as the menus' search box.  Below that the box is cleared as
+/// well as hidden, so deleting collections can never leave a hidden filter
+/// suppressing the ones that are left.
+fn collections_filter_ui(ui: &mut egui::Ui, filter: &mut String, total: usize) {
+    if total <= COLLECTION_SEARCH_THRESHOLD {
+        filter.clear();
+        return;
+    }
+    ui.add(
+        egui::TextEdit::singleline(filter)
+            .id(egui::Id::new("lib_collections_filter"))
+            .desired_width(f32::INFINITY)
+            .hint_text("Filter collections"),
+    );
+}
+
 fn collections_ui(ui: &mut egui::Ui, state: &mut AppState) {
     if state.library.collections.is_empty() {
         ui.weak("No collections yet")
@@ -1294,7 +1327,27 @@ fn collections_ui(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
-    for coll in state.library.collections.clone() {
+    let total = state.library.collections.len();
+    let mut filter = std::mem::take(&mut state.library.collections_filter);
+    collections_filter_ui(ui, &mut filter, total);
+    state.library.collections_filter = filter;
+
+    let shown: Vec<_> = state
+        .library
+        .collections
+        .iter()
+        .filter(|c| name_matches(&state.library.collections_filter, &c.name))
+        .cloned()
+        .collect();
+    if shown.is_empty() {
+        ui.weak("No matching collections");
+        return;
+    }
+    // Shift-extension runs over what the sidebar is actually listing, so a
+    // range never quietly picks up collections the filter is hiding.
+    let visible: Vec<CollectionId> = shown.iter().map(|c| c.id).collect();
+
+    for coll in shown {
         // Marked collections read as selected too, so a ctrl-click set looks
         // the same as the one collection the grid is showing.
         let selected = state.library.view == LibraryView::Collection(coll.id)
@@ -1308,7 +1361,7 @@ fn collections_ui(ui: &mut egui::Ui, state: &mut AppState) {
             if ctrl {
                 toggle_collection_mark(state, coll.id);
             } else if shift {
-                extend_collection_marks(state, coll.id);
+                extend_collection_marks(state, &visible, coll.id);
             } else {
                 select_view(state, LibraryView::Collection(coll.id));
                 state.library.marked_collections = vec![coll.id];
@@ -1360,20 +1413,21 @@ fn toggle_collection_mark(state: &mut AppState, id: CollectionId) {
 }
 
 /// Mark every collection between the one marked last and `id`, in the order
-/// the sidebar lists them.
-fn extend_collection_marks(state: &mut AppState, id: CollectionId) {
+/// `order` — the collections the sidebar is currently listing — has them.
+fn extend_collection_marks(state: &mut AppState, order: &[CollectionId], id: CollectionId) {
     let Some(&last) = state.library.marked_collections.last() else {
         state.library.marked_collections = vec![id];
         return;
     };
-    let order = &state.library.collections;
-    let position = |target| order.iter().position(|c| c.id == target);
+    let position = |target| order.iter().position(|&c| c == target);
+    // The last mark can have been filtered out from under the user; start a
+    // fresh run from the click rather than extending from something unseen.
     let (Some(a), Some(b)) = (position(last), position(id)) else {
+        state.library.marked_collections = vec![id];
         return;
     };
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    let run: Vec<CollectionId> = order[lo..=hi].iter().map(|c| c.id).collect();
-    for id in run {
+    for &id in &order[lo..=hi] {
         if !state.library.marked_collections.contains(&id) {
             state.library.marked_collections.push(id);
         }

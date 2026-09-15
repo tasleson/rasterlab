@@ -180,8 +180,17 @@ impl MenuFilter {
     /// Whether `name` should be listed.  Case-insensitive substring match, as
     /// in the grid's own search; an empty box matches everything.
     pub fn matches(&self, name: &str) -> bool {
-        self.text.is_empty() || name.to_lowercase().contains(&self.text.to_lowercase())
+        name_matches(&self.text, name)
     }
+}
+
+/// Whether a collection named `name` survives the filter text `filter`.
+///
+/// Case-insensitive substring match, as in the grid's own search; an empty
+/// filter matches everything.  Shared by the menus' [`MenuFilter`] and the
+/// sidebar's filter box so the two behave the same way.
+pub fn name_matches(filter: &str, name: &str) -> bool {
+    filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
 }
 
 /// The collection dialog currently on screen, if any.
@@ -548,6 +557,11 @@ pub struct LibraryState {
     pub collections_menu_filter: MenuFilter,
     pub move_to_menu_filter: MenuFilter,
 
+    /// The sidebar's collections filter box.  A plain string rather than a
+    /// [`MenuFilter`]: the sidebar has no open/close event to reset on, and a
+    /// filter set there is meant to stay until the user clears it.
+    pub collections_filter: String,
+
     /// The open collection dialog (new / delete confirmation), if any.
     pub collection_prompt: Option<CollectionPrompt>,
 
@@ -695,6 +709,7 @@ impl Default for LibraryState {
             collection_members: HashMap::new(),
             collections_menu_filter: MenuFilter::default(),
             move_to_menu_filter: MenuFilter::default(),
+            collections_filter: String::new(),
             collection_prompt: None,
             folder_import_prompt: None,
             all_photo_count: 0,
@@ -2522,6 +2537,15 @@ mod tests {
             filter.text = needle.to_owned();
             assert!(filter.matches("Iceland 2024"), "{needle} should match");
             assert!(!filter.matches("Portraits"), "{needle} should not match");
+        }
+    }
+
+    #[test]
+    fn name_matches_ignores_case_and_position() {
+        assert!(name_matches("", "Iceland 2024"), "an empty filter matches");
+        for needle in ["ice", "ICE", "land 20", "2024"] {
+            assert!(name_matches(needle, "Iceland 2024"), "{needle} matches");
+            assert!(!name_matches(needle, "Portraits"), "{needle} does not");
         }
     }
 
