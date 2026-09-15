@@ -3241,3 +3241,176 @@ fn open_existing_refuses_a_path_that_is_no_longer_a_library() {
         "a real library must open by the same path"
     );
 }
+
+// ── Deleting sources ─────────────────────────────────────────────────────────
+
+/// The source files still under `dir`, as paths relative to it and sorted, so
+/// assertions do not depend on directory order.
+fn remaining_sources(dir: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                walk(&path, root, found);
+            } else {
+                found.push(path.strip_prefix(root).unwrap().display().to_string());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, dir, &mut found);
+    found.sort();
+    found
+}
+
+fn delete_sources() -> rasterlab_library::ImportOptions {
+    rasterlab_library::ImportOptions {
+        collection: ImportCollection::None,
+        delete_sources: true,
+    }
+}
+
+/// Emptying a card is the whole point of the option: what the library took in
+/// is gone from the source, and the library holds every one of them.
+#[test]
+fn deleting_sources_empties_what_it_imported() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let deleted = std::cell::Cell::new(0);
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| deleted.set(p.deleted_sources),
+    )
+    .unwrap();
+
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 3);
+    assert_eq!(deleted.get(), 3);
+    assert!(
+        remaining_sources(src.path()).is_empty(),
+        "sources left behind: {:?}",
+        remaining_sources(src.path())
+    );
+}
+
+/// A file the library already had is no less imported for having arrived on an
+/// earlier run, so a second pass over a half-emptied card finishes emptying it
+/// rather than leaving every duplicate where it is.
+#[test]
+fn a_delete_run_takes_the_duplicates_too() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        ImportCollection::None,
+        no_cancel(),
+        |_| {},
+    )
+    .unwrap();
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.imported, 0, "the second run imported something new");
+    assert_eq!(last.skipped_duplicates, 3);
+    assert_eq!(last.deleted_sources, 3);
+    assert!(last.errors.is_empty(), "{:?}", last.errors);
+    assert!(remaining_sources(src.path()).is_empty());
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 3);
+}
+
+/// A photo can be in the index while its file is not — a library restored
+/// without its `files/`, a mount that dropped out. The source in front of us is
+/// then the only copy left, and deleting it on the index's word alone would
+/// lose the photograph.
+#[test]
+fn a_source_is_kept_when_the_library_has_no_file_for_it() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        ImportCollection::None,
+        no_cancel(),
+        |_| {},
+    )
+    .unwrap();
+    for row in lib.all_photos(SortOrder::default()).unwrap() {
+        std::fs::remove_file(lib.rlab_path(&row.hash)).unwrap();
+    }
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.deleted_sources, 0);
+    assert_eq!(last.errors.len(), 3, "kept sources go unreported");
+    assert_eq!(
+        remaining_sources(src.path()),
+        vec![
+            "Harbour/shot.png".to_string(),
+            "Sunrise/shot.png".into(),
+            "loose.png".into(),
+        ]
+    );
+}
+
+/// A file that failed to import is not in the library, whatever the run was
+/// asked to do with the files that are.
+#[test]
+fn a_failed_import_keeps_its_source() {
+    let src = shoot_tree();
+    let broken = src.path().join("broken.png");
+    std::fs::write(&broken, b"not a png").unwrap();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.imported, 3);
+    assert_eq!(last.deleted_sources, 3);
+    assert_eq!(last.errors.len(), 1);
+    assert_eq!(
+        remaining_sources(src.path()),
+        vec!["broken.png".to_string()]
+    );
+}

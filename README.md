@@ -259,6 +259,9 @@ rasterlab library import /srv/photos ~/cards/DCIM
 rasterlab library import /srv/photos ~/shoots --collection-per-folder
 rasterlab library import /srv/photos iceland/*.nef --collection "Iceland 2024"
 
+# Empty a card: delete each source once the library holds its contents
+rasterlab library import /srv/photos ~/cards/DCIM --delete-source
+
 # Re-index the .rlab files on disk, recovering rows the index has lost
 rasterlab library rebuild /srv/photos
 
@@ -276,6 +279,15 @@ in the library are skipped by content hash, which makes re-running an import
 over the same source cheap — and is why an interrupted import is finished by
 simply running it again. `--create` makes the library as part of the import for
 the first run.
+
+`--delete-source` removes each source file once the library is holding its
+contents, which is what makes an import an "empty the card" run. A file the
+library already had is deleted too — it is no less imported for having arrived
+on an earlier run — so a second pass over a half-emptied card finishes emptying
+it. Nothing is deleted until the `.rlab` holding those bytes has been found on
+disk, a file that failed to import is always left where it is, and a source
+that had to be kept is reported as an error like any other. Sidecars and
+anything else the import did not take in are left alone.
 
 `compare` answers "did that change alter what ends up in the library?" — import
 the same sources with the old code and with the new, then compare the two

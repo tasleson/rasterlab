@@ -69,6 +69,34 @@ impl ImportCollection {
     }
 }
 
+/// Everything an import run needs to know beyond the files themselves.
+///
+/// Takes an [`ImportCollection`] directly (`options.into()`), so a caller that
+/// only cares about filing stays a one-liner.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportOptions {
+    /// What collection, if any, newly imported photos are filed into.
+    pub collection: ImportCollection,
+    /// Delete each source file once the library is holding its contents.
+    ///
+    /// This covers duplicates as well as new photographs: a file skipped
+    /// because the library already has those exact bytes is no less imported
+    /// for having been imported earlier, and leaving it behind would mean a
+    /// re-run over a half-emptied card never finishes emptying it.  Nothing is
+    /// deleted until the `.rlab` holding the contents has been found on disk,
+    /// and a file that failed to import is always left alone.
+    pub delete_sources: bool,
+}
+
+impl From<ImportCollection> for ImportOptions {
+    fn from(collection: ImportCollection) -> Self {
+        Self {
+            collection,
+            delete_sources: false,
+        }
+    }
+}
+
 /// The collection an imported photo joins, as known before the photo is
 /// committed: a stable uuid and display name, plus the index row id once one
 /// exists.
@@ -219,6 +247,7 @@ pub fn import_files(
         imported: 0,
         current_file: PathBuf::new(),
         skipped_duplicates: 0,
+        deleted_sources: 0,
         errors: Vec::new(),
         scanning: false,
     });
@@ -250,6 +279,9 @@ pub fn import_files(
         &mut batch_hashes,
         &cancelled,
         paths.len(),
+        // Importing a hand-picked list of files says nothing about wanting
+        // them gone; only the folder import offers that.
+        false,
         &mut tally,
         progress_cb,
     );
@@ -268,6 +300,7 @@ pub fn import_files(
         imported: tally.imported,
         current_file: PathBuf::new(),
         skipped_duplicates: tally.skipped_duplicates,
+        deleted_sources: tally.deleted_sources,
         errors: tally.errors.clone(),
         scanning: false,
     });
@@ -301,10 +334,10 @@ pub fn import_folder_grouped(
     paths: &[PathBuf],
     cancelled: Arc<AtomicBool>,
     source_dir: Option<&Path>,
-    collection: ImportCollection,
+    options: ImportOptions,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Result<Vec<ImportSession>> {
-    let assigner = Mutex::new(CollectionAssigner::new(db, collection));
+    let assigner = Mutex::new(CollectionAssigner::new(db, options.collection.clone()));
     let total = paths.len();
     // One clock reading for the whole run, so every group this import creates
     // sorts together in a recent-imports list.
@@ -329,6 +362,7 @@ pub fn import_folder_grouped(
             imported: 0,
             current_file: path.clone(),
             skipped_duplicates: 0,
+            deleted_sources: 0,
             errors: Vec::new(),
             scanning: true,
         });
@@ -405,12 +439,13 @@ pub fn import_folder_grouped(
             &mut batch_hashes,
             &cancelled,
             total,
+            options.delete_sources,
             &mut tally,
             progress_cb,
         );
         let group_done = outcomes
             .iter()
-            .filter(|outcome| matches!(outcome, ImportOutcome::Imported))
+            .filter(|outcome| matches!(outcome, ImportOutcome::Imported(_)))
             .count();
 
         recount_session(db, &session_id)?;
@@ -439,6 +474,7 @@ pub fn import_folder_grouped(
         imported: tally.imported,
         current_file: PathBuf::new(),
         skipped_duplicates: tally.skipped_duplicates,
+        deleted_sources: tally.deleted_sources,
         errors: tally.errors.clone(),
         scanning: false,
     });
@@ -621,9 +657,23 @@ impl Prepared {
     }
 }
 
+/// What preparing one source file found.
+enum Preparation {
+    /// A new photograph, ready to be committed.  Boxed: a `Prepared` is the
+    /// far larger of the two variants, and every duplicate would otherwise
+    /// carry its bulk around.
+    Ready(Box<Prepared>),
+    /// Already in the library, carrying the content hash of the photo that
+    /// makes it a duplicate.  The hash rather than a bare "skip it": an import
+    /// deleting its sources has to find the file holding those bytes before
+    /// unlinking the copy in front of it.
+    Duplicate(String),
+}
+
 /// Read, decode and serialise one source file without writing anything.
 ///
-/// Returns `Ok(None)` for a file already in the library, `Err` on failure.
+/// Returns [`Preparation::Duplicate`] for a file already in the library, `Err`
+/// on failure.
 /// Nothing here touches the library on disk and the only database calls are
 /// reads, so this is safe to run on several threads at once against the same
 /// import; [`commit_prepared`] performs every write, in input order.
@@ -647,7 +697,7 @@ fn prepare_one(
     import_date: u64,
     fallback_capture_ts: Option<u64>,
     assigner: &Mutex<CollectionAssigner<'_>>,
-) -> Result<Option<Prepared>> {
+) -> Result<Preparation> {
     // 1. Read source bytes + capture source-file timestamps.
     //    Stat first so we read the times the file had before we opened it.
     let fs_meta = import_phase!(
@@ -665,12 +715,12 @@ fn prepare_one(
     // network) read plus Blake3 hash just to rediscover the duplicate. Falls
     // through to the read+hash dedup whenever the mtime is unavailable.
     if let Some(mtime) = source_mtime
-        && import_phase!(
+        && let Some(hash) = import_phase!(
             "fingerprint_lookup",
             db.source_already_imported(&path.to_string_lossy(), fs_meta.len(), mtime.secs)
         )?
     {
-        return Ok(None);
+        return Ok(Preparation::Duplicate(hash));
     }
 
     let input_bytes = import_phase!(
@@ -712,7 +762,7 @@ fn prepare_one(
     //    batch cannot be seen here — that pair may be in flight at the same
     //    moment — so `commit_prepared` checks the batch's own hashes again.
     if import_phase!("hash_lookup", db.photo_by_hash(&hash))?.is_some() {
-        return Ok(None);
+        return Ok(Preparation::Duplicate(hash));
     }
 
     // 4. Determine the stack partner hash (if this file is in a pair)
@@ -858,7 +908,7 @@ fn prepare_one(
         encode_rlab(original_bytes, &lmta, &thumb_bytes, width, height)?
     };
 
-    Ok(Some(Prepared {
+    Ok(Preparation::Ready(Box::new(Prepared {
         hash,
         thumb_bytes,
         rlab_bytes,
@@ -868,7 +918,7 @@ fn prepare_one(
         stack_id,
         has_edits,
         collection,
-    }))
+    })))
 }
 
 /// Make one prepared photo durable and record it in the index.
@@ -1010,13 +1060,25 @@ struct PipelineJob {
     fallback_capture_ts: Option<u64>,
 }
 
-/// What committing one input file did.
+/// What committing one input file did, carrying the content hash the library
+/// now holds those bytes under.
 enum ImportOutcome {
     /// Newly imported.
-    Imported,
+    Imported(String),
     /// Already in the library, or a duplicate of an earlier file in this batch.
-    Duplicate,
+    Duplicate(String),
     Failed,
+}
+
+impl ImportOutcome {
+    /// The hash the library holds this file's contents under, or `None` when
+    /// it does not hold them at all.
+    fn library_hash(&self) -> Option<&str> {
+        match self {
+            Self::Imported(hash) | Self::Duplicate(hash) => Some(hash),
+            Self::Failed => None,
+        }
+    }
 }
 
 /// Counts carried across every group of one import run, so progress reports
@@ -1026,6 +1088,8 @@ struct ImportTally {
     processed: usize,
     imported: usize,
     skipped_duplicates: usize,
+    /// Source files removed after their contents were found in the library.
+    deleted_sources: usize,
     errors: Vec<(PathBuf, String)>,
 }
 
@@ -1037,7 +1101,7 @@ struct PipelineQueue {
     /// can never wait on work nobody has started.
     next_job: usize,
     /// Finished preparations by input index, drained in that order.
-    ready: BTreeMap<usize, Result<Option<Prepared>>>,
+    ready: BTreeMap<usize, Result<Preparation>>,
     /// Bytes held in `ready`, weighed against [`PREPARE_QUEUE_BUDGET_BYTES`].
     buffered: usize,
     /// Source bytes of the preparations currently running, weighed against
@@ -1095,6 +1159,7 @@ fn run_import_pipeline(
     batch_hashes: &mut HashSet<String>,
     cancelled: &AtomicBool,
     total: usize,
+    delete_sources: bool,
     tally: &mut ImportTally,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Vec<ImportOutcome> {
@@ -1175,7 +1240,7 @@ fn run_import_pipeline(
 
                     let mut queue = queue.lock().expect("import queue poisoned");
                     queue.in_flight -= source_bytes;
-                    if let Ok(Some(prepared)) = &prepared {
+                    if let Ok(Preparation::Ready(prepared)) = &prepared {
                         queue.buffered += prepared.buffered_bytes();
                     }
                     queue.ready.insert(index, prepared);
@@ -1202,7 +1267,7 @@ fn run_import_pipeline(
                 }
                 match queue.ready.remove(&index) {
                     Some(prepared) => {
-                        if let Ok(Some(prepared)) = &prepared {
+                        if let Ok(Preparation::Ready(prepared)) = &prepared {
                             queue.buffered -= prepared.buffered_bytes();
                         }
                         ready.notify_all();
@@ -1219,6 +1284,7 @@ fn run_import_pipeline(
                 imported: tally.imported,
                 current_file: job.path.clone(),
                 skipped_duplicates: tally.skipped_duplicates,
+                deleted_sources: tally.deleted_sources,
                 errors: tally.errors.clone(),
                 scanning: false,
             });
@@ -1227,15 +1293,15 @@ fn run_import_pipeline(
             // concurrently, so neither can see the other in the index.  The
             // earlier one has already committed by the time this runs.
             let outcome = match prepared {
-                Ok(Some(prepared)) if batch_hashes.contains(&prepared.hash) => {
-                    ImportOutcome::Duplicate
+                Ok(Preparation::Ready(prepared)) if batch_hashes.contains(&prepared.hash) => {
+                    ImportOutcome::Duplicate(prepared.hash)
                 }
-                Ok(Some(prepared)) => {
+                Ok(Preparation::Ready(prepared)) => {
                     let hash = prepared.hash.clone();
-                    match commit_prepared(library_root, db, assigner, prepared) {
+                    match commit_prepared(library_root, db, assigner, *prepared) {
                         Ok(()) => {
-                            batch_hashes.insert(hash);
-                            ImportOutcome::Imported
+                            batch_hashes.insert(hash.clone());
+                            ImportOutcome::Imported(hash)
                         }
                         Err(e) => {
                             tally.errors.push((job.path.clone(), format!("{:#}", e)));
@@ -1243,16 +1309,24 @@ fn run_import_pipeline(
                         }
                     }
                 }
-                Ok(None) => ImportOutcome::Duplicate,
+                Ok(Preparation::Duplicate(hash)) => ImportOutcome::Duplicate(hash),
                 Err(e) => {
                     tally.errors.push((job.path.clone(), format!("{:#}", e)));
                     ImportOutcome::Failed
                 }
             };
             match &outcome {
-                ImportOutcome::Imported => tally.imported += 1,
-                ImportOutcome::Duplicate => tally.skipped_duplicates += 1,
+                ImportOutcome::Imported(_) => tally.imported += 1,
+                ImportOutcome::Duplicate(_) => tally.skipped_duplicates += 1,
                 ImportOutcome::Failed => {}
+            }
+            // Only once the library is known to be holding these bytes, and
+            // never for a file that failed: the source is the other copy.
+            if delete_sources && let Some(hash) = outcome.library_hash() {
+                match delete_source(library_root, &job.path, hash) {
+                    Ok(()) => tally.deleted_sources += 1,
+                    Err(e) => tally.errors.push((job.path.clone(), format!("{:#}", e))),
+                }
             }
             tally.processed += 1;
             outcomes.push(outcome);
@@ -1301,6 +1375,26 @@ fn encode_rlab(
     })
 }
 // ── Path helpers ──────────────────────────────────────────────────────────────
+
+/// Remove a source file whose contents the library is now holding.
+///
+/// The stored `.rlab` is located first, and the source is kept whenever it
+/// cannot be: a photo can be in the index while its file is not — a library
+/// restored without its `files/`, a mount that dropped out mid-run — and this
+/// is the last moment at which the source is still the other copy.  A photo
+/// the user has moved to Recently Deleted counts as held: it is still in the
+/// library, and still restorable.
+fn delete_source(library_root: &Path, source: &Path, hash: &str) -> Result<()> {
+    let active = rlab_path(library_root, hash);
+    let deleted = rlab_path(&library_root.join("recently_deleted"), hash);
+    if !active.is_file() && !deleted.is_file() {
+        anyhow::bail!(
+            "kept source: the library has no file at {}",
+            active.display()
+        );
+    }
+    std::fs::remove_file(source).with_context(|| format!("delete source {}", source.display()))
+}
 
 pub fn relative_lib_path(hash: &str) -> String {
     format!("{}/{}/{}.rlab", &hash[0..2], &hash[2..4], hash)

@@ -362,13 +362,19 @@ impl LibraryDb for StoolapDb {
         source_path: &str,
         source_size: u64,
         source_mtime_secs: i64,
-    ) -> Result<bool> {
+    ) -> Result<Option<String>> {
         let mut rows = self.db.query(
-            "SELECT 1 FROM photos
+            "SELECT hash FROM photos
              WHERE source_path = $1 AND source_size = $2 AND source_mtime = $3",
             (source_path, source_size as i64, source_mtime_secs),
         )?;
-        Ok(rows.next().is_some())
+        match rows.next() {
+            Some(row) => {
+                let row = row.context("source_already_imported row")?;
+                Ok(Some(row.get::<String>(0).context("hash")?))
+            }
+            None => Ok(None),
+        }
     }
 
     fn update_lmta(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> Result<()> {

@@ -23,7 +23,7 @@ use crate::{
         CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
         RecentlyDeletedRow, SortOrder,
     },
-    import::{self, ImportCollection, ImportSession},
+    import::{self, ImportCollection, ImportOptions, ImportSession},
     reconstruct::{self, RebuildOutcome, RebuildProgress},
     search::SearchFilter,
     stoolap_db::StoolapDb,
@@ -76,6 +76,9 @@ pub struct ImportProgress {
     pub imported: usize,
     pub current_file: PathBuf,
     pub skipped_duplicates: usize,
+    /// Source files deleted after the library was found to hold their
+    /// contents. Zero unless the run was asked to delete its sources.
+    pub deleted_sources: usize,
     pub errors: Vec<(PathBuf, String)>,
     /// True during the pre-import capture-date scan (phase 1 of a grouped
     /// folder import). Lets the UI show "Scanning…" instead of a frozen
@@ -319,7 +322,7 @@ impl Library {
         self.import_expanded(
             &paths,
             Some(folder),
-            collection,
+            collection.into(),
             Arc::new(AtomicBool::new(false)),
             &progress_cb,
         )
@@ -338,13 +341,18 @@ impl Library {
     /// Setting `cancel` stops the run after the file it is on. Nothing has to
     /// be undone: imports are keyed by content hash, so re-running the same
     /// command picks up where this one left off.
+    ///
+    /// `options` takes an [`ImportCollection`] on its own, or an
+    /// [`ImportOptions`] when the run should also delete the sources it has
+    /// taken in.
     pub fn import_paths(
         &self,
         paths: &[PathBuf],
-        collection: ImportCollection,
+        options: impl Into<ImportOptions>,
         cancel: Arc<AtomicBool>,
         progress_cb: impl Fn(ImportProgress),
     ) -> Result<Vec<ImportSession>> {
+        let options = options.into();
         let mut files = Vec::new();
         let mut seen = HashSet::new();
         let mut folders = Vec::new();
@@ -373,14 +381,14 @@ impl Library {
             (0, [only]) => Some(*only),
             _ => None,
         };
-        self.import_expanded(&files, source, collection, cancel, &progress_cb)
+        self.import_expanded(&files, source, options, cancel, &progress_cb)
     }
 
     fn import_expanded(
         &self,
         files: &[PathBuf],
         source_dir: Option<&Path>,
-        collection: ImportCollection,
+        options: ImportOptions,
         cancel: Arc<AtomicBool>,
         progress_cb: &dyn Fn(ImportProgress),
     ) -> Result<Vec<ImportSession>> {
@@ -391,7 +399,7 @@ impl Library {
             files,
             cancel,
             source_dir,
-            collection,
+            options,
             progress_cb,
         )
     }

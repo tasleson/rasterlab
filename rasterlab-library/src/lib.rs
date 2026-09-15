@@ -84,7 +84,7 @@ pub use db_trait::{
     CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
     RecentlyDeletedRow, SortOrder,
 };
-pub use import::{ImportCollection, ImportSession, MONTH_NAMES, ymd_from_unix};
+pub use import::{ImportCollection, ImportOptions, ImportSession, MONTH_NAMES, ymd_from_unix};
 pub use library::{
     BulkOutcome, BulkProgress, ImportProgress, Library, LibraryBusy, MembershipChange, NotALibrary,
     is_library_root,
