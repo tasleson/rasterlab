@@ -291,8 +291,11 @@ the first run.
 its photograph, which is what makes an import an "empty the card" run. A file
 the library already had is deleted too — it is no less imported for having
 arrived on an earlier run — so a second pass over a half-emptied card finishes
-emptying it. A file that failed to import is left where it is, as are sidecars
-and anything else the import did not take in.
+emptying it. A photo the user has moved to Recently Deleted counts as held as
+well: its file is still there, it can still be restored, and its source is
+still a second copy of something the library has. A file that failed to import
+is left where it is, as are sidecars and anything else the import did not take
+in.
 
 The proof is the point, and it costs a read. Every source is hashed rather than
 recognised by its path, size and mtime in the index, because that fingerprint

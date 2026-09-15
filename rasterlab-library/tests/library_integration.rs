@@ -3671,3 +3671,52 @@ fn a_source_is_kept_when_the_library_copy_does_not_verify() {
     );
     assert!(src.path().join("shot.png").is_file());
 }
+
+/// A photo in Recently Deleted is still in the library: it is restorable, it
+/// still has its file, and the source that brought it in is still a second
+/// copy of something the library is holding. Keeping that source would mean a
+/// card never empties until the user has been round the trash.
+#[test]
+fn a_delete_run_takes_a_source_whose_photo_is_in_recently_deleted() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    write_png_with_mtime(&src.path().join("shot.png"), 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder(src.path(), |_| {}).unwrap();
+
+    let photo = lib.all_photos(SortOrder::default()).unwrap().remove(0);
+    lib.delete_photo(photo.id).unwrap();
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert!(last.errors.is_empty(), "{:?}", last.errors);
+    assert_eq!(
+        last.deleted_sources, 1,
+        "the source outlived its photograph"
+    );
+    assert!(!src.path().join("shot.png").exists());
+
+    // And the photo stayed where the user put it: an import must not quietly
+    // resurrect something they deleted, nor leave a second copy behind.
+    assert_eq!(last.imported, 0);
+    assert_eq!(last.skipped_duplicates, 1);
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+    assert!(lib.recently_deleted_path(&photo.hash).is_file());
+}

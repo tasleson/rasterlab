@@ -154,9 +154,10 @@ pub struct ImportArgs {
     ///
     /// A file the library already had is deleted too — it is no less imported
     /// for having arrived on an earlier run — so emptying a card takes the
-    /// same command whether or not part of it got there already. A file that
-    /// failed to import is left where it is, as are sidecars and anything else
-    /// the import did not take in.
+    /// same command whether or not part of it got there already. That includes
+    /// a photo sitting in Recently Deleted, which is still in the library and
+    /// still restorable. A file that failed to import is left where it is, as
+    /// are sidecars and anything else the import did not take in.
     ///
     /// Proving it costs a read: every source is hashed rather than recognised
     /// by its fingerprint in the index, and the library's own copy is read
