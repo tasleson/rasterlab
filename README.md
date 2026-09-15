@@ -272,6 +272,13 @@ rasterlab library scrub /srv/photos --quiet
 rasterlab library compare /srv/photos-before /srv/photos-after
 ```
 
+A folder is searched recursively for images and for `.rlab` projects. A project
+is unwrapped on the way in: the photograph inside it is what the library
+indexes, under the Blake3 the project already records for it, and its edits,
+rating and keywords come along. That hash is also how a project is recognised as
+a duplicate, so importing another library's files a second time costs a seek per
+file rather than a read.
+
 An import groups what it brings in into back-dated sessions by capture date,
 the same way the GUI groups a folder import, so importing an existing archive
 reconstructs its history instead of landing it all under today. Photos already

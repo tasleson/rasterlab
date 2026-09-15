@@ -13,7 +13,7 @@ use rasterlab_core::{
     formats::FormatRegistry,
     library_meta::{CollectionRef, LibraryMeta},
     pipeline::EditPipeline,
-    project::{RlabFile, read_library_summary},
+    project::{RlabFile, is_rlab_path, read_library_summary},
     verified_write::{create_dir_all_synced, rename_synced},
 };
 use uuid::Uuid;
@@ -1461,11 +1461,16 @@ fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf>
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
             .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    .map(|x| exts.contains(&x.to_lowercase()))
-                    .unwrap_or(false)
+                // `.rlab` is no format handler's extension — it is the
+                // container, and the import unwraps it — but a folder of
+                // projects is a folder of photographs, so the walk has to
+                // offer them alongside the ordinary images.
+                is_rlab_path(e.path())
+                    || e.path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| exts.contains(&x.to_lowercase()))
+                        .unwrap_or(false)
             })
             .map(|e| e.into_path())
             .collect()

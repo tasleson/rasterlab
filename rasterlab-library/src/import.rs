@@ -13,7 +13,7 @@ use rasterlab_core::import_phase;
 use rasterlab_core::{
     formats::{FormatRegistry, exif_util::read_capture_date_from_prefix},
     library_meta::{CollectionRef, FileTimeStamp, LibraryExif, LibraryMeta},
-    project::{RlabFile, is_rlab_path},
+    project::{RlabFile, is_rlab_path, read_library_summary, read_original_hash},
     verified_write::{create_dir_all_synced, write_verified_atomic},
 };
 use uuid::Uuid;
@@ -500,6 +500,9 @@ pub fn import_folder_grouped(
 /// `DateTimeOriginal`, then filesystem modified time, then created time.
 fn capture_timestamp(path: &Path) -> u64 {
     import_phase!("capture_scan", {
+        if let Some(ts) = rlab_capture_timestamp(path) {
+            return ts;
+        }
         if let Some(ts) = exif_capture_timestamp(path) {
             return ts;
         }
@@ -535,6 +538,22 @@ const EXIF_PREFIX_LEN: u64 = 1 << 20; // 1 MiB
 /// TIFF-based RAW use different container parsers; formats without EXIF (PNG,
 /// scans, …) — and the rare file whose date sits past the prefix — return
 /// `None` and fall back to filesystem times.
+/// Capture time of an already-imported project, read from the `LMTA` its
+/// previous library wrote.
+///
+/// Costs a seek over the chunk headers rather than a full read: the point of
+/// the scan phase is to date the run before any of it is imported, and a tree
+/// of `.rlab` files is exactly the case — another tool's library, or this
+/// one's — where dating them by file mtime would collapse years of history
+/// into the day they were copied.
+fn rlab_capture_timestamp(path: &Path) -> Option<u64> {
+    if !is_rlab_path(path) {
+        return None;
+    }
+    let date = read_library_summary(path).ok()?.lmta?.exif?.capture_date?;
+    parse_exif_datetime(&date)
+}
+
 fn exif_capture_timestamp(path: &Path) -> Option<u64> {
     let ext = path.extension()?.to_string_lossy().to_lowercase();
     let is_jpeg = is_jpeg_ext(&ext);
@@ -719,6 +738,23 @@ fn prepare_one(
             "fingerprint_lookup",
             db.source_already_imported(&path.to_string_lossy(), fs_meta.len(), mtime.secs)
         )?
+    {
+        return Ok(Preparation::Duplicate(hash));
+    }
+
+    // A project already carries the Blake3 of the original it holds, stored
+    // beside the payload rather than over it, so asking whether the library
+    // has this photograph costs a seek instead of reading (and re-hashing) a
+    // whole original.  Worth doing before the read: importing another
+    // library's files is mostly a run of photographs this one already has.
+    if is_rlab_path(path)
+        && let Some(hash) = import_phase!(
+            "hash_lookup",
+            read_original_hash(path)
+                .ok()
+                .map(|hash| blake3::Hash::from(hash).to_hex().to_string())
+        )
+        && import_phase!("hash_lookup", db.photo_by_hash(&hash))?.is_some()
     {
         return Ok(Preparation::Duplicate(hash));
     }

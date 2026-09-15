@@ -47,7 +47,9 @@ pub enum LibraryCommand {
 
     /// Import files and folders into a library.
     ///
-    /// Folders are searched recursively for supported images. Everything the
+    /// Folders are searched recursively for supported images and for `.rlab`
+    /// projects, which are unwrapped so the library indexes the photograph
+    /// inside rather than the container. Everything the
     /// run brings in is grouped into back-dated import sessions by capture
     /// date, the same way the GUI groups a folder import, so importing an
     /// existing archive reconstructs its history rather than landing it all

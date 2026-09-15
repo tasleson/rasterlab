@@ -3414,3 +3414,164 @@ fn a_failed_import_keeps_its_source() {
         vec!["broken.png".to_string()]
     );
 }
+
+// ── Importing projects found in a folder ─────────────────────────────────────
+
+/// Write `source` into `dir` as a `.rlab` project, the way an earlier library
+/// or a save from the editor would have left it, carrying `capture_date` in
+/// its `LMTA`.  `mtime` is set to something quite unlike the capture date, so a
+/// test can tell which of the two the import dated the photo by.
+fn write_rlab(
+    dir: &std::path::Path,
+    name: &str,
+    source: &std::path::Path,
+    capture_date: Option<&str>,
+    mtime_secs: i64,
+) -> PathBuf {
+    use rasterlab_core::{
+        formats::FormatRegistry,
+        library_meta::{LibraryExif, LibraryMeta},
+        pipeline::EditPipeline,
+        project::{RlabFile, RlabMeta, SavedCopy},
+    };
+
+    let original_bytes = std::fs::read(source).unwrap();
+    let image = FormatRegistry::with_builtins()
+        .decode_bytes(&original_bytes, Some(source))
+        .unwrap();
+    let (width, height) = (image.width, image.height);
+    let mut project = RlabFile::new(
+        RlabMeta::new(
+            "test",
+            Some(source.to_string_lossy().into_owned()),
+            width,
+            height,
+        ),
+        original_bytes,
+        vec![SavedCopy {
+            name: "Original".into(),
+            pipeline_state: EditPipeline::new(image).save_state().unwrap(),
+        }],
+        0,
+        None,
+    );
+    if let Some(capture_date) = capture_date {
+        project.set_lmta(Some(LibraryMeta {
+            exif: Some(LibraryExif {
+                capture_date: Some(capture_date.to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
+
+    let path = dir.join(name);
+    project.write_v5(&path).unwrap();
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(mtime_secs, 0)).unwrap();
+    path
+}
+
+/// A folder of projects is a folder of photographs. `.rlab` is no format
+/// handler's extension, so a walk that only asks the registry what it can
+/// decode walks straight past a whole exported library.
+#[test]
+fn a_folder_import_takes_the_rlab_projects_it_finds() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    write_png_with_mtime(&src.path().join("loose.png"), 1, BASE);
+    let project = write_rlab(src.path(), "edited.rlab", &png_path(), None, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder(src.path(), |_| {}).unwrap();
+
+    let hashes: Vec<String> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .map(|photo| photo.hash)
+        .collect();
+    assert_eq!(hashes.len(), 2, "the project was walked past");
+    let original = blake3::hash(&std::fs::read(png_path()).unwrap())
+        .to_hex()
+        .to_string();
+    assert!(
+        hashes.contains(&original),
+        "the project is indexed under the hash of the photograph inside it"
+    );
+    assert!(project.is_file(), "the import moved the source");
+}
+
+/// The project records the Blake3 of the original it holds, which is the same
+/// key the library files photographs under: a project whose photograph is
+/// already in the library is a duplicate, however it arrived.
+#[test]
+fn an_rlab_of_a_photo_already_in_the_library_is_a_duplicate() {
+    const BASE: i64 = 1_600_000_000;
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_files(&[png_path()], |_| {}).unwrap();
+
+    let src = tempfile::tempdir().unwrap();
+    write_rlab(src.path(), "same-photo.rlab", &png_path(), None, BASE);
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        ImportCollection::None,
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.imported, 0);
+    assert_eq!(last.skipped_duplicates, 1);
+    assert!(last.errors.is_empty(), "{:?}", last.errors);
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+}
+
+/// Importing another library's files is the case back-dating exists for, and a
+/// project's capture date lives in its `LMTA` rather than where a JPEG keeps
+/// it. Dating those files by mtime would collapse years of shoots into the day
+/// they were copied.
+#[test]
+fn rlab_sessions_are_dated_by_the_capture_date_inside_the_project() {
+    const DAY: i64 = 86_400;
+    const SHOT: i64 = 1_599_984_000; // 2020-09-13 08:00:00 UTC
+    // Copied onto this disk long after they were shot.
+    const COPIED: i64 = 1_750_000_000; // 2025-06-15 UTC
+
+    let src = tempfile::tempdir().unwrap();
+    write_rlab(
+        src.path(),
+        "sunrise.rlab",
+        &png_path(),
+        Some("2020:09:13 08:00:00"),
+        COPIED,
+    );
+    write_rlab(
+        src.path(),
+        "harbour.rlab",
+        &jpeg_path(),
+        Some("2020:09:18 08:00:00"),
+        COPIED,
+    );
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    let sessions = lib.import_folder(src.path(), |_| {}).unwrap();
+
+    assert_eq!(sessions.len(), 2, "five days apart is two shoots");
+    let mut started: Vec<u64> = sessions.iter().map(|session| session.started_at).collect();
+    started.sort();
+    assert_eq!(
+        started,
+        vec![SHOT as u64, (SHOT + 5 * DAY) as u64],
+        "sessions were dated by file mtime, not by the projects' capture dates"
+    );
+}
