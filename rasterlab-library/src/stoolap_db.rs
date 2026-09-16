@@ -103,6 +103,41 @@ impl StoolapDb {
         Ok(())
     }
 
+    /// Rewrite every session's cached active-photo count from the photo rows.
+    ///
+    /// Runs on every open, and is normally a no-op: the per-photo mutations
+    /// keep the count current themselves.  It is here for the libraries where
+    /// they did not — an emptied session that kept its old count sat in the
+    /// sidebar offering photos that were all in Recently Deleted, and nothing
+    /// short of an index rebuild put it right.
+    fn resync_session_counts(&self) -> Result<()> {
+        let rows = self
+            .db
+            .query("SELECT id, photo_count FROM import_sessions", ())
+            .context("read sessions for count resync")?;
+        let mut stale = Vec::new();
+        for row in rows {
+            let row = row.context("session row")?;
+            let id = row.get::<String>(0).context("session id")?;
+            let cached = row.get::<i64>(1).context("session photo_count")?;
+            let actual: i64 = self.db.query_one(
+                "SELECT COUNT(*) FROM photos
+                 WHERE import_session = $1 AND deleted_at = 0",
+                (id.as_str(),),
+            )?;
+            if actual != cached {
+                stale.push((id, actual));
+            }
+        }
+        for (id, count) in stale {
+            self.db.execute(
+                "UPDATE import_sessions SET photo_count = $1 WHERE id = $2",
+                (count, id.as_str()),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Run `f` in one transaction, committing only if it returns `Ok`.
     ///
     /// One photo is spread over `photos`, `exif`, `ratings`, `keywords`,
@@ -312,6 +347,8 @@ impl LibraryDb for StoolapDb {
             "UPDATE photos SET deleted_at=0 WHERE deleted_at IS NULL",
             (),
         );
+        self.resync_session_counts()
+            .context("resync cached import-session counts")?;
         Ok(())
     }
 
@@ -1690,6 +1727,27 @@ mod tests {
             db.delete_photo(*id).unwrap();
         }
         assert_eq!(session_counts(&db), [("s2".to_owned(), 1)]);
+    }
+
+    /// Libraries carrying a count left stale by the old per-photo update heal
+    /// on the next open rather than waiting for an index rebuild.
+    #[test]
+    fn opening_the_index_resyncs_a_stale_session_count() {
+        let db = db();
+        db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
+            .unwrap();
+        let id = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        db.mark_photo_deleted(id, 1_700_000_000).unwrap();
+        db.update_session_count("s1", 28).unwrap();
+
+        db.init().unwrap();
+
+        assert!(
+            session_counts(&db).is_empty(),
+            "the session has no active photos, whatever its cached count said"
+        );
     }
 
     /// Every session the sidebar would show, newest first, with its cached count.
