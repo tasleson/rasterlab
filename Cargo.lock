@@ -3918,6 +3918,7 @@ dependencies = [
  "rasterlab-gpu",
  "rasterlab-library",
  "rasterlab-render",
+ "rayon",
  "rfd",
  "serde",
  "serde_json",
