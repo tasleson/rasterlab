@@ -30,6 +30,14 @@ For end-to-end pipeline timing (sepia apply → histogram → texture conversion
 cargo run --release --example render_timing -- exp.jpg
 ```
 
+To break down the Open path instead (decode → EXIF → orientation →
+histogram → texture upload), pass a large photo and, optionally, a copy
+of it carrying EXIF orientation 6:
+
+```bash
+cargo run --release --example load_timing -- photo.jpg [photo_rotated.jpg]
+```
+
 ### Memory-bandwidth-bound loops do not benefit from rayon
 
 Operations that are a simple map/copy over a large buffer (e.g. the
@@ -92,4 +100,5 @@ When adding a new tool to the tools panel (`rasterlab-gui/src/panels/tools/`):
 | Canvas / texture upload | `rasterlab-gui/src/panels/canvas.rs` |
 | Criterion benchmarks | `rasterlab-core/benches/operations.rs` |
 | End-to-end timing example | `rasterlab-core/examples/render_timing.rs` |
+| Open-path (load) timing example | `rasterlab-core/examples/load_timing.rs` |
 | Thread-scaling example | `rasterlab-core/examples/rayon_scaling.rs` |

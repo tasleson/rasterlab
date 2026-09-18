@@ -1,2 +1,6 @@
 /target
 IDEAS.md
+
+# Large local benchmark inputs (see rasterlab-core/examples/load_timing.rs);
+# generated or copied in locally, never committed.
+/test_images/bench_*
