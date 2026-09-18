@@ -38,13 +38,25 @@ of it carrying EXIF orientation 6:
 cargo run --release --example load_timing -- photo.jpg [photo_rotated.jpg]
 ```
 
-### Memory-bandwidth-bound loops do not benefit from rayon
+### Measure memory-bandwidth-bound loops, do not assume
 
-Operations that are a simple map/copy over a large buffer (e.g. the
-`image_to_egui` RGBA8→Color32 conversion) are limited by memory
-bandwidth, not compute.  Adding `par_chunks` coordination overhead
-makes them slower, not faster.  Benchmark before assuming parallel =
-better.
+A simple map/copy over a large buffer is limited by memory bandwidth,
+not compute — but that does **not** mean rayon cannot help, because a
+single core usually cannot saturate the machine's bandwidth on its own.
+Which way it goes depends on the buffer and the box, so measure.
+
+Two worked examples, both 24 MP (~90 MiB), on a 16-core desktop:
+
+- The `image_to_egui` RGBA8→Color32 conversion **does** benefit:
+  ~42 ms serial → ~15 ms across the pool.  (A serial `memcpy` of the
+  same buffer is ~45 ms, so the gain is parallelism, not skipping the
+  per-pixel work — and skipping it is not an option anyway, since
+  `Color32` is premultiplied.)
+- The RGB→RGBA expansion likewise goes ~47 ms → ~13 ms, but chunk size
+  barely matters there (4096 px/chunk beats one-pixel chunks by only
+  ~8%), which is the signature of a bandwidth-bound loop.
+
+The rule that still holds unconditionally is the accumulator one below.
 
 ### rayon fold accumulators must be small or chunked
 
