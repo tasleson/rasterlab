@@ -3956,6 +3956,7 @@ dependencies = [
  "blake3",
  "filetime",
  "image",
+ "libc",
  "rasterlab-core",
  "rayon",
  "serde",

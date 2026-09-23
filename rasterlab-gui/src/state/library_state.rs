@@ -396,25 +396,43 @@ pub(crate) struct MetadataCommitRequest {
 
 /// The banner text for a failed open, plus the path to offer a retry for.
 ///
-/// Two of these are not faults in the library at all — it is held by another
-/// process, or it is on something that is not connected — and both are fixed
-/// by waiting and trying again, so each says so in those terms and comes with
-/// a path to retry, rather than showing `flock` wording no one asked about.
+/// Three of these are not faults in the library at all — it is held by
+/// another process here, held by another machine, or on something that is not
+/// connected — and all are fixed by waiting and trying again, so each says so
+/// in those terms and comes with a path to retry, rather than showing `flock`
+/// wording no one asked about.  The other-machine case names the machine,
+/// since that is the only part of it the user can act on.
 /// Anything else is the library itself being broken, and carries its own text.
 fn open_failure(path: &Path, err: &anyhow::Error) -> (String, Option<PathBuf>) {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
-    if err.downcast_ref::<LibraryBusy>().is_some() {
-        return (
-            format!(
-                "\"{name}\" is in use by another RasterLab process — a \
-                 command-line rebuild or scrub, most likely. It will open once \
-                 that finishes."
-            ),
-            Some(path.to_path_buf()),
-        );
+    match err.downcast_ref::<LibraryBusy>() {
+        // Another machine: say which one, because the fix is over there and
+        // the user cannot find the process by looking at this screen.
+        Some(LibraryBusy::OtherHost { holder }) => {
+            return (
+                format!(
+                    "\"{name}\" is open on {} — that machine has to close it \
+                     first. If {} is gone for good, delete library.lock from \
+                     the library folder.",
+                    holder.host, holder.host
+                ),
+                Some(path.to_path_buf()),
+            );
+        }
+        Some(LibraryBusy::ThisHost) => {
+            return (
+                format!(
+                    "\"{name}\" is in use by another RasterLab process — a \
+                     command-line rebuild or scrub, most likely. It will open once \
+                     that finishes."
+                ),
+                Some(path.to_path_buf()),
+            );
+        }
+        None => {}
     }
     if err.downcast_ref::<NotALibrary>().is_some() {
         return (
@@ -1744,11 +1762,29 @@ mod tests {
     fn open_failure_separates_busy_and_missing_from_broken() {
         let path = Path::new("/photos/Main Library");
 
-        let (message, retry) = open_failure(path, &anyhow::Error::new(LibraryBusy));
+        let (message, retry) = open_failure(path, &anyhow::Error::new(LibraryBusy::ThisHost));
         assert_eq!(retry.as_deref(), Some(path), "a busy library is retryable");
         assert!(
             message.contains("Main Library") && message.contains("another RasterLab process"),
             "busy message names the library and the reason: {message}"
+        );
+
+        // A library held from another machine is retryable too, but the user
+        // needs to be told where to go, so the message names the host.
+        let held = LibraryBusy::OtherHost {
+            holder: rasterlab_library::LockHolder {
+                host: "filer-linux".into(),
+                pid: 991,
+                session: "s".into(),
+                version: "0.6.0".into(),
+                heartbeat: 0,
+            },
+        };
+        let (message, retry) = open_failure(path, &anyhow::Error::new(held));
+        assert_eq!(retry.as_deref(), Some(path), "a held library is retryable");
+        assert!(
+            message.contains("filer-linux") && message.contains("library.lock"),
+            "cross-host message names the machine and the way out: {message}"
         );
 
         let (message, retry) =

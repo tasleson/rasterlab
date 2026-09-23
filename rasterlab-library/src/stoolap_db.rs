@@ -26,7 +26,7 @@ impl StoolapDb {
         // A held lock is not a broken library, so it keeps its own type all
         // the way up rather than arriving as one more opaque open failure.
         let db = Database::open(&dsn).map_err(|e| match e {
-            stoolap::Error::DatabaseLocked => anyhow::Error::new(LibraryBusy),
+            stoolap::Error::DatabaseLocked => anyhow::Error::new(LibraryBusy::ThisHost),
             other => anyhow::Error::new(other).context("open library.db"),
         })?;
         Ok(Self { db })

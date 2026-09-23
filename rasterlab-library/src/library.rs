@@ -23,6 +23,7 @@ use crate::{
         CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
         RecentlyDeletedRow, SortOrder,
     },
+    host_lock::HostLock,
     import::{self, ImportCollection, ImportOptions, ImportSession},
     reconstruct::{self, RebuildOutcome, RebuildProgress},
     search::SearchFilter,
@@ -32,17 +33,33 @@ use crate::{
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// Opening the library failed because another process already has it open.
+/// Opening the library failed because someone already has it open.
 ///
-/// The index takes an exclusive `flock` on `library.db` and holds it for as
-/// long as the library is open, so one library means one process.  A long CLI
-/// run is the case that matters: `rasterlab library rebuild` over a large
-/// network library can take hours, and for all of them the GUI cannot open
+/// Two mechanisms can say so, and which one spoke changes what the user can
+/// usefully do about it, so the variants are kept apart.  A long CLI run is
+/// the case that matters either way: `rasterlab library rebuild` over a large
+/// network library can take hours, and for all of them nothing else can open
 /// that library.  Callers get this as its own type so they can say "busy, try
 /// later" rather than reporting a library that is perfectly healthy as broken.
 #[derive(Debug, thiserror::Error)]
-#[error("the library is already open in another RasterLab process")]
-pub struct LibraryBusy;
+pub enum LibraryBusy {
+    /// The index's exclusive `flock` on `library.db` is held.  Exact, and
+    /// immediate, but only among clients that share a lock table — which in
+    /// practice means processes reaching the library the same way.
+    #[error("the library is already open in another RasterLab process")]
+    ThisHost,
+
+    /// The library root's [`host_lock`](crate::host_lock) file names a
+    /// different machine that is still refreshing it.  This is the case
+    /// `flock` cannot see: a Mac over SMB and a Linux box over NFS against one
+    /// dataset do not share a lock table, so without this each would find the
+    /// file unlocked and open the library.
+    #[error("the library is open on {holder}")]
+    OtherHost {
+        /// Who the lock file says is holding it, so the message can name them.
+        holder: crate::host_lock::LockHolder,
+    },
+}
 
 /// Opening the library failed because there is no library at that path.
 ///
@@ -183,6 +200,10 @@ pub struct Library {
     root: PathBuf,
     db: Box<dyn LibraryDb>,
     registry: FormatRegistry,
+    /// The cross-protocol claim on the library root, held for the session and
+    /// released when this is dropped.  Declared after `db` so it is dropped
+    /// after it: the `flock` goes first, then the file that advertised it.
+    _host_lock: HostLock,
     /// Serializes read-modify-write operations on authoritative project files.
     /// Atomic rename prevents torn files, but without this guard two background
     /// tasks could still overwrite one another's metadata or edit stack.
@@ -210,15 +231,31 @@ impl Library {
 
     /// Open (or create) a library at `path` with an injected DB backend
     /// (useful for testing with a fake/mock DB).
+    ///
+    /// One root, one `Library`.  The host lock recognises our own session and
+    /// steps aside for it, so a second `Library` on the same root in the same
+    /// process appears to acquire the lock as well — and dropping either one
+    /// removes the lock file the other is still relying on.  [`open_or_create`]
+    /// is saved from that by the stoolap index's `flock`, which refuses the
+    /// second open outright; a backend injected here need not do anything of
+    /// the kind, so the caller is the one keeping the count.
+    ///
+    /// [`open_or_create`]: Self::open_or_create
     pub fn with_db(path: &Path, db: Box<dyn LibraryDb>) -> Result<Self> {
         create_dir_all_synced(&path.join("files"))?;
         create_dir_all_synced(&path.join("thumbs"))?;
         create_dir_all_synced(&path.join("recently_deleted/files"))?;
+        // After the index's `flock`, which has already turned away anything on
+        // this machine, and before any write: a refusal here means another
+        // machine is in the library and nothing of ours should touch it.
+        let host_lock = HostLock::acquire(path)
+            .map_err(|holder| anyhow::Error::new(LibraryBusy::OtherHost { holder }))?;
         db.init()?;
         let library = Self {
             root: path.to_path_buf(),
             db,
             registry: FormatRegistry::with_builtins(),
+            _host_lock: host_lock,
             project_write_lock: Mutex::new(()),
         };
         library.reconcile_recently_deleted()?;
