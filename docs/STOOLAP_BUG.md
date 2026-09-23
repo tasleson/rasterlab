@@ -1,5 +1,12 @@
 # Stoolap: a join loses every row when the join column is indexed
 
+> **Status: fixed in stoolap 0.4.1.**  Re-running the reproduction below
+> against 0.4.1 gives the right answer in the case 0.4.0 got wrong: with the
+> index on the join column present, reading back in a session after the one
+> that inserted, the three-table join returns **3 rows** on 0.4.1 where 0.4.0
+> returned **0**.  The report that follows is the record of the 0.4.0
+> behaviour and is left as it was written.
+
 A query joining three or more tables returns **zero rows, with no error**, when
 the join column of one of those tables carries a secondary index and the rows
 are read back in a later session. The same query returns the correct rows in

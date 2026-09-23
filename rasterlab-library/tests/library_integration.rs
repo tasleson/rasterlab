@@ -1806,6 +1806,125 @@ fn searching_by_collection_returns_its_photos() {
     assert_eq!(found[0].hash, photos[0].hash);
 }
 
+/// Photos written in one session and read back in the next, which is the
+/// shape of query stoolap 0.4.0 answered with silence: a join of three or
+/// more tables whose join column carries a secondary index returns no rows at
+/// all once the writing session has closed (`docs/STOOLAP_BUG.md`).
+///
+/// Every other reopen in this file deletes `library.db` and rebuilds it, so
+/// the rows are always read in the session that wrote them — which is exactly
+/// why the bug got past this suite. Here the library is simply closed and
+/// opened again on the same files. `keywords` matters as much as
+/// `collection_photos`: the text search joins it on `photo_id`, and
+/// `kw_photo` indexes that column.
+#[test]
+fn search_after_reopen_returns_rows_from_the_previous_session() {
+    const BASE: i64 = 1_600_000_000;
+    const KEYWORD: &str = "harbour";
+    const NAMES: [&str; 4] = ["one.png", "two.png", "three.png", "four.png"];
+
+    let src = tempfile::tempdir().unwrap();
+    let paths: Vec<PathBuf> = NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let path = src.path().join(name);
+            write_png_with_mtime(&path, i as u8 + 1, BASE + i as i64);
+            path
+        })
+        .collect();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let session = lib.import_files(&paths, |_| {}).expect("import_files");
+    assert!(
+        session.errors.is_empty(),
+        "import errors: {:?}",
+        session.errors
+    );
+
+    let id_of = |lib: &Library, name: &str| {
+        lib.all_photos(SortOrder::default())
+            .unwrap()
+            .into_iter()
+            .find(|row| row.original_filename.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("no photo named {name}"))
+            .id
+    };
+
+    // Two overlapping but distinct sets, so a filter that quietly ignores its
+    // constraint cannot pass by returning everything.
+    let collection = lib.create_collection("Trip").unwrap();
+    let members: Vec<_> = NAMES[..3].iter().map(|n| id_of(&lib, n)).collect();
+    lib.add_to_collection(collection.id, &members).unwrap();
+    for name in &NAMES[1..] {
+        let meta = rasterlab_library::LibraryMeta {
+            keywords: vec![KEYWORD.to_owned()],
+            ..Default::default()
+        };
+        lib.update_metadata(id_of(&lib, name), meta).unwrap();
+    }
+
+    drop(lib);
+    let lib = open_library(tmp.path());
+    let collection = lib
+        .all_collections()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.name == "Trip")
+        .expect("the collection survived the reopen");
+
+    assert_eq!(
+        lib.collection_photos(collection.id).unwrap().len(),
+        3,
+        "the two-table membership query lost rows across the reopen"
+    );
+
+    let cases: [(&str, SearchFilter, &[&str]); 3] = [
+        (
+            "collection scope",
+            SearchFilter {
+                collection_id: Some(collection.id),
+                ..Default::default()
+            },
+            &NAMES[..3],
+        ),
+        (
+            "keyword text",
+            SearchFilter {
+                text: Some(KEYWORD.to_owned()),
+                ..Default::default()
+            },
+            &NAMES[1..],
+        ),
+        (
+            "collection and keyword together",
+            SearchFilter {
+                collection_id: Some(collection.id),
+                text: Some(KEYWORD.to_owned()),
+                ..Default::default()
+            },
+            &NAMES[1..3],
+        ),
+    ];
+
+    for (label, filter, expected) in cases {
+        let mut found: Vec<String> = lib
+            .search(&filter, SortOrder::default())
+            .unwrap_or_else(|e| panic!("{label}: search failed: {e:#}"))
+            .into_iter()
+            .filter_map(|row| row.original_filename)
+            .collect();
+        found.sort();
+        let mut want: Vec<String> = expected.iter().map(|n| (*n).to_owned()).collect();
+        want.sort();
+        assert_eq!(
+            found, want,
+            "{label} returned the wrong rows after a reopen"
+        );
+    }
+}
+
 /// A deleted collection must not come back: the files are what a rebuild
 /// believes, so they have to stop claiming membership before the index rows
 /// go.

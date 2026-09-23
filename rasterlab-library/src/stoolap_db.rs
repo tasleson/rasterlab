@@ -40,8 +40,10 @@ impl StoolapDb {
 
     /// A collection's photos, in the caller's order.
     ///
-    /// Two tables is the limit: a third turns this into the join that comes
-    /// back empty. See `search` on this type, and STOOLAP_BUG.md.
+    /// Two tables is the limit on stoolap 0.4.0: a third turns this into the
+    /// join that comes back empty. Fixed in 0.4.1, so this constraint lifts
+    /// with the `[patch.crates-io]` stanza. See `search` on this type, and
+    /// STOOLAP_BUG.md.
     fn collection_photos_sorted(
         &self,
         collection_id: CollectionId,
@@ -497,14 +499,22 @@ impl LibraryDb for StoolapDb {
     // ── Search ────────────────────────────────────────────────────────────
 
     fn search(&self, filter: &SearchFilter, sort: SortOrder) -> Result<Vec<PhotoRow>> {
-        // A collection scope cannot go into the statement below. Stoolap
-        // returns *no rows at all*, silently, from a join of three or more
-        // tables when the join column of one of them carries an index and the
-        // rows are read back in a later session. `collection_photos(photo_id)`
-        // is indexed and `photo_id` is what the join is on, so putting that
-        // table in with the metadata tables empties the whole result.
-        // STOOLAP_BUG.md has the reproduction. Membership is resolved with a
-        // query of its own instead, and applied to the rows here.
+        // A collection scope stays out of the statement below, for stoolap
+        // 0.4.0's sake. That version returns *no rows at all*, silently, from
+        // a join of three or more tables when the join column of one of them
+        // carries an index and the rows are read back in a later session.
+        // `collection_photos(photo_id)` is indexed and `photo_id` is what the
+        // join is on, so putting that table in with the metadata tables
+        // emptied the whole result. STOOLAP_BUG.md has the reproduction.
+        // Membership is resolved with a query of its own instead, and applied
+        // to the rows here.
+        //
+        // 0.4.1 fixes the bug, so this workaround retires along with the
+        // `[patch.crates-io]` stanza pinning the patched build. Note it was
+        // never a complete mitigation anyway: the statement below is a
+        // five-table LEFT JOIN that already includes `keywords k ON
+        // k.photo_id = p.id`, and `kw_photo` indexes exactly that column —
+        // the triggering shape, kept out only of this one join.
         let members = match filter.collection_id {
             Some(id) => Some(self.collection_member_id_set(id)?),
             None => None,
