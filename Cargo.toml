@@ -102,3 +102,11 @@ rasterlab-core       = { path = "rasterlab-core" }
 rasterlab-gpu        = { path = "rasterlab-gpu" }
 rasterlab-render     = { path = "rasterlab-render" }
 rasterlab-library    = { path = "rasterlab-library" }
+
+# stoolap's WAL, checkpoint and snapshot writes flush with `File::sync_all`,
+# which on macOS is `fcntl(F_FULLFSYNC)` — an SMB mount answers that with
+# ENOTSUP, so a library living on a file server cannot checkpoint at all.
+# The branch adds the plain-fsync fallback; retire this patch once it is
+# merged upstream.
+[patch.crates-io]
+stoolap = { git = "https://github.com/tasleson/stoolap", branch = "fullfsync-enotsup-fallback" }
