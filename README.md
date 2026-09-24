@@ -134,7 +134,7 @@ Each v5 file contains Reed–Solomon recovery data in two `RECC` chunks, one bef
 
 ### Verifying saves and scrubbing a library
 
-- A v5 save is staged in a hidden file beside its destination, flushed with `fsync`, read back, and compared byte-for-byte with the in-memory file before being renamed into place. Cache-bypass/eviction requests are advisory on platforms that support them, so the exact storage layer exercised by the read-back is OS-dependent.
+- A v5 save is staged in a hidden file beside its destination, flushed with `fsync` (see [Keeping a library on a file server](#keeping-a-library-on-a-file-server) for macOS SMB mounts), read back, and compared byte-for-byte with the in-memory file before being renamed into place. Cache-bypass/eviction requests are advisory on platforms that support them, so the exact storage layer exercised by the read-back is OS-dependent.
 - Every other file RasterLab writes — exports, preferences, autosaves, pipeline JSON — is staged and renamed the same way, without the read-back. A crash therefore leaves the previous file whole rather than a truncated one. On Unix the containing directory is flushed after the rename, and directories created along the way are flushed into their own parents, so a newly created library shard cannot take a verified file down with it.
 - **File > Start Integrity Scrub** verifies every `.rlab` in the open library. It leaves clean v5 files alone, upgrades clean v3/v4 files to v5, and repairs correctable damage.
 - Before a scrub replaces a damaged file, it copies the damaged original into the library's `recovered/` tree, verifying that backup the same way a save is verified. The repaired temporary file is then renamed over the live file on the same filesystem.
@@ -179,6 +179,18 @@ Current library features include:
 - Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals or of the `.rlab` projects themselves.
 - Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
 - Index rebuilding, integrity scrubbing, protected-photo deletion guards, and a library-owned Recently Deleted area that works consistently on local and network filesystems.
+
+### Keeping a library on a file server
+
+A library can live on a network share and be opened from more than one machine, one at a time. It is single-process by design, so two locks keep a second opener out.
+
+The first is an exclusive `flock` on `library.db`, held for as long as the library is open. It is exact and cannot go stale, but only between clients that share a lock table. On an NFS mount that means locking must actually reach the server; a mount with `nolock` or `local_lock=flock` lets two writers in.
+
+The second covers what `flock` cannot see. A Mac reaching the library over SMB and a Linux machine reaching the same dataset over NFS are served by Samba and `nfsd`, which keep separate lock tables, so each would find `library.db` unlocked. The library root therefore also holds `library.lock`, which records the host, process, session, and RasterLab version holding the library and is refreshed every minute. Opening a library that another host is still refreshing fails with a message naming that host. This lock is advisory: two machines opening in the same instant can both succeed, and it is a backstop to the `flock`, not a replacement.
+
+A lock that has not been refreshed for 30 minutes is treated as abandoned and taken over. If you know the other machine is gone, for example because it crashed, delete `library.lock` or set `RASTERLAB_TAKE_LIBRARY_LOCK=1` to open the library straight away. Neither bypasses the `flock`, so a second process on the same machine is still refused.
+
+On macOS, SMB mounts do not implement the `F_FULLFSYNC` barrier behind Rust's `sync_all`. When the filesystem reports it as unsupported, RasterLab falls back to a plain `fsync`, which is also the strongest flush an SMB client can pass to the server. Any other I/O error still fails the save.
 
 ## Plugins
 
