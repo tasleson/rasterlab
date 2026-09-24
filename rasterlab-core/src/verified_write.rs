@@ -280,10 +280,14 @@ pub fn create_dir_all_synced(dir: &Path) -> io::Result<()> {
 /// Flush the directory entry naming `path`.
 ///
 /// The file's own data is already on the device; this is what makes the *name*
-/// still point at it after a power loss.  Best effort: by this point the new
-/// file is complete, verified and in place, and some filesystems (network
-/// mounts especially) refuse to sync a directory at all — reporting that as a
-/// failed save would be a lie about bytes that are safely stored.
+/// still point at it after a power loss.  It goes through [`fsync_compat`], so
+/// a mount that refuses the macOS device barrier still gets a plain `fsync`
+/// rather than nothing at all.
+///
+/// Best effort even so: by this point the new file is complete, verified and
+/// in place, and a few filesystems (network mounts especially) will not sync a
+/// directory by any means — reporting that as a failed save would be a lie
+/// about bytes that are safely stored.
 #[cfg(unix)]
 pub fn sync_parent_dir(path: &Path) {
     let dir = path.parent().unwrap_or(Path::new(""));
@@ -293,7 +297,7 @@ pub fn sync_parent_dir(path: &Path) {
         dir
     };
     if let Ok(handle) = File::open(dir) {
-        let _ = handle.sync_all();
+        let _ = fsync_compat(&handle);
     }
 }
 
@@ -356,9 +360,95 @@ fn write_and_sync(staged: &Path, dst: &Path, bytes: &[u8]) -> io::Result<()> {
 
     // Push the data out of our buffers and the kernel's. Without this the
     // read-back is answered from RAM and proves nothing about the device.
-    file.sync_all()?;
+    fsync_compat(&file)?;
     evict_from_cache(&file);
     Ok(())
+}
+
+// ── Flushing ────────────────────────────────────────────────────────────────────
+
+/// Flush a file to storage, asking for the strongest barrier the filesystem
+/// will actually honour.
+///
+/// On macOS, `File::sync_all` is `fcntl(F_FULLFSYNC)`: it asks the *device* to
+/// empty its own write cache, which is a stronger promise than POSIX `fsync`
+/// and the reason a Mac survives a power cut with its data intact.  Not every
+/// filesystem implements that fcntl, though.  An SMB mount answers it with
+/// `ENOTSUP` (errno 45), and other network and virtual filesystems answer the
+/// same refusal as `EINVAL` or `ENOTTY`.  Rust's std has no fallback, so on
+/// such a mount every save through [`write_atomic`] or
+/// [`write_verified_atomic`] fails outright, with the bytes perfectly fine and
+/// nothing wrong but the barrier we asked for.
+///
+/// So when — and only when — the refusal says the call is not implemented
+/// here, this falls back to plain `fsync(2)` and reports that instead.  That
+/// is a genuinely weaker guarantee: `fsync` promises the data reached the
+/// filesystem, not that the disk at the far end has flushed it out of its
+/// cache and onto the platters.  On a network mount, however, the stronger
+/// promise was never on offer.  `F_FULLFSYNC` is a local device barrier; the
+/// SMB client cannot carry it over the wire to the server's disks, so the
+/// choice on that mount is not between a strong flush and a weak one but
+/// between a weak flush and refusing to save at all.  The server is where the
+/// durability actually lives, and telling it to commit the file is the most
+/// this end can do.
+///
+/// Any other error from `F_FULLFSYNC` is a real failure — a full disk, a
+/// broken connection, an I/O error the device reported late — and propagates
+/// untouched.  `EINTR` is retried, since a signal is not an answer.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub fn fsync_compat(file: &File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let fd = file.as_raw_fd();
+
+    // SAFETY: `file` is borrowed for the whole call, so `fd` stays open and
+    // valid.  Neither fcntl nor fsync takes ownership of the descriptor.
+    let full_fsync = || unsafe { libc::fcntl(fd, libc::F_FULLFSYNC) };
+    let plain_fsync = || unsafe { libc::fsync(fd) };
+
+    match retry_on_eintr(full_fsync) {
+        Ok(()) => Ok(()),
+        // The filesystem does not implement the device barrier.  Different
+        // implementations phrase that refusal differently; all of these mean
+        // the same thing, and none says anything went wrong with the data.
+        // Darwin, unlike Linux, gives `ENOTSUP` (45) and `EOPNOTSUPP` (102)
+        // separate values, so both have to be named.
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(libc::ENOTSUP)
+                    | Some(libc::EOPNOTSUPP)
+                    | Some(libc::EINVAL)
+                    | Some(libc::ENOTTY)
+            ) =>
+        {
+            retry_on_eintr(plain_fsync)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Run a `-1`-on-failure libc call until it returns something other than
+/// `EINTR`.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn retry_on_eintr(mut call: impl FnMut() -> libc::c_int) -> io::Result<()> {
+    loop {
+        if call() != -1 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+/// Everywhere else `sync_all` is already the strongest flush the platform
+/// offers — plain `fsync` on Linux and the BSDs, `FlushFileBuffers` on
+/// Windows — and there is nothing to fall back to.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+pub fn fsync_compat(file: &File) -> io::Result<()> {
+    file.sync_all()
 }
 
 // ── Cache hints ───────────────────────────────────────────────────────────────
@@ -662,6 +752,61 @@ mod tests {
 
         assert_eq!(std::fs::read(&to).unwrap(), payload(2_000));
         assert_eq!(entries(dir.path()), ["photo.rlab"]);
+    }
+
+    /// The flush has to succeed on an ordinary local file, which is the only
+    /// case a portable test can reach: reproducing the `ENOTSUP` fallback
+    /// needs a mount whose filesystem refuses `F_FULLFSYNC`, and no temp
+    /// directory is one.  What this does pin down is that the fcntl path is
+    /// wired up correctly and reports success on files of every shape the
+    /// writers produce.
+    #[test]
+    fn flushing_succeeds_on_ordinary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, len) in [("empty", 0), ("small", 1), ("page", 4096), ("big", 300_000)] {
+            let path = dir.path().join(name);
+            let mut file = File::create(&path).unwrap();
+            file.write_all(&payload(len)).unwrap();
+            fsync_compat(&file).expect(name);
+
+            // A second flush with nothing left to write must be just as happy.
+            fsync_compat(&file).expect(name);
+        }
+    }
+
+    /// A read-only handle has nothing to flush, and must not turn that into a
+    /// failed save.  Worth pinning because `F_FULLFSYNC` and `fsync` differ
+    /// from `FlushFileBuffers` here, and the fallback must not mistake a
+    /// permission refusal for "not implemented".
+    #[test]
+    fn flushing_a_read_only_handle_is_not_an_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), payload(100)).unwrap();
+        let file = File::open(tmp.path()).unwrap();
+        fsync_compat(&file).unwrap();
+    }
+
+    /// One of the two staged writers, named for a failure message.
+    type Writer = fn(&Path, &[u8]) -> io::Result<()>;
+
+    /// Both writers flush through [`fsync_compat`], so both have to round-trip
+    /// unchanged for payloads that cross the interesting size boundaries.
+    #[test]
+    fn both_writers_round_trip_through_the_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases: [(&str, Writer); 2] = [
+            ("verified", write_verified_atomic),
+            ("unverified", write_atomic),
+        ];
+
+        for (label, write) in cases {
+            for len in [0, 1, 4095, 4096, 4097, 250_000] {
+                let dst = dir.path().join(format!("{label}-{len}.rlab"));
+                let bytes = payload(len);
+                write(&dst, &bytes).unwrap_or_else(|e| panic!("{label} {len}: {e}"));
+                assert_eq!(std::fs::read(&dst).unwrap(), bytes, "{label} {len}");
+            }
+        }
     }
 
     #[test]

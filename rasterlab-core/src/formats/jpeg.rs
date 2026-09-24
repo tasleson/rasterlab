@@ -1,4 +1,4 @@
-use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
+use image::{ExtendedColorType, GenericImageView, codecs::jpeg::JpegEncoder};
 
 use crate::{
     error::{RasterError, RasterResult},
@@ -22,16 +22,31 @@ impl FormatHandler for JpegHandler {
         let dyn_image = image::load_from_memory_with_format(data, image::ImageFormat::Jpeg)
             .map_err(|e| RasterError::decode("jpeg", e.to_string()))?;
 
-        let rgba = dyn_image.to_rgba8();
-        let (w, h) = rgba.dimensions();
+        let (w, h) = dyn_image.dimensions();
         let mut metadata = exif_util::read_exif_from_bytes(data);
+
+        // A standard JPEG decodes to RGB8, so the opaque-RGBA expansion and
+        // the EXIF orientation transform are fused into one buffer pass
+        // instead of the old two-pass RGB→RGBA→rotate.
+        let (data, w, h) = match dyn_image {
+            image::DynamicImage::ImageRgb8(rgb) => {
+                exif_util::apply_orientation_rgb(rgb.into_raw(), w, h, metadata.orientation)
+            }
+            image::DynamicImage::ImageRgba8(rgba) => {
+                exif_util::apply_orientation(rgba.into_raw(), w, h, metadata.orientation)
+            }
+            // Grayscale and other odd variants: the crate's converter.
+            other => {
+                let rgba = other.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                exif_util::apply_orientation(rgba.into_raw(), w, h, metadata.orientation)
+            }
+        };
 
         // Apply EXIF orientation to pixels so downstream consumers always
         // see an upright image, then normalise the stored value (and the
         // raw_exif bytes used for metadata-preserving export) so a
         // re-exported file is not rotated twice by downstream viewers.
-        let (data, w, h) =
-            exif_util::apply_orientation(rgba.into_raw(), w, h, metadata.orientation);
         if metadata.orientation != 1 {
             if let Some(ref mut bytes) = metadata.raw_exif {
                 exif_util::normalize_tiff_orientation(bytes);

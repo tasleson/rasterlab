@@ -23,6 +23,7 @@ pub mod heal;
 pub mod highlights_shadows;
 pub mod hsl;
 pub mod hue_shift;
+pub mod intensify_hdr;
 pub mod levels;
 pub mod local_laplacian;
 pub mod looks;

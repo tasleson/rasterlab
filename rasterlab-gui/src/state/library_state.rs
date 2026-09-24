@@ -152,6 +152,47 @@ pub enum Membership {
     All,
 }
 
+/// The search box at the top of a collections menu.
+///
+/// Menus have no open/close event to hook, so the box tracks the frame it was
+/// last drawn on: a gap means the menu closed and reopened in between, and the
+/// text starts empty again rather than still filtering by whatever was typed
+/// the last time.
+#[derive(Default)]
+pub struct MenuFilter {
+    pub text: String,
+    last_frame: Option<u64>,
+}
+
+impl MenuFilter {
+    /// Call once per frame the menu is drawn, before reading `text`.  Returns
+    /// whether this is the menu's first frame, which is when the caller claims
+    /// keyboard focus for the box.
+    pub fn opening(&mut self, frame: u64) -> bool {
+        let fresh = self.last_frame != Some(frame.saturating_sub(1));
+        if fresh {
+            self.text.clear();
+        }
+        self.last_frame = Some(frame);
+        fresh
+    }
+
+    /// Whether `name` should be listed.  Case-insensitive substring match, as
+    /// in the grid's own search; an empty box matches everything.
+    pub fn matches(&self, name: &str) -> bool {
+        name_matches(&self.text, name)
+    }
+}
+
+/// Whether a collection named `name` survives the filter text `filter`.
+///
+/// Case-insensitive substring match, as in the grid's own search; an empty
+/// filter matches everything.  Shared by the menus' [`MenuFilter`] and the
+/// sidebar's filter box so the two behave the same way.
+pub fn name_matches(filter: &str, name: &str) -> bool {
+    filter.is_empty() || name.to_lowercase().contains(&filter.to_lowercase())
+}
+
 /// The collection dialog currently on screen, if any.
 pub enum CollectionPrompt {
     /// Naming a new collection.
@@ -175,9 +216,13 @@ pub enum CollectionPrompt {
 }
 
 impl CollectionPrompt {
-    pub fn new_collection(photos: Vec<PhotoId>, change: MembershipChange) -> Self {
+    /// Naming a new collection for `photos`.  `name` seeds the field — the
+    /// menus pass what was typed in their search box, so a search that came up
+    /// empty turns into the collection the user was looking for; pass `""`
+    /// where there is nothing to seed it with.
+    pub fn new_collection(photos: Vec<PhotoId>, change: MembershipChange, name: &str) -> Self {
         Self::New {
-            entry: NameEntry::default(),
+            entry: NameEntry::seeded(name),
             photos,
             change,
         }
@@ -351,25 +396,43 @@ pub(crate) struct MetadataCommitRequest {
 
 /// The banner text for a failed open, plus the path to offer a retry for.
 ///
-/// Two of these are not faults in the library at all — it is held by another
-/// process, or it is on something that is not connected — and both are fixed
-/// by waiting and trying again, so each says so in those terms and comes with
-/// a path to retry, rather than showing `flock` wording no one asked about.
+/// Three of these are not faults in the library at all — it is held by
+/// another process here, held by another machine, or on something that is not
+/// connected — and all are fixed by waiting and trying again, so each says so
+/// in those terms and comes with a path to retry, rather than showing `flock`
+/// wording no one asked about.  The other-machine case names the machine,
+/// since that is the only part of it the user can act on.
 /// Anything else is the library itself being broken, and carries its own text.
 fn open_failure(path: &Path, err: &anyhow::Error) -> (String, Option<PathBuf>) {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
-    if err.downcast_ref::<LibraryBusy>().is_some() {
-        return (
-            format!(
-                "\"{name}\" is in use by another RasterLab process — a \
-                 command-line rebuild or scrub, most likely. It will open once \
-                 that finishes."
-            ),
-            Some(path.to_path_buf()),
-        );
+    match err.downcast_ref::<LibraryBusy>() {
+        // Another machine: say which one, because the fix is over there and
+        // the user cannot find the process by looking at this screen.
+        Some(LibraryBusy::OtherHost { holder }) => {
+            return (
+                format!(
+                    "\"{name}\" is open on {} — that machine has to close it \
+                     first. If {} is gone for good, delete library.lock from \
+                     the library folder.",
+                    holder.host, holder.host
+                ),
+                Some(path.to_path_buf()),
+            );
+        }
+        Some(LibraryBusy::ThisHost) => {
+            return (
+                format!(
+                    "\"{name}\" is in use by another RasterLab process — a \
+                     command-line rebuild or scrub, most likely. It will open once \
+                     that finishes."
+                ),
+                Some(path.to_path_buf()),
+            );
+        }
+        None => {}
     }
     if err.downcast_ref::<NotALibrary>().is_some() {
         return (
@@ -506,6 +569,16 @@ pub struct LibraryState {
     /// Held rather than queried on demand because the grid asks about the
     /// current selection for every collection, every frame a menu is open.
     pub collection_members: HashMap<CollectionId, HashSet<PhotoId>>,
+
+    /// Search boxes for the grid context menu's collection lists, one per menu
+    /// so opening "Move to" doesn't inherit the filter typed above it.
+    pub collections_menu_filter: MenuFilter,
+    pub move_to_menu_filter: MenuFilter,
+
+    /// The sidebar's collections filter box.  A plain string rather than a
+    /// [`MenuFilter`]: the sidebar has no open/close event to reset on, and a
+    /// filter set there is meant to stay until the user clears it.
+    pub collections_filter: String,
 
     /// The open collection dialog (new / delete confirmation), if any.
     pub collection_prompt: Option<CollectionPrompt>,
@@ -652,6 +725,9 @@ impl Default for LibraryState {
             collections: Vec::new(),
             marked_collections: Vec::new(),
             collection_members: HashMap::new(),
+            collections_menu_filter: MenuFilter::default(),
+            move_to_menu_filter: MenuFilter::default(),
+            collections_filter: String::new(),
             collection_prompt: None,
             folder_import_prompt: None,
             all_photo_count: 0,
@@ -1686,11 +1762,29 @@ mod tests {
     fn open_failure_separates_busy_and_missing_from_broken() {
         let path = Path::new("/photos/Main Library");
 
-        let (message, retry) = open_failure(path, &anyhow::Error::new(LibraryBusy));
+        let (message, retry) = open_failure(path, &anyhow::Error::new(LibraryBusy::ThisHost));
         assert_eq!(retry.as_deref(), Some(path), "a busy library is retryable");
         assert!(
             message.contains("Main Library") && message.contains("another RasterLab process"),
             "busy message names the library and the reason: {message}"
+        );
+
+        // A library held from another machine is retryable too, but the user
+        // needs to be told where to go, so the message names the host.
+        let held = LibraryBusy::OtherHost {
+            holder: rasterlab_library::LockHolder {
+                host: "filer-linux".into(),
+                pid: 991,
+                session: "s".into(),
+                version: "0.6.0".into(),
+                heartbeat: 0,
+            },
+        };
+        let (message, retry) = open_failure(path, &anyhow::Error::new(held));
+        assert_eq!(retry.as_deref(), Some(path), "a held library is retryable");
+        assert!(
+            message.contains("filer-linux") && message.contains("library.lock"),
+            "cross-host message names the machine and the way out: {message}"
         );
 
         let (message, retry) =
@@ -2467,5 +2561,44 @@ mod tests {
             state.import_refreshed_imported, 4,
             "and one more photo is enough to trigger again"
         );
+    }
+
+    #[test]
+    fn menu_filter_matches_case_insensitively() {
+        let mut filter = MenuFilter::default();
+        // An empty box lists everything.
+        assert!(filter.matches("Iceland 2024"));
+
+        for needle in ["ice", "ICE", "land 20"] {
+            filter.text = needle.to_owned();
+            assert!(filter.matches("Iceland 2024"), "{needle} should match");
+            assert!(!filter.matches("Portraits"), "{needle} should not match");
+        }
+    }
+
+    #[test]
+    fn name_matches_ignores_case_and_position() {
+        assert!(name_matches("", "Iceland 2024"), "an empty filter matches");
+        for needle in ["ice", "ICE", "land 20", "2024"] {
+            assert!(name_matches(needle, "Iceland 2024"), "{needle} matches");
+            assert!(!name_matches(needle, "Portraits"), "{needle} does not");
+        }
+    }
+
+    #[test]
+    fn menu_filter_clears_when_the_menu_reopens() {
+        let mut filter = MenuFilter::default();
+        assert!(filter.opening(10), "the first frame is an opening one");
+        filter.text = "ice".to_owned();
+
+        // Consecutive frames are the same menu still open, so what was typed
+        // stays.
+        assert!(!filter.opening(11));
+        assert!(!filter.opening(12));
+        assert_eq!(filter.text, "ice");
+
+        // A gap means it closed and came back: start from an empty box.
+        assert!(filter.opening(40));
+        assert!(filter.text.is_empty());
     }
 }

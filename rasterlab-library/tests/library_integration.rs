@@ -1806,6 +1806,125 @@ fn searching_by_collection_returns_its_photos() {
     assert_eq!(found[0].hash, photos[0].hash);
 }
 
+/// Photos written in one session and read back in the next, which is the
+/// shape of query stoolap 0.4.0 answered with silence: a join of three or
+/// more tables whose join column carries a secondary index returns no rows at
+/// all once the writing session has closed (`docs/STOOLAP_BUG.md`).
+///
+/// Every other reopen in this file deletes `library.db` and rebuilds it, so
+/// the rows are always read in the session that wrote them — which is exactly
+/// why the bug got past this suite. Here the library is simply closed and
+/// opened again on the same files. `keywords` matters as much as
+/// `collection_photos`: the text search joins it on `photo_id`, and
+/// `kw_photo` indexes that column.
+#[test]
+fn search_after_reopen_returns_rows_from_the_previous_session() {
+    const BASE: i64 = 1_600_000_000;
+    const KEYWORD: &str = "harbour";
+    const NAMES: [&str; 4] = ["one.png", "two.png", "three.png", "four.png"];
+
+    let src = tempfile::tempdir().unwrap();
+    let paths: Vec<PathBuf> = NAMES
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let path = src.path().join(name);
+            write_png_with_mtime(&path, i as u8 + 1, BASE + i as i64);
+            path
+        })
+        .collect();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let session = lib.import_files(&paths, |_| {}).expect("import_files");
+    assert!(
+        session.errors.is_empty(),
+        "import errors: {:?}",
+        session.errors
+    );
+
+    let id_of = |lib: &Library, name: &str| {
+        lib.all_photos(SortOrder::default())
+            .unwrap()
+            .into_iter()
+            .find(|row| row.original_filename.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("no photo named {name}"))
+            .id
+    };
+
+    // Two overlapping but distinct sets, so a filter that quietly ignores its
+    // constraint cannot pass by returning everything.
+    let collection = lib.create_collection("Trip").unwrap();
+    let members: Vec<_> = NAMES[..3].iter().map(|n| id_of(&lib, n)).collect();
+    lib.add_to_collection(collection.id, &members).unwrap();
+    for name in &NAMES[1..] {
+        let meta = rasterlab_library::LibraryMeta {
+            keywords: vec![KEYWORD.to_owned()],
+            ..Default::default()
+        };
+        lib.update_metadata(id_of(&lib, name), meta).unwrap();
+    }
+
+    drop(lib);
+    let lib = open_library(tmp.path());
+    let collection = lib
+        .all_collections()
+        .unwrap()
+        .into_iter()
+        .find(|row| row.name == "Trip")
+        .expect("the collection survived the reopen");
+
+    assert_eq!(
+        lib.collection_photos(collection.id).unwrap().len(),
+        3,
+        "the two-table membership query lost rows across the reopen"
+    );
+
+    let cases: [(&str, SearchFilter, &[&str]); 3] = [
+        (
+            "collection scope",
+            SearchFilter {
+                collection_id: Some(collection.id),
+                ..Default::default()
+            },
+            &NAMES[..3],
+        ),
+        (
+            "keyword text",
+            SearchFilter {
+                text: Some(KEYWORD.to_owned()),
+                ..Default::default()
+            },
+            &NAMES[1..],
+        ),
+        (
+            "collection and keyword together",
+            SearchFilter {
+                collection_id: Some(collection.id),
+                text: Some(KEYWORD.to_owned()),
+                ..Default::default()
+            },
+            &NAMES[1..3],
+        ),
+    ];
+
+    for (label, filter, expected) in cases {
+        let mut found: Vec<String> = lib
+            .search(&filter, SortOrder::default())
+            .unwrap_or_else(|e| panic!("{label}: search failed: {e:#}"))
+            .into_iter()
+            .filter_map(|row| row.original_filename)
+            .collect();
+        found.sort();
+        let mut want: Vec<String> = expected.iter().map(|n| (*n).to_owned()).collect();
+        want.sort();
+        assert_eq!(
+            found, want,
+            "{label} returned the wrong rows after a reopen"
+        );
+    }
+}
+
 /// A deleted collection must not come back: the files are what a rebuild
 /// believes, so they have to stop claiming membership before the index rows
 /// go.
@@ -3240,4 +3359,483 @@ fn open_existing_refuses_a_path_that_is_no_longer_a_library() {
         Library::open_existing(&gone).is_ok(),
         "a real library must open by the same path"
     );
+}
+
+// ── Deleting sources ─────────────────────────────────────────────────────────
+
+/// The source files still under `dir`, as paths relative to it and sorted, so
+/// assertions do not depend on directory order.
+fn remaining_sources(dir: &std::path::Path) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let path = entry.expect("source entry").path();
+            if path.is_dir() {
+                walk(&path, root, found);
+            } else {
+                found.push(path.strip_prefix(root).unwrap().display().to_string());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(dir, dir, &mut found);
+    found.sort();
+    found
+}
+
+fn delete_sources() -> rasterlab_library::ImportOptions {
+    rasterlab_library::ImportOptions {
+        collection: ImportCollection::None,
+        delete_sources: true,
+    }
+}
+
+/// Emptying a card is the whole point of the option: what the library took in
+/// is gone from the source, and the library holds every one of them.
+#[test]
+fn deleting_sources_empties_what_it_imported() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let deleted = std::cell::Cell::new(0);
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| deleted.set(p.deleted_sources),
+    )
+    .unwrap();
+
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 3);
+    assert_eq!(deleted.get(), 3);
+    assert!(
+        remaining_sources(src.path()).is_empty(),
+        "sources left behind: {:?}",
+        remaining_sources(src.path())
+    );
+}
+
+/// A file the library already had is no less imported for having arrived on an
+/// earlier run, so a second pass over a half-emptied card finishes emptying it
+/// rather than leaving every duplicate where it is.
+#[test]
+fn a_delete_run_takes_the_duplicates_too() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        ImportCollection::None,
+        no_cancel(),
+        |_| {},
+    )
+    .unwrap();
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.imported, 0, "the second run imported something new");
+    assert_eq!(last.skipped_duplicates, 3);
+    assert_eq!(last.deleted_sources, 3);
+    assert!(last.errors.is_empty(), "{:?}", last.errors);
+    assert!(remaining_sources(src.path()).is_empty());
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 3);
+}
+
+/// A photo can be in the index while its file is not — a library restored
+/// without its `files/`, a mount that dropped out. The source in front of us is
+/// then the only copy left, and deleting it on the index's word alone would
+/// lose the photograph.
+#[test]
+fn a_source_is_kept_when_the_library_has_no_file_for_it() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        ImportCollection::None,
+        no_cancel(),
+        |_| {},
+    )
+    .unwrap();
+    for row in lib.all_photos(SortOrder::default()).unwrap() {
+        std::fs::remove_file(lib.rlab_path(&row.hash)).unwrap();
+    }
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.deleted_sources, 0);
+    assert_eq!(last.errors.len(), 3, "kept sources go unreported");
+    assert_eq!(
+        remaining_sources(src.path()),
+        vec![
+            "Harbour/shot.png".to_string(),
+            "Sunrise/shot.png".into(),
+            "loose.png".into(),
+        ]
+    );
+}
+
+/// A file that failed to import is not in the library, whatever the run was
+/// asked to do with the files that are.
+#[test]
+fn a_failed_import_keeps_its_source() {
+    let src = shoot_tree();
+    let broken = src.path().join("broken.png");
+    std::fs::write(&broken, b"not a png").unwrap();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.imported, 3);
+    assert_eq!(last.deleted_sources, 3);
+    assert_eq!(last.errors.len(), 1);
+    assert_eq!(
+        remaining_sources(src.path()),
+        vec!["broken.png".to_string()]
+    );
+}
+
+// ── Importing projects found in a folder ─────────────────────────────────────
+
+/// Write `source` into `dir` as a `.rlab` project, the way an earlier library
+/// or a save from the editor would have left it, carrying `capture_date` in
+/// its `LMTA`.  `mtime` is set to something quite unlike the capture date, so a
+/// test can tell which of the two the import dated the photo by.
+fn write_rlab(
+    dir: &std::path::Path,
+    name: &str,
+    source: &std::path::Path,
+    capture_date: Option<&str>,
+    mtime_secs: i64,
+) -> PathBuf {
+    use rasterlab_core::{
+        formats::FormatRegistry,
+        library_meta::{LibraryExif, LibraryMeta},
+        pipeline::EditPipeline,
+        project::{RlabFile, RlabMeta, SavedCopy},
+    };
+
+    let original_bytes = std::fs::read(source).unwrap();
+    let image = FormatRegistry::with_builtins()
+        .decode_bytes(&original_bytes, Some(source))
+        .unwrap();
+    let (width, height) = (image.width, image.height);
+    let mut project = RlabFile::new(
+        RlabMeta::new(
+            "test",
+            Some(source.to_string_lossy().into_owned()),
+            width,
+            height,
+        ),
+        original_bytes,
+        vec![SavedCopy {
+            name: "Original".into(),
+            pipeline_state: EditPipeline::new(image).save_state().unwrap(),
+        }],
+        0,
+        None,
+    );
+    if let Some(capture_date) = capture_date {
+        project.set_lmta(Some(LibraryMeta {
+            exif: Some(LibraryExif {
+                capture_date: Some(capture_date.to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
+
+    let path = dir.join(name);
+    project.write_v5(&path).unwrap();
+    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(mtime_secs, 0)).unwrap();
+    path
+}
+
+/// A folder of projects is a folder of photographs. `.rlab` is no format
+/// handler's extension, so a walk that only asks the registry what it can
+/// decode walks straight past a whole exported library.
+#[test]
+fn a_folder_import_takes_the_rlab_projects_it_finds() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    write_png_with_mtime(&src.path().join("loose.png"), 1, BASE);
+    let project = write_rlab(src.path(), "edited.rlab", &png_path(), None, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder(src.path(), |_| {}).unwrap();
+
+    let hashes: Vec<String> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .map(|photo| photo.hash)
+        .collect();
+    assert_eq!(hashes.len(), 2, "the project was walked past");
+    let original = blake3::hash(&std::fs::read(png_path()).unwrap())
+        .to_hex()
+        .to_string();
+    assert!(
+        hashes.contains(&original),
+        "the project is indexed under the hash of the photograph inside it"
+    );
+    assert!(project.is_file(), "the import moved the source");
+}
+
+/// The project records the Blake3 of the original it holds, which is the same
+/// key the library files photographs under: a project whose photograph is
+/// already in the library is a duplicate, however it arrived.
+#[test]
+fn an_rlab_of_a_photo_already_in_the_library_is_a_duplicate() {
+    const BASE: i64 = 1_600_000_000;
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_files(&[png_path()], |_| {}).unwrap();
+
+    let src = tempfile::tempdir().unwrap();
+    write_rlab(src.path(), "same-photo.rlab", &png_path(), None, BASE);
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        ImportCollection::None,
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.imported, 0);
+    assert_eq!(last.skipped_duplicates, 1);
+    assert!(last.errors.is_empty(), "{:?}", last.errors);
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+}
+
+/// Importing another library's files is the case back-dating exists for, and a
+/// project's capture date lives in its `LMTA` rather than where a JPEG keeps
+/// it. Dating those files by mtime would collapse years of shoots into the day
+/// they were copied.
+#[test]
+fn rlab_sessions_are_dated_by_the_capture_date_inside_the_project() {
+    const DAY: i64 = 86_400;
+    const SHOT: i64 = 1_599_984_000; // 2020-09-13 08:00:00 UTC
+    // Copied onto this disk long after they were shot.
+    const COPIED: i64 = 1_750_000_000; // 2025-06-15 UTC
+
+    let src = tempfile::tempdir().unwrap();
+    write_rlab(
+        src.path(),
+        "sunrise.rlab",
+        &png_path(),
+        Some("2020:09:13 08:00:00"),
+        COPIED,
+    );
+    write_rlab(
+        src.path(),
+        "harbour.rlab",
+        &jpeg_path(),
+        Some("2020:09:18 08:00:00"),
+        COPIED,
+    );
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    let sessions = lib.import_folder(src.path(), |_| {}).unwrap();
+
+    assert_eq!(sessions.len(), 2, "five days apart is two shoots");
+    let mut started: Vec<u64> = sessions.iter().map(|session| session.started_at).collect();
+    started.sort();
+    assert_eq!(
+        started,
+        vec![SHOT as u64, (SHOT + 5 * DAY) as u64],
+        "sessions were dated by file mtime, not by the projects' capture dates"
+    );
+}
+
+/// The fingerprint shortcut says the file that was imported from this path had
+/// this size and mtime, which is not the same as saying the file sitting there
+/// now is that file. A run that only skips it loses nothing by being wrong; a
+/// run that deletes it loses the photograph.
+#[test]
+fn a_delete_run_does_not_take_the_index_fingerprints_word_for_it() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    let path = src.path().join("shot.png");
+    write_png_with_mtime(&path, 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder(src.path(), |_| {}).unwrap();
+    let first = lib.all_photos(SortOrder::default()).unwrap().remove(0).hash;
+
+    // A different photograph, of the same size, under the same name and mtime:
+    // everything the fingerprint looks at, and none of the bytes.
+    write_png_with_mtime(&path, 2, BASE);
+    assert_ne!(
+        std::fs::read(&path).unwrap(),
+        std::fs::read(lib.rlab_path(&first)).unwrap(),
+        "the replacement has to differ for this test to mean anything"
+    );
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.imported, 1, "the replacement was skipped on a stat");
+    assert_eq!(last.deleted_sources, 1);
+    let hashes: Vec<String> = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .map(|photo| photo.hash)
+        .collect();
+    assert_eq!(hashes.len(), 2, "the second photograph never landed");
+    assert!(hashes.contains(&first));
+}
+
+/// A photo can be in the index while its file is no longer readable. Deleting
+/// the source on the index's word would leave the library holding a row and a
+/// ruin, so the copy is read back and verified first.
+#[test]
+fn a_source_is_kept_when_the_library_copy_does_not_verify() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    write_png_with_mtime(&src.path().join("shot.png"), 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder(src.path(), |_| {}).unwrap();
+
+    // Rot in the middle of the stored file: every digest in it still says what
+    // it said, and none of them match any more.
+    let stored = lib.rlab_path(&lib.all_photos(SortOrder::default()).unwrap()[0].hash);
+    let mut bytes = std::fs::read(&stored).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xff;
+    std::fs::write(&stored, &bytes).unwrap();
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!(last.deleted_sources, 0, "deleted the only readable copy");
+    assert_eq!(last.errors.len(), 1);
+    assert!(
+        last.errors[0].1.contains("did not verify"),
+        "unhelpful about what it kept and why: {}",
+        last.errors[0].1
+    );
+    assert!(src.path().join("shot.png").is_file());
+}
+
+/// A photo in Recently Deleted is still in the library: it is restorable, it
+/// still has its file, and the source that brought it in is still a second
+/// copy of something the library is holding. Keeping that source would mean a
+/// card never empties until the user has been round the trash.
+#[test]
+fn a_delete_run_takes_a_source_whose_photo_is_in_recently_deleted() {
+    const BASE: i64 = 1_600_000_000;
+    let src = tempfile::tempdir().unwrap();
+    write_png_with_mtime(&src.path().join("shot.png"), 1, BASE);
+
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    lib.import_folder(src.path(), |_| {}).unwrap();
+
+    let photo = lib.all_photos(SortOrder::default()).unwrap().remove(0);
+    lib.delete_photo(photo.id).unwrap();
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert!(last.errors.is_empty(), "{:?}", last.errors);
+    assert_eq!(
+        last.deleted_sources, 1,
+        "the source outlived its photograph"
+    );
+    assert!(!src.path().join("shot.png").exists());
+
+    // And the photo stayed where the user put it: an import must not quietly
+    // resurrect something they deleted, nor leave a second copy behind.
+    assert_eq!(last.imported, 0);
+    assert_eq!(last.skipped_duplicates, 1);
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+    assert!(lib.recently_deleted_path(&photo.hash).is_file());
 }

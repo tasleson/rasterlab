@@ -13,7 +13,7 @@ use rasterlab_core::{
     formats::FormatRegistry,
     library_meta::{CollectionRef, LibraryMeta},
     pipeline::EditPipeline,
-    project::{RlabFile, read_library_summary},
+    project::{RlabFile, is_rlab_path, read_library_summary},
     verified_write::{create_dir_all_synced, rename_synced},
 };
 use uuid::Uuid;
@@ -23,7 +23,8 @@ use crate::{
         CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
         RecentlyDeletedRow, SortOrder,
     },
-    import::{self, ImportCollection, ImportSession},
+    host_lock::HostLock,
+    import::{self, ImportCollection, ImportOptions, ImportSession},
     reconstruct::{self, RebuildOutcome, RebuildProgress},
     search::SearchFilter,
     stoolap_db::StoolapDb,
@@ -32,17 +33,33 @@ use crate::{
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-/// Opening the library failed because another process already has it open.
+/// Opening the library failed because someone already has it open.
 ///
-/// The index takes an exclusive `flock` on `library.db` and holds it for as
-/// long as the library is open, so one library means one process.  A long CLI
-/// run is the case that matters: `rasterlab library rebuild` over a large
-/// network library can take hours, and for all of them the GUI cannot open
+/// Two mechanisms can say so, and which one spoke changes what the user can
+/// usefully do about it, so the variants are kept apart.  A long CLI run is
+/// the case that matters either way: `rasterlab library rebuild` over a large
+/// network library can take hours, and for all of them nothing else can open
 /// that library.  Callers get this as its own type so they can say "busy, try
 /// later" rather than reporting a library that is perfectly healthy as broken.
 #[derive(Debug, thiserror::Error)]
-#[error("the library is already open in another RasterLab process")]
-pub struct LibraryBusy;
+pub enum LibraryBusy {
+    /// The index's exclusive `flock` on `library.db` is held.  Exact, and
+    /// immediate, but only among clients that share a lock table — which in
+    /// practice means processes reaching the library the same way.
+    #[error("the library is already open in another RasterLab process")]
+    ThisHost,
+
+    /// The library root's [`host_lock`](crate::host_lock) file names a
+    /// different machine that is still refreshing it.  This is the case
+    /// `flock` cannot see: a Mac over SMB and a Linux box over NFS against one
+    /// dataset do not share a lock table, so without this each would find the
+    /// file unlocked and open the library.
+    #[error("the library is open on {holder}")]
+    OtherHost {
+        /// Who the lock file says is holding it, so the message can name them.
+        holder: crate::host_lock::LockHolder,
+    },
+}
 
 /// Opening the library failed because there is no library at that path.
 ///
@@ -76,6 +93,9 @@ pub struct ImportProgress {
     pub imported: usize,
     pub current_file: PathBuf,
     pub skipped_duplicates: usize,
+    /// Source files deleted after the library was found to hold their
+    /// contents. Zero unless the run was asked to delete its sources.
+    pub deleted_sources: usize,
     pub errors: Vec<(PathBuf, String)>,
     /// True during the pre-import capture-date scan (phase 1 of a grouped
     /// folder import). Lets the UI show "Scanning…" instead of a frozen
@@ -180,6 +200,10 @@ pub struct Library {
     root: PathBuf,
     db: Box<dyn LibraryDb>,
     registry: FormatRegistry,
+    /// The cross-protocol claim on the library root, held for the session and
+    /// released when this is dropped.  Declared after `db` so it is dropped
+    /// after it: the `flock` goes first, then the file that advertised it.
+    _host_lock: HostLock,
     /// Serializes read-modify-write operations on authoritative project files.
     /// Atomic rename prevents torn files, but without this guard two background
     /// tasks could still overwrite one another's metadata or edit stack.
@@ -207,15 +231,31 @@ impl Library {
 
     /// Open (or create) a library at `path` with an injected DB backend
     /// (useful for testing with a fake/mock DB).
+    ///
+    /// One root, one `Library`.  The host lock recognises our own session and
+    /// steps aside for it, so a second `Library` on the same root in the same
+    /// process appears to acquire the lock as well — and dropping either one
+    /// removes the lock file the other is still relying on.  [`open_or_create`]
+    /// is saved from that by the stoolap index's `flock`, which refuses the
+    /// second open outright; a backend injected here need not do anything of
+    /// the kind, so the caller is the one keeping the count.
+    ///
+    /// [`open_or_create`]: Self::open_or_create
     pub fn with_db(path: &Path, db: Box<dyn LibraryDb>) -> Result<Self> {
         create_dir_all_synced(&path.join("files"))?;
         create_dir_all_synced(&path.join("thumbs"))?;
         create_dir_all_synced(&path.join("recently_deleted/files"))?;
+        // After the index's `flock`, which has already turned away anything on
+        // this machine, and before any write: a refusal here means another
+        // machine is in the library and nothing of ours should touch it.
+        let host_lock = HostLock::acquire(path)
+            .map_err(|holder| anyhow::Error::new(LibraryBusy::OtherHost { holder }))?;
         db.init()?;
         let library = Self {
             root: path.to_path_buf(),
             db,
             registry: FormatRegistry::with_builtins(),
+            _host_lock: host_lock,
             project_write_lock: Mutex::new(()),
         };
         library.reconcile_recently_deleted()?;
@@ -319,7 +359,7 @@ impl Library {
         self.import_expanded(
             &paths,
             Some(folder),
-            collection,
+            collection.into(),
             Arc::new(AtomicBool::new(false)),
             &progress_cb,
         )
@@ -338,13 +378,18 @@ impl Library {
     /// Setting `cancel` stops the run after the file it is on. Nothing has to
     /// be undone: imports are keyed by content hash, so re-running the same
     /// command picks up where this one left off.
+    ///
+    /// `options` takes an [`ImportCollection`] on its own, or an
+    /// [`ImportOptions`] when the run should also delete the sources it has
+    /// taken in.
     pub fn import_paths(
         &self,
         paths: &[PathBuf],
-        collection: ImportCollection,
+        options: impl Into<ImportOptions>,
         cancel: Arc<AtomicBool>,
         progress_cb: impl Fn(ImportProgress),
     ) -> Result<Vec<ImportSession>> {
+        let options = options.into();
         let mut files = Vec::new();
         let mut seen = HashSet::new();
         let mut folders = Vec::new();
@@ -373,14 +418,14 @@ impl Library {
             (0, [only]) => Some(*only),
             _ => None,
         };
-        self.import_expanded(&files, source, collection, cancel, &progress_cb)
+        self.import_expanded(&files, source, options, cancel, &progress_cb)
     }
 
     fn import_expanded(
         &self,
         files: &[PathBuf],
         source_dir: Option<&Path>,
-        collection: ImportCollection,
+        options: ImportOptions,
         cancel: Arc<AtomicBool>,
         progress_cb: &dyn Fn(ImportProgress),
     ) -> Result<Vec<ImportSession>> {
@@ -391,7 +436,7 @@ impl Library {
             files,
             cancel,
             source_dir,
-            collection,
+            options,
             progress_cb,
         )
     }
@@ -1453,11 +1498,16 @@ fn collect_image_paths(folder: &Path, registry: &FormatRegistry) -> Vec<PathBuf>
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
             .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|x| x.to_str())
-                    .map(|x| exts.contains(&x.to_lowercase()))
-                    .unwrap_or(false)
+                // `.rlab` is no format handler's extension — it is the
+                // container, and the import unwraps it — but a folder of
+                // projects is a folder of photographs, so the walk has to
+                // offer them alongside the ordinary images.
+                is_rlab_path(e.path())
+                    || e.path()
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| exts.contains(&x.to_lowercase()))
+                        .unwrap_or(false)
             })
             .map(|e| e.into_path())
             .collect()

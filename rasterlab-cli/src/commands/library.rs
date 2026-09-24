@@ -21,8 +21,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use rasterlab_library::{
-    CompareOptions, CompareOutcome, ImportCollection, ImportProgress, ImportSession, Library,
-    RebuildOutcome, ScrubOutcome, Side,
+    CompareOptions, CompareOutcome, ImportCollection, ImportOptions, ImportProgress, ImportSession,
+    Library, RebuildOutcome, ScrubOutcome, Side,
 };
 
 /// Exit status for a run the user interrupted, following the shell convention
@@ -47,7 +47,9 @@ pub enum LibraryCommand {
 
     /// Import files and folders into a library.
     ///
-    /// Folders are searched recursively for supported images. Everything the
+    /// Folders are searched recursively for supported images and for `.rlab`
+    /// projects, which are unwrapped so the library indexes the photograph
+    /// inside rather than the container. Everything the
     /// run brings in is grouped into back-dated import sessions by capture
     /// date, the same way the GUI groups a folder import, so importing an
     /// existing archive reconstructs its history rather than landing it all
@@ -147,17 +149,39 @@ pub struct ImportArgs {
     #[arg(long)]
     pub create: bool,
 
+    /// Delete each source file once the library is proved to hold its
+    /// photograph.
+    ///
+    /// A file the library already had is deleted too — it is no less imported
+    /// for having arrived on an earlier run — so emptying a card takes the
+    /// same command whether or not part of it got there already. That includes
+    /// a photo sitting in Recently Deleted, which is still in the library and
+    /// still restorable. A file that failed to import is left where it is, as
+    /// are sidecars and anything else the import did not take in.
+    ///
+    /// Proving it costs a read: every source is hashed rather than recognised
+    /// by its fingerprint in the index, and the library's own copy is read
+    /// back and verified before the source goes. A run that deletes nothing is
+    /// therefore cheaper than this one, and a source the library cannot
+    /// account for is kept and reported as an error.
+    #[arg(long)]
+    pub delete_source: bool,
+
     /// Print only the final tally, no running progress.
     #[arg(short, long)]
     pub quiet: bool,
 }
 
 impl ImportArgs {
-    fn collection(&self) -> ImportCollection {
-        match &self.collection {
+    fn options(&self) -> ImportOptions {
+        let collection = match &self.collection {
             _ if self.collection_per_folder => ImportCollection::PerFolder,
             Some(name) => ImportCollection::Named(name.clone()),
             None => ImportCollection::None,
+        };
+        ImportOptions {
+            collection,
+            delete_sources: self.delete_source,
         }
     }
 }
@@ -221,7 +245,7 @@ fn import(args: ImportArgs) -> Result<()> {
     // simply the last one it sent rather than a count kept alongside it.
     let last = RefCell::new(ImportProgress::default());
 
-    let sessions = library.import_paths(&args.sources, args.collection(), cancel.clone(), |p| {
+    let sessions = library.import_paths(&args.sources, args.options(), cancel.clone(), |p| {
         let mut progress = progress.borrow_mut();
         if p.scanning {
             // Reading capture dates, not importing: a separate phase with a
@@ -241,7 +265,11 @@ fn import(args: ImportArgs) -> Result<()> {
         progress.update(Status {
             done: p.done,
             total: p.total,
-            tallies: &[("imported", p.imported), ("skipped", p.skipped_duplicates)],
+            tallies: &[
+                ("imported", p.imported),
+                ("skipped", p.skipped_duplicates),
+                ("deleted", p.deleted_sources),
+            ],
             errors: p.errors.len(),
             current: &p.current_file,
         });
@@ -371,6 +399,9 @@ fn report_import(
         tally.skipped_duplicates,
         count(tally.errors.len(), "error")
     );
+    if tally.deleted_sources > 0 {
+        println!("  {} deleted", count(tally.deleted_sources, "source file"));
+    }
     for session in sessions.iter().filter(|s| s.photo_count > 0) {
         println!(
             "  {}: {}",

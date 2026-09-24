@@ -26,7 +26,7 @@ impl StoolapDb {
         // A held lock is not a broken library, so it keeps its own type all
         // the way up rather than arriving as one more opaque open failure.
         let db = Database::open(&dsn).map_err(|e| match e {
-            stoolap::Error::DatabaseLocked => anyhow::Error::new(LibraryBusy),
+            stoolap::Error::DatabaseLocked => anyhow::Error::new(LibraryBusy::ThisHost),
             other => anyhow::Error::new(other).context("open library.db"),
         })?;
         Ok(Self { db })
@@ -40,8 +40,10 @@ impl StoolapDb {
 
     /// A collection's photos, in the caller's order.
     ///
-    /// Two tables is the limit: a third turns this into the join that comes
-    /// back empty. See `search` on this type, and STOOLAP_BUG.md.
+    /// Two tables is the limit on stoolap 0.4.0: a third turns this into the
+    /// join that comes back empty. Fixed in 0.4.1, so this constraint lifts
+    /// with the `[patch.crates-io]` stanza. See `search` on this type, and
+    /// STOOLAP_BUG.md.
     fn collection_photos_sorted(
         &self,
         collection_id: CollectionId,
@@ -98,6 +100,41 @@ impl StoolapDb {
             self.db.execute(
                 "UPDATE collections SET uuid = $1 WHERE id = $2",
                 (Uuid::new_v4().to_string(), id),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Rewrite every session's cached active-photo count from the photo rows.
+    ///
+    /// Runs on every open, and is normally a no-op: the per-photo mutations
+    /// keep the count current themselves.  It is here for the libraries where
+    /// they did not — an emptied session that kept its old count sat in the
+    /// sidebar offering photos that were all in Recently Deleted, and nothing
+    /// short of an index rebuild put it right.
+    fn resync_session_counts(&self) -> Result<()> {
+        let rows = self
+            .db
+            .query("SELECT id, photo_count FROM import_sessions", ())
+            .context("read sessions for count resync")?;
+        let mut stale = Vec::new();
+        for row in rows {
+            let row = row.context("session row")?;
+            let id = row.get::<String>(0).context("session id")?;
+            let cached = row.get::<i64>(1).context("session photo_count")?;
+            let actual: i64 = self.db.query_one(
+                "SELECT COUNT(*) FROM photos
+                 WHERE import_session = $1 AND deleted_at = 0",
+                (id.as_str(),),
+            )?;
+            if actual != cached {
+                stale.push((id, actual));
+            }
+        }
+        for (id, count) in stale {
+            self.db.execute(
+                "UPDATE import_sessions SET photo_count = $1 WHERE id = $2",
+                (count, id.as_str()),
             )?;
         }
         Ok(())
@@ -312,6 +349,8 @@ impl LibraryDb for StoolapDb {
             "UPDATE photos SET deleted_at=0 WHERE deleted_at IS NULL",
             (),
         );
+        self.resync_session_counts()
+            .context("resync cached import-session counts")?;
         Ok(())
     }
 
@@ -362,13 +401,19 @@ impl LibraryDb for StoolapDb {
         source_path: &str,
         source_size: u64,
         source_mtime_secs: i64,
-    ) -> Result<bool> {
+    ) -> Result<Option<String>> {
         let mut rows = self.db.query(
-            "SELECT 1 FROM photos
+            "SELECT hash FROM photos
              WHERE source_path = $1 AND source_size = $2 AND source_mtime = $3",
             (source_path, source_size as i64, source_mtime_secs),
         )?;
-        Ok(rows.next().is_some())
+        match rows.next() {
+            Some(row) => {
+                let row = row.context("source_already_imported row")?;
+                Ok(Some(row.get::<String>(0).context("hash")?))
+            }
+            None => Ok(None),
+        }
     }
 
     fn update_lmta(&self, photo_id: PhotoId, lmta: &LibraryMeta) -> Result<()> {
@@ -454,14 +499,22 @@ impl LibraryDb for StoolapDb {
     // ── Search ────────────────────────────────────────────────────────────
 
     fn search(&self, filter: &SearchFilter, sort: SortOrder) -> Result<Vec<PhotoRow>> {
-        // A collection scope cannot go into the statement below. Stoolap
-        // returns *no rows at all*, silently, from a join of three or more
-        // tables when the join column of one of them carries an index and the
-        // rows are read back in a later session. `collection_photos(photo_id)`
-        // is indexed and `photo_id` is what the join is on, so putting that
-        // table in with the metadata tables empties the whole result.
-        // STOOLAP_BUG.md has the reproduction. Membership is resolved with a
-        // query of its own instead, and applied to the rows here.
+        // A collection scope stays out of the statement below, for stoolap
+        // 0.4.0's sake. That version returns *no rows at all*, silently, from
+        // a join of three or more tables when the join column of one of them
+        // carries an index and the rows are read back in a later session.
+        // `collection_photos(photo_id)` is indexed and `photo_id` is what the
+        // join is on, so putting that table in with the metadata tables
+        // emptied the whole result. STOOLAP_BUG.md has the reproduction.
+        // Membership is resolved with a query of its own instead, and applied
+        // to the rows here.
+        //
+        // 0.4.1 fixes the bug, so this workaround retires along with the
+        // `[patch.crates-io]` stanza pinning the patched build. Note it was
+        // never a complete mitigation anyway: the statement below is a
+        // five-table LEFT JOIN that already includes `keywords k ON
+        // k.photo_id = p.id`, and `kw_photo` indexes exactly that column —
+        // the triggering shape, kept out only of this one join.
         let members = match filter.collection_id {
             Some(id) => Some(self.collection_member_id_set(id)?),
             None => None,
@@ -1046,15 +1099,16 @@ fn replace_photo_tx(tx: &mut Transaction, photo_id: PhotoId, photo: NewPhoto<'_>
     // way every other photo mutation here does. A photo whose file moved it to
     // another session leaves the old session's count to the pass that ends a
     // rebuild.
-    tx.execute(
-        "UPDATE import_sessions
-         SET photo_count = (
-             SELECT COUNT(*) FROM photos
-             WHERE import_session = import_sessions.id AND deleted_at = 0
-         )
-         WHERE id = (SELECT import_session FROM photos WHERE id = $1)",
-        (photo_id,),
-    )?;
+    if let Some(session) = photo_session_tx(tx, photo_id)? {
+        let active: bool = tx
+            .query_one(
+                "SELECT COUNT(*) FROM photos WHERE id = $1 AND deleted_at = 0",
+                (photo_id,),
+            )
+            .map(|n: i64| n > 0)
+            .context("photo deleted state")?;
+        refresh_session_count_tx(tx, &session, photo_id, active)?;
+    }
 
     Ok(())
 }
@@ -1235,6 +1289,49 @@ fn update_lmta_tx(tx: &mut Transaction, photo_id: PhotoId, lmta: &LibraryMeta) -
     Ok(())
 }
 
+/// Write a session's cached active-photo count, derived from every photo in it
+/// except `photo_id`, plus `also_active` for that photo itself.
+///
+/// The count is read out and written back as a literal rather than left to a
+/// correlated subquery inside the `UPDATE`.  Repeating that statement verbatim
+/// gets the subquery value the first run produced, so emptying a session photo
+/// by photo moved the cached count once and then left it frozen — the session
+/// kept most of its original count and its place in the sidebar, offering
+/// photos that were all in Recently Deleted.  Excluding the photo being changed
+/// also keeps the count right whether or not this transaction's own write is
+/// visible to the read.
+fn refresh_session_count_tx(
+    tx: &mut Transaction,
+    session_id: &str,
+    photo_id: PhotoId,
+    also_active: bool,
+) -> Result<()> {
+    let others: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM photos
+             WHERE import_session = $1 AND deleted_at = 0 AND id <> $2",
+            (session_id, photo_id),
+        )
+        .context("count session photos")?;
+    tx.execute(
+        "UPDATE import_sessions SET photo_count = $1 WHERE id = $2",
+        (others + i64::from(also_active), session_id),
+    )?;
+    Ok(())
+}
+
+/// The import session a photo belongs to, or `None` when it has none.
+fn photo_session_tx(tx: &mut Transaction, photo_id: PhotoId) -> Result<Option<String>> {
+    let session: Option<String> = tx
+        .query_opt(
+            "SELECT import_session FROM photos WHERE id = $1",
+            (photo_id,),
+        )
+        .context("photo import session")?
+        .flatten();
+    Ok(session.filter(|id| !id.is_empty()))
+}
+
 /// Toggle a photo's Recently Deleted state and refresh its session's active
 /// count in the same transaction.
 fn set_photo_deleted_tx(
@@ -1242,20 +1339,17 @@ fn set_photo_deleted_tx(
     photo_id: PhotoId,
     deleted_at: Option<u64>,
 ) -> Result<()> {
+    // Read the session while the row is certainly untouched by this
+    // transaction.
+    let session = photo_session_tx(tx, photo_id)?;
     let deleted_value = Value::integer(deleted_at.unwrap_or(0) as i64);
     tx.execute(
         "UPDATE photos SET deleted_at = $1 WHERE id = $2",
         vec![deleted_value, Value::integer(photo_id)],
     )?;
-    tx.execute(
-        "UPDATE import_sessions
-         SET photo_count = (
-             SELECT COUNT(*) FROM photos
-             WHERE import_session = import_sessions.id AND deleted_at = 0
-         )
-         WHERE id = (SELECT import_session FROM photos WHERE id = $1)",
-        (photo_id,),
-    )?;
+    if let Some(session) = session {
+        refresh_session_count_tx(tx, &session, photo_id, deleted_at.is_none())?;
+    }
     Ok(())
 }
 
@@ -1266,16 +1360,9 @@ fn delete_photo_tx(tx: &mut Transaction, photo_id: PhotoId) -> Result<()> {
     // available. Empty-session pruning happens at the end of the surrounding
     // operation: index rebuilding temporarily deletes and reinserts rows, and
     // must retain the session row (including a custom name) in between.
-    tx.execute(
-        "UPDATE import_sessions
-         SET photo_count = (
-             SELECT COUNT(*) FROM photos
-             WHERE import_session = import_sessions.id
-               AND deleted_at = 0 AND id <> $1
-         )
-         WHERE id = (SELECT import_session FROM photos WHERE id = $1)",
-        (photo_id,),
-    )?;
+    if let Some(session) = photo_session_tx(tx, photo_id)? {
+        refresh_session_count_tx(tx, &session, photo_id, false)?;
+    }
     // Manual cascade since we dropped ON DELETE CASCADE
     for tbl in &[
         "keywords",
@@ -1602,6 +1689,84 @@ mod tests {
         db.restore_photo(id).unwrap();
         assert_eq!(db.all_photos(SortOrder::default()).unwrap().len(), 1);
         assert!(db.recently_deleted().unwrap().is_empty());
+    }
+
+    /// The sidebar reads `photo_count`, so emptying a session one photo at a
+    /// time has to walk it all the way down — not just the first step.
+    #[test]
+    fn emptying_a_session_photo_by_photo_walks_its_cached_count_to_zero() {
+        let db = db();
+        db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
+            .unwrap();
+        db.insert_session("s2", "Jun 4 2025", 1_600_100_000, None)
+            .unwrap();
+        let ids: Vec<PhotoId> = (0..3)
+            .map(|i| {
+                db.insert_photo(new_photo(
+                    &format!("aabbc{i}"),
+                    &format!("aa/bb/aabbc{i}.rlab"),
+                    &lmta("s1"),
+                ))
+                .unwrap()
+            })
+            .collect();
+        db.insert_photo(new_photo("ddeeff", "dd/ee/ddeeff.rlab", &lmta("s2")))
+            .unwrap();
+        db.update_session_count("s1", 3).unwrap();
+        db.update_session_count("s2", 1).unwrap();
+
+        for id in &ids {
+            db.mark_photo_deleted(*id, 1_700_000_000).unwrap();
+        }
+        assert_eq!(
+            session_counts(&db),
+            [("s2".to_owned(), 1)],
+            "a session with every photo in Recently Deleted is off the sidebar"
+        );
+
+        for id in &ids {
+            db.restore_photo(*id).unwrap();
+        }
+        assert_eq!(
+            session_counts(&db),
+            [("s2".to_owned(), 1), ("s1".to_owned(), 3)],
+            "restoring them all puts the session back at its full count"
+        );
+
+        for id in &ids {
+            db.delete_photo(*id).unwrap();
+        }
+        assert_eq!(session_counts(&db), [("s2".to_owned(), 1)]);
+    }
+
+    /// Libraries carrying a count left stale by the old per-photo update heal
+    /// on the next open rather than waiting for an index rebuild.
+    #[test]
+    fn opening_the_index_resyncs_a_stale_session_count() {
+        let db = db();
+        db.insert_session("s1", "Jun 3 2025", 1_600_000_000, None)
+            .unwrap();
+        let id = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        db.mark_photo_deleted(id, 1_700_000_000).unwrap();
+        db.update_session_count("s1", 28).unwrap();
+
+        db.init().unwrap();
+
+        assert!(
+            session_counts(&db).is_empty(),
+            "the session has no active photos, whatever its cached count said"
+        );
+    }
+
+    /// Every session the sidebar would show, newest first, with its cached count.
+    fn session_counts(db: &StoolapDb) -> Vec<(String, i64)> {
+        db.all_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.id, s.photo_count))
+            .collect()
     }
 
     #[test]

@@ -60,17 +60,48 @@
 //! What is *not* claimed: nothing here coordinates two processes writing one
 //! library at once, and a `.rlab` that is rewritten while another process
 //! reads it hands that reader the old bytes, not an error.  What keeps that
-//! from mattering is that a library is single-process to begin with: the index
-//! holds an exclusive `flock` on `library.db` while it is open, so a second
-//! process opening the same library fails with [`LibraryBusy`] instead of
-//! joining it.  The lock lives on the file rather than in this crate, so it
-//! covers a CLI run and a GUI session equally — but note it is only as good as
-//! the filesystem underneath, and on a network mount that means checking that
-//! locking is really passed to the server (an NFS mount with `nolock` or
-//! `local_lock=flock` admits two writers).
+//! from mattering is that a library is meant to be single-process, and two
+//! locks say so — one exact, one a backstop.  Both fail an open with
+//! [`LibraryBusy`], which names which of them spoke.
+//!
+//! * **An exclusive `flock` on `library.db`**, taken by the index and held for
+//!   as long as the library is open.  This is the authoritative one: it is
+//!   immediate, it cannot go stale, and it needs no cooperation beyond the
+//!   kernel's.  A second opener gets [`LibraryBusy::ThisHost`].  The lock
+//!   lives on the file rather than in this crate, so it covers a CLI run and a
+//!   GUI session equally — but it is only as good as the filesystem
+//!   underneath, and on a network mount that means checking that locking is
+//!   really passed to the server (an NFS mount with `nolock` or
+//!   `local_lock=flock` admits two writers).
+//!
+//! * **A heartbeat file, `library.lock`, in the library root** — see
+//!   [`host_lock`].  `flock` is only shared among clients that share a lock
+//!   table, and two protocols against one dataset do not: a Mac reaching the
+//!   library over SMB and a Linux box reaching it over NFS are served by Samba
+//!   and `nfsd` respectively, which keep separate tables, so each finds
+//!   `library.db` unlocked and both open the library.  The heartbeat file
+//!   crosses that gap by not relying on the filesystem for anything but
+//!   reading and writing bytes: a holder records its hostname, pid, session id
+//!   and version and rewrites the timestamp every
+//!   [`REFRESH_INTERVAL`](host_lock::REFRESH_INTERVAL), and an opener that
+//!   finds a *different host* still refreshing gets
+//!   [`LibraryBusy::OtherHost`], naming the machine.  A lock silent for
+//!   [`STALE_AFTER`](host_lock::STALE_AFTER) is treated as abandoned and taken
+//!   over, and `RASTERLAB_TAKE_LIBRARY_LOCK=1` (or deleting the file) takes
+//!   one by hand.
+//!
+//! The second is a guardrail, not a guarantee: read-then-write is not atomic,
+//! so two hosts starting in the same instant can both think they won, and a
+//! host whose connection stalls past the staleness window can have its lock
+//! taken while it is alive.  It catches the mistake that actually happens —
+//! a rebuild left running on one machine, the GUI opened on another — and
+//! says so by name instead of letting two writers into one library in
+//! silence.  Same-machine conflicts are left entirely to the `flock`, which
+//! is exact where this is not.
 
 pub mod compare;
 pub mod db_trait;
+pub mod host_lock;
 pub mod import;
 pub mod library;
 pub mod reconstruct;
@@ -84,7 +115,8 @@ pub use db_trait::{
     CollectionId, CollectionRow, ImportSessionRow, LibraryDb, PhotoId, PhotoRow,
     RecentlyDeletedRow, SortOrder,
 };
-pub use import::{ImportCollection, ImportSession, MONTH_NAMES, ymd_from_unix};
+pub use host_lock::{HostLock, LockHolder};
+pub use import::{ImportCollection, ImportOptions, ImportSession, MONTH_NAMES, ymd_from_unix};
 pub use library::{
     BulkOutcome, BulkProgress, ImportProgress, Library, LibraryBusy, MembershipChange, NotALibrary,
     is_library_root,

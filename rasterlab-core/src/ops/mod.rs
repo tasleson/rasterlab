@@ -22,6 +22,7 @@ pub mod histogram;
 mod hsl;
 pub mod hsl_panel;
 pub mod hue_shift;
+pub mod intensify_hdr;
 pub mod levels;
 pub mod local_laplacian;
 pub mod lut;
@@ -64,6 +65,7 @@ pub use highlights_shadows::HighlightsShadowsOp;
 pub use histogram::{HistogramData, HistogramOp};
 pub use hsl_panel::HslPanelOp;
 pub use hue_shift::HueShiftOp;
+pub use intensify_hdr::IntensifyHdrOp;
 pub use levels::LevelsOp;
 pub use local_laplacian::LocalLaplacianOp;
 pub use lut::LutOp;
@@ -129,13 +131,22 @@ where
 
 /// Rec. 709 luminance per pixel, on the same 0–255 scale as the channels it
 /// came from.  Shared by the ops that measure structure rather than colour:
-/// focus stacking, panorama feature detection, and frame alignment.
+/// focus stacking, panorama feature detection, frame alignment, and the
+/// Intensify HDR base layer.
+///
+/// Parallel because in Intensify HDR this is the opening stage and a serial
+/// pass over a 12 MP frame cost more than the six blur passes that follow it
+/// (27 ms against 34 ms; 3.2 ms once threaded).  It moves as many bytes out as
+/// it reads in, so it looks like the memory-bandwidth-bound map that CLAUDE.md
+/// says not to parallelise — but the serial version only reaches ~3.5 GB/s.
+/// It is bound by the latency of the byte-to-float converts and the multiply
+/// chain, not by the bus, and that headroom is what threads claim here.
 pub(super) fn luma_f32(image: &crate::image::Image) -> Vec<f32> {
     image
         .data
         .as_chunks::<4>()
         .0
-        .iter()
+        .par_iter()
         .map(|p| 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32)
         .collect()
 }
@@ -164,6 +175,111 @@ pub(super) fn bilinear_sample(image: &crate::image::Image, sx: f32, sy: f32) -> 
         out[i] = (top + (bot - top) * ty).clamp(0.0, 255.0) as u8;
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Box blur (single channel, separable sliding-window, O(w*h) regardless of radius)
+// ---------------------------------------------------------------------------
+
+pub(super) fn box_blur_1ch(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    // Three passes of separable H+V ≈ Gaussian.
+    let mut buf = src.to_vec();
+    for _ in 0..3 {
+        box_blur_h_1ch(&mut buf, w, h, radius);
+        box_blur_v_1ch(&mut buf, w, h, radius);
+    }
+    buf
+}
+
+/// Horizontal box blur — one row per rayon task.
+fn box_blur_h_1ch(buf: &mut [f32], w: usize, _h: usize, radius: usize) {
+    buf.par_chunks_mut(w).for_each(|row| {
+        let mut out = vec![0.0f32; w];
+        let mut sum = 0.0f32;
+        for &v in row.iter().take(radius.min(w - 1) + 1) {
+            sum += v;
+        }
+        let mut count = (radius.min(w - 1) + 1) as f32;
+        for x in 0..w {
+            out[x] = sum / count;
+            if x + radius + 1 < w {
+                sum += row[x + radius + 1];
+                count += 1.0;
+            }
+            if x >= radius {
+                sum -= row[x - radius];
+                count -= 1.0;
+            }
+        }
+        row.copy_from_slice(&out);
+    });
+}
+
+/// Vertical box blur — parallel column strips, no transpose.
+///
+/// Columns are processed in strips of STRIP adjacent columns.  Each strip
+/// gathers its data into a contiguous [h × STRIP] buffer (one cache-line per
+/// row in the source), runs the sliding-window blur across all STRIP columns
+/// simultaneously (SIMD-friendly inner loop), then writes the results back.
+/// Strips cover disjoint column ranges so parallel mutation is sound.
+fn box_blur_v_1ch(buf: &mut [f32], w: usize, h: usize, radius: usize) {
+    const STRIP: usize = 16; // 16 f32 = 64 bytes = one cache line per source row
+
+    let n_strips = w.div_ceil(STRIP);
+    // Cast to usize so the closure captures a Send+Sync value. Casting back
+    // inside the closure is sound because strips cover disjoint column ranges.
+    let raw = buf.as_mut_ptr() as usize;
+
+    (0..n_strips).into_par_iter().for_each(|s| {
+        let x0 = s * STRIP;
+        let sw = STRIP.min(w - x0); // actual columns in this strip (last strip may be narrow)
+        let p = raw as *mut f32;
+
+        // --- Gather: copy strip columns into contiguous [h × sw] buffer ---
+        // Each row contributes one memcpy of sw floats (≤ one cache line).
+        let mut tmp = vec![0.0f32; h * sw];
+        for y in 0..h {
+            let src_row = unsafe { std::slice::from_raw_parts(p.add(y * w + x0), sw) };
+            tmp[y * sw..y * sw + sw].copy_from_slice(src_row);
+        }
+
+        // --- Blur: sliding window over all sw columns simultaneously ---
+        // Inner loops over sw are auto-vectorised by the compiler.
+        let mut sums = vec![0.0f32; sw];
+        let seed_end = radius.min(h - 1);
+        for y in 0..=seed_end {
+            let row = &tmp[y * sw..y * sw + sw];
+            for c in 0..sw {
+                sums[c] += row[c];
+            }
+        }
+        let mut count = (seed_end + 1) as f32;
+
+        for y in 0..h {
+            let inv = 1.0 / count;
+            // Write blurred values directly into buf for this strip's columns.
+            unsafe {
+                let dst_row = std::slice::from_raw_parts_mut(p.add(y * w + x0), sw);
+                for c in 0..sw {
+                    dst_row[c] = sums[c] * inv;
+                }
+            }
+            if y + radius + 1 < h {
+                let add_row = &tmp[(y + radius + 1) * sw..(y + radius + 1) * sw + sw];
+                for c in 0..sw {
+                    sums[c] += add_row[c];
+                }
+                count += 1.0;
+            }
+            if y >= radius {
+                let sub_row = &tmp[(y - radius) * sw..(y - radius) * sw + sw];
+                for c in 0..sw {
+                    sums[c] -= sub_row[c];
+                }
+                count -= 1.0;
+            }
+        }
+    });
 }
 
 #[cfg(test)]

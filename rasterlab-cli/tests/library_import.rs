@@ -257,3 +257,50 @@ fn quiet_keeps_the_tally() {
     assert!(stdout.contains("2 of 2 imported"), "no tally: {stdout}");
     assert!(!stdout.contains("scanned"), "progress survived: {stdout}");
 }
+
+/// `--delete-source` is the "empty the card" run: what the library takes in
+/// leaves the source, and a second pass finishes off the files the first pass
+/// had already brought in.
+#[test]
+fn delete_source_empties_the_card_across_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let src = tmp.path().join("src");
+    source_tree(&src);
+
+    // First run without the option, so the second has duplicates to clear.
+    assert!(
+        rasterlab(&[
+            "library",
+            "import",
+            root.to_str().unwrap(),
+            src.join("shoot-a").to_str().unwrap(),
+            "--create",
+        ])
+        .status
+        .success()
+    );
+    assert!(src.join("shoot-a").read_dir().unwrap().next().is_some());
+
+    let out = rasterlab(&[
+        "library",
+        "import",
+        root.to_str().unwrap(),
+        src.to_str().unwrap(),
+        "--delete-source",
+    ]);
+    assert!(out.status.success(), "import failed: {out:?}");
+    assert!(
+        stdout_of(&out).contains("2 source files deleted"),
+        "unexpected tally: {}",
+        stdout_of(&out)
+    );
+    assert_eq!(photo_count(&root), 2);
+    for shoot in ["shoot-a", "shoot-b"] {
+        assert_eq!(
+            src.join(shoot).read_dir().unwrap().count(),
+            0,
+            "{shoot} still holds its photo"
+        );
+    }
+}

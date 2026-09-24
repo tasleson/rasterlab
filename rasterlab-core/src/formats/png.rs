@@ -1,10 +1,11 @@
 use image::{
-    ExtendedColorType, ImageEncoder,
+    ExtendedColorType, GenericImageView, ImageEncoder,
     codecs::png::{CompressionType, FilterType, PngEncoder},
 };
 
 use crate::{
     error::{RasterError, RasterResult},
+    formats::exif_util,
     image::Image,
     traits::format_handler::{EncodeOptions, FormatHandler},
 };
@@ -24,9 +25,17 @@ impl FormatHandler for PngHandler {
         let dyn_image = image::load_from_memory_with_format(data, image::ImageFormat::Png)
             .map_err(|e| RasterError::decode("png", e.to_string()))?;
 
-        let rgba = dyn_image.to_rgba8();
-        let (w, h) = rgba.dimensions();
-        Image::from_rgba8(w, h, rgba.into_raw())
+        let (w, h) = dyn_image.dimensions();
+        // A straight 8-bit RGBA PNG moves the decoder's buffer without
+        // copying; a 24-bit PNG expands to opaque RGBA in one parallel pass.
+        // (The old `to_rgba8()` cloned every pixel in both cases.)
+        let buf = match dyn_image {
+            image::DynamicImage::ImageRgba8(rgba) => rgba.into_raw(),
+            image::DynamicImage::ImageRgb8(rgb) => exif_util::rgb8_to_rgba8(&rgb),
+            // Paletted, 8/16-bit and LA variants: the crate's converter.
+            other => other.to_rgba8().into_raw(),
+        };
+        Image::from_rgba8(w, h, buf)
     }
 
     fn encode(&self, image: &Image, options: &EncodeOptions) -> RasterResult<Vec<u8>> {

@@ -77,6 +77,7 @@ The table follows the tool order in the GUI.
 | Highlights / Shadows | Adjusts highlight and shadow regions independently. |
 | HSL Panel | Adjusts hue, saturation, and luminance in eight color bands. |
 | Hue Shift | Rotates hue globally. |
+| Intensify HDR | Applies an Intensify-inspired local HDR look with a 0–100% effect control. |
 | Levels | Sets black, mid, and white points with LUT-based remapping. |
 | Local Tone | Uses edge-aware local Laplacian filtering to compress large-scale contrast while retaining or boosting texture. |
 | LUT / Color Grading | Applies a `.cube` 3D LUT with adjustable blend strength. |
@@ -171,7 +172,7 @@ Current library features include:
 - File or recursive folder import, duplicate detection, RAW+JPEG pairing, and 512 px thumbnails.
 - Import-session grouping; folder imports use capture dates, with filesystem timestamps as fallback, to rebuild a useful historical timeline. Consecutive shooting days merge into one session, except that a day of more than 100 photos is kept as a session of its own. A **Recent Imports** list in the sidebar shows the last 10 sessions in the order they were imported, so a folder of old photographs is one click away instead of buried under its capture date.
 - Ratings, pick/reject flags, color labels, captions, keywords, and batch metadata edits.
-- Collections: create one from the sidebar, then right-click a selection in the grid and use **Collections** to put photos in or take them out. **Collections › Move to** files the selection into one collection and out of every other one it is in, which re-homes a batch in a single pass over the files instead of the two an add and a remove would take. Right-clicking a collection in the sidebar renames or deletes it, and selecting a photo lists the collections it belongs to. Ctrl-click and shift-click mark several collections in the sidebar the way they select several photos in the grid, so a batch of them can be deleted in one confirmation, which runs in the background like the Recently Deleted operations. A photo can be in as many collections as you like, and each membership is stored in that photo's own `.rlab`, so it survives an index rebuild. Deleting a collection leaves its photos alone. Files record a collection's identity rather than its name, so renaming one is instant however many photos are in it; the name each file carries is only a fallback for rebuilding an index that has been lost outright, and may be a rename behind.
+- Collections: create one from the sidebar, then right-click a selection in the grid and use **Collections** to put photos in or take them out. **Collections › Move to** files the selection into one collection and out of every other one it is in, which re-homes a batch in a single pass over the files instead of the two an add and a remove would take. Right-clicking a collection in the sidebar renames or deletes it, and selecting a photo lists the collections it belongs to. The sidebar's **Collections** section collapses like the import-session years, and once there are more than a handful a filter box above the list narrows it by name. Ctrl-click and shift-click mark several collections in the sidebar the way they select several photos in the grid, so a batch of them can be deleted in one confirmation, which runs in the background like the Recently Deleted operations. A photo can be in as many collections as you like, and each membership is stored in that photo's own `.rlab`, so it survives an index rebuild. Deleting a collection leaves its photos alone. Files record a collection's identity rather than its name, so renaming one is instant however many photos are in it; the name each file carries is only a fallback for rebuilding an index that has been lost outright, and may be a rename behind.
 - Import-time collections: choosing **File > Import Photos > Select Folder…** asks, before the import starts, whether the photos should be filed into a collection — one per folder, named after the folder that directly holds them, or a single collection you name for the whole import. A collection that already goes by that name is used as it is, so importing the same folder again adds only what is new. The choice is remembered between imports.
 - Filtering by text, rating, flag, color label, camera, lens, capture date, aperture, shutter speed, ISO, pixel dimensions, and edited state.
 - Sorting by import date, capture date, rating, or filename.
@@ -258,6 +259,9 @@ rasterlab library import /srv/photos ~/cards/DCIM
 rasterlab library import /srv/photos ~/shoots --collection-per-folder
 rasterlab library import /srv/photos iceland/*.nef --collection "Iceland 2024"
 
+# Empty a card: delete each source once the library holds its contents
+rasterlab library import /srv/photos ~/cards/DCIM --delete-source
+
 # Re-index the .rlab files on disk, recovering rows the index has lost
 rasterlab library rebuild /srv/photos
 
@@ -268,6 +272,13 @@ rasterlab library scrub /srv/photos --quiet
 rasterlab library compare /srv/photos-before /srv/photos-after
 ```
 
+A folder is searched recursively for images and for `.rlab` projects. A project
+is unwrapped on the way in: the photograph inside it is what the library
+indexes, under the Blake3 the project already records for it, and its edits,
+rating and keywords come along. That hash is also how a project is recognised as
+a duplicate, so importing another library's files a second time costs a seek per
+file rather than a read.
+
 An import groups what it brings in into back-dated sessions by capture date,
 the same way the GUI groups a folder import, so importing an existing archive
 reconstructs its history instead of landing it all under today. Photos already
@@ -275,6 +286,26 @@ in the library are skipped by content hash, which makes re-running an import
 over the same source cheap — and is why an interrupted import is finished by
 simply running it again. `--create` makes the library as part of the import for
 the first run.
+
+`--delete-source` removes each source file once the library is proved to hold
+its photograph, which is what makes an import an "empty the card" run. A file
+the library already had is deleted too — it is no less imported for having
+arrived on an earlier run — so a second pass over a half-emptied card finishes
+emptying it. A photo the user has moved to Recently Deleted counts as held as
+well: its file is still there, it can still be restored, and its source is
+still a second copy of something the library has. A file that failed to import
+is left where it is, as are sidecars and anything else the import did not take
+in.
+
+The proof is the point, and it costs a read. Every source is hashed rather than
+recognised by its path, size and mtime in the index, because that fingerprint
+describes the file that was imported and not the one on the card now; and the
+library's own `.rlab` is read back and verified in full — every digest in it,
+against the photograph the source hashed to — before that source is unlinked.
+The exception is a photo this run just wrote, which was already staged, synced,
+read back and compared on the way in. A source the library cannot account for
+is kept and reported as an error like any other, so the run exits non-zero and
+says which file it left behind.
 
 `compare` answers "did that change alter what ends up in the library?" — import
 the same sources with the old code and with the new, then compare the two

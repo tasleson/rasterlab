@@ -23,6 +23,11 @@ image      = { workspace = true }
 thiserror  = { workspace = true }
 anyhow     = { workspace = true }
 
+# gethostname, so the cross-protocol library lock can name the machine
+# holding a library open.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 filetime = "0.2"

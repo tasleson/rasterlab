@@ -5,9 +5,9 @@ use rasterlab_core::{
     analysis::ImageStats,
     image::Image,
     ops::{
-        BlackAndWhiteOp, CropOp, HealOp, HealSpot, LocalLaplacianOp, NoiseReductionOp, NrMethod,
-        RotateOp, SepiaOp, SharpenOp, WhiteBalanceOp, clarity_texture::ClarityTextureOp,
-        histogram::HistogramData, split_tone::SplitToneOp,
+        BlackAndWhiteOp, CropOp, HealOp, HealSpot, IntensifyHdrOp, LocalLaplacianOp,
+        NoiseReductionOp, NrMethod, RotateOp, SepiaOp, SharpenOp, WhiteBalanceOp,
+        clarity_texture::ClarityTextureOp, histogram::HistogramData, split_tone::SplitToneOp,
     },
     traits::operation::Operation,
 };
@@ -150,6 +150,31 @@ fn bench_clarity_texture(c: &mut Criterion) {
                 b.iter_batched(
                     || img.deep_clone(),
                     |i| ClarityTextureOp::new(cl, tx).apply(i).unwrap(),
+                    BatchSize::LargeInput,
+                )
+            },
+        );
+    }
+}
+
+fn bench_intensify_hdr(c: &mut Criterion) {
+    init_rayon();
+    // Three stages share one traversal budget here: the luma plane, six
+    // separable blur passes at 3 % of the short side, and the pixel loop that
+    // folds the tone curve, detail gain, saturation and the amount blend
+    // together.  Both amounts are benchmarked because they regress
+    // differently: a sub-1.0 amount is the one that used to pay for an extra
+    // read-modify-write pass, while full strength is the one that shows a
+    // reintroduced copy of the frame.
+    let img = make_image(4000, 3000);
+    for amount in [0.5_f32, 1.0] {
+        c.bench_with_input(
+            BenchmarkId::new("intensify_hdr 4000x3000", format!("amount={amount}")),
+            &amount,
+            |b, &amount| {
+                b.iter_batched(
+                    || img.deep_clone(),
+                    |i| IntensifyHdrOp::new(amount).apply(i).unwrap(),
                     BatchSize::LargeInput,
                 )
             },
@@ -349,6 +374,7 @@ criterion_group!(
     bench_row_parallel_granularity,
     bench_split_tone,
     bench_clarity_texture,
+    bench_intensify_hdr,
     bench_histogram,
     bench_local_laplacian,
     bench_image_stats,
