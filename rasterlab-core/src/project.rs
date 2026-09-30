@@ -220,7 +220,11 @@ impl RlabMeta {
 }
 
 /// In-memory representation of a `.rlab` project file.
-#[derive(Debug)]
+///
+/// `Clone` copies the embedded original, which can be tens of megabytes for a
+/// RAW source; callers that only need to share a loaded file should wrap it in
+/// an `Arc` and clone only when they must take ownership.
+#[derive(Debug, Clone)]
 pub struct RlabFile {
     /// Format version read from the file header.
     pub format_version: u16,
