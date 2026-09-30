@@ -182,6 +182,8 @@ impl AppState {
     /// (restoring the full edit stack); all other files are loaded as source images.
     pub fn open_file(&mut self, path: std::path::PathBuf) {
         self.loading = true;
+        self.open_request += 1;
+        let request = self.open_request;
         self.status = format!("Loading {}…", path.display());
         self.mode = AppMode::Editor;
 
@@ -207,10 +209,11 @@ impl AppState {
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            |message| {
-                BgMessage::Error(format!(
+            move |message| BgMessage::Error {
+                request,
+                message: format!(
                     "{message} (the file may be corrupt or an unsupported camera variant)"
-                ))
+                ),
             },
             move || {
                 if is_project {
@@ -220,14 +223,21 @@ impl AppState {
                             let hint = rlab.meta.source_path.as_deref().map(std::path::Path::new);
                             match registry.decode_bytes(&rlab.original_bytes, hint) {
                                 Ok(image) => BgMessage::ProjectLoaded {
+                                    request,
                                     path,
                                     rlab: Box::new(rlab),
                                     image,
                                 },
-                                Err(e) => BgMessage::Error(e.to_string()),
+                                Err(e) => BgMessage::Error {
+                                    request,
+                                    message: e.to_string(),
+                                },
                             }
                         }
-                        Err(e) => BgMessage::Error(e.to_string()),
+                        Err(e) => BgMessage::Error {
+                            request,
+                            message: e.to_string(),
+                        },
                     }
                 } else {
                     // Keep the source bytes for future .rlab saves and decode that
@@ -238,14 +248,21 @@ impl AppState {
                         Ok(original_bytes) => {
                             match decode_standalone_bytes(&original_bytes, &path) {
                                 Ok(image) => BgMessage::ImageLoaded {
+                                    request,
                                     path,
                                     image,
                                     original_bytes,
                                 },
-                                Err(e) => BgMessage::Error(e.to_string()),
+                                Err(e) => BgMessage::Error {
+                                    request,
+                                    message: e.to_string(),
+                                },
                             }
                         }
-                        Err(e) => BgMessage::Error(e.to_string()),
+                        Err(e) => BgMessage::Error {
+                            request,
+                            message: e.to_string(),
+                        },
                     }
                 }
             },
@@ -680,6 +697,45 @@ mod tests {
             .pipeline_state
             .entries[0]
             .clone()
+    }
+
+    #[test]
+    fn a_load_superseded_by_a_newer_open_is_dropped() {
+        // Arrowing quickly through the library starts one open per key press,
+        // and a cached photo can finish before the slow read it replaced.
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.loading = true;
+        state.open_request = 2;
+        let stale = [
+            BgMessage::ImageLoaded {
+                request: 1,
+                path: "stale.png".into(),
+                image: Image::new(4, 4),
+                original_bytes: Vec::new(),
+            },
+            BgMessage::Error {
+                request: 1,
+                message: "stale failure".into(),
+            },
+        ];
+        for message in stale {
+            state.bg_tx.send(message).unwrap();
+        }
+        state.poll_background();
+        assert!(state.copies.is_none());
+        assert!(state.loading, "only the current open may clear `loading`");
+
+        state
+            .bg_tx
+            .send(BgMessage::ImageLoaded {
+                request: 2,
+                path: "current.png".into(),
+                image: Image::new(4, 4),
+                original_bytes: Vec::new(),
+            })
+            .unwrap();
+        state.poll_background();
+        assert!(state.copies.is_some());
     }
 
     #[test]

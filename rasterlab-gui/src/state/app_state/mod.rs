@@ -64,6 +64,8 @@ pub enum AppMode {
 
 enum BgMessage {
     ImageLoaded {
+        /// The [`AppState::open_request`] this load answers.
+        request: u64,
         path: std::path::PathBuf,
         image: Image,
         /// Verbatim bytes of the source file, kept for future `.rlab` saves.
@@ -71,6 +73,8 @@ enum BgMessage {
     },
     /// A `.rlab` project file was successfully decoded.
     ProjectLoaded {
+        /// The [`AppState::open_request`] this load answers.
+        request: u64,
         path: std::path::PathBuf,
         rlab: Box<RlabFile>,
         image: Image,
@@ -78,8 +82,8 @@ enum BgMessage {
     /// Result from the background render thread (via `rasterlab-render` crate).
     Render(RenderResult),
     /// A background thread failed at loading the open document. Terminal for
-    /// the editor's `loading` flag.
-    Error(String),
+    /// the editor's `loading` flag, when `request` is still the current open.
+    Error { request: u64, message: String },
     /// Progress update from a running import. `job` says which one: several
     /// imports can run at once, and they all report on this one channel.
     ImportProgress {
@@ -198,6 +202,11 @@ pub struct AppState {
     pub preview_overlay_rect: Option<[u32; 4]>,
     pub histogram: Option<HistogramData>,
     pub loading: bool,
+    /// Identifies the most recent [`open_file`](Self::open_file). Loads are not
+    /// guaranteed to finish in the order they started — a quick local file can
+    /// overtake a slow network one — so a result tagged with any other value
+    /// belongs to an open the user has already moved past and is dropped.
+    open_request: u64,
     pub status: String,
     pub last_path: Option<std::path::PathBuf>,
     /// Verbatim bytes of the currently loaded source file (for `.rlab` saves).
@@ -364,6 +373,7 @@ impl AppState {
             preview_viewport: None,
             histogram: None,
             loading: false,
+            open_request: 0,
             status: "Welcome to RasterLab — open an image to begin.".into(),
             last_path: None,
             original_bytes: None,
@@ -418,17 +428,31 @@ impl AppState {
         while let Ok(msg) = self.bg_rx.try_recv() {
             match msg {
                 BgMessage::ImageLoaded {
+                    request,
                     path,
                     image,
                     original_bytes,
-                } => self.on_image_loaded(path, image, original_bytes),
-                BgMessage::ProjectLoaded { path, rlab, image } => {
-                    self.on_project_loaded(path, rlab, image)
+                } => {
+                    if request == self.open_request {
+                        self.on_image_loaded(path, image, original_bytes)
+                    }
+                }
+                BgMessage::ProjectLoaded {
+                    request,
+                    path,
+                    rlab,
+                    image,
+                } => {
+                    if request == self.open_request {
+                        self.on_project_loaded(path, rlab, image)
+                    }
                 }
                 BgMessage::Render(result) => self.on_render_result(result),
-                BgMessage::Error(e) => {
-                    self.status = format!("Error: {}", e);
-                    self.loading = false;
+                BgMessage::Error { request, message } => {
+                    if request == self.open_request {
+                        self.status = format!("Error: {}", message);
+                        self.loading = false;
+                    }
                 }
                 BgMessage::ImportProgress { job, progress } => {
                     self.on_import_progress(job, progress)
