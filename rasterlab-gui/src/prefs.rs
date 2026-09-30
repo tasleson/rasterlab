@@ -129,6 +129,12 @@ impl Prefs {
     /// Returns the platform-specific path for the prefs file, or `None` if the
     /// data directory cannot be determined.
     pub fn path() -> Option<PathBuf> {
+        // Tests construct `AppState`s, which load prefs and save them on
+        // open or when a preference changes. Keep them off the developer's
+        // real preferences, and independent of them.
+        if cfg!(test) {
+            return None;
+        }
         dirs::data_dir().map(|d| d.join("rasterlab").join("prefs.yaml"))
     }
 
