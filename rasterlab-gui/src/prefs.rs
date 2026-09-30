@@ -95,6 +95,12 @@ pub struct Prefs {
     /// The library that was open when the app last exited.
     #[serde(default)]
     pub last_library: Option<PathBuf>,
+    /// Keep the previous photo and read ahead the next one while arrowing
+    /// through library photos in the editor. Hides network-storage latency at
+    /// the cost of memory: each cached photo holds a decoded image and its
+    /// embedded original, easily 100 MB+ for a RAW.
+    #[serde(default = "default_true")]
+    pub nav_prefetch: bool,
     /// Thumbnail display scale in the library grid (0.25–1.0; 1.0 = 512px).
     #[serde(default = "default_thumb_scale")]
     pub library_thumb_scale: f32,
@@ -251,6 +257,7 @@ mod tests {
         let prefs = Prefs::default();
         assert!(prefs.use_native_dialogs);
         assert!(prefs.preserve_metadata);
+        assert!(prefs.nav_prefetch);
         assert_eq!(prefs.jpeg_quality, default_jpeg_quality());
         assert_eq!(prefs.png_compression, default_png_compression());
         assert_eq!(prefs.library_thumb_scale, default_thumb_scale());

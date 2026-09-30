@@ -41,6 +41,7 @@ impl AppState {
             return;
         }
         self.flush_library_metadata_drafts();
+        self.forget_cached_projects();
         let scale = self.prefs.library_thumb_scale;
         self.library.create_library(path.clone(), scale);
         self.remember_open_library(path);
@@ -48,6 +49,7 @@ impl AppState {
 
     pub fn open_library(&mut self, path: std::path::PathBuf) {
         self.flush_library_metadata_drafts();
+        self.forget_cached_projects();
         let scale = self.prefs.library_thumb_scale;
         self.library.open_library(path.clone(), scale);
         self.remember_open_library(path);
@@ -755,6 +757,9 @@ impl AppState {
     /// the status line that follows it.
     fn finish_collection_task(&mut self) -> (&'static str, String) {
         self.collection_cancel = None;
+        // Membership lives in each photo's `.rlab`, and even a change that
+        // failed part-way has rewritten some of them.
+        self.forget_cached_projects();
         self.library
             .collection_task
             .take()

@@ -84,6 +84,7 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
             if let Err(e) = lib.set_protected(id, protected) {
                 state.library.last_error = Some(format!("Protect failed: {e}"));
             }
+            state.forget_cached_library_photos(&[id]);
             state.library.refresh();
         }
 
@@ -402,10 +403,10 @@ fn multi_photo_ui(ui: &mut egui::Ui, state: &mut AppState, ids: &[PhotoId], coun
     ui.horizontal(|ui| {
         ui.label("Protection:");
         if ui.button("🔒 Protect").clicked() {
-            state.library.set_protected_selected(true);
+            state.set_protected_selected(true);
         }
         if ui.button("Unprotect").clicked() {
-            state.library.set_protected_selected(false);
+            state.set_protected_selected(false);
         }
     });
 
@@ -448,6 +449,7 @@ fn for_each_lmta(
             lib.update_metadata(id, lmta.clone()).ok();
         }
     }
+    state.forget_cached_library_photos(ids);
     state.library.refresh();
 }
 

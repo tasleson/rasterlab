@@ -2099,7 +2099,7 @@ fn thumb_cell(
             "Protect"
         };
         if ui.button(protect_label).clicked() {
-            state.library.set_protected_selected(!all_protected);
+            state.set_protected_selected(!all_protected);
             ui.close();
         }
 

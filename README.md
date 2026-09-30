@@ -179,6 +179,7 @@ Current library features include:
 - Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals or of the `.rlab` projects themselves.
 - Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
 - Index rebuilding, integrity scrubbing, protected-photo deletion guards, and a library-owned Recently Deleted area that works consistently on local and network filesystems.
+- Arrowing through library photos in the editor keeps the photo just left and reads the next one ahead in the background, so stepping through a library on network storage does not wait on each file. It holds up to three decoded photos; **Preferences > Prefetch Adjacent Photos** turns it off to save the memory.
 
 ### Keeping a library on a file server
 

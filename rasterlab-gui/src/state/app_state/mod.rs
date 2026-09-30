@@ -14,12 +14,17 @@
 
 mod library_tasks;
 mod persistence;
+mod prefetch;
 mod render;
 mod workers;
 
 use std::{
     path::PathBuf as StdPathBuf,
-    sync::{Arc, atomic::AtomicBool, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
+    },
 };
 
 use crate::{
@@ -67,17 +72,19 @@ enum BgMessage {
         /// The [`AppState::open_request`] this load answers.
         request: u64,
         path: std::path::PathBuf,
-        image: Image,
+        /// Boxed so every other message is not sized for a whole `Image`.
+        image: Box<Image>,
         /// Verbatim bytes of the source file, kept for future `.rlab` saves.
         original_bytes: Vec<u8>,
     },
-    /// A `.rlab` project file was successfully decoded.
+    /// A `.rlab` project file was successfully decoded. Both halves may also
+    /// be held by the navigation cache, hence shared rather than owned.
     ProjectLoaded {
         /// The [`AppState::open_request`] this load answers.
         request: u64,
         path: std::path::PathBuf,
-        rlab: Box<RlabFile>,
-        image: Image,
+        rlab: Arc<RlabFile>,
+        image: Arc<Image>,
     },
     /// Result from the background render thread (via `rasterlab-render` crate).
     Render(RenderResult),
@@ -206,7 +213,9 @@ pub struct AppState {
     /// guaranteed to finish in the order they started — a quick local file can
     /// overtake a slow network one — so a result tagged with any other value
     /// belongs to an open the user has already moved past and is dropped.
-    open_request: u64,
+    /// Shared with load workers, so one that has been superseded while it
+    /// waits on the navigation cache gives up instead of reading the file.
+    open_request: Arc<AtomicU64>,
     pub status: String,
     pub last_path: Option<std::path::PathBuf>,
     /// Verbatim bytes of the currently loaded source file (for `.rlab` saves).
@@ -239,6 +248,10 @@ pub struct AppState {
     /// When `Some`, forces every tool-panel CollapsingHeader open/closed for
     /// one frame.  Cleared by the tools panel after use.
     pub tools_force_open: Option<bool>,
+
+    /// Recently opened and read-ahead projects, so arrowing through library
+    /// photos in the editor does not wait on storage for each one.
+    project_cache: prefetch::ProjectCache,
 
     // Background thread channel
     bg_tx: mpsc::Sender<BgMessage>,
@@ -360,6 +373,8 @@ impl AppState {
         tools.export_dialog.preserve_metadata = prefs.preserve_metadata;
         tools.export_border = prefs.export_border.clone();
         let initial_thumb_scale = prefs.library_thumb_scale;
+        let project_cache = prefetch::ProjectCache::default();
+        project_cache.set_enabled(prefs.nav_prefetch);
         Self {
             prefs,
             registry: FormatRegistry::with_builtins(),
@@ -373,7 +388,7 @@ impl AppState {
             preview_viewport: None,
             histogram: None,
             loading: false,
-            open_request: 0,
+            open_request: Arc::default(),
             status: "Welcome to RasterLab — open an image to begin.".into(),
             last_path: None,
             original_bytes: None,
@@ -387,6 +402,7 @@ impl AppState {
             split_mode: SplitMode::VsOriginal,
             split_focus: None,
             tools_force_open: None,
+            project_cache,
             bg_tx,
             bg_rx,
             thumb_req_tx: None,
@@ -433,8 +449,8 @@ impl AppState {
                     image,
                     original_bytes,
                 } => {
-                    if request == self.open_request {
-                        self.on_image_loaded(path, image, original_bytes)
+                    if self.is_current_open(request) {
+                        self.on_image_loaded(path, *image, original_bytes)
                     }
                 }
                 BgMessage::ProjectLoaded {
@@ -443,13 +459,13 @@ impl AppState {
                     rlab,
                     image,
                 } => {
-                    if request == self.open_request {
+                    if self.is_current_open(request) {
                         self.on_project_loaded(path, rlab, image)
                     }
                 }
                 BgMessage::Render(result) => self.on_render_result(result),
                 BgMessage::Error { request, message } => {
-                    if request == self.open_request {
+                    if self.is_current_open(request) {
                         self.status = format!("Error: {}", message);
                         self.loading = false;
                     }
@@ -478,6 +494,9 @@ impl AppState {
                     result,
                 } => {
                     let succeeded = result.is_ok();
+                    if succeeded {
+                        self.forget_cached_library_photos(&[id]);
+                    }
                     self.library
                         .finish_selected_detail_commit(id, revision, result);
                     if succeeded {
@@ -491,6 +510,9 @@ impl AppState {
                     result,
                 } => match result {
                     Ok(bytes) => {
+                        if let Some(lib) = &self.library.library {
+                            self.project_cache.invalidate(&lib.rlab_path(&hash));
+                        }
                         self.library
                             .finish_cached_active_copy_save(&hash, Some(copy_idx));
                         self.on_thumb_loaded(hash, bytes);
@@ -517,6 +539,11 @@ impl AppState {
         }
         self.update_processing_status();
         self.maybe_write_autosave();
+    }
+
+    /// Whether `request` is still the most recent open.
+    fn is_current_open(&self, request: u64) -> bool {
+        self.open_request.load(Ordering::Relaxed) == request
     }
 
     // -----------------------------------------------------------------------

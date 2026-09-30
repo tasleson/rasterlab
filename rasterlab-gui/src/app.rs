@@ -13,6 +13,14 @@ use crate::{
     state::{AppMode, AppState, FocusStackRequest},
 };
 
+/// Where editor arrow-key navigation is coming from and heading, so the open
+/// can keep the photo left cached and read the next one ahead.
+#[cfg(not(target_arch = "wasm32"))]
+struct NavPrefetch {
+    left: PathBuf,
+    next: Option<PathBuf>,
+}
+
 /// What to do once the user confirms discarding unsaved changes on open.
 #[cfg(not(target_arch = "wasm32"))]
 enum PendingOpen {
@@ -27,6 +35,7 @@ enum PendingOpen {
         rlab_path: PathBuf,
         lib_root: PathBuf,
         hash: String,
+        nav: Option<NavPrefetch>,
     },
     /// Focus-stack a library selection: opens the base photo and loads every
     /// selected frame into the Focus Stack tool.
@@ -256,8 +265,9 @@ impl RasterLabApp {
         let Some(lib) = self.state.library.library.clone() else {
             return;
         };
-        // Borrow results only long enough to find the adjacent photo, then drop.
-        let adjacent = {
+        // Borrow results only long enough to find the adjacent photo, and the
+        // one after it in the direction of travel, then drop.
+        let (adjacent, next_hash) = {
             let results = &self.state.library.results;
             let Some(idx) = results.iter().position(|p| p.hash == current_hash) else {
                 return;
@@ -266,10 +276,19 @@ impl RasterLabApp {
             if new_idx == idx {
                 return;
             }
-            results[new_idx].clone()
+            let next_hash = (new_idx as i64 + i64::from(delta.signum()))
+                .try_into()
+                .ok()
+                .and_then(|next_idx: usize| results.get(next_idx))
+                .map(|photo| photo.hash.clone());
+            (results[new_idx].clone(), next_hash)
+        };
+        let nav = NavPrefetch {
+            left: lib.rlab_path(&current_hash),
+            next: next_hash.map(|hash| lib.rlab_path(&hash)),
         };
         let rlab_path = lib.rlab_path(&adjacent.hash);
-        self.request_open_library_photo(rlab_path, lib_root, adjacent.hash);
+        self.request_open_library_photo(rlab_path, lib_root, adjacent.hash, Some(nav));
     }
 
     /// Select the currently-open library photo and raise the delete confirmation.
@@ -333,7 +352,13 @@ impl RasterLabApp {
 
     /// Open a photo from the library, prompting to discard unsaved changes first if needed.
     #[cfg(not(target_arch = "wasm32"))]
-    fn request_open_library_photo(&mut self, rlab_path: PathBuf, lib_root: PathBuf, hash: String) {
+    fn request_open_library_photo(
+        &mut self,
+        rlab_path: PathBuf,
+        lib_root: PathBuf,
+        hash: String,
+        nav: Option<NavPrefetch>,
+    ) {
         // Leaving for the editor stops the detail panel from being drawn, and
         // with it the debounce poll that would have written the draft.
         self.state.commit_library_detail_metadata(true);
@@ -342,17 +367,34 @@ impl RasterLabApp {
                 rlab_path,
                 lib_root,
                 hash,
+                nav,
             });
             self.open_confirm_open = true;
         } else {
-            self.open_library_photo(rlab_path, lib_root, hash);
+            self.open_library_photo(rlab_path, lib_root, hash, nav);
         }
     }
 
     /// Actually switch the editor to a library photo. Assumes any unsaved-changes
     /// prompt has already been handled.
+    ///
+    /// `nav` is set for arrow-key navigation only. Pruning and reading ahead
+    /// happen here rather than on the key press, so a prompt the user cancels
+    /// leaves the cache as it was.
     #[cfg(not(target_arch = "wasm32"))]
-    fn open_library_photo(&mut self, rlab_path: PathBuf, lib_root: PathBuf, hash: String) {
+    fn open_library_photo(
+        &mut self,
+        rlab_path: PathBuf,
+        lib_root: PathBuf,
+        hash: String,
+        nav: Option<NavPrefetch>,
+    ) {
+        if let Some(nav) = nav
+            && self.state.nav_prefetch()
+        {
+            self.state
+                .prepare_library_navigation(&nav.left, &rlab_path, nav.next);
+        }
         self.state.library_context = Some((lib_root, hash));
         self.state.open_file(rlab_path);
         self.state.mode = AppMode::Editor;
@@ -377,7 +419,7 @@ impl RasterLabApp {
         // Frames first: `open_library_photo` starts an async load whose
         // completion renders the editor's tool state as it stands then.
         self.state.load_focus_stack_frames(req.frame_paths);
-        self.open_library_photo(req.base_rlab_path, req.library_root, req.base_hash);
+        self.open_library_photo(req.base_rlab_path, req.library_root, req.base_hash, None);
     }
 
     /// Save in-place if a project path is already known; otherwise open Save As.
@@ -502,7 +544,7 @@ impl eframe::App for RasterLabApp {
             }
         }
         if let Some((rlab_path, lib_root, hash)) = self.state.library.pending_open_photo.take() {
-            self.request_open_library_photo(rlab_path, lib_root, hash);
+            self.request_open_library_photo(rlab_path, lib_root, hash, None);
         }
         if let Some(req) = self.state.library.pending_focus_stack.take() {
             self.request_focus_stack(req);
@@ -900,6 +942,22 @@ impl eframe::App for RasterLabApp {
                             }
                         });
                     });
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.separator();
+                        let mut prefetch = self.state.nav_prefetch();
+                        if ui
+                            .checkbox(&mut prefetch, "Prefetch Adjacent Photos")
+                            .on_hover_text(
+                                "Keep the previous photo and preload the next one while \
+                                 arrowing through the library in the editor. Speeds up \
+                                 navigation on network storage at the cost of memory.",
+                            )
+                            .changed()
+                        {
+                            self.state.set_nav_prefetch(prefetch);
+                        }
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About RasterLab").clicked() {
@@ -1024,7 +1082,7 @@ impl eframe::App for RasterLabApp {
                         let rlab_path = lib.rlab_path(&photo.hash);
                         // open_library_photo skips the unsaved-changes prompt
                         // (nothing to save — we just deleted the current photo).
-                        self.open_library_photo(rlab_path, lib_root, photo.hash);
+                        self.open_library_photo(rlab_path, lib_root, photo.hash, None);
                     }
                 }
             }
@@ -1224,7 +1282,8 @@ impl RasterLabApp {
                                 rlab_path,
                                 lib_root,
                                 hash,
-                            }) => self.open_library_photo(rlab_path, lib_root, hash),
+                                nav,
+                            }) => self.open_library_photo(rlab_path, lib_root, hash, nav),
                             Some(PendingOpen::FocusStack(req)) => self.start_focus_stack(req),
                             None => {}
                         }
