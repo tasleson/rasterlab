@@ -95,13 +95,20 @@ pub struct ImportOptions {
     /// duplicates is unlinked, except where this run wrote it, which
     /// [`write_verified_atomic`] already confirmed on the device.
     pub delete_sources: bool,
+    /// Import photographs the user permanently deleted from this library
+    /// before, instead of skipping them.
+    ///
+    /// The way back from an erase made by mistake.  A photo brought back this
+    /// way is no longer remembered as erased, so later imports treat it like
+    /// any other photo the library holds.
+    pub include_erased: bool,
 }
 
 impl From<ImportCollection> for ImportOptions {
     fn from(collection: ImportCollection) -> Self {
         Self {
             collection,
-            delete_sources: false,
+            ..Self::default()
         }
     }
 }
@@ -256,6 +263,7 @@ pub fn import_files(
         imported: 0,
         current_file: PathBuf::new(),
         skipped_duplicates: 0,
+        skipped_purged: 0,
         deleted_sources: 0,
         errors: Vec::new(),
         scanning: false,
@@ -290,7 +298,7 @@ pub fn import_files(
         paths.len(),
         // Importing a hand-picked list of files says nothing about wanting
         // them gone; only the folder import offers that.
-        false,
+        &ImportOptions::default(),
         &mut tally,
         progress_cb,
     );
@@ -309,6 +317,7 @@ pub fn import_files(
         imported: tally.imported,
         current_file: PathBuf::new(),
         skipped_duplicates: tally.skipped_duplicates,
+        skipped_purged: tally.skipped_purged,
         deleted_sources: tally.deleted_sources,
         errors: tally.errors.clone(),
         scanning: false,
@@ -371,6 +380,7 @@ pub fn import_folder_grouped(
             imported: 0,
             current_file: path.clone(),
             skipped_duplicates: 0,
+            skipped_purged: 0,
             deleted_sources: 0,
             errors: Vec::new(),
             scanning: true,
@@ -448,7 +458,7 @@ pub fn import_folder_grouped(
             &mut batch_hashes,
             &cancelled,
             total,
-            options.delete_sources,
+            &options,
             &mut tally,
             progress_cb,
         );
@@ -483,6 +493,7 @@ pub fn import_folder_grouped(
         imported: tally.imported,
         current_file: PathBuf::new(),
         skipped_duplicates: tally.skipped_duplicates,
+        skipped_purged: tally.skipped_purged,
         deleted_sources: tally.deleted_sources,
         errors: tally.errors.clone(),
         scanning: false,
@@ -696,12 +707,34 @@ enum Preparation {
     /// deleting its sources has to find the file holding those bytes before
     /// unlinking the copy in front of it.
     Duplicate(String),
+    /// A photograph the user permanently deleted from the library, and so is
+    /// not to be brought back.
+    Purged,
+}
+
+/// What the library already knows of the photograph with content hash
+/// `hash`: that it holds it, that the user erased it, or — `None` — nothing
+/// that keeps it out.  An erased photo is let through when the run was asked
+/// to include those.
+fn previously_seen(
+    db: &dyn LibraryDb,
+    hash: &str,
+    options: &ImportOptions,
+) -> Result<Option<Preparation>> {
+    if db.photo_by_hash(hash)?.is_some() {
+        return Ok(Some(Preparation::Duplicate(hash.to_owned())));
+    }
+    if !options.include_erased && db.is_purged(hash)? {
+        return Ok(Some(Preparation::Purged));
+    }
+    Ok(None)
 }
 
 /// Read, decode and serialise one source file without writing anything.
 ///
-/// Returns [`Preparation::Duplicate`] for a file already in the library, `Err`
-/// on failure.
+/// Returns [`Preparation::Duplicate`] for a file already in the library,
+/// [`Preparation::Purged`] for one the user permanently deleted, `Err` on
+/// failure.
 /// Nothing here touches the library on disk and the only database calls are
 /// reads, so this is safe to run on several threads at once against the same
 /// import; [`commit_prepared`] performs every write, in input order.
@@ -710,10 +743,10 @@ enum Preparation {
 /// and `fallback_capture_ts` synthesises an EXIF capture date for files that
 /// carry none, so they still sort coherently by capture time.
 ///
-/// `delete_sources` turns off both of the shortcuts that decide a file is a
-/// duplicate without reading it — the source fingerprint and a project's own
-/// record of its original's hash.  The run is about to unlink the file, so the
-/// hash it is judged by has to come from its bytes.
+/// `options.delete_sources` turns off both of the shortcuts that decide a file
+/// is a duplicate without reading it — the source fingerprint and a project's
+/// own record of its original's hash.  The run is about to unlink the file, so
+/// the hash it is judged by has to come from its bytes.
 ///
 /// `assigner` decides which collection the photo joins, and is consulted only
 /// once the file is known to be a genuinely new photograph.  The membership
@@ -730,7 +763,7 @@ fn prepare_one(
     import_date: u64,
     fallback_capture_ts: Option<u64>,
     assigner: &Mutex<CollectionAssigner<'_>>,
-    delete_sources: bool,
+    options: &ImportOptions,
 ) -> Result<Preparation> {
     // 1. Read source bytes + capture source-file timestamps.
     //    Stat first so we read the times the file had before we opened it.
@@ -752,7 +785,7 @@ fn prepare_one(
     // A run that deletes its sources does not take it: a stat says the file at
     // this path was imported, not that the file in front of us now is the one
     // that was, and that is not something to unlink a photograph on.
-    if !delete_sources
+    if !options.delete_sources
         && let Some(mtime) = source_mtime
         && let Some(hash) = import_phase!(
             "fingerprint_lookup",
@@ -771,7 +804,7 @@ fn prepare_one(
     // Skipped for the same reason as the fingerprint above when the source is
     // to be deleted: this hash is the container's claim about itself, and a
     // deletion is made against bytes that were read, not claims.
-    if !delete_sources
+    if !options.delete_sources
         && is_rlab_path(path)
         && let Some(hash) = import_phase!(
             "hash_lookup",
@@ -779,9 +812,9 @@ fn prepare_one(
                 .ok()
                 .map(|hash| blake3::Hash::from(hash).to_hex().to_string())
         )
-        && import_phase!("hash_lookup", db.photo_by_hash(&hash))?.is_some()
+        && let Some(seen) = import_phase!("hash_lookup", previously_seen(db, &hash, options))?
     {
-        return Ok(Preparation::Duplicate(hash));
+        return Ok(seen);
     }
 
     let input_bytes = import_phase!(
@@ -822,8 +855,8 @@ fn prepare_one(
     // 3. Duplicate check.  A file that only duplicates another file of the same
     //    batch cannot be seen here — that pair may be in flight at the same
     //    moment — so `commit_prepared` checks the batch's own hashes again.
-    if import_phase!("hash_lookup", db.photo_by_hash(&hash))?.is_some() {
-        return Ok(Preparation::Duplicate(hash));
+    if let Some(seen) = import_phase!("hash_lookup", previously_seen(db, &hash, options))? {
+        return Ok(seen);
     }
 
     // 4. Determine the stack partner hash (if this file is in a pair)
@@ -1128,6 +1161,8 @@ enum ImportOutcome {
     /// Already in the library, or a duplicate of an earlier file in this
     /// batch, under this content hash.
     Duplicate(String),
+    /// Erased from the library by the user before, so left out.
+    Purged,
     Failed,
 }
 
@@ -1138,6 +1173,7 @@ struct ImportTally {
     processed: usize,
     imported: usize,
     skipped_duplicates: usize,
+    skipped_purged: usize,
     /// Source files removed after their contents were found in the library.
     deleted_sources: usize,
     errors: Vec<(PathBuf, String)>,
@@ -1209,7 +1245,7 @@ fn run_import_pipeline(
     batch_hashes: &mut HashSet<String>,
     cancelled: &AtomicBool,
     total: usize,
-    delete_sources: bool,
+    options: &ImportOptions,
     tally: &mut ImportTally,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Vec<ImportOutcome> {
@@ -1286,7 +1322,7 @@ fn run_import_pipeline(
                         job.import_date,
                         job.fallback_capture_ts,
                         assigner,
-                        delete_sources,
+                        options,
                     );
 
                     let mut queue = queue.lock().expect("import queue poisoned");
@@ -1335,6 +1371,7 @@ fn run_import_pipeline(
                 imported: tally.imported,
                 current_file: job.path.clone(),
                 skipped_duplicates: tally.skipped_duplicates,
+                skipped_purged: tally.skipped_purged,
                 deleted_sources: tally.deleted_sources,
                 errors: tally.errors.clone(),
                 scanning: false,
@@ -1351,6 +1388,13 @@ fn run_import_pipeline(
                     let hash = prepared.hash.clone();
                     match commit_prepared(library_root, db, assigner, *prepared) {
                         Ok(()) => {
+                            // Back in the library, so no longer erased.  Best
+                            // effort: a record left behind is harmless while
+                            // the photo is held, since an import finds it as a
+                            // duplicate before asking whether it was erased.
+                            if options.include_erased {
+                                let _ = db.forget_purged(&hash);
+                            }
                             batch_hashes.insert(hash);
                             ImportOutcome::Imported
                         }
@@ -1361,6 +1405,7 @@ fn run_import_pipeline(
                     }
                 }
                 Ok(Preparation::Duplicate(hash)) => ImportOutcome::Duplicate(hash),
+                Ok(Preparation::Purged) => ImportOutcome::Purged,
                 Err(e) => {
                     tally.errors.push((job.path.clone(), format!("{:#}", e)));
                     ImportOutcome::Failed
@@ -1369,11 +1414,12 @@ fn run_import_pipeline(
             match &outcome {
                 ImportOutcome::Imported => tally.imported += 1,
                 ImportOutcome::Duplicate(_) => tally.skipped_duplicates += 1,
+                ImportOutcome::Purged => tally.skipped_purged += 1,
                 ImportOutcome::Failed => {}
             }
             // Only once the library is proved to be holding this photograph,
             // and never for a file that failed: the source is the other copy.
-            if delete_sources
+            if options.delete_sources
                 && let Some(deleted) = delete_verified_source(library_root, &job.path, &outcome)
             {
                 match deleted {
@@ -1430,7 +1476,9 @@ fn encode_rlab(
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 /// Remove a source file whose photograph the library is now holding, or say
-/// why it was kept.  `None` is a file the library does not hold at all.
+/// why it was kept.  `None` is a file the library does not hold at all —
+/// one that failed, or one the user erased from it before, whose source may
+/// well be the last copy left.
 ///
 /// This is the last moment at which the source is the other copy, so what the
 /// library has is proved rather than assumed — except for a photo this run
@@ -1443,7 +1491,7 @@ fn delete_verified_source(
     outcome: &ImportOutcome,
 ) -> Option<Result<()>> {
     let held = match outcome {
-        ImportOutcome::Failed => return None,
+        ImportOutcome::Failed | ImportOutcome::Purged => return None,
         ImportOutcome::Imported => Ok(()),
         ImportOutcome::Duplicate(hash) => verify_library_copy(library_root, hash),
     };

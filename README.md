@@ -109,7 +109,7 @@ RasterLab uses several independent mechanisms because no single checksum, undo s
 - Undo/redo, operation enable/disable controls, editable stack entries, and virtual copies make edits reversible without duplicating the source image.
 - Pipeline state is autosaved after changes. Previous unsaved sessions can be restored from **File > Previously Unsaved Work**.
 - Opening another file or library photo while edits are unsaved requires confirmation.
-- Library deletion requires confirmation and moves photos to RasterLab's **Recently Deleted** view, where they can be restored, deleted permanently, or removed together with **Empty Recently Deleted**.
+- Library deletion requires confirmation and moves photos to RasterLab's **Recently Deleted** view, where they can be restored, deleted permanently, or removed together with **Empty Recently Deleted**. The library remembers the content hash of every photo deleted permanently, and a later import skips that photograph rather than bringing it back, so re-importing a card you have already culled does not undo the cull.
 - All four, and deleting collections, run in the background with a progress count and a **Stop** button, so a large batch on a network-mounted library never blocks the window. One runs at a time. Stopping keeps whatever has already been done; what could not be done is listed by name.
 - A library photo can be marked **Protected**. RasterLab then refuses to delete it (even into Recently Deleted) until it is unprotected.
 
@@ -139,7 +139,7 @@ Each v5 file contains Reed–Solomon recovery data in two `RECC` chunks, one bef
 - **File > Start Integrity Scrub** verifies every `.rlab` in the open library. It leaves clean v5 files alone, upgrades clean v3/v4 files to v5, and repairs correctable damage.
 - Before a scrub replaces a damaged file, it copies the damaged original into the library's `recovered/` tree, verifying that backup the same way a save is verified. The repaired temporary file is then renamed over the live file on the same filesystem.
 - Library files are addressed by the BLAKE3 hash of their embedded original bytes. A scrub also compares that identity with the file's name and directory, detecting a valid but misplaced or misdirected file that internal checksums alone would accept.
-- The Stoolap database is an index, not the only copy of library metadata. Ratings, flags, labels, captions, keywords, collections, EXIF snapshots, and edit state are embedded in `.rlab` files, allowing **File > Rebuild Library Index** to reconstruct the catalog. A rebuild walks every photo, so it can be stopped from the same menu item or from the progress line in the library toolbar; it keeps whatever it re-indexed, and running it again finishes the job.
+- The Stoolap database is an index, not the only copy of library metadata. Ratings, flags, labels, captions, keywords, collections, EXIF snapshots, and edit state are embedded in `.rlab` files, allowing **File > Rebuild Library Index** to reconstruct the catalog. The one exception is the list of photos deleted permanently, which later imports skip: their files are gone, so it lives only in `library.db`, survives a rebuild, but is lost with the database itself. A rebuild walks every photo, so it can be stopped from the same menu item or from the progress line in the library toolbar; it keeps whatever it re-indexed, and running it again finishes the job.
 
 To verify an individual project from the source tree:
 
@@ -179,6 +179,7 @@ Current library features include:
 - Batch rendered export with resize constraints and presentation borders, or verbatim export of imported originals or of the `.rlab` projects themselves.
 - Focus stacking from the grid: select the frames, right-click, and **Focus Stack** opens the first one in the editor with the whole selection loaded as source frames.
 - Index rebuilding, integrity scrubbing, protected-photo deletion guards, and a library-owned Recently Deleted area that works consistently on local and network filesystems.
+- Arrowing through library photos in the editor keeps the photo just left and reads the next one ahead in the background, so stepping through a library on network storage does not wait on each file. It holds up to three decoded photos; **Preferences > Prefetch Adjacent Photos** turns it off to save the memory.
 
 ### Keeping a library on a file server
 
@@ -274,6 +275,9 @@ rasterlab library import /srv/photos iceland/*.nef --collection "Iceland 2024"
 # Empty a card: delete each source once the library holds its contents
 rasterlab library import /srv/photos ~/cards/DCIM --delete-source
 
+# Bring back photos that were deleted permanently, which imports otherwise skip
+rasterlab library import /srv/photos ~/cards/DCIM --include-erased
+
 # Re-index the .rlab files on disk, recovering rows the index has lost
 rasterlab library rebuild /srv/photos
 
@@ -299,15 +303,21 @@ over the same source cheap — and is why an interrupted import is finished by
 simply running it again. `--create` makes the library as part of the import for
 the first run.
 
+Photos deleted permanently from the library are skipped too, so re-importing a
+card you have already culled does not undo the cull. `--include-erased` imports
+them anyway, which is the way back from an erase made by mistake; a photo
+brought back that way is no longer remembered as deleted.
+
 `--delete-source` removes each source file once the library is proved to hold
 its photograph, which is what makes an import an "empty the card" run. A file
 the library already had is deleted too — it is no less imported for having
 arrived on an earlier run — so a second pass over a half-emptied card finishes
 emptying it. A photo the user has moved to Recently Deleted counts as held as
 well: its file is still there, it can still be restored, and its source is
-still a second copy of something the library has. A file that failed to import
-is left where it is, as are sidecars and anything else the import did not take
-in.
+still a second copy of something the library has. A photo the user deleted
+permanently does not: the import skips it, and its source may be the last copy
+left, so it stays. A file that failed to import is left where it is, as are
+sidecars and anything else the import did not take in.
 
 The proof is the point, and it costs a read. Every source is hashed rather than
 recognised by its path, size and mtime in the index, because that fingerprint

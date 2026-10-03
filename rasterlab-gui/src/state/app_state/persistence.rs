@@ -2,7 +2,7 @@
 //! exporting rendered output, saving projects, dirty tracking against the last
 //! clean boundary, and the autosave session.
 
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 
 use rasterlab_core::{
     Image,
@@ -21,7 +21,11 @@ use crate::panels::{
 };
 use crate::state::VirtualCopyStore;
 
-use super::{AppMode, AppState, BgMessage, workers};
+use super::{
+    AppMode, AppState, BgMessage,
+    prefetch::{self, LoadedProject},
+    workers,
+};
 
 /// Decode a standalone source whose original bytes are already retained for a
 /// future project save. RAW formats retain their seekable-file fallback inside
@@ -106,12 +110,15 @@ impl AppState {
     pub(super) fn on_project_loaded(
         &mut self,
         path: std::path::PathBuf,
-        mut rlab: Box<RlabFile>,
-        image: Image,
+        rlab: Arc<RlabFile>,
+        source: Arc<Image>,
     ) {
+        // The navigation cache usually holds the same file, so this is where
+        // the embedded original is copied — once, as it always was.
+        let mut rlab = Arc::unwrap_or_clone(rlab);
         rlab.resolve_relative_paths(path.parent().unwrap_or_else(|| std::path::Path::new(".")));
-        let w = image.width;
-        let h = image.height;
+        let w = source.width;
+        let h = source.height;
         self.reset_tools_for_new_image(w, h);
         self.last_path = rlab
             .meta
@@ -121,7 +128,7 @@ impl AppState {
             .or_else(|| Some(path.clone()));
         self.project_created_at = Some(rlab.meta.created_at);
         self.project_lmta = rlab.lmta.clone();
-        self.original_bytes = Some(rlab.original_bytes.clone());
+        self.original_bytes = Some(std::mem::take(&mut rlab.original_bytes));
         self.project_path = Some(path.clone());
         self.is_dirty = false;
         self.clean_edit_state = None;
@@ -132,7 +139,6 @@ impl AppState {
         self.begin_autosave_session();
 
         let display_name = rlab.lmta.as_ref().and_then(|l| l.original_filename.clone());
-        let source = Arc::new(image);
         if let Some((saved_copies, saved_active)) = self.autosave_restore.take() {
             // Establish the clean boundary from the deserialised project stack.
             // Some operation values (notably f32s) normalise during load, so the
@@ -182,6 +188,8 @@ impl AppState {
     /// (restoring the full edit stack); all other files are loaded as source images.
     pub fn open_file(&mut self, path: std::path::PathBuf) {
         self.loading = true;
+        let request = self.open_request.fetch_add(1, Ordering::Relaxed) + 1;
+        let latest_request = Arc::clone(&self.open_request);
         self.status = format!("Loading {}…", path.display());
         self.mode = AppMode::Editor;
 
@@ -196,6 +204,7 @@ impl AppState {
             .extension()
             .map(|e| e.eq_ignore_ascii_case("rlab"))
             .unwrap_or(false);
+        let cache = self.project_cache.clone();
 
         // Decoders are third-party code (e.g. rawler) and not guaranteed
         // panic-free on malformed input, so the worker is spawned through the
@@ -207,27 +216,28 @@ impl AppState {
             workers::IMAGE_WORKER_STACK,
             self.bg_tx.clone(),
             self.ctx.clone(),
-            |message| {
-                BgMessage::Error(format!(
+            move |message| BgMessage::Error {
+                request,
+                message: format!(
                     "{message} (the file may be corrupt or an unsupported camera variant)"
-                ))
+                ),
             },
             move || {
                 if is_project {
-                    match RlabFile::read(&path) {
-                        Ok(rlab) => {
-                            let registry = FormatRegistry::with_builtins();
-                            let hint = rlab.meta.source_path.as_deref().map(std::path::Path::new);
-                            match registry.decode_bytes(&rlab.original_bytes, hint) {
-                                Ok(image) => BgMessage::ProjectLoaded {
-                                    path,
-                                    rlab: Box::new(rlab),
-                                    image,
-                                },
-                                Err(e) => BgMessage::Error(e.to_string()),
-                            }
-                        }
-                        Err(e) => BgMessage::Error(e.to_string()),
+                    // Through the cache even when the open did not come from
+                    // library navigation: a photo that was prefetched, or just
+                    // left, is served without touching storage. The cache's
+                    // stat happens here, not on the UI thread, because a stat
+                    // on an unresponsive network mount can hang.
+                    let is_current = || latest_request.load(Ordering::Relaxed) == request;
+                    match cache.load(&path, is_current, prefetch::read_project) {
+                        Ok(LoadedProject { rlab, image }) => BgMessage::ProjectLoaded {
+                            request,
+                            path,
+                            rlab,
+                            image,
+                        },
+                        Err(message) => BgMessage::Error { request, message },
                     }
                 } else {
                     // Keep the source bytes for future .rlab saves and decode that
@@ -238,18 +248,93 @@ impl AppState {
                         Ok(original_bytes) => {
                             match decode_standalone_bytes(&original_bytes, &path) {
                                 Ok(image) => BgMessage::ImageLoaded {
+                                    request,
                                     path,
-                                    image,
+                                    image: Box::new(image),
                                     original_bytes,
                                 },
-                                Err(e) => BgMessage::Error(e.to_string()),
+                                Err(e) => BgMessage::Error {
+                                    request,
+                                    message: e.to_string(),
+                                },
                             }
                         }
-                        Err(e) => BgMessage::Error(e.to_string()),
+                        Err(e) => BgMessage::Error {
+                            request,
+                            message: e.to_string(),
+                        },
                     }
                 }
             },
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Navigation cache
+    // -----------------------------------------------------------------------
+
+    /// Keep what editor navigation is likely to want next, and start reading
+    /// the photo after `opening` in the direction of travel.
+    ///
+    /// `left` stays cached because arrowing back is common, and dropping
+    /// everything else bounds memory to the three photos that matter.
+    pub(crate) fn prepare_library_navigation(
+        &self,
+        left: &std::path::Path,
+        opening: &std::path::Path,
+        next: Option<std::path::PathBuf>,
+    ) {
+        let mut keep = vec![left, opening];
+        keep.extend(next.as_deref());
+        self.project_cache.retain(&keep);
+        if let Some(next) = next {
+            self.project_cache.prefetch(next, prefetch::read_project);
+        }
+    }
+
+    /// Whether editor navigation caches and reads ahead.
+    pub(crate) fn nav_prefetch(&self) -> bool {
+        self.prefs.nav_prefetch
+    }
+
+    /// Turn navigation caching on or off. Turning it off releases the cached
+    /// photos immediately rather than waiting for them to age out.
+    pub(crate) fn set_nav_prefetch(&mut self, enabled: bool) {
+        self.prefs.nav_prefetch = enabled;
+        self.prefs.save();
+        self.project_cache.set_enabled(enabled);
+    }
+
+    /// Forget the cached copies of library photos whose files were rewritten.
+    pub(crate) fn forget_cached_library_photos(&mut self, ids: &[rasterlab_library::PhotoId]) {
+        let Some(lib) = &self.library.library else {
+            self.project_cache.clear();
+            return;
+        };
+        for &id in ids {
+            match self.library.results.iter().find(|photo| photo.id == id) {
+                Some(photo) => self.project_cache.invalidate(&lib.rlab_path(&photo.hash)),
+                // Not in the current results, so its path is unknown here;
+                // only a handful of entries are lost by starting over.
+                None => {
+                    self.project_cache.clear();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Protect or unprotect the selected library photos. The flag is stored
+    /// in each photo's `.rlab`, so their cached copies go stale.
+    pub(crate) fn set_protected_selected(&mut self, protected: bool) {
+        let ids = self.library.selected.clone();
+        self.library.set_protected_selected(protected);
+        self.forget_cached_library_photos(&ids);
+    }
+
+    /// Forget every cached project, e.g. because the library changed under it.
+    pub(super) fn forget_cached_projects(&self) {
+        self.project_cache.clear();
     }
 
     /// Export the current editor document using the options from the shared
@@ -509,6 +594,10 @@ impl AppState {
                 .map(|()| self.project_lmta.clone())
                 .map_err(|error| error.to_string()),
         };
+        // The stamp check alone could miss this rewrite: some network
+        // filesystems keep mtimes too coarsely to tell a same-size save apart.
+        // Invalidating after a failed write too costs at most one reread.
+        self.project_cache.invalidate(&path);
         match write_result {
             Ok(saved_lmta) => {
                 self.project_lmta = saved_lmta;
@@ -680,6 +769,45 @@ mod tests {
             .pipeline_state
             .entries[0]
             .clone()
+    }
+
+    #[test]
+    fn a_load_superseded_by_a_newer_open_is_dropped() {
+        // Arrowing quickly through the library starts one open per key press,
+        // and a cached photo can finish before the slow read it replaced.
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.loading = true;
+        state.open_request.store(2, Ordering::Relaxed);
+        let stale = [
+            BgMessage::ImageLoaded {
+                request: 1,
+                path: "stale.png".into(),
+                image: Box::new(Image::new(4, 4)),
+                original_bytes: Vec::new(),
+            },
+            BgMessage::Error {
+                request: 1,
+                message: "stale failure".into(),
+            },
+        ];
+        for message in stale {
+            state.bg_tx.send(message).unwrap();
+        }
+        state.poll_background();
+        assert!(state.copies.is_none());
+        assert!(state.loading, "only the current open may clear `loading`");
+
+        state
+            .bg_tx
+            .send(BgMessage::ImageLoaded {
+                request: 2,
+                path: "current.png".into(),
+                image: Box::new(Image::new(4, 4)),
+                original_bytes: Vec::new(),
+            })
+            .unwrap();
+        state.poll_background();
+        assert!(state.copies.is_some());
     }
 
     #[test]
@@ -899,6 +1027,108 @@ mod tests {
             std::fs::read(&thumb_path).unwrap(),
             b"the thumbnail this photo already had"
         );
+    }
+
+    #[test]
+    fn saving_a_project_evicts_its_cached_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached.rlab");
+        let mut state = state_with_saturation(0.5);
+        state.save_project(path.clone());
+
+        // The test source bytes are not a decodable image, so only the read
+        // is real; what matters is that the entry exists.
+        state
+            .project_cache
+            .load(
+                &path,
+                || true,
+                |path| {
+                    Ok(LoadedProject {
+                        rlab: Arc::new(RlabFile::read(path).map_err(|e| e.to_string())?),
+                        image: Arc::new(Image::new(8, 8)),
+                    })
+                },
+            )
+            .unwrap();
+        assert!(state.project_cache.contains(&path));
+
+        // A same-size rewrite within the filesystem's mtime granularity would
+        // pass the stamp check, so the save itself has to evict.
+        state.save_project(path.clone());
+        assert!(!state.project_cache.contains(&path));
+    }
+
+    /// Write `n` placeholder projects and cache each one as loaded.
+    fn cached_projects(
+        state: &AppState,
+        dir: &std::path::Path,
+        n: usize,
+    ) -> Vec<std::path::PathBuf> {
+        (0..n)
+            .map(|i| {
+                let path = dir.join(format!("{i}.rlab"));
+                std::fs::write(&path, b"project").unwrap();
+                state
+                    .project_cache
+                    .load(
+                        &path,
+                        || true,
+                        |_| {
+                            Ok(LoadedProject {
+                                rlab: Arc::new(RlabFile::new(
+                                    RlabMeta::new("test", None::<String>, 1, 1),
+                                    Vec::new(),
+                                    Vec::new(),
+                                    0,
+                                    None,
+                                )),
+                                image: Arc::new(Image::new(1, 1)),
+                            })
+                        },
+                    )
+                    .unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn navigation_keeps_the_photo_left_and_the_one_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(egui::Context::default(), None);
+        let paths = cached_projects(&state, dir.path(), 3);
+
+        // The next photo is already cached, so no prefetch is started and
+        // the outcome does not depend on a worker's timing.
+        state.prepare_library_navigation(&paths[0], &paths[1], Some(paths[2].clone()));
+        assert!(paths.iter().all(|p| state.project_cache.contains(p)));
+
+        state.prepare_library_navigation(&paths[1], &paths[2], None);
+        let kept: Vec<bool> = paths
+            .iter()
+            .map(|p| state.project_cache.contains(p))
+            .collect();
+        assert_eq!(kept, [false, true, true]);
+    }
+
+    #[test]
+    fn turning_navigation_prefetch_off_releases_the_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.set_nav_prefetch(true);
+        let paths = cached_projects(&state, dir.path(), 2);
+
+        state.set_nav_prefetch(false);
+        assert!(!state.nav_prefetch());
+        assert!(paths.iter().all(|p| !state.project_cache.contains(p)));
+
+        // Nothing is prefetched while it is off.
+        state.prepare_library_navigation(&paths[0], &paths[1], Some(dir.path().join("next.rlab")));
+        assert!(!state.project_cache.contains(&dir.path().join("next.rlab")));
+
+        state.set_nav_prefetch(true);
+        assert!(state.nav_prefetch());
     }
 
     #[test]

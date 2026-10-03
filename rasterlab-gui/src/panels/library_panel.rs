@@ -445,6 +445,10 @@ fn move_to_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
+/// Told before an erase, because an import that quietly skips a photo is
+/// otherwise a mystery to the user who forgot they deleted it.
+const REIMPORT_NOTE: &str = "Importing the same photos again later will skip them.";
+
 fn permanent_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
     if !state.library.confirm_permanent_delete {
         return;
@@ -468,6 +472,7 @@ fn permanent_delete_dialog(ctx: &egui::Context, state: &mut AppState) {
                 "This cannot be undone.",
             );
             ui.label("The selected photos and their RasterLab edits will be permanently removed.");
+            ui.label(REIMPORT_NOTE);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
@@ -508,6 +513,7 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
             ui.label(format!(
                 "Permanently remove all {n} photo(s) from Recently Deleted?"
             ));
+            ui.label(REIMPORT_NOTE);
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui
@@ -2099,7 +2105,7 @@ fn thumb_cell(
             "Protect"
         };
         if ui.button(protect_label).clicked() {
-            state.library.set_protected_selected(!all_protected);
+            state.set_protected_selected(!all_protected);
             ui.close();
         }
 

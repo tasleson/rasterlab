@@ -13,6 +13,14 @@ use crate::{
     state::{AppMode, AppState, FocusStackRequest},
 };
 
+/// Where editor arrow-key navigation is coming from and heading, so the open
+/// can keep the photo left cached and read the next one ahead.
+#[cfg(not(target_arch = "wasm32"))]
+struct NavPrefetch {
+    left: PathBuf,
+    next: Option<PathBuf>,
+}
+
 /// What to do once the user confirms discarding unsaved changes on open.
 #[cfg(not(target_arch = "wasm32"))]
 enum PendingOpen {
@@ -27,10 +35,18 @@ enum PendingOpen {
         rlab_path: PathBuf,
         lib_root: PathBuf,
         hash: String,
+        nav: Option<NavPrefetch>,
     },
     /// Focus-stack a library selection: opens the base photo and loads every
     /// selected frame into the Focus Stack tool.
     FocusStack(FocusStackRequest),
+}
+
+/// What to do once a save started from an unsaved-changes prompt succeeds.
+#[cfg(not(target_arch = "wasm32"))]
+enum AfterSave {
+    Open(PendingOpen),
+    Quit,
 }
 
 pub struct RasterLabApp {
@@ -50,6 +66,10 @@ pub struct RasterLabApp {
     /// The action to execute once the user confirms the open-discard dialog.
     #[cfg(not(target_arch = "wasm32"))]
     pending_open: Option<PendingOpen>,
+    /// What to do once a Save As started from "Save & Open" or "Save & Quit"
+    /// completes. Dropped if the Save As is cancelled or the save fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    after_save: Option<AfterSave>,
     /// Index of the photo in `library.results` that the user asked to delete
     /// from the editor. `Some` while the confirmation dialog is open; used to
     /// navigate to the adjacent photo if the deletion is confirmed.
@@ -123,6 +143,8 @@ impl RasterLabApp {
             open_confirm_open: false,
             #[cfg(not(target_arch = "wasm32"))]
             pending_open: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            after_save: None,
             #[cfg(not(target_arch = "wasm32"))]
             editor_delete_at_idx: None,
             last_title: String::new(),
@@ -256,8 +278,9 @@ impl RasterLabApp {
         let Some(lib) = self.state.library.library.clone() else {
             return;
         };
-        // Borrow results only long enough to find the adjacent photo, then drop.
-        let adjacent = {
+        // Borrow results only long enough to find the adjacent photo, and the
+        // one after it in the direction of travel, then drop.
+        let (adjacent, next_hash) = {
             let results = &self.state.library.results;
             let Some(idx) = results.iter().position(|p| p.hash == current_hash) else {
                 return;
@@ -266,10 +289,19 @@ impl RasterLabApp {
             if new_idx == idx {
                 return;
             }
-            results[new_idx].clone()
+            let next_hash = (new_idx as i64 + i64::from(delta.signum()))
+                .try_into()
+                .ok()
+                .and_then(|next_idx: usize| results.get(next_idx))
+                .map(|photo| photo.hash.clone());
+            (results[new_idx].clone(), next_hash)
+        };
+        let nav = NavPrefetch {
+            left: lib.rlab_path(&current_hash),
+            next: next_hash.map(|hash| lib.rlab_path(&hash)),
         };
         let rlab_path = lib.rlab_path(&adjacent.hash);
-        self.request_open_library_photo(rlab_path, lib_root, adjacent.hash);
+        self.request_open_library_photo(rlab_path, lib_root, adjacent.hash, Some(nav));
     }
 
     /// Select the currently-open library photo and raise the delete confirmation.
@@ -333,7 +365,13 @@ impl RasterLabApp {
 
     /// Open a photo from the library, prompting to discard unsaved changes first if needed.
     #[cfg(not(target_arch = "wasm32"))]
-    fn request_open_library_photo(&mut self, rlab_path: PathBuf, lib_root: PathBuf, hash: String) {
+    fn request_open_library_photo(
+        &mut self,
+        rlab_path: PathBuf,
+        lib_root: PathBuf,
+        hash: String,
+        nav: Option<NavPrefetch>,
+    ) {
         // Leaving for the editor stops the detail panel from being drawn, and
         // with it the debounce poll that would have written the draft.
         self.state.commit_library_detail_metadata(true);
@@ -342,17 +380,34 @@ impl RasterLabApp {
                 rlab_path,
                 lib_root,
                 hash,
+                nav,
             });
             self.open_confirm_open = true;
         } else {
-            self.open_library_photo(rlab_path, lib_root, hash);
+            self.open_library_photo(rlab_path, lib_root, hash, nav);
         }
     }
 
     /// Actually switch the editor to a library photo. Assumes any unsaved-changes
     /// prompt has already been handled.
+    ///
+    /// `nav` is set for arrow-key navigation only. Pruning and reading ahead
+    /// happen here rather than on the key press, so a prompt the user cancels
+    /// leaves the cache as it was.
     #[cfg(not(target_arch = "wasm32"))]
-    fn open_library_photo(&mut self, rlab_path: PathBuf, lib_root: PathBuf, hash: String) {
+    fn open_library_photo(
+        &mut self,
+        rlab_path: PathBuf,
+        lib_root: PathBuf,
+        hash: String,
+        nav: Option<NavPrefetch>,
+    ) {
+        if let Some(nav) = nav
+            && self.state.nav_prefetch()
+        {
+            self.state
+                .prepare_library_navigation(&nav.left, &rlab_path, nav.next);
+        }
         self.state.library_context = Some((lib_root, hash));
         self.state.open_file(rlab_path);
         self.state.mode = AppMode::Editor;
@@ -377,7 +432,54 @@ impl RasterLabApp {
         // Frames first: `open_library_photo` starts an async load whose
         // completion renders the editor's tool state as it stands then.
         self.state.load_focus_stack_frames(req.frame_paths);
-        self.open_library_photo(req.base_rlab_path, req.library_root, req.base_hash);
+        self.open_library_photo(req.base_rlab_path, req.library_root, req.base_hash, None);
+    }
+
+    /// Run an open that was deferred behind the unsaved-changes prompt.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn perform_open(&mut self, ctx: &Context, pending: PendingOpen) {
+        match pending {
+            PendingOpen::Dialog => self.chooser.open_image(ctx),
+            PendingOpen::Path(p) => self.state.open_file(p),
+            PendingOpen::Autosave(e) => self.state.restore_autosave(e),
+            PendingOpen::LibraryPhoto {
+                rlab_path,
+                lib_root,
+                hash,
+                nav,
+            } => self.open_library_photo(rlab_path, lib_root, hash, nav),
+            PendingOpen::FocusStack(req) => self.start_focus_stack(req),
+        }
+    }
+
+    /// Save the project, then run `then` once the save has succeeded.
+    /// Without a project path this goes through Save As, and `then` is
+    /// deferred until that dialog returns. A failed save leaves the document
+    /// open (the status bar carries the error) rather than losing the edits.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_then(&mut self, ctx: &Context, then: AfterSave) {
+        if let Some(path) = self.state.project_path.clone() {
+            self.state.save_project(path);
+            self.run_after_save(ctx, then);
+        } else {
+            self.after_save = Some(then);
+            self.chooser.save_project(ctx);
+        }
+    }
+
+    /// Carry out `then` if the preceding save cleared the dirty flag.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_after_save(&mut self, ctx: &Context, then: AfterSave) {
+        if self.state.is_dirty {
+            return;
+        }
+        match then {
+            AfterSave::Open(pending) => self.perform_open(ctx, pending),
+            AfterSave::Quit => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
     }
 
     /// Save in-place if a project path is already known; otherwise open Save As.
@@ -394,8 +496,15 @@ impl RasterLabApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_dialogs(&mut self, ctx: &Context) {
         let Some((kind, paths)) = self.chooser.update(ctx) else {
+            // A chooser that is no longer busy without a result was cancelled.
+            if !self.chooser.is_busy() {
+                self.after_save = None;
+            }
             return;
         };
+        // Only the Save As started from an unsaved-changes prompt may carry
+        // its follow-up action on.
+        let after_save = self.after_save.take();
         // Helper: consume the vec and take the first path (single-file/folder kinds).
         let first = || paths.clone().into_iter().next();
         match kind {
@@ -406,7 +515,10 @@ impl RasterLabApp {
             }
             DialogKind::SaveProject => {
                 if let Some(p) = first() {
-                    self.state.save_project(p)
+                    self.state.save_project(p);
+                    if let Some(then) = after_save {
+                        self.run_after_save(ctx, then);
+                    }
                 }
             }
             DialogKind::ExportEditStack => {
@@ -502,7 +614,7 @@ impl eframe::App for RasterLabApp {
             }
         }
         if let Some((rlab_path, lib_root, hash)) = self.state.library.pending_open_photo.take() {
-            self.request_open_library_photo(rlab_path, lib_root, hash);
+            self.request_open_library_photo(rlab_path, lib_root, hash, None);
         }
         if let Some(req) = self.state.library.pending_focus_stack.take() {
             self.request_focus_stack(req);
@@ -900,6 +1012,22 @@ impl eframe::App for RasterLabApp {
                             }
                         });
                     });
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        ui.separator();
+                        let mut prefetch = self.state.nav_prefetch();
+                        if ui
+                            .checkbox(&mut prefetch, "Prefetch Adjacent Photos")
+                            .on_hover_text(
+                                "Keep the previous photo and preload the next one while \
+                                 arrowing through the library in the editor. Speeds up \
+                                 navigation on network storage at the cost of memory.",
+                            )
+                            .changed()
+                        {
+                            self.state.set_nav_prefetch(prefetch);
+                        }
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About RasterLab").clicked() {
@@ -1024,7 +1152,7 @@ impl eframe::App for RasterLabApp {
                         let rlab_path = lib.rlab_path(&photo.hash);
                         // open_library_photo skips the unsaved-changes prompt
                         // (nothing to save — we just deleted the current photo).
-                        self.open_library_photo(rlab_path, lib_root, photo.hash);
+                        self.open_library_photo(rlab_path, lib_root, photo.hash, None);
                     }
                 }
             }
@@ -1158,6 +1286,20 @@ impl RasterLabApp {
         }
     }
 
+    /// The "Save & …" button shared by the unsaved-changes prompts. Disabled,
+    /// like the Save menu item, while a tool edit is in progress.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_and_button(&self, ui: &mut egui::Ui, label: &str, verb: &str) -> egui::Response {
+        let hint = if self.state.project_path.is_some() {
+            format!("Save the project, then {verb}")
+        } else {
+            format!("Choose where to save the project, then {verb}")
+        };
+        ui.add_enabled(self.state.editing.is_none(), egui::Button::new(label))
+            .on_hover_text(hint)
+            .on_disabled_hover_text("Apply or cancel the current tool edit before saving")
+    }
+
     fn show_exit_confirm_window(&mut self, ctx: &Context) {
         if !self.exit_confirm_open {
             return;
@@ -1173,11 +1315,16 @@ impl RasterLabApp {
                     "You have unsaved changes that haven't been saved as a \
                      project or exported.",
                 );
-                ui.label("Are you sure you want to quit?");
+                ui.label("Save them before quitting, or discard them?");
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         self.exit_confirm_open = false;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if self.save_and_button(ui, "Save & Quit", "quit").clicked() {
+                        self.exit_confirm_open = false;
+                        self.save_then(ctx, AfterSave::Quit);
                     }
                     if ui.button("Discard & Quit").clicked() {
                         self.exit_confirm_open = false;
@@ -1207,26 +1354,23 @@ impl RasterLabApp {
                     "You have unsaved changes that haven't been saved as a \
                      project or exported.",
                 );
-                ui.label("Open anyway and discard changes?");
+                ui.label("Save them before opening, or discard them?");
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if ui.button("Cancel").clicked() {
                         self.open_confirm_open = false;
                         self.pending_open = None;
                     }
+                    if self.save_and_button(ui, "Save & Open", "open").clicked() {
+                        self.open_confirm_open = false;
+                        if let Some(pending) = self.pending_open.take() {
+                            self.save_then(ctx, AfterSave::Open(pending));
+                        }
+                    }
                     if ui.button("Discard & Open").clicked() {
                         self.open_confirm_open = false;
-                        match self.pending_open.take() {
-                            Some(PendingOpen::Dialog) => self.chooser.open_image(ctx),
-                            Some(PendingOpen::Path(p)) => self.state.open_file(p),
-                            Some(PendingOpen::Autosave(e)) => self.state.restore_autosave(e),
-                            Some(PendingOpen::LibraryPhoto {
-                                rlab_path,
-                                lib_root,
-                                hash,
-                            }) => self.open_library_photo(rlab_path, lib_root, hash),
-                            Some(PendingOpen::FocusStack(req)) => self.start_focus_stack(req),
-                            None => {}
+                        if let Some(pending) = self.pending_open.take() {
+                            self.perform_open(ctx, pending);
                         }
                     }
                 });

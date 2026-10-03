@@ -351,7 +351,8 @@ impl FileChooser {
         }
     }
 
-    fn is_busy(&self) -> bool {
+    /// True while a dialog is open (or a native one is still pending).
+    pub fn is_busy(&self) -> bool {
         if self.use_native {
             self.rfd_rx.is_some()
         } else {

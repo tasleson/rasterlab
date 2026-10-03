@@ -93,6 +93,10 @@ pub struct ImportProgress {
     pub imported: usize,
     pub current_file: PathBuf,
     pub skipped_duplicates: usize,
+    /// Files skipped because the user permanently deleted that photograph
+    /// from this library before.  Never counted in `skipped_duplicates`: the
+    /// library does not hold these, so they are not duplicates of anything.
+    pub skipped_purged: usize,
     /// Source files deleted after the library was found to hold their
     /// contents. Zero unless the run was asked to delete its sources.
     pub deleted_sources: usize,
@@ -695,9 +699,23 @@ impl Library {
 
     /// Storage first, index second: a failed index mutation may leave a stale
     /// row, but can never resurrect a file the user permanently removed.
+    ///
+    /// The photo's hash is remembered before anything goes, so a later import
+    /// of the same photograph skips it rather than undoing the user's
+    /// decision.  Recorded last, a failed index write would leave a stale row
+    /// that the next rebuild drops without remembering anything; recorded
+    /// first, a photo still held is harmless, since an import finds it as a
+    /// duplicate before it asks whether it was erased.
     fn permanently_remove(&self, row: &PhotoRow, rlab: &Path) -> Result<()> {
-        if rlab.exists() {
-            std::fs::remove_file(rlab).with_context(|| format!("remove {}", rlab.display()))?;
+        self.db
+            .record_purged(&row.hash, unix_now())
+            .context("record the photo as permanently deleted")?;
+        if rlab.exists()
+            && let Err(error) = std::fs::remove_file(rlab)
+        {
+            // The photo stays, so it should stay importable too.
+            let _ = self.db.forget_purged(&row.hash);
+            return Err(error).with_context(|| format!("remove {}", rlab.display()));
         }
         let thumb = self.thumb_path(&row.hash);
         if thumb.exists() {

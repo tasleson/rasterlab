@@ -1147,6 +1147,201 @@ fn delete_photo_permanently_removes_files_and_db_row() {
     );
 }
 
+// ── Permanently deleted photos stay deleted ────────────────────────────────
+
+/// Import `paths` and hand back the run's final import-phase progress, which
+/// carries its tallies.
+fn import_tally(
+    lib: &Library,
+    paths: &[PathBuf],
+    options: impl Into<rasterlab_library::ImportOptions>,
+) -> rasterlab_library::ImportProgress {
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(paths, options, no_cancel(), |p| {
+        if !p.scanning {
+            *last.borrow_mut() = p;
+        }
+    })
+    .expect("import_paths");
+    last.into_inner()
+}
+
+/// Move `photo` through Recently Deleted and out the other side, the way the
+/// library panel's "Empty Recently Deleted" button does.
+fn erase(lib: &Library, photo: &PhotoRow) {
+    lib.delete_photo(photo.id).unwrap();
+    assert_eq!(lib.empty_recently_deleted().unwrap(), 1);
+}
+
+/// Erasing a photo is a decision about the photograph, not about one file, so
+/// importing the same card again must not bring it back — whichever of Recently
+/// Deleted's buttons erased it.
+#[test]
+fn a_permanently_deleted_photo_is_not_imported_again() {
+    type Eraser = fn(&Library, PhotoId);
+    let erasers: [(&str, Eraser); 3] = [
+        ("Delete Permanently", |lib, id| {
+            lib.delete_photo(id).unwrap();
+            lib.delete_recently_deleted_permanently(id).unwrap();
+        }),
+        ("Empty Recently Deleted", |lib, id| {
+            lib.delete_photo(id).unwrap();
+            assert_eq!(lib.empty_recently_deleted().unwrap(), 1);
+        }),
+        ("delete_photo_permanently", |lib, id| {
+            lib.delete_photo_permanently(id).unwrap();
+        }),
+    ];
+    for (how, erase) in erasers {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = open_library(tmp.path());
+        lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+        let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+        erase(&lib, photo.id);
+
+        let tally = import_tally(&lib, &[jpeg_path(), png_path()], ImportCollection::None);
+
+        assert_eq!(tally.imported, 1, "{how}: only the new photo comes in");
+        assert_eq!(tally.skipped_purged, 1, "{how}");
+        assert_eq!(tally.skipped_duplicates, 0, "{how}: nothing held it");
+        assert!(tally.errors.is_empty(), "{how}: {:?}", tally.errors);
+        let photos = lib.all_photos(SortOrder::default()).unwrap();
+        assert_eq!(photos.len(), 1, "{how}");
+        assert_ne!(
+            photos[0].hash, photo.hash,
+            "{how}: the erased photo is back"
+        );
+        assert!(!lib.rlab_path(&photo.hash).exists(), "{how}");
+    }
+}
+
+/// Only an erased photo is remembered: one waiting in Recently Deleted is
+/// still in the library, so meeting it again is an ordinary duplicate.
+#[test]
+fn a_photo_in_recently_deleted_is_a_duplicate_not_a_purged_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    lib.delete_photo(photo.id).unwrap();
+
+    let tally = import_tally(&lib, &[jpeg_path()], ImportCollection::None);
+
+    assert_eq!(tally.skipped_duplicates, 1);
+    assert_eq!(tally.skipped_purged, 0);
+}
+
+/// Nothing on disk records an erased photo — its file is what was erased — so
+/// the list lives only in the index, and a rebuild must leave it alone.
+#[test]
+fn erased_photos_stay_erased_across_an_index_rebuild() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    erase(&lib, &photo);
+
+    lib.rebuild_index(no_cancel(), |_| {})
+        .expect("rebuild_index");
+    let tally = import_tally(&lib, &[jpeg_path(), png_path()], ImportCollection::None);
+
+    assert_eq!(tally.imported, 0);
+    assert_eq!(tally.skipped_purged, 1);
+    assert_eq!(tally.skipped_duplicates, 1);
+}
+
+/// A `.rlab` is judged by the hash of the original it carries, read from its
+/// header without reading the original itself; that shortcut has to know about
+/// erased photos too.
+#[test]
+fn an_exported_project_of_an_erased_photo_is_not_imported_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let outside = tempfile::tempdir().unwrap();
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+    let project = outside.path().join("kept.rlab");
+    std::fs::copy(lib.rlab_path(&photo.hash), &project).unwrap();
+    erase(&lib, &photo);
+
+    let tally = import_tally(&lib, &[project], ImportCollection::None);
+
+    assert_eq!(tally.skipped_purged, 1);
+    assert!(tally.errors.is_empty(), "{:?}", tally.errors);
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+}
+
+/// A run that deletes its sources only removes what the library is holding.
+/// It is not holding an erased photo, so that source may be the last copy of
+/// it anywhere, and stays.
+#[test]
+fn a_delete_run_keeps_the_source_of_an_erased_photo() {
+    let src = shoot_tree();
+    let tmp_lib = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp_lib.path());
+    let loose = src.path().join("loose.png");
+    lib.import_paths(
+        &[src.path().to_path_buf()],
+        ImportCollection::None,
+        no_cancel(),
+        |_| {},
+    )
+    .unwrap();
+    let erased = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .find(|photo| photo.original_filename.as_deref() == Some("loose.png"))
+        .expect("loose.png was imported");
+    erase(&lib, &erased);
+
+    let tally = import_tally(&lib, &[src.path().to_path_buf()], delete_sources());
+
+    assert_eq!(tally.skipped_purged, 1);
+    assert_eq!(tally.deleted_sources, 2, "the two duplicates still go");
+    assert!(tally.errors.is_empty(), "{:?}", tally.errors);
+    assert!(loose.exists(), "the erased photo's source was deleted");
+    assert_eq!(remaining_sources(src.path()), ["loose.png"]);
+}
+
+/// `include_erased` is the way back from an erase made by mistake, and a
+/// photo brought back is an ordinary member of the library again: losing its
+/// file later is not an erase, so it must not then be skipped as one.
+#[test]
+fn include_erased_brings_an_erased_photo_back_for_good() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photo = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .find(|photo| photo.original_filename.as_deref() == Some("meta_test.jpg"))
+        .expect("meta_test.jpg was imported");
+    erase(&lib, &photo);
+
+    let include_erased = rasterlab_library::ImportOptions {
+        include_erased: true,
+        ..Default::default()
+    };
+    let tally = import_tally(&lib, &[jpeg_path()], include_erased);
+    assert_eq!(tally.imported, 1);
+    assert_eq!(tally.skipped_purged, 0);
+    assert!(lib.rlab_path(&photo.hash).exists());
+
+    // The file goes missing and a rebuild drops its row; that is not the user
+    // erasing it, so an ordinary import takes it in again.
+    std::fs::remove_file(lib.rlab_path(&photo.hash)).unwrap();
+    lib.rebuild_index(no_cancel(), |_| {})
+        .expect("rebuild_index");
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+    let tally = import_tally(&lib, &[jpeg_path()], ImportCollection::None);
+    assert_eq!(tally.imported, 1, "the brought-back photo is still erased");
+    assert_eq!(tally.skipped_purged, 0);
+}
+
 // ── Protection ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -3384,8 +3579,8 @@ fn remaining_sources(dir: &std::path::Path) -> Vec<String> {
 
 fn delete_sources() -> rasterlab_library::ImportOptions {
     rasterlab_library::ImportOptions {
-        collection: ImportCollection::None,
         delete_sources: true,
+        ..Default::default()
     }
 }
 

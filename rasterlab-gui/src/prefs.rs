@@ -38,8 +38,8 @@ impl ThemePref {
 /// Maximum number of paths kept in the recently-opened list.
 const MAX_RECENT: usize = 10;
 
-/// Persistent GUI preferences.  Missing keys are treated as `false`/default.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Persistent GUI preferences.  Missing keys take the field's serde default.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prefs {
     /// Open/closed state of each collapsing tool section, keyed by a stable
     /// ASCII string (e.g. `"blur"`, `"crop"`, `"hsl_panel"`).
@@ -95,6 +95,12 @@ pub struct Prefs {
     /// The library that was open when the app last exited.
     #[serde(default)]
     pub last_library: Option<PathBuf>,
+    /// Keep the previous photo and read ahead the next one while arrowing
+    /// through library photos in the editor. Hides network-storage latency at
+    /// the cost of memory: each cached photo holds a decoded image and its
+    /// embedded original, easily 100 MB+ for a RAW.
+    #[serde(default = "default_true")]
+    pub nav_prefetch: bool,
     /// Thumbnail display scale in the library grid (0.25–1.0; 1.0 = 512px).
     #[serde(default = "default_thumb_scale")]
     pub library_thumb_scale: f32,
@@ -125,10 +131,28 @@ fn default_thumb_scale() -> f32 {
     0.5
 }
 
+/// A fresh install gets exactly what an empty prefs file would give.
+///
+/// A derived `Default` would disagree with the `#[serde(default = ...)]`
+/// attributes — every `default_true` flag false, JPEG quality 0 — so a user
+/// with no prefs file yet would start from different settings than one whose
+/// file simply lacks those keys.
+impl Default for Prefs {
+    fn default() -> Self {
+        serde_yaml::from_str("{}").expect("every Prefs field has a serde default")
+    }
+}
+
 impl Prefs {
     /// Returns the platform-specific path for the prefs file, or `None` if the
     /// data directory cannot be determined.
     pub fn path() -> Option<PathBuf> {
+        // Tests construct `AppState`s, which load prefs and save them on
+        // open or when a preference changes. Keep them off the developer's
+        // real preferences, and independent of them.
+        if cfg!(test) {
+            return None;
+        }
         dirs::data_dir().map(|d| d.join("rasterlab").join("prefs.yaml"))
     }
 
@@ -226,6 +250,18 @@ mod tests {
         let prefs: Prefs = serde_yaml::from_str("jpeg_quality: 88\n").unwrap();
         assert_eq!(prefs.jpeg_quality, 88);
         assert_eq!(prefs.export_border, ExportBorderOptions::default());
+    }
+
+    #[test]
+    fn default_matches_an_empty_prefs_file() {
+        let prefs = Prefs::default();
+        assert!(prefs.use_native_dialogs);
+        assert!(prefs.preserve_metadata);
+        assert!(prefs.nav_prefetch);
+        assert_eq!(prefs.jpeg_quality, default_jpeg_quality());
+        assert_eq!(prefs.png_compression, default_png_compression());
+        assert_eq!(prefs.library_thumb_scale, default_thumb_scale());
+        assert_eq!(prefs.open_file_filter, default_open_file_filter());
     }
 
     #[test]

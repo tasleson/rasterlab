@@ -167,6 +167,16 @@ pub struct ImportArgs {
     #[arg(long)]
     pub delete_source: bool,
 
+    /// Import photos that were permanently deleted from this library before,
+    /// instead of skipping them.
+    ///
+    /// The library remembers every photo deleted permanently so that importing
+    /// the same card again does not undo a cull. This is the way back from an
+    /// erase made by mistake; a photo brought back is no longer remembered as
+    /// deleted.
+    #[arg(long)]
+    pub include_erased: bool,
+
     /// Print only the final tally, no running progress.
     #[arg(short, long)]
     pub quiet: bool,
@@ -182,6 +192,7 @@ impl ImportArgs {
         ImportOptions {
             collection,
             delete_sources: self.delete_source,
+            include_erased: self.include_erased,
         }
     }
 }
@@ -267,7 +278,7 @@ fn import(args: ImportArgs) -> Result<()> {
             total: p.total,
             tallies: &[
                 ("imported", p.imported),
-                ("skipped", p.skipped_duplicates),
+                ("skipped", p.skipped_duplicates + p.skipped_purged),
                 ("deleted", p.deleted_sources),
             ],
             errors: p.errors.len(),
@@ -399,6 +410,13 @@ fn report_import(
         tally.skipped_duplicates,
         count(tally.errors.len(), "error")
     );
+    if tally.skipped_purged > 0 {
+        println!(
+            "  {} skipped: permanently deleted from this library before \
+             (--include-erased imports them)",
+            count(tally.skipped_purged, "photo")
+        );
+    }
     if tally.deleted_sources > 0 {
         println!("  {} deleted", count(tally.deleted_sources, "source file"));
     }

@@ -89,8 +89,8 @@ mod tests {
 
     #[test]
     fn a_completed_worker_delivers_its_own_terminal_message() {
-        let message = terminal_message(|| BgMessage::Error("done".into()));
-        assert!(matches!(message, BgMessage::Error(m) if m == "done"));
+        let message = terminal_message(|| BgMessage::DeleteFailed("done".into()));
+        assert!(matches!(message, BgMessage::DeleteFailed(m) if m == "done"));
     }
 
     #[test]

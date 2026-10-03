@@ -304,3 +304,43 @@ fn delete_source_empties_the_card_across_runs() {
         );
     }
 }
+
+/// A permanently deleted photo stays out of the library on a plain re-import,
+/// with the tally saying why, and `--include-erased` brings it back.
+#[test]
+fn include_erased_brings_back_what_a_plain_import_skips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("library");
+    let src = tmp.path().join("src");
+    source_tree(&src);
+    let import = |extra: &[&str]| {
+        let mut args = vec!["library", "import", root.to_str().unwrap()];
+        args.push(src.to_str().unwrap());
+        args.extend_from_slice(extra);
+        let out = rasterlab(&args);
+        assert!(out.status.success(), "import failed: {out:?}");
+        stdout_of(&out)
+    };
+    import(&["--create"]);
+
+    {
+        let lib = Library::open_existing(&root).unwrap();
+        let photo = lib.all_photos(SortOrder::default()).unwrap()[0].clone();
+        lib.delete_photo(photo.id).unwrap();
+        assert_eq!(lib.empty_recently_deleted().unwrap(), 1);
+    }
+
+    let stdout = import(&[]);
+    assert!(
+        stdout.contains("1 photo skipped: permanently deleted"),
+        "no erased tally: {stdout}"
+    );
+    assert_eq!(photo_count(&root), 1);
+
+    let stdout = import(&["--include-erased"]);
+    assert!(
+        stdout.contains("1 of 2 imported"),
+        "unexpected tally: {stdout}"
+    );
+    assert_eq!(photo_count(&root), 2);
+}
