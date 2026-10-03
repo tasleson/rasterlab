@@ -275,6 +275,9 @@ rasterlab library import /srv/photos iceland/*.nef --collection "Iceland 2024"
 # Empty a card: delete each source once the library holds its contents
 rasterlab library import /srv/photos ~/cards/DCIM --delete-source
 
+# Bring back photos that were deleted permanently, which imports otherwise skip
+rasterlab library import /srv/photos ~/cards/DCIM --include-erased
+
 # Re-index the .rlab files on disk, recovering rows the index has lost
 rasterlab library rebuild /srv/photos
 
@@ -299,6 +302,11 @@ in the library are skipped by content hash, which makes re-running an import
 over the same source cheap — and is why an interrupted import is finished by
 simply running it again. `--create` makes the library as part of the import for
 the first run.
+
+Photos deleted permanently from the library are skipped too, so re-importing a
+card you have already culled does not undo the cull. `--include-erased` imports
+them anyway, which is the way back from an erase made by mistake; a photo
+brought back that way is no longer remembered as deleted.
 
 `--delete-source` removes each source file once the library is proved to hold
 its photograph, which is what makes an import an "empty the card" run. A file

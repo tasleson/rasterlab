@@ -95,13 +95,20 @@ pub struct ImportOptions {
     /// duplicates is unlinked, except where this run wrote it, which
     /// [`write_verified_atomic`] already confirmed on the device.
     pub delete_sources: bool,
+    /// Import photographs the user permanently deleted from this library
+    /// before, instead of skipping them.
+    ///
+    /// The way back from an erase made by mistake.  A photo brought back this
+    /// way is no longer remembered as erased, so later imports treat it like
+    /// any other photo the library holds.
+    pub include_erased: bool,
 }
 
 impl From<ImportCollection> for ImportOptions {
     fn from(collection: ImportCollection) -> Self {
         Self {
             collection,
-            delete_sources: false,
+            ..Self::default()
         }
     }
 }
@@ -706,12 +713,18 @@ enum Preparation {
 }
 
 /// What the library already knows of the photograph with content hash
-/// `hash`: that it holds it, that the user erased it, or — `None` — nothing.
-fn previously_seen(db: &dyn LibraryDb, hash: &str) -> Result<Option<Preparation>> {
+/// `hash`: that it holds it, that the user erased it, or — `None` — nothing
+/// that keeps it out.  An erased photo is let through when the run was asked
+/// to include those.
+fn previously_seen(
+    db: &dyn LibraryDb,
+    hash: &str,
+    options: &ImportOptions,
+) -> Result<Option<Preparation>> {
     if db.photo_by_hash(hash)?.is_some() {
         return Ok(Some(Preparation::Duplicate(hash.to_owned())));
     }
-    if db.is_purged(hash)? {
+    if !options.include_erased && db.is_purged(hash)? {
         return Ok(Some(Preparation::Purged));
     }
     Ok(None)
@@ -799,7 +812,7 @@ fn prepare_one(
                 .ok()
                 .map(|hash| blake3::Hash::from(hash).to_hex().to_string())
         )
-        && let Some(seen) = import_phase!("hash_lookup", previously_seen(db, &hash))?
+        && let Some(seen) = import_phase!("hash_lookup", previously_seen(db, &hash, options))?
     {
         return Ok(seen);
     }
@@ -842,7 +855,7 @@ fn prepare_one(
     // 3. Duplicate check.  A file that only duplicates another file of the same
     //    batch cannot be seen here — that pair may be in flight at the same
     //    moment — so `commit_prepared` checks the batch's own hashes again.
-    if let Some(seen) = import_phase!("hash_lookup", previously_seen(db, &hash))? {
+    if let Some(seen) = import_phase!("hash_lookup", previously_seen(db, &hash, options))? {
         return Ok(seen);
     }
 
@@ -1375,6 +1388,13 @@ fn run_import_pipeline(
                     let hash = prepared.hash.clone();
                     match commit_prepared(library_root, db, assigner, *prepared) {
                         Ok(()) => {
+                            // Back in the library, so no longer erased.  Best
+                            // effort: a record left behind is harmless while
+                            // the photo is held, since an import finds it as a
+                            // duplicate before asking whether it was erased.
+                            if options.include_erased {
+                                let _ = db.forget_purged(&hash);
+                            }
                             batch_hashes.insert(hash);
                             ImportOutcome::Imported
                         }

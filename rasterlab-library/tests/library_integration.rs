@@ -1305,6 +1305,43 @@ fn a_delete_run_keeps_the_source_of_an_erased_photo() {
     assert_eq!(remaining_sources(src.path()), ["loose.png"]);
 }
 
+/// `include_erased` is the way back from an erase made by mistake, and a
+/// photo brought back is an ordinary member of the library again: losing its
+/// file later is not an erase, so it must not then be skipped as one.
+#[test]
+fn include_erased_brings_an_erased_photo_back_for_good() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photo = lib
+        .all_photos(SortOrder::default())
+        .unwrap()
+        .into_iter()
+        .find(|photo| photo.original_filename.as_deref() == Some("meta_test.jpg"))
+        .expect("meta_test.jpg was imported");
+    erase(&lib, &photo);
+
+    let include_erased = rasterlab_library::ImportOptions {
+        include_erased: true,
+        ..Default::default()
+    };
+    let tally = import_tally(&lib, &[jpeg_path()], include_erased);
+    assert_eq!(tally.imported, 1);
+    assert_eq!(tally.skipped_purged, 0);
+    assert!(lib.rlab_path(&photo.hash).exists());
+
+    // The file goes missing and a rebuild drops its row; that is not the user
+    // erasing it, so an ordinary import takes it in again.
+    std::fs::remove_file(lib.rlab_path(&photo.hash)).unwrap();
+    lib.rebuild_index(no_cancel(), |_| {})
+        .expect("rebuild_index");
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+    let tally = import_tally(&lib, &[jpeg_path()], ImportCollection::None);
+    assert_eq!(tally.imported, 1, "the brought-back photo is still erased");
+    assert_eq!(tally.skipped_purged, 0);
+}
+
 // ── Protection ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -3542,8 +3579,8 @@ fn remaining_sources(dir: &std::path::Path) -> Vec<String> {
 
 fn delete_sources() -> rasterlab_library::ImportOptions {
     rasterlab_library::ImportOptions {
-        collection: ImportCollection::None,
         delete_sources: true,
+        ..Default::default()
     }
 }
 
