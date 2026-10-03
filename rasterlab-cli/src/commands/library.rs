@@ -267,7 +267,7 @@ fn import(args: ImportArgs) -> Result<()> {
             total: p.total,
             tallies: &[
                 ("imported", p.imported),
-                ("skipped", p.skipped_duplicates),
+                ("skipped", p.skipped_duplicates + p.skipped_purged),
                 ("deleted", p.deleted_sources),
             ],
             errors: p.errors.len(),
@@ -399,6 +399,12 @@ fn report_import(
         tally.skipped_duplicates,
         count(tally.errors.len(), "error")
     );
+    if tally.skipped_purged > 0 {
+        println!(
+            "  {} skipped: permanently deleted from this library before",
+            count(tally.skipped_purged, "photo")
+        );
+    }
     if tally.deleted_sources > 0 {
         println!("  {} deleted", count(tally.deleted_sources, "source file"));
     }

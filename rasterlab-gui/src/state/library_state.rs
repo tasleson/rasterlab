@@ -510,8 +510,18 @@ fn import_progress_text(progress: &ImportProgress) -> String {
     }
     format!(
         "Importing… {}/{} processed, {} new, {} skipped",
-        progress.done, progress.total, progress.imported, progress.skipped_duplicates
+        progress.done,
+        progress.total,
+        progress.imported,
+        skipped_count(progress)
     )
+}
+
+/// Files an import left out on purpose: those the library already holds, and
+/// those the user permanently deleted from it before.  The status line has
+/// room for one number, and either way nothing went wrong.
+fn skipped_count(progress: &ImportProgress) -> usize {
+    progress.skipped_duplicates + progress.skipped_purged
 }
 
 /// Suffix a status line with its error tally, which is left off entirely when
@@ -1368,8 +1378,7 @@ impl LibraryState {
                     let done: usize = importing().map(|job| job.progress.done).sum();
                     let total: usize = importing().map(|job| job.progress.total).sum();
                     let imported: usize = importing().map(|job| job.progress.imported).sum();
-                    let skipped: usize =
-                        importing().map(|job| job.progress.skipped_duplicates).sum();
+                    let skipped: usize = importing().map(|job| skipped_count(&job.progress)).sum();
                     let mut text = format!(
                         "Importing {} {noun}… {done}/{total} processed, {imported} new, \
                          {skipped} skipped",
@@ -2188,6 +2197,7 @@ mod tests {
         total: usize,
         imported: usize,
         skipped: usize,
+        purged: usize,
         errors: usize,
     }
 
@@ -2208,6 +2218,7 @@ mod tests {
                     done: spec.done,
                     imported: spec.imported,
                     skipped_duplicates: spec.skipped,
+                    skipped_purged: spec.purged,
                     scanning: spec.scanning,
                     errors: failures(spec.errors),
                     ..Default::default()
@@ -2250,6 +2261,14 @@ mod tests {
                     ..importing
                 }],
                 "Importing… 5/10 processed, 3 new, 2 skipped, 2 error(s)",
+            ),
+            (
+                "photos erased before count as skipped too",
+                &[JobSpec {
+                    purged: 4,
+                    ..importing
+                }],
+                "Importing… 5/10 processed, 3 new, 6 skipped",
             ),
             (
                 "one import still reading capture dates",

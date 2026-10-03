@@ -256,6 +256,7 @@ pub fn import_files(
         imported: 0,
         current_file: PathBuf::new(),
         skipped_duplicates: 0,
+        skipped_purged: 0,
         deleted_sources: 0,
         errors: Vec::new(),
         scanning: false,
@@ -309,6 +310,7 @@ pub fn import_files(
         imported: tally.imported,
         current_file: PathBuf::new(),
         skipped_duplicates: tally.skipped_duplicates,
+        skipped_purged: tally.skipped_purged,
         deleted_sources: tally.deleted_sources,
         errors: tally.errors.clone(),
         scanning: false,
@@ -371,6 +373,7 @@ pub fn import_folder_grouped(
             imported: 0,
             current_file: path.clone(),
             skipped_duplicates: 0,
+            skipped_purged: 0,
             deleted_sources: 0,
             errors: Vec::new(),
             scanning: true,
@@ -483,6 +486,7 @@ pub fn import_folder_grouped(
         imported: tally.imported,
         current_file: PathBuf::new(),
         skipped_duplicates: tally.skipped_duplicates,
+        skipped_purged: tally.skipped_purged,
         deleted_sources: tally.deleted_sources,
         errors: tally.errors.clone(),
         scanning: false,
@@ -696,12 +700,28 @@ enum Preparation {
     /// deleting its sources has to find the file holding those bytes before
     /// unlinking the copy in front of it.
     Duplicate(String),
+    /// A photograph the user permanently deleted from the library, and so is
+    /// not to be brought back.
+    Purged,
+}
+
+/// What the library already knows of the photograph with content hash
+/// `hash`: that it holds it, that the user erased it, or — `None` — nothing.
+fn previously_seen(db: &dyn LibraryDb, hash: &str) -> Result<Option<Preparation>> {
+    if db.photo_by_hash(hash)?.is_some() {
+        return Ok(Some(Preparation::Duplicate(hash.to_owned())));
+    }
+    if db.is_purged(hash)? {
+        return Ok(Some(Preparation::Purged));
+    }
+    Ok(None)
 }
 
 /// Read, decode and serialise one source file without writing anything.
 ///
-/// Returns [`Preparation::Duplicate`] for a file already in the library, `Err`
-/// on failure.
+/// Returns [`Preparation::Duplicate`] for a file already in the library,
+/// [`Preparation::Purged`] for one the user permanently deleted, `Err` on
+/// failure.
 /// Nothing here touches the library on disk and the only database calls are
 /// reads, so this is safe to run on several threads at once against the same
 /// import; [`commit_prepared`] performs every write, in input order.
@@ -779,9 +799,9 @@ fn prepare_one(
                 .ok()
                 .map(|hash| blake3::Hash::from(hash).to_hex().to_string())
         )
-        && import_phase!("hash_lookup", db.photo_by_hash(&hash))?.is_some()
+        && let Some(seen) = import_phase!("hash_lookup", previously_seen(db, &hash))?
     {
-        return Ok(Preparation::Duplicate(hash));
+        return Ok(seen);
     }
 
     let input_bytes = import_phase!(
@@ -822,8 +842,8 @@ fn prepare_one(
     // 3. Duplicate check.  A file that only duplicates another file of the same
     //    batch cannot be seen here — that pair may be in flight at the same
     //    moment — so `commit_prepared` checks the batch's own hashes again.
-    if import_phase!("hash_lookup", db.photo_by_hash(&hash))?.is_some() {
-        return Ok(Preparation::Duplicate(hash));
+    if let Some(seen) = import_phase!("hash_lookup", previously_seen(db, &hash))? {
+        return Ok(seen);
     }
 
     // 4. Determine the stack partner hash (if this file is in a pair)
@@ -1128,6 +1148,8 @@ enum ImportOutcome {
     /// Already in the library, or a duplicate of an earlier file in this
     /// batch, under this content hash.
     Duplicate(String),
+    /// Erased from the library by the user before, so left out.
+    Purged,
     Failed,
 }
 
@@ -1138,6 +1160,7 @@ struct ImportTally {
     processed: usize,
     imported: usize,
     skipped_duplicates: usize,
+    skipped_purged: usize,
     /// Source files removed after their contents were found in the library.
     deleted_sources: usize,
     errors: Vec<(PathBuf, String)>,
@@ -1335,6 +1358,7 @@ fn run_import_pipeline(
                 imported: tally.imported,
                 current_file: job.path.clone(),
                 skipped_duplicates: tally.skipped_duplicates,
+                skipped_purged: tally.skipped_purged,
                 deleted_sources: tally.deleted_sources,
                 errors: tally.errors.clone(),
                 scanning: false,
@@ -1361,6 +1385,7 @@ fn run_import_pipeline(
                     }
                 }
                 Ok(Preparation::Duplicate(hash)) => ImportOutcome::Duplicate(hash),
+                Ok(Preparation::Purged) => ImportOutcome::Purged,
                 Err(e) => {
                     tally.errors.push((job.path.clone(), format!("{:#}", e)));
                     ImportOutcome::Failed
@@ -1369,6 +1394,7 @@ fn run_import_pipeline(
             match &outcome {
                 ImportOutcome::Imported => tally.imported += 1,
                 ImportOutcome::Duplicate(_) => tally.skipped_duplicates += 1,
+                ImportOutcome::Purged => tally.skipped_purged += 1,
                 ImportOutcome::Failed => {}
             }
             // Only once the library is proved to be holding this photograph,
@@ -1430,7 +1456,9 @@ fn encode_rlab(
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 /// Remove a source file whose photograph the library is now holding, or say
-/// why it was kept.  `None` is a file the library does not hold at all.
+/// why it was kept.  `None` is a file the library does not hold at all —
+/// one that failed, or one the user erased from it before, whose source may
+/// well be the last copy left.
 ///
 /// This is the last moment at which the source is the other copy, so what the
 /// library has is proved rather than assumed — except for a photo this run
@@ -1443,7 +1471,7 @@ fn delete_verified_source(
     outcome: &ImportOutcome,
 ) -> Option<Result<()>> {
     let held = match outcome {
-        ImportOutcome::Failed => return None,
+        ImportOutcome::Failed | ImportOutcome::Purged => return None,
         ImportOutcome::Imported => Ok(()),
         ImportOutcome::Duplicate(hash) => verify_library_copy(library_root, hash),
     };
