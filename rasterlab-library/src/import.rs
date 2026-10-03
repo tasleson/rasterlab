@@ -291,7 +291,7 @@ pub fn import_files(
         paths.len(),
         // Importing a hand-picked list of files says nothing about wanting
         // them gone; only the folder import offers that.
-        false,
+        &ImportOptions::default(),
         &mut tally,
         progress_cb,
     );
@@ -451,7 +451,7 @@ pub fn import_folder_grouped(
             &mut batch_hashes,
             &cancelled,
             total,
-            options.delete_sources,
+            &options,
             &mut tally,
             progress_cb,
         );
@@ -730,10 +730,10 @@ fn previously_seen(db: &dyn LibraryDb, hash: &str) -> Result<Option<Preparation>
 /// and `fallback_capture_ts` synthesises an EXIF capture date for files that
 /// carry none, so they still sort coherently by capture time.
 ///
-/// `delete_sources` turns off both of the shortcuts that decide a file is a
-/// duplicate without reading it — the source fingerprint and a project's own
-/// record of its original's hash.  The run is about to unlink the file, so the
-/// hash it is judged by has to come from its bytes.
+/// `options.delete_sources` turns off both of the shortcuts that decide a file
+/// is a duplicate without reading it — the source fingerprint and a project's
+/// own record of its original's hash.  The run is about to unlink the file, so
+/// the hash it is judged by has to come from its bytes.
 ///
 /// `assigner` decides which collection the photo joins, and is consulted only
 /// once the file is known to be a genuinely new photograph.  The membership
@@ -750,7 +750,7 @@ fn prepare_one(
     import_date: u64,
     fallback_capture_ts: Option<u64>,
     assigner: &Mutex<CollectionAssigner<'_>>,
-    delete_sources: bool,
+    options: &ImportOptions,
 ) -> Result<Preparation> {
     // 1. Read source bytes + capture source-file timestamps.
     //    Stat first so we read the times the file had before we opened it.
@@ -772,7 +772,7 @@ fn prepare_one(
     // A run that deletes its sources does not take it: a stat says the file at
     // this path was imported, not that the file in front of us now is the one
     // that was, and that is not something to unlink a photograph on.
-    if !delete_sources
+    if !options.delete_sources
         && let Some(mtime) = source_mtime
         && let Some(hash) = import_phase!(
             "fingerprint_lookup",
@@ -791,7 +791,7 @@ fn prepare_one(
     // Skipped for the same reason as the fingerprint above when the source is
     // to be deleted: this hash is the container's claim about itself, and a
     // deletion is made against bytes that were read, not claims.
-    if !delete_sources
+    if !options.delete_sources
         && is_rlab_path(path)
         && let Some(hash) = import_phase!(
             "hash_lookup",
@@ -1232,7 +1232,7 @@ fn run_import_pipeline(
     batch_hashes: &mut HashSet<String>,
     cancelled: &AtomicBool,
     total: usize,
-    delete_sources: bool,
+    options: &ImportOptions,
     tally: &mut ImportTally,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Vec<ImportOutcome> {
@@ -1309,7 +1309,7 @@ fn run_import_pipeline(
                         job.import_date,
                         job.fallback_capture_ts,
                         assigner,
-                        delete_sources,
+                        options,
                     );
 
                     let mut queue = queue.lock().expect("import queue poisoned");
@@ -1399,7 +1399,7 @@ fn run_import_pipeline(
             }
             // Only once the library is proved to be holding this photograph,
             // and never for a file that failed: the source is the other copy.
-            if delete_sources
+            if options.delete_sources
                 && let Some(deleted) = delete_verified_source(library_root, &job.path, &outcome)
             {
                 match deleted {
