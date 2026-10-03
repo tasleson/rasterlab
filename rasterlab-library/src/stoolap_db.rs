@@ -237,6 +237,13 @@ const SCHEMA_STMTS: &[&str] = &[
         photo_id      INTEGER,
         added_at      INTEGER
     )",
+    // Content hashes of photos the user permanently deleted, so an import
+    // skips them.  Nothing in a `.rlab` backs this — the file is gone — so it
+    // is the one table a rebuild cannot recreate, and never truncates.
+    "CREATE TABLE IF NOT EXISTS purged_hashes (
+        hash      TEXT NOT NULL UNIQUE,
+        purged_at INTEGER NOT NULL
+    )",
     "CREATE INDEX IF NOT EXISTS exif_aperture  ON exif(aperture)",
     "CREATE INDEX IF NOT EXISTS exif_iso       ON exif(iso)",
     "CREATE INDEX IF NOT EXISTS exif_shutter   ON exif(shutter_sec)",
@@ -458,6 +465,37 @@ impl LibraryDb for StoolapDb {
 
     fn delete_photo(&self, photo_id: PhotoId) -> Result<()> {
         self.in_transaction(|tx| delete_photo_tx(tx, photo_id))
+    }
+
+    fn record_purged(&self, hash: &str, purged_at: u64) -> Result<()> {
+        self.in_transaction(|tx| {
+            // Delete-then-insert rather than relying on upsert syntax: a hash
+            // is erased again only if a rebuild found its file restored from
+            // elsewhere, and then the newer date is the one to keep.
+            tx.execute("DELETE FROM purged_hashes WHERE hash = $1", (hash,))?;
+            tx.execute(
+                "INSERT INTO purged_hashes (hash, purged_at) VALUES ($1, $2)",
+                (hash, purged_at as i64),
+            )?;
+            Ok(())
+        })
+    }
+
+    fn forget_purged(&self, hash: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM purged_hashes WHERE hash = $1", (hash,))?;
+        Ok(())
+    }
+
+    fn is_purged(&self, hash: &str) -> Result<bool> {
+        let count: i64 = self
+            .db
+            .query_one(
+                "SELECT COUNT(*) FROM purged_hashes WHERE hash = $1",
+                (hash,),
+            )
+            .context("look up purged hash")?;
+        Ok(count > 0)
     }
 
     fn all_photos(&self, sort: SortOrder) -> Result<Vec<PhotoRow>> {
@@ -1658,6 +1696,42 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0);
         assert!(db.all_sessions().unwrap().is_empty());
+    }
+
+    /// A plain row delete, which is what a rebuild uses to drop a row whose
+    /// file has gone, must not leave a purge record behind.
+    #[test]
+    fn deleting_a_row_does_not_record_a_purge() {
+        let db = db();
+        let id = db
+            .insert_photo(new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta("s1")))
+            .unwrap();
+        db.delete_photo(id).unwrap();
+        assert!(!db.is_purged("aabbcc").unwrap());
+    }
+
+    #[test]
+    fn purge_records_are_kept_once_and_can_be_forgotten() {
+        let db = db();
+        db.record_purged("ddeeff", 1_700_000_000).unwrap();
+        assert!(db.is_purged("ddeeff").unwrap());
+        assert!(!db.is_purged("aabbcc").unwrap());
+
+        // Erasing the same photograph again — say a rebuild found its file
+        // restored from a backup — keeps one record, dated by the latest.
+        db.record_purged("ddeeff", 1_800_000_000).unwrap();
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM purged_hashes"), 1);
+        assert_eq!(
+            count(&db, "SELECT purged_at FROM purged_hashes"),
+            1_800_000_000
+        );
+
+        // Reopening the index runs the schema again; the record survives.
+        db.init().unwrap();
+        assert!(db.is_purged("ddeeff").unwrap());
+
+        db.forget_purged("ddeeff").unwrap();
+        assert!(!db.is_purged("ddeeff").unwrap());
     }
 
     #[test]

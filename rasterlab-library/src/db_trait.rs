@@ -185,7 +185,22 @@ pub trait LibraryDb: Send + Sync {
     fn restore_photo(&self, photo_id: PhotoId) -> anyhow::Result<()>;
 
     /// Permanently remove a photo row and all dependent metadata.
+    ///
+    /// Index bookkeeping only: this is also what a rebuild uses to drop a row
+    /// whose file has gone, so it remembers nothing.  A photo the user erased
+    /// is recorded with [`LibraryDb::record_purged`] as well.
     fn delete_photo(&self, photo_id: PhotoId) -> anyhow::Result<()>;
+
+    /// Remember that the user erased the photograph with content hash `hash`
+    /// at `purged_at`, so that importing the same card or folder again does not
+    /// bring it back.  Recording it again keeps one record, with the new date.
+    fn record_purged(&self, hash: &str, purged_at: u64) -> anyhow::Result<()>;
+
+    /// Undo [`LibraryDb::record_purged`], so the photograph imports again.
+    fn forget_purged(&self, hash: &str) -> anyhow::Result<()>;
+
+    /// Whether the photograph with this content hash was erased by the user.
+    fn is_purged(&self, hash: &str) -> anyhow::Result<bool>;
 
     fn all_photos(&self, sort: SortOrder) -> anyhow::Result<Vec<PhotoRow>>;
 
