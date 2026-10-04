@@ -7,7 +7,7 @@ use std::sync::{Arc, atomic::Ordering};
 use rasterlab_core::{
     Image,
     formats::FormatRegistry,
-    ops::{MaskedOp, ResizeOp},
+    ops::ResizeOp,
     pipeline::EditPipeline,
     project::{RlabFile, RlabMeta},
     traits::format_handler::EncodeOptions,
@@ -386,23 +386,7 @@ impl AppState {
         // resolution and its downsampled tonal range. Render the committed
         // pipeline at source resolution and then apply the current preview op
         // at full resolution so export matches what the user sees.
-        let preview_op = self.tools.preview_op().map(|preview| {
-            let edit_mask = self.editing.and_then(|session| {
-                self.pipeline()
-                    .and_then(|pipeline| pipeline.ops().get(session.op_index))
-                    .and_then(|entry| entry.operation.as_any())
-                    .and_then(|any| any.downcast_ref::<MaskedOp>())
-                    .map(|masked| masked.mask.clone())
-            });
-            if let Some(mask) = edit_mask {
-                Box::new(MaskedOp {
-                    inner: preview,
-                    mask,
-                }) as Box<dyn Operation>
-            } else {
-                preview
-            }
-        });
+        let preview_op = self.current_preview_op();
         let Some(pipeline) = self.pipeline_mut() else {
             return Err("Nothing to save — open an image first".into());
         };

@@ -3,8 +3,12 @@
 //! between virtual copies of the same source image.
 
 use egui::{Color32, RichText, Ui};
+use rasterlab_core::{
+    ops::{MaskShape, MaskedOp},
+    traits::operation::Operation,
+};
 
-use crate::state::AppState;
+use crate::state::{AppState, EditingTool};
 
 /// Renders the edit stack panel.
 pub fn ui(ui: &mut Ui, state: &mut AppState) {
@@ -68,14 +72,16 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
     let mut reorder: Option<(usize, usize)> = None;
     let mut toggle_idx: Option<usize> = None;
     let mut edit_idx: Option<usize> = None;
+    let mut edit_mask_idx: Option<usize> = None;
 
     let editing = state.editing;
 
     for (i, entry) in ops.iter().enumerate() {
         let is_active = i < cursor;
-        let desc = entry.operation.describe();
+        let (desc, mask) = stack_description(entry.operation.as_ref());
         let (name, details) = split_description(&desc);
-        let is_editing_this = editing.is_some_and(|s| s.op_index == i);
+        let is_editing_this =
+            editing.is_some_and(|s| s.op_index == i && s.tool != EditingTool::Masking);
         let editable = crate::state::editing_tool_for_op(entry.operation.as_ref()).is_some();
         // The pipeline entry is temporarily disabled while its tool preview
         // substitutes for it.  Keep showing the committed enabled state so
@@ -196,11 +202,55 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
             });
         }
 
+        if let Some(mask) = mask {
+            let (mask_name, mask_details) = split_description(&mask);
+            let editing_this_mask =
+                editing.is_some_and(|s| s.op_index == i && s.tool == EditingTool::Masking);
+            ui.horizontal(|ui| {
+                ui.add_space(44.0);
+                ui.label(
+                    RichText::new(format!("↳ {mask_name}")).color(if editing_this_mask {
+                        Color32::from_rgb(90, 160, 255)
+                    } else {
+                        row_color
+                    }),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            editing_this_mask || (editing.is_none() && is_active),
+                            egui::Button::new("📝"),
+                        )
+                        .on_hover_text("Edit this mask")
+                        .clicked()
+                    {
+                        edit_mask_idx = Some(i);
+                    }
+                });
+            });
+            if let Some(details) = mask_details {
+                ui.horizontal(|ui| {
+                    ui.add_space(60.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(details)
+                                .color(row_color.gamma_multiply(0.75))
+                                .monospace()
+                                .small(),
+                        )
+                        .wrap(),
+                    );
+                });
+            }
+        }
+
         ui.separator();
     }
 
     // ── Apply deferred mutations ──────────────────────────────────────────
-    if let Some(idx) = edit_idx {
+    if let Some(idx) = edit_mask_idx {
+        state.begin_mask_edit(idx);
+    } else if let Some(idx) = edit_idx {
         state.begin_edit(idx);
     } else if let Some(idx) = remove_idx {
         state.remove_op(idx);
@@ -212,6 +262,32 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
 }
 
 // ── Tab bar ──────────────────────────────────────────────────────────────────
+
+/// Keep the attached mask visible without inventing another pipeline index.
+fn stack_description(op: &dyn Operation) -> (String, Option<String>) {
+    let Some(masked) = op.as_any().and_then(|any| any.downcast_ref::<MaskedOp>()) else {
+        return (op.describe(), None);
+    };
+    let mask = match &masked.mask {
+        MaskShape::Linear(mask) => format!(
+            "Linear Gradient Mask  Center {:.2}, {:.2} · Angle {:.0}° · Feather {:.2}{}",
+            mask.cx,
+            mask.cy,
+            mask.angle_deg,
+            mask.feather,
+            if mask.invert { " · Inverted" } else { "" },
+        ),
+        MaskShape::Radial(mask) => format!(
+            "Radial Gradient Mask  Center {:.2}, {:.2} · Radius {:.2} · Feather {:.2}{}",
+            mask.cx,
+            mask.cy,
+            mask.radius,
+            mask.feather,
+            if mask.invert { " · Inverted" } else { "" },
+        ),
+    };
+    (masked.inner.describe(), Some(mask))
+}
 
 /// Split the conventional `Name  details` operation description into the two
 /// lines used by the edit stack. Descriptions without details remain a single
@@ -358,6 +434,59 @@ fn rename_popup(ui: &mut Ui, state: &mut AppState) {
 #[cfg(test)]
 mod tests {
     use super::split_description;
+    use crate::state::{AppState, VirtualCopyStore};
+    use rasterlab_core::{
+        Image,
+        ops::{LinearMask, MaskShape, MaskedOp, RadialMask, SepiaOp},
+        pipeline::EditPipeline,
+    };
+
+    #[test]
+    fn stack_shows_attached_mask_type_and_parameters() {
+        for (mask, expected_name, expected_details) in [
+            (
+                MaskShape::Linear(LinearMask {
+                    angle_deg: 35.0,
+                    invert: true,
+                    ..Default::default()
+                }),
+                "Linear Gradient Mask",
+                "Angle 35°",
+            ),
+            (
+                MaskShape::Radial(RadialMask {
+                    radius: 0.42,
+                    invert: true,
+                    ..Default::default()
+                }),
+                "Radial Gradient Mask",
+                "Radius 0.42",
+            ),
+        ] {
+            let ctx = egui::Context::default();
+            let mut pipeline = EditPipeline::new(Image::new(8, 8));
+            pipeline.push_op(Box::new(MaskedOp {
+                inner: Box::new(SepiaOp::new(0.5)),
+                mask,
+            }));
+            let mut state = AppState::new(ctx.clone(), None);
+            state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| super::ui(ui, &mut state));
+            let text: String = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) => Some(text.galley.text()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains(expected_name), "{text}");
+            assert!(text.contains(expected_details), "{text}");
+            assert!(text.contains("Inverted"), "{text}");
+            assert_eq!(state.pipeline().unwrap().ops().len(), 1);
+        }
+    }
 
     #[test]
     fn splits_operation_name_from_details() {

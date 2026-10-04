@@ -573,6 +573,12 @@ impl CanvasState {
 
         if state.tools.mask_sel > 0 {
             self.handle_mask(ui, painter, state, view);
+        } else if state
+            .editing
+            .is_some_and(|session| session.tool == EditingTool::Masking)
+        {
+            // Selecting None previews removal; it must not activate another
+            // canvas tool while the mask session still owns the interaction.
         } else if state.tools.find::<HealTool>().is_some_and(|t| t.active) {
             self.handle_heal(ui, painter, state, view);
         } else if state

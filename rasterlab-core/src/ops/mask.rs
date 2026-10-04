@@ -9,7 +9,7 @@ use crate::{error::RasterResult, image::Image, traits::operation::Operation};
 
 /// A linear gradient mask.  Full effect on one side of the centre line,
 /// fading to zero on the other over a configurable transition zone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinearMask {
     /// Midpoint of the gradient in normalised [0, 1] image coordinates.
     pub cx: f32,
@@ -37,7 +37,7 @@ impl Default for LinearMask {
 
 /// A radial (elliptical) gradient mask.  Full effect inside the radius,
 /// fading to zero beyond it over the feather zone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RadialMask {
     /// Centre of the ellipse in normalised [0, 1] image coordinates.
     pub cx: f32,
@@ -64,7 +64,7 @@ impl Default for RadialMask {
 }
 
 /// Which kind of mask to use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MaskShape {
     Linear(LinearMask),
     Radial(RadialMask),

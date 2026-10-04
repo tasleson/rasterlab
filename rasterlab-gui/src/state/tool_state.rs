@@ -207,6 +207,28 @@ impl ToolState {
         }
     }
 
+    pub fn load_mask_shape(&mut self, mask: Option<&MaskShape>) {
+        match mask {
+            None => self.mask_sel = 0,
+            Some(MaskShape::Linear(mask)) => {
+                self.mask_sel = 1;
+                self.mask_lin_cx = mask.cx;
+                self.mask_lin_cy = mask.cy;
+                self.mask_lin_angle = mask.angle_deg;
+                self.mask_lin_feather = mask.feather;
+                self.mask_lin_invert = mask.invert;
+            }
+            Some(MaskShape::Radial(mask)) => {
+                self.mask_sel = 2;
+                self.mask_rad_cx = mask.cx;
+                self.mask_rad_cy = mask.cy;
+                self.mask_rad_radius = mask.radius;
+                self.mask_rad_feather = mask.feather;
+                self.mask_rad_invert = mask.invert;
+            }
+        }
+    }
+
     pub fn current_mask_shape(&self) -> Option<MaskShape> {
         match self.mask_sel {
             1 => Some(MaskShape::Linear(LinearMask {

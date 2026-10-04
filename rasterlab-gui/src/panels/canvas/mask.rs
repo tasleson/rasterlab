@@ -3,7 +3,7 @@
 
 use egui::{Color32, ColorImage, Pos2, Rect, Stroke, TextureOptions, Ui, Vec2};
 
-use crate::state::AppState;
+use crate::state::{AppState, EditingTool};
 
 use super::coords::{norm_to_screen, screen_to_norm};
 use super::{CanvasState, CanvasView};
@@ -50,10 +50,18 @@ impl CanvasState {
         if primary_down {
             if let (Some(start), Some(p)) = (self.mask_drag_start, ptr_pos) {
                 let end = screen_to_norm(p, image_tl, display_size);
+                let before = state.tools.current_mask_shape();
                 match state.tools.mask_sel {
                     MASK_LINEAR => update_linear_mask(state, start, end),
                     MASK_RADIAL => update_radial_mask(state, start, end),
                     _ => {}
+                }
+                if before != state.tools.current_mask_shape()
+                    && state
+                        .editing
+                        .is_some_and(|session| session.tool == EditingTool::Masking)
+                {
+                    state.request_render();
                 }
             }
         } else {

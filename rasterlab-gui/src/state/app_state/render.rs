@@ -383,23 +383,7 @@ impl AppState {
         }
 
         // Preview op — applied on top of committed result but NOT cached.
-        let preview_op: Option<Box<dyn Operation>> = self.tools.preview_op().map(|preview| {
-            let edit_mask = self.editing.and_then(|session| {
-                self.pipeline()
-                    .and_then(|pipeline| pipeline.ops().get(session.op_index))
-                    .and_then(|entry| entry.operation.as_any())
-                    .and_then(|any| any.downcast_ref::<MaskedOp>())
-                    .map(|masked| masked.mask.clone())
-            });
-            if let Some(mask) = edit_mask {
-                Box::new(MaskedOp {
-                    inner: preview,
-                    mask,
-                }) as Box<dyn Operation>
-            } else {
-                preview
-            }
-        });
+        let preview_op = self.current_preview_op();
         let reusable_nr_signature = preview_op
             .as_deref()
             .map(|op| {
@@ -416,7 +400,7 @@ impl AppState {
         // Render at reduced scale when a preview op is active so ops run on
         // a fraction of the pixels (~16× fewer at 25%). Manual NLM previews
         // are full-resolution so Apply can reuse the exact result.
-        let preview_requested = self.tools.any_preview_active() && !force_full_res;
+        let preview_requested = preview_op.is_some() && !force_full_res;
         let is_preview = preview_requested && !reusable_nr_preview;
         let preview_scale = if is_preview {
             Some(PREVIEW_SCALE)
@@ -476,13 +460,18 @@ impl AppState {
         // is empty) and we have a known viewport — run the preview op only on the
         // visible pixels at full resolution, return as an overlay.
         let all_cached = start_idx >= pipeline_cursor;
-        let overlay_viewport = if is_preview && all_cached {
+        // Spatial masks use full-image coordinates, so evaluating one on a
+        // cropped viewport would move its gradient as the user pans.
+        let masked_preview = preview_op
+            .as_deref()
+            .is_some_and(|op| op.as_any().is_some_and(|any| any.is::<MaskedOp>()));
+        let overlay_viewport = if is_preview && all_cached && !masked_preview {
             self.preview_viewport
         } else {
             None
         };
         // Fall back to downsampled-blit if overlay path isn't available.
-        let preview_viewport = if is_preview && overlay_viewport.is_none() {
+        let preview_viewport = if is_preview && overlay_viewport.is_none() && !masked_preview {
             self.preview_viewport
         } else {
             None

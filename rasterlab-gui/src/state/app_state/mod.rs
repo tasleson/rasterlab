@@ -38,8 +38,8 @@ use rasterlab_core::{
     analysis::{ImageStats, PlanMode},
     formats::FormatRegistry,
     ops::{
-        BlackAndWhiteOp, BrightnessContrastOp, CropOp, HistogramData, LevelsOp, MaskedOp,
-        SaturationOp, SharpenOp, SprocketFilmOp, VignetteOp,
+        BlackAndWhiteOp, BrightnessContrastOp, CropOp, HistogramData, LevelsOp, MaskShape,
+        MaskedOp, SaturationOp, SharpenOp, SprocketFilmOp, VignetteOp,
     },
     pipeline::EditPipeline,
     project::RlabFile,
@@ -300,6 +300,8 @@ pub struct AppState {
     /// stack buttons are disabled; only the tool matching `editing.tool` is
     /// interactive, and its Apply button replaces the op instead of pushing.
     pub editing: Option<EditSession>,
+    /// Global mask selection to restore after editing a committed mask.
+    mask_before_edit: Option<MaskShape>,
 
     // ── App mode & library ────────────────────────────────────────────────────
     pub mode: AppMode,
@@ -420,6 +422,7 @@ impl AppState {
             autosave_restore: None,
             autosave_restore_session_id: None,
             editing: None,
+            mask_before_edit: None,
             mode: AppMode::Editor,
             library: LibraryState {
                 thumb_scale: initial_thumb_scale,
@@ -642,6 +645,77 @@ impl AppState {
         self.request_render();
     }
 
+    /// Edit the mask attached to an operation, keeping its adjustment intact.
+    pub fn begin_mask_edit(&mut self, index: usize) {
+        if self.editing.is_some() {
+            return;
+        }
+        let Some((mask, was_enabled)) = self.pipeline().and_then(|pipeline| {
+            let entry = pipeline
+                .ops()
+                .get(index)
+                .filter(|_| index < pipeline.cursor())?;
+            let masked = entry.operation.as_any()?.downcast_ref::<MaskedOp>()?;
+            Some((masked.mask.clone(), entry.enabled))
+        }) else {
+            return;
+        };
+        self.tools.cancel_all_previews();
+        self.mask_before_edit = self.tools.current_mask_shape();
+        self.tools.load_mask_shape(Some(&mask));
+        self.tools.reveal_tool = Some("masking");
+        self.editing = Some(EditSession {
+            op_index: index,
+            tool: EditingTool::Masking,
+            was_enabled,
+        });
+        if let Some(pipeline) = self.pipeline_mut() {
+            pipeline.set_enabled_no_snapshot(index, false);
+        }
+        self.request_render();
+    }
+
+    /// Shared by canvas rendering and full-resolution export.
+    pub(super) fn current_preview_op(&self) -> Option<Box<dyn Operation>> {
+        let masked = self.editing.and_then(|session| {
+            self.pipeline()?
+                .ops()
+                .get(session.op_index)?
+                .operation
+                .as_any()?
+                .downcast_ref::<MaskedOp>()
+        });
+        if self
+            .editing
+            .is_some_and(|session| session.tool == EditingTool::Masking)
+        {
+            let inner = masked?.inner.clone_box();
+            return Some(match self.tools.current_mask_shape() {
+                Some(mask) => Box::new(MaskedOp { inner, mask }),
+                None => inner,
+            });
+        }
+        self.tools.preview_op().map(|preview| match masked {
+            Some(masked) => Box::new(MaskedOp {
+                inner: preview,
+                mask: masked.mask.clone(),
+            }) as Box<dyn Operation>,
+            None => preview,
+        })
+    }
+
+    pub fn commit_mask_edit(&mut self) {
+        if !self
+            .editing
+            .is_some_and(|session| session.tool == EditingTool::Masking)
+        {
+            return;
+        }
+        if let Some(op) = self.current_preview_op() {
+            self.commit_edit(op);
+        }
+    }
+
     /// End the current edit session, re-enabling the op if it was auto-disabled.
     pub fn end_edit(&mut self) {
         let Some(session) = self.editing.take() else {
@@ -651,6 +725,10 @@ impl AppState {
         // while the editor's preview took its place).
         if let Some(p) = self.pipeline_mut() {
             p.set_enabled_no_snapshot(session.op_index, session.was_enabled);
+        }
+        if session.tool == EditingTool::Masking {
+            self.tools
+                .load_mask_shape(self.mask_before_edit.take().as_ref());
         }
         self.tools.cancel_all_previews();
         self.request_render();
@@ -664,12 +742,17 @@ impl AppState {
             return;
         };
         self.tools.cancel_all_previews();
+        if session.tool == EditingTool::Masking {
+            self.tools
+                .load_mask_shape(self.mask_before_edit.take().as_ref());
+        }
         if let Some(p) = self.pipeline_mut() {
             let mask = p
                 .ops()
                 .get(session.op_index)
                 .and_then(|entry| entry.operation.as_any())
                 .and_then(|any| any.downcast_ref::<MaskedOp>())
+                .filter(|_| session.tool != EditingTool::Masking)
                 .map(|masked| masked.mask.clone());
             let new_op: Box<dyn Operation> = if let Some(mask) = mask {
                 Box::new(MaskedOp {
@@ -1226,6 +1309,125 @@ mod sprocket_crop_tests {
         state.end_edit();
 
         assert!(!state.pipeline().unwrap().ops()[0].enabled);
+    }
+
+    #[test]
+    fn mask_edits_apply_cancel_undo_and_redo_without_changing_the_adjustment() {
+        use rasterlab_core::ops::RadialMask;
+
+        let original_mask = MaskShape::Linear(LinearMask::default());
+        let changed_mask = MaskShape::Radial(RadialMask {
+            cx: 0.25,
+            cy: 0.75,
+            radius: 0.4,
+            feather: 0.2,
+            invert: true,
+        });
+        for enabled in [true, false] {
+            let mut state = state_with_op(Box::new(MaskedOp {
+                inner: Box::new(SepiaOp::new(0.25)),
+                mask: original_mask.clone(),
+            }));
+            // Keep the test synchronous: inspect the same preview operation
+            // used by the background renderer and rendered export directly.
+            state.loading = true;
+            if !enabled {
+                state.pipeline_mut().unwrap().toggle_op(0);
+            }
+            let original =
+                serde_json::to_value(&state.pipeline().unwrap().ops()[0].operation).unwrap();
+            state.tools.mask_sel = 2;
+            let pending = state.tools.current_mask_shape();
+
+            state.begin_mask_edit(0);
+            assert_eq!(
+                state.tools.current_mask_shape(),
+                Some(original_mask.clone())
+            );
+            state.tools.load_mask_shape(Some(&changed_mask));
+            let preview = state.current_preview_op().unwrap();
+            let expected = serde_json::to_value(&preview).unwrap();
+            assert_eq!(
+                serde_json::to_value(&state.pipeline().unwrap().ops()[0].operation).unwrap(),
+                original
+            );
+            state.end_edit();
+            assert_eq!(state.tools.current_mask_shape(), pending);
+            assert_eq!(state.pipeline().unwrap().ops()[0].enabled, enabled);
+            assert!(!state.is_dirty);
+
+            state.begin_mask_edit(0);
+            state.tools.load_mask_shape(Some(&changed_mask));
+            state.commit_mask_edit();
+            assert!(state.editing.is_none());
+            assert!(state.is_dirty);
+            assert_eq!(state.tools.current_mask_shape(), pending);
+            assert_eq!(state.pipeline().unwrap().ops().len(), 1);
+            assert_eq!(state.pipeline().unwrap().ops()[0].enabled, enabled);
+            let committed = &state.pipeline().unwrap().ops()[0].operation;
+            assert_eq!(serde_json::to_value(committed).unwrap(), expected);
+            let restored: Box<dyn rasterlab_core::traits::operation::Operation> =
+                serde_json::from_value(expected.clone()).unwrap();
+            let restored = restored
+                .as_any()
+                .unwrap()
+                .downcast_ref::<MaskedOp>()
+                .unwrap();
+            assert_eq!(restored.mask, changed_mask);
+            assert_eq!(
+                restored
+                    .inner
+                    .as_any()
+                    .unwrap()
+                    .downcast_ref::<SepiaOp>()
+                    .unwrap()
+                    .strength,
+                0.25
+            );
+
+            state.undo();
+            assert_eq!(
+                serde_json::to_value(&state.pipeline().unwrap().ops()[0].operation).unwrap(),
+                original
+            );
+            assert_eq!(state.pipeline().unwrap().ops()[0].enabled, enabled);
+            state.redo();
+            assert_eq!(
+                serde_json::to_value(&state.pipeline().unwrap().ops()[0].operation).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn removing_a_mask_keeps_the_adjustment_and_can_be_undone() {
+        let mut state = state_with_op(Box::new(MaskedOp {
+            inner: Box::new(SepiaOp::new(0.25)),
+            mask: MaskShape::Linear(LinearMask::default()),
+        }));
+        state.loading = true;
+        state.begin_mask_edit(0);
+        state.tools.mask_sel = 0;
+        assert_eq!(state.current_preview_op().unwrap().name(), "sepia");
+        state.commit_mask_edit();
+        assert_eq!(state.pipeline().unwrap().ops()[0].operation.name(), "sepia");
+        assert_eq!(state.tools.mask_sel, 0);
+        state.undo();
+        assert_eq!(
+            state.pipeline().unwrap().ops()[0].operation.name(),
+            "masked"
+        );
+        state.redo();
+        assert_eq!(state.pipeline().unwrap().ops()[0].operation.name(), "sepia");
+    }
+
+    #[test]
+    fn mask_edit_rejects_unmasked_and_missing_rows() {
+        let mut state = state_with_op(Box::new(SepiaOp::new(0.25)));
+        state.begin_mask_edit(0);
+        state.begin_mask_edit(1);
+        assert!(state.editing.is_none());
+        assert!(state.pipeline().unwrap().ops()[0].enabled);
     }
 
     #[test]
