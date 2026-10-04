@@ -96,7 +96,7 @@ The table follows the tool order in the GUI.
 | Vignette | Applies radial darkening with strength, radius, and feather controls. |
 | White Balance | Adjusts temperature and tint. |
 
-A linear or radial gradient mask can wrap the next applied operation. Once applied, the mask appears beneath that adjustment in the Edit Stack. Use the mask row's pencil to change its settings, then **Apply Mask** to save or **Cancel Edit** to discard changes. Selecting **None** and applying removes the mask while keeping the adjustment. Multi-image tools such as Focus Stack, HDR Merge, and Panorama prompt for additional source files and add their result to the same non-destructive pipeline. They accept managed-library photos as source frames, reading each one's embedded original.
+A linear or radial gradient mask can wrap the next applied operation. Drag across the image to place it, then drag its handles to adjust it: dragging a linear mask's end rotates and stretches it about its centre, the centre point moves it, and a radial mask has a handle on its edge to set the radius. Once applied, the mask appears beneath that adjustment in the Edit Stack. Use the mask row's pencil to change its settings, then **Apply Mask** to save or **Cancel Edit** to discard changes. Selecting **None** and applying removes the mask while keeping the adjustment. Multi-image tools such as Focus Stack, HDR Merge, and Panorama prompt for additional source files and add their result to the same non-destructive pipeline. They accept managed-library photos as source frames, reading each one's embedded original.
 
 ## Protecting images and projects
 

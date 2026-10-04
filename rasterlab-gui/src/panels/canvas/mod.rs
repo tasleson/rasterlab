@@ -89,8 +89,8 @@ pub struct CanvasState {
     mask_overlay_texture: Option<TextureHandle>,
     /// Hash of the mask params that produced the current overlay texture.
     mask_overlay_hash: u64,
-    /// Drag-start position (normalised [0, 1] image coords) for interactive mask placement.
-    mask_drag_start: Option<Pos2>,
+    /// Active primary drag on the mask: placing a new one or moving a handle.
+    mask_drag: Option<mask::MaskDrag>,
     /// Dragging index for heal spots: (spot_index, is_src_circle).
     heal_dragging: Option<(usize, bool)>,
     /// Last pointer position over the canvas while healing, in image
@@ -126,7 +126,7 @@ impl Default for CanvasState {
             split_dragging: false,
             mask_overlay_texture: None,
             mask_overlay_hash: 0,
-            mask_drag_start: None,
+            mask_drag: None,
             heal_dragging: None,
             heal_hover: None,
             straighten_line: None,
