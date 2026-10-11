@@ -147,6 +147,11 @@ pub struct BulkOutcome {
     /// caller holding cached thumbnails knows which of them to drop.  Only a
     /// permanent delete fills this in.
     pub purged: Vec<String>,
+    /// Photos that actually went into Recently Deleted — not the protected
+    /// ones, the failures, or any the run never reached because it was
+    /// cancelled — so a caller offering to undo the move can put back exactly
+    /// these.  Only a move to Recently Deleted fills this in.
+    pub moved: Vec<PhotoId>,
     /// True when the run stopped early because `cancel` was raised.
     pub cancelled: bool,
 }
@@ -492,7 +497,8 @@ impl Library {
         progress_cb: impl Fn(BulkProgress),
     ) -> Result<BulkOutcome> {
         let index = photo_index(self.db.all_photos(SortOrder::default())?);
-        Ok(bulk_op(photos, &cancel, progress_cb, |id| {
+        let mut moved: Vec<PhotoId> = Vec::new();
+        let mut outcome = bulk_op(photos, &cancel, progress_cb, |id| {
             let Some(row) = index.get(&id) else {
                 return Step::missing(id, "in the library index");
             };
@@ -500,10 +506,15 @@ impl Library {
                 return Step::Protected(photo_label(row));
             }
             match self.move_one_to_recently_deleted(row) {
-                Ok(()) => Step::Done,
+                Ok(()) => {
+                    moved.push(id);
+                    Step::Done
+                }
                 Err(error) => Step::failed(row, &error),
             }
-        }))
+        });
+        outcome.moved = moved;
+        Ok(outcome)
     }
 
     /// Move a photo into this library's Recently Deleted area.
@@ -1427,6 +1438,7 @@ fn bulk_op<T: Copy>(
         protected: progress.protected,
         errors: progress.errors,
         purged: Vec::new(),
+        moved: Vec::new(),
         cancelled,
     }
 }

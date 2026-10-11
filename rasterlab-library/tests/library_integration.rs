@@ -3394,6 +3394,9 @@ fn a_bulk_move_leaves_protected_photos_and_moves_the_rest() {
     assert_eq!(outcome.protected.len(), 1, "{:?}", outcome.protected);
     assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
     assert!(!outcome.cancelled);
+    // `moved` is what an undo puts back, so it must name exactly the photos
+    // that went — a protected one in it would be "restored" from nowhere.
+    assert_eq!(outcome.moved, vec![rows[0].id, rows[2].id]);
     assert_eq!(lib.recently_deleted().unwrap().len(), 2);
     assert!(
         lib.rlab_path(&rows[1].hash).exists(),
@@ -3413,6 +3416,7 @@ fn a_photo_the_index_does_not_know_is_reported_without_stopping_the_run() {
         .expect("move_to_recently_deleted");
 
     assert_eq!(outcome.done, 2, "the two real photos must still move");
+    assert_eq!(outcome.moved, vec![rows[0].id, rows[2].id]);
     assert_eq!(outcome.errors.len(), 1, "{:?}", outcome.errors);
     assert!(
         outcome.errors[0].1.contains("not in the library index"),
@@ -3455,6 +3459,7 @@ fn a_cancelled_bulk_move_keeps_what_it_had_already_moved() {
 
     assert!(outcome.cancelled);
     assert_eq!(outcome.done, 1);
+    assert_eq!(outcome.moved, vec![ids[0]], "only the photo that moved");
     assert_eq!(lib.recently_deleted().unwrap().len(), 1);
     assert_eq!(
         lib.all_photos(SortOrder::default()).unwrap().len(),
