@@ -84,7 +84,7 @@ impl AppState {
             ) {
                 Ok(store) => {
                     self.copies = Some(store);
-                    self.mark_dirty();
+                    self.refresh_dirty();
                 }
                 Err(e) => {
                     self.status = format!("Warning: could not restore edit stack: {}", e);
@@ -154,7 +154,7 @@ impl AppState {
             match VirtualCopyStore::load_from_saved(source, saved_copies, saved_active) {
                 Ok(store) => {
                     self.copies = Some(store);
-                    self.mark_dirty();
+                    self.refresh_dirty();
                 }
                 Err(e) => {
                     self.status = format!("Warning: could not restore edit stack: {}", e);
@@ -623,9 +623,23 @@ impl AppState {
     // Dirty tracking
     // -----------------------------------------------------------------------
 
+    /// Record that the user has changed the edit state.
+    ///
+    /// Every edit, undo, and redo of the stack comes through here, which makes
+    /// it the place a pending undo of a move to Recently Deleted is retired:
+    /// once the user has edited the photo the editor moved on to, Ctrl+Z
+    /// means "undo that edit", not "bring back the photo I deleted before
+    /// it".  Opening a document is not an edit, even one that restores an
+    /// autosave, so the load paths use `refresh_dirty` instead and stepping
+    /// onto the next photo after a delete leaves the undo in place.
+    pub(crate) fn mark_dirty(&mut self) {
+        self.library.undoable_delete = None;
+        self.refresh_dirty();
+    }
+
     /// Recompute whether the effective edit state differs from the last open or
     /// save boundary, and schedule an autosave only while changes remain.
-    pub(crate) fn mark_dirty(&mut self) {
+    fn refresh_dirty(&mut self) {
         let was_dirty = self.is_dirty;
         self.is_dirty = match (&self.clean_edit_state, &self.copies) {
             (Some(clean), Some(store)) => store

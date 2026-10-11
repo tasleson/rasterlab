@@ -85,6 +85,49 @@ pub struct DeleteTask {
     pub progress: BulkProgress,
     /// True once the user has asked it to stop, until the worker reports back.
     pub stopping: bool,
+    /// The library the run acts on.  Opening another library does not wait
+    /// for the run to finish, and photo ids are only unique within one
+    /// library, so a run that ends after a switch must not leave an undo
+    /// behind that would be replayed against the wrong one.
+    pub library: Arc<Library>,
+    /// True when the run was started from the editor — Delete on the photo
+    /// being viewed — rather than from the grid.
+    pub from_editor: bool,
+}
+
+/// A move to Recently Deleted that Ctrl+Z can still put back.
+///
+/// Only the most recent one is kept, and only until the user does something
+/// else that Ctrl+Z could reasonably mean instead: undo answers for the latest
+/// action, not for one several steps back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UndoableDelete {
+    /// Exactly the photos that moved.  Protected photos, failures, and any the
+    /// run never reached are not in Recently Deleted, so there is nothing of
+    /// theirs to put back.
+    pub photos: Vec<PhotoId>,
+    /// True when the move was made from the editor, which then went on to
+    /// the next photo.  Undoing it should take the editor back to the photo
+    /// the user was looking at, not just restore it out of sight.
+    pub from_editor: bool,
+}
+
+/// The photo an undone editor delete is bringing back, and where the editor
+/// was when the undo was asked for.
+///
+/// The restore runs in the background, and the user is free to carry on in
+/// the meantime.  If they have moved on by the time it lands — to another
+/// photo, out of the editor, or to another library, whose photo ids say
+/// nothing about this one's — dragging the editor back would undo their
+/// navigation rather than the delete, so the reopen is dropped instead.
+pub struct ReopenAfterUndo {
+    /// The photo being restored.
+    pub photo: PhotoId,
+    /// The library it is being restored into.
+    pub library: Arc<Library>,
+    /// Hash of the library photo the editor was showing when Ctrl+Z was
+    /// pressed.
+    pub shown: String,
 }
 
 /// A collection-membership change running in the background.
@@ -642,6 +685,20 @@ pub struct LibraryState {
     /// answer is `AppState::delete_running`.
     pub delete_task: Option<DeleteTask>,
 
+    /// The last move to Recently Deleted, while Ctrl+Z can still undo it.
+    ///
+    /// Retired by any other bulk delete starting (a restore, a purge, or an
+    /// empty changes what "undo" would mean), by switching libraries, and by
+    /// a new edit or a switch of virtual copy in the editor.
+    /// `AppState::can_undo_delete` is the answer to whether it can run right
+    /// now.
+    pub undoable_delete: Option<UndoableDelete>,
+
+    /// Set while the restore of an undone editor delete runs, so the editor
+    /// can go back to that photo once it lands.  `AppState::take_photo_to_reopen`
+    /// decides whether it still should.
+    pub reopen_after_undo: Option<ReopenAfterUndo>,
+
     /// The running collection-membership change, or `None` when idle.
     ///
     /// Only the progress line reads it; the authoritative "is one running"
@@ -753,6 +810,8 @@ impl Default for LibraryState {
             last_scrub_errors: Vec::new(),
             show_scrub_errors: false,
             delete_task: None,
+            undoable_delete: None,
+            reopen_after_undo: None,
             collection_task: None,
             last_delete_errors: Vec::new(),
             show_delete_errors: false,
@@ -1180,6 +1239,8 @@ impl LibraryState {
                 self.metadata_drafts.clear();
                 self.active_copy_saves.clear();
                 self.thumbs.clear();
+                // The ids it names belong to the library being left.
+                self.undoable_delete = None;
                 self.last_error = None;
                 self.retry_library = None;
                 self.refresh();

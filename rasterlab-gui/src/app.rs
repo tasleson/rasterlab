@@ -163,7 +163,21 @@ impl RasterLabApp {
         let no_focus = ctx.memory(|m| m.focused().is_none());
         #[cfg(not(target_arch = "wasm32"))]
         let can_save = self.state.pipeline().is_some() && self.state.editing.is_none();
-        let can_undo = self.state.can_undo();
+        // A move to Recently Deleted that can still be undone is the most
+        // recent action — any edit since would have retired it — so Ctrl+Z
+        // takes it back before it touches the edit stack.  Not while a text
+        // field has focus, though: there Ctrl+Z belongs to the text, and the
+        // key is left for it rather than falling back to the edit stack,
+        // which would undo an older edit and retire the delete's undo too.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (undo_delete, can_undo) = if self.state.library.undoable_delete.is_some() {
+            let undo_delete = no_focus && self.state.can_undo_delete();
+            (undo_delete, undo_delete)
+        } else {
+            (false, self.state.can_undo())
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (undo_delete, can_undo) = (false, self.state.can_undo());
         let can_redo = self.state.can_redo();
 
         // Consume shortcut keys inside `input_mut`, but defer the handlers
@@ -227,7 +241,11 @@ impl RasterLabApp {
         });
 
         if do_undo {
-            self.state.undo();
+            if undo_delete {
+                self.state.undo_delete();
+            } else {
+                self.state.undo();
+            }
         }
         if do_redo {
             self.state.redo();
@@ -906,12 +924,27 @@ impl eframe::App for RasterLabApp {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
+                    // Same precedence as Ctrl+Z, named so the user can tell
+                    // which of the two Undo is about to do.
+                    let undo_delete = self.state.can_undo_delete();
+                    let undo_label = if undo_delete {
+                        "Undo Move to Recently Deleted  (Ctrl+Z)"
+                    } else {
+                        "Undo  (Ctrl+Z)"
+                    };
                     if ui
-                        .add_enabled(self.state.can_undo(), egui::Button::new("Undo  (Ctrl+Z)"))
+                        .add_enabled(
+                            undo_delete || self.state.can_undo(),
+                            egui::Button::new(undo_label),
+                        )
                         .clicked()
                     {
                         ui.close_kind(egui::UiKind::Menu);
-                        self.state.undo();
+                        if undo_delete {
+                            self.state.undo_delete();
+                        } else {
+                            self.state.undo();
+                        }
                     }
                     if ui
                         .add_enabled(self.state.can_redo(), egui::Button::new("Redo  (Ctrl+Y)"))
@@ -1156,6 +1189,18 @@ impl eframe::App for RasterLabApp {
                     }
                 }
             }
+        }
+
+        // ── Undone editor delete ─────────────────────────────────────────
+        // The mirror of the block above: once the restore has landed, go
+        // back to the photo the editor left when it was deleted, if the user
+        // is still where they pressed Ctrl+Z.  Through the prompt, unlike the
+        // delete above: an edit would have retired the undo, but the photo on
+        // screen can still be dirty without one — an autosave restored as it
+        // opened.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((rlab_path, lib_root, hash)) = self.state.take_photo_to_reopen() {
+            self.request_open_library_photo(rlab_path, lib_root, hash, None);
         }
 
         // ── About dialog ─────────────────────────────────────────────────

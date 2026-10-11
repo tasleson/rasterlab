@@ -16,7 +16,9 @@ use rasterlab_core::panic_guard;
 use rasterlab_library::{CollectionId, MembershipChange, PhotoId};
 
 use super::{AppMode, AppState, BgMessage, workers};
-use crate::state::library_state::{CollectionTask, DeleteKind, DeleteTask, ImportKind, plural};
+use crate::state::library_state::{
+    CollectionTask, DeleteKind, DeleteTask, ImportKind, ReopenAfterUndo, UndoableDelete, plural,
+};
 
 /// Number of worker threads servicing thumbnail loads. Fixed and small so a
 /// large library grid can't spawn thousands of threads at once.
@@ -28,6 +30,19 @@ pub(super) struct ThumbLoadRequest {
     hash: String,
     thumb_path: StdPathBuf,
     rlab_path: StdPathBuf,
+}
+
+/// What a bulk delete operation acts on.
+enum DeleteTarget {
+    /// The grid selection, taken as the task starts.
+    Selection,
+    /// Exactly these photos, whatever is selected: an undo puts back what the
+    /// move took, not what happens to be selected by the time it is asked for.
+    Photos(Vec<PhotoId>),
+    /// These collections, leaving their photos alone.
+    Collections(Vec<CollectionId>),
+    /// Everything in Recently Deleted.
+    Everything,
 }
 
 impl AppState {
@@ -406,22 +421,89 @@ impl AppState {
 
     /// Move the selection into the library-owned Recently Deleted area.
     pub fn move_selected_to_recently_deleted(&mut self) {
-        self.start_delete_task(DeleteKind::ToRecentlyDeleted, Vec::new());
+        self.start_delete_task(DeleteKind::ToRecentlyDeleted, DeleteTarget::Selection);
     }
 
     /// Move the selection back out of Recently Deleted.
     pub fn restore_selected(&mut self) {
-        self.start_delete_task(DeleteKind::Restore, Vec::new());
+        self.start_delete_task(DeleteKind::Restore, DeleteTarget::Selection);
     }
 
     /// Erase the selected Recently Deleted photos for good.
     pub fn permanently_delete_selected(&mut self) {
-        self.start_delete_task(DeleteKind::Permanent, Vec::new());
+        self.start_delete_task(DeleteKind::Permanent, DeleteTarget::Selection);
     }
 
     /// Erase everything in Recently Deleted for good.
     pub fn empty_recently_deleted(&mut self) {
-        self.start_delete_task(DeleteKind::Empty, Vec::new());
+        self.start_delete_task(DeleteKind::Empty, DeleteTarget::Everything);
+    }
+
+    /// True when Undo would put back the last move to Recently Deleted.
+    ///
+    /// Not while another bulk operation is running: the restore is one
+    /// itself, and would be refused.  Nor during an edit session, for the
+    /// same reason pipeline undo is not: the session points into the open
+    /// photo's stack, and an undo that reopens the deleted photo would leave
+    /// it pointing into a document that is no longer there.
+    pub fn can_undo_delete(&self) -> bool {
+        self.library.undoable_delete.is_some()
+            && self.library.library.is_some()
+            && self.editing.is_none()
+            && !self.delete_running()
+    }
+
+    /// Put back the photos the last move to Recently Deleted took, without
+    /// the user having to go and find them in Recently Deleted.
+    ///
+    /// When the move was the editor's Delete of one photo and the editor is
+    /// still on the photo it went on to afterwards, the photo the user deleted
+    /// is the one they expect to see again, so it is noted for
+    /// [`AppState::take_photo_to_reopen`].  A grid delete, or one of several
+    /// photos, has no single photo to return to, and only restores.
+    pub fn undo_delete(&mut self) {
+        if !self.can_undo_delete() {
+            return;
+        }
+        let Some(undo) = self.library.undoable_delete.take() else {
+            return;
+        };
+        self.library.reopen_after_undo = match (undo.photos.as_slice(), &self.library_context) {
+            ([photo], Some((_, shown))) if undo.from_editor && self.mode == AppMode::Editor => {
+                self.library.library.clone().map(|library| ReopenAfterUndo {
+                    photo: *photo,
+                    library,
+                    shown: shown.clone(),
+                })
+            }
+            _ => None,
+        };
+        self.start_delete_task(DeleteKind::Restore, DeleteTarget::Photos(undo.photos));
+    }
+
+    /// Once the restore started by [`AppState::undo_delete`] is over, the
+    /// photo to take the editor back to, as `(rlab_path, library_root, hash)`.
+    ///
+    /// Only if the editor is still where it was when Ctrl+Z was pressed, in
+    /// the same library, and the photo is back in the results; a restore that
+    /// failed, was stopped, or put the photo somewhere the current view does
+    /// not show leaves the editor alone.  Either way the request is used up.
+    pub fn take_photo_to_reopen(&mut self) -> Option<(StdPathBuf, StdPathBuf, String)> {
+        if self.delete_running() {
+            return None;
+        }
+        let reopen = self.library.reopen_after_undo.take()?;
+        let lib = self
+            .library
+            .library
+            .clone()
+            .filter(|lib| Arc::ptr_eq(lib, &reopen.library))?;
+        let (root, shown) = self.library_context.clone()?;
+        if self.mode != AppMode::Editor || shown != reopen.shown {
+            return None;
+        }
+        let photo = self.library.results.iter().find(|p| p.id == reopen.photo)?;
+        Some((lib.rlab_path(&photo.hash), root, photo.hash.clone()))
     }
 
     /// Delete collections, leaving the photos that were in them alone.
@@ -430,7 +512,13 @@ impl AppState {
     /// the marks as they stand now: the sidebar is still live behind the
     /// dialog, and the batch that goes must be the batch that was listed.
     pub fn delete_collections(&mut self, ids: Vec<CollectionId>) {
-        self.start_delete_task(DeleteKind::Collections, ids);
+        self.start_delete_task(DeleteKind::Collections, DeleteTarget::Collections(ids));
+    }
+
+    /// True while the editor is showing a photo from the library, which is
+    /// where its Delete key works.
+    fn in_library_editor(&self) -> bool {
+        self.mode == AppMode::Editor && self.library_context.is_some()
     }
 
     /// Request that a running bulk operation stop after the current photo.
@@ -449,19 +537,22 @@ impl AppState {
     /// it finishes: those photos or collections are on their way out, and
     /// leaving them marked invites a second run at them while the first is
     /// still going.
-    fn start_delete_task(&mut self, kind: DeleteKind, collections: Vec<CollectionId>) {
+    fn start_delete_task(&mut self, kind: DeleteKind, target: DeleteTarget) {
         if self.delete_running() {
             return;
         }
         let Some(lib) = self.library.library.clone() else {
             return;
         };
-        let mut photos = Vec::new();
-        match kind {
-            DeleteKind::Empty => {}
-            DeleteKind::Collections => self.library.leave_collections(&collections),
-            _ => photos = std::mem::take(&mut self.library.selected),
-        }
+        let (photos, collections) = match target {
+            DeleteTarget::Selection => (std::mem::take(&mut self.library.selected), Vec::new()),
+            DeleteTarget::Photos(photos) => (photos, Vec::new()),
+            DeleteTarget::Collections(collections) => {
+                self.library.leave_collections(&collections);
+                (Vec::new(), collections)
+            }
+            DeleteTarget::Everything => (Vec::new(), Vec::new()),
+        };
         // Empty takes no list of its own, so seed its bar from the sidebar
         // count until the worker's first report replaces it with the real
         // total.
@@ -474,6 +565,11 @@ impl AppState {
             return;
         }
 
+        // Whatever this run is, it is now the latest thing Ctrl+Z could be
+        // asked to undo, and putting back an older move would undo the wrong
+        // one — or, after a purge, try to restore photos that are gone.
+        self.library.undoable_delete = None;
+
         let cancel = Arc::new(AtomicBool::new(false));
         self.delete_cancel = Some(cancel.clone());
         self.library.delete_task = Some(DeleteTask {
@@ -483,6 +579,8 @@ impl AppState {
                 ..Default::default()
             },
             stopping: false,
+            library: Arc::clone(&lib),
+            from_editor: self.in_library_editor(),
         });
         self.library.last_delete_errors.clear();
         self.status = format!("{}…", kind.progress_verb());
@@ -528,8 +626,29 @@ impl AppState {
         }
     }
 
-    pub(super) fn on_delete_complete(&mut self, outcome: rasterlab_library::BulkOutcome) {
+    pub(super) fn on_delete_complete(&mut self, mut outcome: rasterlab_library::BulkOutcome) {
+        // Asked before the task is released: it knows where the run was
+        // started from, and whether the library it ran against is still open.
+        let undo_from_editor = self.library.delete_task.as_ref().and_then(|task| {
+            let same_library = self
+                .library
+                .library
+                .as_ref()
+                .is_some_and(|lib| Arc::ptr_eq(lib, &task.library));
+            (task.kind == DeleteKind::ToRecentlyDeleted && same_library).then_some(task.from_editor)
+        });
         let kind = self.finish_delete_task();
+        // A run stopped partway is undoable too: what it did move is in
+        // Recently Deleted, and putting that back is still what the user would
+        // be asking for.
+        if let Some(from_editor) = undo_from_editor
+            && !outcome.moved.is_empty()
+        {
+            self.library.undoable_delete = Some(UndoableDelete {
+                photos: std::mem::take(&mut outcome.moved),
+                from_editor,
+            });
+        }
         // Permanently erased photos will never be shown again, so their
         // thumbnails are dead weight in the texture cache.
         for hash in &outcome.purged {
@@ -549,6 +668,11 @@ impl AppState {
         if !outcome.errors.is_empty() {
             self.status
                 .push_str(&format!(", {} error(s)", outcome.errors.len()));
+        }
+        // Nothing else on screen says the move can be taken back without a
+        // trip to Recently Deleted.
+        if self.library.undoable_delete.is_some() {
+            self.status.push_str(" (Ctrl+Z to undo)");
         }
         // Protected photos are a partly-unfollowed instruction, not a failure,
         // so they get the banner rather than being lost in the status line.
@@ -1154,5 +1278,473 @@ fn protected_message(names: &[String]) -> String {
         format!("Protected, so not deleted: {}.", names.join(", "))
     } else {
         format!("{} protected photos were not deleted.", names.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::Path,
+        time::{Duration, Instant},
+    };
+
+    use rasterlab_core::{
+        Image,
+        ops::{SaturationOp, SepiaOp},
+        pipeline::EditPipeline,
+        project::{RlabFile, RlabMeta},
+    };
+    use rasterlab_library::BulkOutcome;
+
+    use super::*;
+    use crate::state::{
+        edit_session::{EditSession, EditingTool},
+        virtual_copies::VirtualCopyStore,
+    };
+
+    type Ids = &'static [PhotoId];
+    /// Something done to the state, named for the failure message.
+    type Action = (&'static str, fn(&mut AppState));
+
+    fn state_with_library(dir: &Path) -> AppState {
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.library.create_library(dir.to_path_buf(), 0.5);
+        // Where opening a library leaves the app, and where the grid is.
+        state.mode = AppMode::Library;
+        assert!(
+            state.library.library.is_some(),
+            "{:?}",
+            state.library.last_error
+        );
+        state
+    }
+
+    /// Stand in for a running bulk operation of `kind`, without a worker, so
+    /// its completion can be handed over directly.
+    fn pretend_running(state: &mut AppState, kind: DeleteKind) {
+        state.delete_cancel = Some(Arc::new(AtomicBool::new(false)));
+        state.library.delete_task = Some(DeleteTask {
+            kind,
+            progress: Default::default(),
+            stopping: false,
+            library: state.library.library.clone().unwrap(),
+            from_editor: false,
+        });
+    }
+
+    /// Fold worker reports in until the running bulk operation is over.
+    fn wait_for_delete(state: &mut AppState) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while state.delete_running() {
+            assert!(
+                Instant::now() < deadline,
+                "the delete worker never reported back"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+            state.poll_background();
+        }
+    }
+
+    fn undoable(photos: &[PhotoId]) -> Option<UndoableDelete> {
+        Some(UndoableDelete {
+            photos: photos.to_vec(),
+            from_editor: false,
+        })
+    }
+
+    #[test]
+    fn only_a_move_that_moved_something_can_be_undone() {
+        let cases: [(DeleteKind, Ids, bool, Option<Ids>); 7] = [
+            (DeleteKind::ToRecentlyDeleted, &[1, 2], false, Some(&[1, 2])),
+            // Stopped partway: what did move can still go back.
+            (DeleteKind::ToRecentlyDeleted, &[1], true, Some(&[1])),
+            // Everything was protected or failed: nothing to put back.
+            (DeleteKind::ToRecentlyDeleted, &[], false, None),
+            (DeleteKind::Restore, &[1], false, None),
+            (DeleteKind::Permanent, &[1], false, None),
+            (DeleteKind::Empty, &[1], false, None),
+            (DeleteKind::Collections, &[1], false, None),
+        ];
+        for (kind, moved, cancelled, expected) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut state = state_with_library(tmp.path());
+            pretend_running(&mut state, kind);
+
+            state.on_delete_complete(BulkOutcome {
+                done: moved.len(),
+                moved: moved.to_vec(),
+                cancelled,
+                ..Default::default()
+            });
+
+            let what = format!("{kind:?}, moved {moved:?}, cancelled {cancelled}");
+            assert_eq!(
+                state.library.undoable_delete,
+                expected.and_then(undoable),
+                "{what}"
+            );
+            assert_eq!(state.can_undo_delete(), expected.is_some(), "{what}");
+            assert_eq!(
+                state.status.contains("Ctrl+Z to undo"),
+                expected.is_some(),
+                "{what}: {}",
+                state.status
+            );
+        }
+    }
+
+    /// Photo ids are only unique within a library, so a move that finishes
+    /// after the user has switched away must not offer to restore its ids in
+    /// the one they switched to.
+    #[test]
+    fn a_move_that_finishes_after_a_library_switch_cannot_be_undone() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut state = state_with_library(first.path());
+        pretend_running(&mut state, DeleteKind::ToRecentlyDeleted);
+        state
+            .library
+            .create_library(second.path().to_path_buf(), 0.5);
+
+        state.on_delete_complete(BulkOutcome {
+            done: 1,
+            moved: vec![1],
+            ..Default::default()
+        });
+
+        assert_eq!(state.library.undoable_delete, None);
+        assert!(!state.status.contains("Ctrl+Z"), "{}", state.status);
+    }
+
+    #[test]
+    fn switching_libraries_retires_the_undo() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut state = state_with_library(first.path());
+        state.library.undoable_delete = undoable(&[1]);
+
+        state
+            .library
+            .create_library(second.path().to_path_buf(), 0.5);
+
+        assert_eq!(state.library.undoable_delete, None);
+    }
+
+    /// Any other bulk delete is now the latest action, and after a purge or
+    /// an empty the photos an older undo names may be gone for good.
+    #[test]
+    fn starting_any_delete_retires_the_undo() {
+        let starts: [Action; 5] = [
+            ("move", AppState::move_selected_to_recently_deleted),
+            ("restore", AppState::restore_selected),
+            ("permanent delete", AppState::permanently_delete_selected),
+            ("empty", AppState::empty_recently_deleted),
+            ("collections", |state| state.delete_collections(vec![1])),
+        ];
+        for (what, start) in starts {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut state = state_with_library(tmp.path());
+            state.library.undoable_delete = undoable(&[1]);
+            state.library.selected = vec![2];
+
+            start(&mut state);
+
+            assert!(state.delete_running(), "{what} did not start");
+            assert_eq!(state.library.undoable_delete, None, "{what}");
+            assert!(!state.can_undo_delete(), "{what}");
+            wait_for_delete(&mut state);
+        }
+    }
+
+    /// A library holding one imported photo, shown in the grid.
+    fn library_with_photo(dir: &Path) -> (AppState, rasterlab_library::PhotoRow) {
+        let mut state = state_with_library(dir);
+        let image = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("test_images/meta_test.jpg");
+        let lib = state.library.library.clone().unwrap();
+        lib.import_files(&[image], |_| {}).unwrap();
+        state.library.refresh();
+        let photo = state.library.results[0].clone();
+        (state, photo)
+    }
+
+    /// Put the editor on `hash`, as opening a library photo does.
+    fn show_in_editor(state: &mut AppState, root: &Path, hash: &str) {
+        state.mode = AppMode::Editor;
+        state.library_context = Some((root.to_path_buf(), hash.to_owned()));
+    }
+
+    /// The whole round trip against a real library: a delete offers the undo,
+    /// the undo puts the photo back, and the offer is used up.  Made from the
+    /// grid it only restores; made from the editor it also takes the editor
+    /// back to the photo.
+    #[test]
+    fn undoing_a_move_restores_exactly_what_moved() {
+        for from_editor in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (mut state, photo) = library_with_photo(tmp.path());
+            if from_editor {
+                show_in_editor(&mut state, tmp.path(), &photo.hash);
+            }
+
+            state.library.select_only(photo.id);
+            state.move_selected_to_recently_deleted();
+            wait_for_delete(&mut state);
+
+            assert!(state.library.results.is_empty(), "{}", state.status);
+            assert_eq!(
+                state.library.undoable_delete,
+                Some(UndoableDelete {
+                    photos: vec![photo.id],
+                    from_editor
+                })
+            );
+            assert!(
+                state.status.ends_with("(Ctrl+Z to undo)"),
+                "{}",
+                state.status
+            );
+            assert!(state.can_undo_delete());
+
+            state.undo_delete();
+            assert!(state.delete_running());
+            assert!(!state.can_undo_delete(), "not while the restore runs");
+            assert_eq!(
+                state.take_photo_to_reopen(),
+                None,
+                "not before the restore lands"
+            );
+            wait_for_delete(&mut state);
+
+            let back: Vec<PhotoId> = state.library.results.iter().map(|p| p.id).collect();
+            assert_eq!(back, [photo.id], "{}", state.status);
+            assert_eq!(state.status, "Restored 1 photo");
+            assert_eq!(state.library.undoable_delete, None);
+            assert!(!state.can_undo_delete());
+            let lib = state.library.library.clone().unwrap();
+            assert_eq!(
+                state.take_photo_to_reopen(),
+                from_editor.then(|| (
+                    lib.rlab_path(&photo.hash),
+                    tmp.path().to_path_buf(),
+                    photo.hash.clone()
+                ))
+            );
+            assert!(state.library.reopen_after_undo.is_none(), "used up");
+        }
+    }
+
+    /// The editor goes back to the restored photo only when it was the
+    /// editor's own Delete of a single photo and the editor is still on a
+    /// library photo.
+    #[test]
+    fn undo_reopens_only_a_single_photo_deleted_from_the_editor() {
+        let cases: [(bool, Ids, AppMode, bool, Option<PhotoId>); 5] = [
+            (true, &[7], AppMode::Editor, true, Some(7)),
+            (false, &[7], AppMode::Editor, true, None),
+            (true, &[7, 8], AppMode::Editor, true, None),
+            (true, &[7], AppMode::Library, true, None),
+            (true, &[7], AppMode::Editor, false, None),
+        ];
+        for (from_editor, photos, mode, in_library, expected) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut state = state_with_library(tmp.path());
+            state.library.undoable_delete = Some(UndoableDelete {
+                photos: photos.to_vec(),
+                from_editor,
+            });
+            state.mode = mode;
+            state.library_context =
+                in_library.then(|| (tmp.path().to_path_buf(), "next".to_owned()));
+
+            state.undo_delete();
+
+            let what = format!("from editor {from_editor}, {photos:?}, {mode:?}, {in_library}");
+            let reopen = state.library.reopen_after_undo.as_ref();
+            assert_eq!(reopen.map(|r| r.photo), expected, "{what}");
+            assert!(
+                reopen.is_none_or(|r| r.shown == "next"),
+                "{what}: the photo on screen must be noted"
+            );
+            assert!(state.delete_running(), "{what}: the restore must still run");
+            wait_for_delete(&mut state);
+        }
+    }
+
+    /// The restore runs in the background, and the user may carry on in the
+    /// meantime.  Having moved on, being dragged back would undo their
+    /// navigation, not the delete.
+    #[test]
+    fn the_editor_goes_back_only_if_the_user_stayed_put() {
+        let other_library = tempfile::tempdir().unwrap();
+        let other_root = other_library.path().to_path_buf();
+        type MoveOn = Box<dyn Fn(&mut AppState, &rasterlab_library::PhotoRow)>;
+        let moves: [(&str, MoveOn); 4] = [
+            ("stayed put", Box::new(|_, _| {})),
+            (
+                "arrowed on",
+                Box::new(|state, _| {
+                    let (root, _) = state.library_context.clone().unwrap();
+                    state.library_context = Some((root, "another photo".to_owned()));
+                }),
+            ),
+            (
+                "left the editor",
+                Box::new(|state, _| state.mode = AppMode::Library),
+            ),
+            // The other library holds a photo under the same id, so only the
+            // library check stands between the reopen and the wrong photo.
+            (
+                "switched library",
+                Box::new(move |state, photo| {
+                    library_with_photo(&other_root);
+                    state.library.open_library(other_root.clone(), 0.5);
+                    assert!(
+                        state.library.results.iter().any(|p| p.id == photo.id),
+                        "the other library should reuse the id"
+                    );
+                    state.mode = AppMode::Editor;
+                }),
+            ),
+        ];
+        for (what, moved_on) in moves {
+            let tmp = tempfile::tempdir().unwrap();
+            let (mut state, photo) = library_with_photo(tmp.path());
+            show_in_editor(&mut state, tmp.path(), &photo.hash);
+            state.library.select_only(photo.id);
+            state.move_selected_to_recently_deleted();
+            wait_for_delete(&mut state);
+            // Where the editor went on to after the delete.
+            show_in_editor(&mut state, tmp.path(), "next");
+
+            state.undo_delete();
+            assert!(state.library.reopen_after_undo.is_some(), "{what}");
+            moved_on(&mut state, &photo);
+            wait_for_delete(&mut state);
+
+            let reopened = state.take_photo_to_reopen().map(|(_, _, hash)| hash);
+            let expected = (what == "stayed put").then(|| photo.hash.clone());
+            assert_eq!(reopened, expected, "{what}");
+            assert!(state.library.reopen_after_undo.is_none(), "{what}: used up");
+        }
+    }
+
+    /// An edit session points into the open photo's stack, and an undo that
+    /// reopened the deleted photo would leave it pointing into a document
+    /// that is gone — the same reason pipeline undo waits for the session.
+    #[test]
+    fn an_edit_session_holds_the_undo_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = state_with_library(tmp.path());
+        state.library.undoable_delete = undoable(&[1]);
+        state.editing = Some(EditSession {
+            op_index: 0,
+            tool: EditingTool::Saturation,
+            was_enabled: true,
+        });
+
+        assert!(!state.can_undo_delete());
+        state.undo_delete();
+
+        assert!(!state.delete_running());
+        assert_eq!(
+            state.library.undoable_delete,
+            undoable(&[1]),
+            "still there for when the session ends"
+        );
+        state.editing = None;
+        assert!(state.can_undo_delete());
+    }
+
+    /// A store whose stack can be both undone and redone, with a second copy
+    /// to switch to, so every action below has something to act on.
+    fn state_with_edits() -> AppState {
+        let mut pipeline = EditPipeline::new(Image::new(8, 8));
+        pipeline.push_op(Box::new(SaturationOp::new(0.5)));
+        pipeline.push_op(Box::new(SepiaOp::new(0.25)));
+        assert!(pipeline.undo());
+        let mut store = VirtualCopyStore::new("Copy 1".into(), pipeline);
+        store.add_copy("Copy 2".into());
+        store.set_active(0);
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(store);
+        state
+    }
+
+    /// "Most recent action wins": once the user edits the photo the editor
+    /// moved on to, or switches to another copy of it, Ctrl+Z is about that.
+    #[test]
+    fn an_edit_retires_the_undo() {
+        let edits: [Action; 6] = [
+            ("push", |state| state.push_op(Box::new(SepiaOp::new(0.5)))),
+            ("toggle", |state| state.toggle_op(0)),
+            ("remove", |state| state.remove_op(0)),
+            ("undo", AppState::undo),
+            ("redo", AppState::redo),
+            ("switch copy", |state| state.switch_copy(1)),
+        ];
+        for (what, edit) in edits {
+            let mut state = state_with_edits();
+            state.library.undoable_delete = undoable(&[1]);
+
+            edit(&mut state);
+
+            let switched = state.copies.as_ref().unwrap().active_index() == 1;
+            assert!(state.is_dirty || switched, "{what} did nothing");
+            assert_eq!(state.library.undoable_delete, None, "{what}");
+        }
+    }
+
+    /// The editor opens the next photo straight after an editor delete, and
+    /// that must not use up the undo.  Library photos open as projects; both
+    /// load paths are covered, each with an open that restores an autosave,
+    /// which leaves the document dirty without an edit.
+    #[test]
+    fn opening_a_photo_keeps_the_undo() {
+        for project in [false, true] {
+            for restore_autosave in [false, true] {
+                let mut state = AppState::new(egui::Context::default(), None);
+                // The autosave carries an edit the project on disk does not,
+                // so restoring it is what makes the document dirty.
+                let saved = |ops: usize| {
+                    let mut pipeline = EditPipeline::new(Image::new(4, 4));
+                    for _ in 0..ops {
+                        pipeline.push_op(Box::new(SepiaOp::new(0.5)));
+                    }
+                    VirtualCopyStore::new("Copy 1".into(), pipeline)
+                        .save_states()
+                        .unwrap()
+                };
+                if restore_autosave {
+                    state.autosave_restore = Some(saved(1));
+                }
+                state.library.undoable_delete = undoable(&[1]);
+
+                if project {
+                    let (copies, active) = saved(0);
+                    let rlab = RlabFile::new(
+                        RlabMeta::new("test", None::<String>, 4, 4),
+                        Vec::new(),
+                        copies,
+                        active,
+                        None,
+                    );
+                    state.on_project_loaded(
+                        "next.rlab".into(),
+                        Arc::new(rlab),
+                        Arc::new(Image::new(4, 4)),
+                    );
+                } else {
+                    state.on_image_loaded("next.png".into(), Image::new(4, 4), Vec::new());
+                }
+
+                let what = format!("project {project}, autosave restored {restore_autosave}");
+                assert!(state.copies.is_some(), "{what}: {}", state.status);
+                assert_eq!(state.is_dirty, restore_autosave, "{what}");
+                assert_eq!(state.library.undoable_delete, undoable(&[1]), "{what}");
+            }
+        }
     }
 }

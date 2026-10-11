@@ -111,6 +111,7 @@ RasterLab uses several independent mechanisms because no single checksum, undo s
 - Opening another file or library photo while edits are unsaved requires confirmation.
 - Library deletion requires confirmation and moves photos to RasterLab's **Recently Deleted** view, where they can be restored, deleted permanently, or removed together with **Empty Recently Deleted**. The library remembers the content hash of every photo deleted permanently, and a later import skips that photograph rather than bringing it back, so re-importing a card you have already culled does not undo the cull.
 - All four, and deleting collections, run in the background with a progress count and a **Stop** button, so a large batch on a network-mounted library never blocks the window. One runs at a time. Stopping keeps whatever has already been done; what could not be done is listed by name.
+- The most recent move to Recently Deleted, whether from the grid or with **Delete** in the editor, can be taken back with **Ctrl+Z** (or **Edit > Undo Move to Recently Deleted**) without visiting Recently Deleted. The offer lasts until the next edit, virtual-copy switch, delete, or restore, or until another library is opened; undoing a **Delete** made in the editor also returns the editor to that photo.
 - A library photo can be marked **Protected**. RasterLab then refuses to delete it (even into Recently Deleted) until it is unprotected.
 
 ### Detecting corruption in `.rlab` files

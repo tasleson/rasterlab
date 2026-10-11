@@ -1198,6 +1198,10 @@ impl AppState {
             }
             store.set_active(index);
         }
+        // Not an edit, so `mark_dirty` does not see it, but it is the newest
+        // thing the user did in the editor, and the copy switched to has an
+        // undo history of its own that Ctrl+Z should now be about.
+        self.library.undoable_delete = None;
         self.cancel_all_previews();
         self.request_render();
     }
