@@ -109,6 +109,7 @@ pub mod scrub;
 pub mod search;
 pub mod stoolap_db;
 pub mod thumbnail;
+pub mod timeline;
 
 pub use compare::{CompareOptions, CompareOutcome, CompareProgress, Difference, Scope, Side};
 pub use db_trait::{
@@ -126,3 +127,4 @@ pub use reconstruct::{RebuildOutcome, RebuildProgress};
 pub use scrub::{ScrubOutcome, ScrubProgress};
 pub use search::{Resolution, SearchFilter};
 pub use stoolap_db::StoolapDb;
+pub use timeline::{DateSpan, Timeline};

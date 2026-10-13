@@ -249,6 +249,14 @@ pub trait LibraryDb: Send + Sync {
     /// visibly landing in the grid.
     fn active_photo_count(&self) -> anyhow::Result<i64>;
 
+    /// How many photos (outside Recently Deleted) were taken on each day, as
+    /// the date part of the raw `capture_date` string — `"YYYY:MM:DD"` for an
+    /// EXIF date.  Photos without a capture date are counted under `None`.
+    ///
+    /// Unordered, and a day may appear more than once if the strings spell it
+    /// differently; [`crate::timeline::Timeline`] normalises that.
+    fn capture_day_counts(&self) -> anyhow::Result<Vec<(Option<String>, i64)>>;
+
     /// Drop sessions no photo belongs to, returning how many went.  Empty
     /// sessions are what an interrupted import or a deleted batch leaves.
     fn delete_empty_sessions(&self) -> anyhow::Result<usize>;

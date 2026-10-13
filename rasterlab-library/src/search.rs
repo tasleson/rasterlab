@@ -58,6 +58,10 @@ pub struct SearchFilter {
     pub capture_date_from: Option<String>,
     pub capture_date_to: Option<String>,
 
+    /// When `true`, only return photos that carry no capture date at all —
+    /// the ones no date range can ever match.
+    pub capture_date_unknown: bool,
+
     /// Filter to photos from a specific import session (UUID string).
     pub import_session: Option<String>,
 
@@ -91,6 +95,7 @@ impl SearchFilter {
             && self.lens_model.is_none()
             && self.capture_date_from.is_none()
             && self.capture_date_to.is_none()
+            && !self.capture_date_unknown
             && self.import_session.is_none()
             && self.collection_id.is_none()
             && self.resolution_max.is_none()

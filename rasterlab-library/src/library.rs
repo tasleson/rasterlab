@@ -29,6 +29,7 @@ use crate::{
     search::SearchFilter,
     stoolap_db::StoolapDb,
     thumbnail::{generate_thumbnail, write_thumbnail},
+    timeline::Timeline,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -802,6 +803,12 @@ impl Library {
 
     pub fn all_sessions(&self) -> Result<Vec<ImportSessionRow>> {
         self.db.all_sessions()
+    }
+
+    /// How many photos were taken on each calendar day, for browsing by
+    /// capture date rather than by import.
+    pub fn timeline(&self) -> Result<Timeline> {
+        Ok(Timeline::from_day_counts(self.db.capture_day_counts()?))
     }
 
     pub fn photos_in_session(&self, session_id: &str) -> Result<Vec<PhotoRow>> {

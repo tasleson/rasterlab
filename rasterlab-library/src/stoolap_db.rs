@@ -159,6 +159,17 @@ impl StoolapDb {
 
 // ── Schema ────────────────────────────────────────────────────────────────────
 
+/// Photos whose `capture_date` cannot place them on a calendar day: missing,
+/// not shaped like `YYYY:MM:DD`, or the all-zero date a camera with an unset
+/// clock writes.  [`crate::timeline::parse_day`] rejects exactly these, which is
+/// what keeps the timeline's "Unknown date" count equal to what the filter
+/// returns.
+const UNKNOWN_CAPTURE_DATE_SQL: &str = "(p.capture_date IS NULL
+    OR p.capture_date NOT LIKE '____:__:__%'
+    OR p.capture_date < '1900'
+    OR substr(p.capture_date, 6, 2) NOT BETWEEN '01' AND '12'
+    OR substr(p.capture_date, 9, 2) NOT BETWEEN '01' AND '31')";
+
 const SCHEMA_STMTS: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS photos (
         id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -672,6 +683,9 @@ impl LibraryDb for StoolapDb {
         if let Some(ref to) = filter.capture_date_to {
             push!("p.capture_date <= {}", Value::text(to.clone()));
         }
+        if filter.capture_date_unknown {
+            conditions.push(UNKNOWN_CAPTURE_DATE_SQL.to_string());
+        }
         if let Some(ref session) = filter.import_session {
             push!("p.import_session = {}", Value::text(session.clone()));
         }
@@ -818,6 +832,22 @@ impl LibraryDb for StoolapDb {
         self.db
             .query_one("SELECT COUNT(*) FROM photos WHERE deleted_at = 0", ())
             .context("count active photos")
+    }
+
+    fn capture_day_counts(&self) -> Result<Vec<(Option<String>, i64)>> {
+        let rows = self.db.query(
+            "SELECT substr(capture_date, 1, 10) AS day, COUNT(*)
+             FROM photos
+             WHERE deleted_at = 0
+             GROUP BY day",
+            (),
+        )?;
+        let mut counts = Vec::new();
+        for row in rows {
+            let row = row.context("capture_day_counts row")?;
+            counts.push((row.get::<Option<String>>(0)?, row.get::<i64>(1)?));
+        }
+        Ok(counts)
     }
 
     fn delete_empty_sessions(&self) -> Result<usize> {
@@ -1639,6 +1669,60 @@ mod tests {
         assert_eq!(db.session_photo_count("s1").unwrap(), 1);
         assert_eq!(db.all_sessions().unwrap()[0].photo_count, 1);
         assert_eq!(db.session_photo_count("nonexistent").unwrap(), 0);
+    }
+
+    /// A photo taken at `capture` (or with no date at all), in its own session
+    /// so the date is the only thing that can group it.
+    fn insert_dated(db: &StoolapDb, hash: &str, capture: Option<&str>) {
+        let mut meta = lmta("s");
+        meta.exif = capture.map(|c| LibraryExif {
+            capture_date: Some(c.to_owned()),
+            ..Default::default()
+        });
+        let path = format!("{}/{}/{hash}.rlab", &hash[0..2], &hash[2..4]);
+        db.insert_photo(new_photo(hash, &path, &meta)).unwrap();
+    }
+
+    /// The timeline's per-day counts and its click-through filters have to
+    /// agree, or a day shows one number and opens onto another.
+    #[test]
+    fn timeline_counts_match_what_each_span_returns() {
+        use crate::timeline::{DateSpan, Timeline, apply_unknown};
+
+        let db = db();
+        db.insert_session("s", "s", 1_600_000_000, None).unwrap();
+        for (hash, capture) in [
+            ("aa00aa", Some("2026:07:10 08:00:00")),
+            ("aa01aa", Some("2026:07:10 23:59:59")),
+            ("aa02aa", Some("2026:07:11 00:00:00")),
+            ("aa03aa", Some("2026:06:30 12:00:00")),
+            ("aa04aa", Some("2025:07:10 12:00:00")),
+            ("aa05aa", None),
+            ("aa06aa", Some("0000:00:00 00:00:00")),
+            ("aa07aa", Some("garbage")),
+        ] {
+            insert_dated(&db, hash, capture);
+        }
+
+        let timeline = Timeline::from_day_counts(db.capture_day_counts().unwrap());
+        assert_eq!(timeline.unknown, 3);
+
+        let found = |apply: &dyn Fn(&mut SearchFilter)| {
+            let mut filter = SearchFilter::default();
+            apply(&mut filter);
+            db.search(&filter, SortOrder::default()).unwrap().len() as i64
+        };
+        for span in [
+            DateSpan::Year(2026),
+            DateSpan::Month(2026, 7),
+            DateSpan::Day(2026, 7, 10),
+            DateSpan::Day(2026, 7, 11),
+            DateSpan::Day(2025, 7, 10),
+        ] {
+            assert_eq!(found(&|f| span.apply(f)), timeline.count(span), "{span:?}");
+        }
+        assert_eq!(found(&apply_unknown), timeline.unknown);
+        assert_eq!(timeline.count(DateSpan::Day(2026, 7, 10)), 2);
     }
 
     #[test]
