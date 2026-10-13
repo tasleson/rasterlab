@@ -6,9 +6,10 @@ use std::{
 };
 
 use rasterlab_library::{
-    BulkProgress, CollectionId, CollectionRow, ImportCollection, ImportProgress, ImportSessionRow,
-    Library, LibraryBusy, LibraryMeta, MembershipChange, NotALibrary, PhotoId, PhotoRow,
-    RebuildProgress, ScrubProgress, SearchFilter, SortOrder, import::rlab_path,
+    BulkProgress, CollectionId, CollectionRow, DateSpan, ImportCollection, ImportProgress,
+    ImportSessionRow, Library, LibraryBusy, LibraryMeta, MembershipChange, NotALibrary, PhotoId,
+    PhotoRow, RebuildProgress, ScrubProgress, SearchFilter, SortOrder, Timeline, import::rlab_path,
+    timeline::apply_unknown,
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +24,11 @@ pub enum LibraryView {
     RecentlyDeleted,
     Session(String),
     Collection(CollectionId),
+    /// Photos taken within a stretch of the calendar, whichever import
+    /// brought them in.
+    Captured(DateSpan),
+    /// Photos with no usable capture date, which no `Captured` span reaches.
+    UnknownDate,
 }
 
 // ── Recently Deleted ──────────────────────────────────────────────────────────
@@ -611,6 +617,8 @@ pub struct LibraryState {
 
     // Sidebar state
     pub sessions: Vec<ImportSessionRow>,
+    /// Photo counts per capture day, for the sidebar's Timeline.
+    pub timeline: Arc<Timeline>,
     pub collections: Vec<CollectionRow>,
 
     /// Collections ticked in the sidebar with ctrl- or shift-click, for the
@@ -789,6 +797,7 @@ impl Default for LibraryState {
             import_refreshed_imported: 0,
             thumbs: ThumbCache::new(THUMB_CACHE_CAP),
             sessions: Vec::new(),
+            timeline: Arc::default(),
             collections: Vec::new(),
             marked_collections: Vec::new(),
             collection_members: HashMap::new(),
@@ -1131,6 +1140,8 @@ impl LibraryState {
                 LibraryView::AllPhotos | LibraryView::RecentlyDeleted => {}
                 LibraryView::Session(id) => filter.import_session = Some(id.clone()),
                 LibraryView::Collection(id) => filter.collection_id = Some(*id),
+                LibraryView::Captured(span) => span.apply(&mut filter),
+                LibraryView::UnknownDate => apply_unknown(&mut filter),
             }
             if filter.is_empty() {
                 lib.all_photos(self.sort)
@@ -1153,6 +1164,7 @@ impl LibraryState {
 
         // Refresh sidebar lists
         self.sessions = lib.all_sessions().unwrap_or_default();
+        self.timeline = Arc::new(lib.timeline().unwrap_or_default());
         self.collections = lib.all_collections().unwrap_or_default();
         // A mark on a collection that is gone — deleted here, or dropped by a
         // rebuild — must not linger and take part in the next bulk action.

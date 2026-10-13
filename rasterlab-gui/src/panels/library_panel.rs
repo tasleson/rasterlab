@@ -1,7 +1,7 @@
 use egui::{ScrollArea, Sense, Vec2};
 use rasterlab_library::{
-    CollectionId, ImportSessionRow, MONTH_NAMES, MembershipChange, PhotoId, PhotoRow, Resolution,
-    SearchFilter, SortOrder, ymd_from_unix,
+    CollectionId, DateSpan, ImportSessionRow, MONTH_NAMES, MembershipChange, PhotoId, PhotoRow,
+    Resolution, SearchFilter, SortOrder, Timeline, ymd_from_unix,
 };
 
 use crate::panels::tools::shared::MIN_STACK_FRAMES;
@@ -1021,11 +1021,22 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         ui.strong("Recent Imports");
         recent_imports_ui(ui, state, &sessions);
 
-        // Sessions — grouped into a collapsible Year › Month › session tree so a
-        // large library doesn't flood the sidebar with a flat list.
+        // Timeline — when the photos were taken, whichever import brought them
+        // in.  Import sessions cannot answer that: two imports over the same
+        // dates leave overlapping sessions.
         ui.add_space(4.0);
-        ui.strong("Import Sessions");
-        sessions_tree_ui(ui, state, &sessions);
+        ui.strong("Timeline");
+        timeline_tree_ui(ui, state);
+
+        // Sessions — grouped into a collapsible Year › Month › session tree so a
+        // large library doesn't flood the sidebar with a flat list.  Closed by
+        // default: Recent Imports covers finding what was just brought in, and
+        // this is for asking what one particular import held.
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new(egui::RichText::new("Import Sessions").strong())
+            .id_salt("lib_import_sessions")
+            .default_open(false)
+            .show(ui, |ui| sessions_tree_ui(ui, state, &sessions));
 
         // Collections — user-made groupings, filled from the grid's right-click
         // menu. Membership is per photo, so a photo can be in several.
@@ -1488,6 +1499,102 @@ fn recent_imports_ui(ui: &mut egui::Ui, state: &mut AppState, sessions: &[Import
         {
             let id = sess.id.clone();
             select_view(state, LibraryView::Session(id));
+        }
+    }
+}
+
+// ── Timeline tree ─────────────────────────────────────────────────────────────
+
+/// One month of the timeline, days newest first.
+struct TimelineMonth {
+    month: u32,
+    days: Vec<(u32, i64)>,
+}
+
+/// One year of the timeline, months newest first.
+struct TimelineYear {
+    year: i32,
+    months: Vec<TimelineMonth>,
+}
+
+/// Nest the timeline's days into year → month → day, newest first.
+fn group_timeline(timeline: &Timeline) -> Vec<TimelineYear> {
+    let mut years: Vec<TimelineYear> = Vec::new();
+    for (&(year, month, day), &count) in timeline.days.iter().rev() {
+        if years.last().is_none_or(|y| y.year != year) {
+            years.push(TimelineYear {
+                year,
+                months: Vec::new(),
+            });
+        }
+        let months = &mut years.last_mut().unwrap().months;
+        if months.last().is_none_or(|m| m.month != month) {
+            months.push(TimelineMonth {
+                month,
+                days: Vec::new(),
+            });
+        }
+        months.last_mut().unwrap().days.push((day, count));
+    }
+    years
+}
+
+/// A year or month row: clicking the label shows that span's photos, the arrow
+/// opens it.  Years and months start collapsed, like the sessions tree.
+fn timeline_node(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    span: DateSpan,
+    label: String,
+    body: impl FnOnce(&mut egui::Ui, &mut AppState),
+) {
+    let id = ui.make_persistent_id(("lib_timeline", span));
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+        .show_header(ui, |ui| {
+            let selected = state.library.view == LibraryView::Captured(span);
+            if ui.selectable_label(selected, label).clicked() {
+                select_view(state, LibraryView::Captured(span));
+            }
+        })
+        .body(|ui| body(ui, state));
+}
+
+fn timeline_tree_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    if state.library.timeline.is_empty() {
+        ui.weak("No photos yet");
+        return;
+    }
+    let timeline = std::sync::Arc::clone(&state.library.timeline);
+    for year in group_timeline(&timeline) {
+        let span = DateSpan::Year(year.year);
+        let label = format!("{}  ({})", year.year, timeline.count(span));
+        timeline_node(ui, state, span, label, |ui, state| {
+            for month in &year.months {
+                let span = DateSpan::Month(year.year, month.month);
+                let name = MONTH_NAMES[(month.month - 1) as usize];
+                let label = format!("{}  ({})", name, timeline.count(span));
+                timeline_node(ui, state, span, label, |ui, state| {
+                    for &(day, count) in &month.days {
+                        let span = DateSpan::Day(year.year, month.month, day);
+                        let selected = state.library.view == LibraryView::Captured(span);
+                        let label = format!("{} {}  ({})", name, day, count);
+                        if ui.selectable_label(selected, label).clicked() {
+                            select_view(state, LibraryView::Captured(span));
+                        }
+                    }
+                });
+            }
+        });
+    }
+    if timeline.unknown > 0 {
+        let selected = state.library.view == LibraryView::UnknownDate;
+        let label = format!("Unknown date  ({})", timeline.unknown);
+        if ui
+            .selectable_label(selected, label)
+            .on_hover_text("Photos with no capture date in their metadata")
+            .clicked()
+        {
+            select_view(state, LibraryView::UnknownDate);
         }
     }
 }
@@ -2430,6 +2537,35 @@ mod tests {
         // 2024 has a single December month.
         assert_eq!(years[1].months.len(), 1);
         assert_eq!(years[1].months[0].month, 12);
+    }
+
+    #[test]
+    fn group_timeline_nests_newest_first() {
+        let timeline = Timeline::from_day_counts(
+            [
+                ("2025:12:31", 1),
+                ("2026:07:10", 4),
+                ("2026:07:11", 2),
+                ("2026:06:30", 3),
+            ]
+            .map(|(day, n)| (Some(day.to_owned()), n))
+            .to_vec(),
+        );
+        let years = group_timeline(&timeline);
+        let shape: Vec<_> = years
+            .iter()
+            .map(|y| {
+                let months: Vec<_> = y.months.iter().map(|m| (m.month, m.days.clone())).collect();
+                (y.year, months)
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (2026, vec![(7, vec![(11, 2), (10, 4)]), (6, vec![(30, 3)])]),
+                (2025, vec![(12, vec![(31, 1)])]),
+            ]
+        );
     }
 
     #[test]
