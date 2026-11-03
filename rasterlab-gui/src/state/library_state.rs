@@ -1926,6 +1926,7 @@ mod tests {
             stack_is_primary: true,
             has_edits: false,
             protected: false,
+            source_size: None,
         }
     }
 

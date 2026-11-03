@@ -261,6 +261,9 @@ pub struct RlabLibrarySummary {
     pub copy_names: Vec<String>,
     /// Index of the active virtual copy.
     pub active_copy_index: usize,
+    /// Size of the whole `.rlab` on disk, from the same open that read the
+    /// chunks, so showing it costs no extra round trip to the storage.
+    pub file_len: u64,
 }
 
 /// Result returned by [`verify_and_repair`].
@@ -931,6 +934,7 @@ pub fn read_library_summary(path: &Path) -> RasterResult<RlabLibrarySummary> {
         meta_source_path,
         copy_names,
         active_copy_index,
+        file_len,
     })
 }
 
@@ -1627,6 +1631,10 @@ mod tests {
         );
         assert_eq!(summary.copy_names, ["Original look", "Monochrome"]);
         assert_eq!(summary.active_copy_index, 1);
+        assert_eq!(
+            summary.file_len,
+            std::fs::metadata(output.path()).unwrap().len()
+        );
         let lmta = summary.lmta.unwrap();
         assert_eq!(lmta.caption.as_deref(), Some("A caption"));
         assert_eq!(lmta.keywords, ["one", "two"]);

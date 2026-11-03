@@ -919,6 +919,112 @@ fn recently_deleted_photo_can_be_restored_with_its_session() {
     assert_eq!(restored_session.name, "Keep this name");
 }
 
+/// What Recently Deleted reports holding is what its files take on disk —
+/// the `.rlab`s, not the smaller originals — and a file already gone from
+/// under its row holds nothing.
+#[test]
+fn recently_deleted_bytes_sums_the_files_still_waiting_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    assert_eq!(
+        lib.recently_deleted_bytes().unwrap(),
+        0,
+        "nothing deleted yet"
+    );
+    let sizes: Vec<u64> = photos
+        .iter()
+        .map(|photo| file_len(lib.rlab_path(&photo.hash)))
+        .collect();
+
+    lib.delete_photo(photos[0].id).unwrap();
+    assert_eq!(lib.recently_deleted_bytes().unwrap(), sizes[0]);
+    lib.delete_photo(photos[1].id).unwrap();
+    assert_eq!(lib.recently_deleted_bytes().unwrap(), sizes[0] + sizes[1]);
+
+    std::fs::remove_file(lib.recently_deleted_path(&photos[0].hash)).unwrap();
+    assert_eq!(lib.recently_deleted_bytes().unwrap(), sizes[1]);
+
+    lib.restore_photo(photos[1].id).unwrap();
+    assert_eq!(lib.recently_deleted_bytes().unwrap(), 0);
+}
+
+fn file_len(path: PathBuf) -> u64 {
+    std::fs::metadata(path).unwrap().len()
+}
+
+/// A selection's size covers every photo in it, wherever its file is and
+/// whatever the caller happens to have listed: the ids are looked up in the
+/// index, so a photo hidden by a filter, or sitting in Recently Deleted,
+/// still counts.  Only a photo the library no longer holds adds nothing.
+#[test]
+fn photos_size_covers_every_photo_the_index_still_holds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    let source_of = |photo: &PhotoRow| {
+        [jpeg_path(), png_path()]
+            .into_iter()
+            .find(|path| {
+                Some(path.file_name().unwrap().to_string_lossy().as_ref())
+                    == photo.original_filename.as_deref()
+            })
+            .expect("the row names its source")
+    };
+    for photo in &photos {
+        assert_eq!(photo.source_size, Some(file_len(source_of(photo))));
+    }
+    let files: Vec<u64> = photos
+        .iter()
+        .map(|photo| file_len(lib.rlab_path(&photo.hash)))
+        .collect();
+    let originals: Vec<u64> = photos.iter().map(|p| p.source_size.unwrap()).collect();
+    // Sized from where it now is, not where an active photo's file would be.
+    lib.delete_photo(photos[1].id).unwrap();
+
+    let (a, b) = (photos[0].id, photos[1].id);
+    let gone: PhotoId = a.max(b) + 1000;
+    for (ids, expected_files, expected_originals, why) in [
+        (vec![], 0, 0, "nothing selected"),
+        (vec![a], files[0], originals[0], "an active photo"),
+        (
+            vec![b],
+            files[1],
+            originals[1],
+            "a photo in Recently Deleted",
+        ),
+        (
+            vec![a, b],
+            files[0] + files[1],
+            originals[0] + originals[1],
+            "both sides at once",
+        ),
+        (
+            vec![a, gone],
+            files[0],
+            originals[0],
+            "an id the index lacks",
+        ),
+    ] {
+        let size = lib
+            .photos_size(&ids, &AtomicBool::new(false))
+            .unwrap()
+            .expect("not stopped");
+        assert_eq!(size.files, expected_files, "{why}");
+        assert_eq!(size.originals, Some(expected_originals), "{why}");
+    }
+
+    assert_eq!(
+        lib.photos_size(&[a], &AtomicBool::new(true)).unwrap(),
+        None,
+        "a raised stop flag ends the sizing"
+    );
+}
+
 /// The detail panel reads a selected photo's `.rlab` for its collections and
 /// the rest of its metadata.  A photo in Recently Deleted has been moved out of
 /// `files/`, so looking for it where an active photo's file lives reported the

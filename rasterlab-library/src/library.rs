@@ -125,6 +125,17 @@ pub struct BulkProgress {
     pub errors: Vec<(String, String)>,
 }
 
+/// Bytes on disk behind a set of photos; see [`Library::photos_size`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskSize {
+    /// Their `.rlab` files: what the photos actually cost in storage.  Each
+    /// also carries edits, a thumbnail and parity, so it is larger than the
+    /// original it holds.
+    pub files: u64,
+    /// Their originals at import, when every photo counted recorded one.
+    pub originals: Option<u64>,
+}
+
 /// Final tally of a bulk operation over a list of photos.
 ///
 /// Every photo is attempted, so a run that hits trouble reports what it did
@@ -310,6 +321,82 @@ impl Library {
         }
         let deleted = self.recently_deleted_path(hash);
         if deleted.exists() { deleted } else { active }
+    }
+
+    // ── Sizes ─────────────────────────────────────────────────────────────
+
+    /// What the photos `ids` take on disk, active or in Recently Deleted.
+    ///
+    /// The photos are looked up in the index rather than taken from whatever
+    /// a caller has listed, so every id is covered whichever view or filter
+    /// it was picked from.  An id the index no longer has, or whose file is
+    /// gone, holds no space and adds nothing.  One stat per photo, on the
+    /// side the index says its file is on: run it off the UI thread.
+    ///
+    /// `stop` is checked between photos; `Ok(None)` means it was raised.
+    pub fn photos_size(&self, ids: &[PhotoId], stop: &AtomicBool) -> Result<Option<DiskSize>> {
+        let mut rows: HashMap<PhotoId, (PhotoRow, bool)> = self
+            .all_photos(SortOrder::default())?
+            .into_iter()
+            .map(|row| (row.id, (row, false)))
+            .collect();
+        rows.extend(
+            self.deleted_rows()?
+                .into_iter()
+                .map(|row| (row.id, (row, true))),
+        );
+
+        let mut size = DiskSize {
+            files: 0,
+            originals: Some(0),
+        };
+        for id in ids {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+            let Some((row, deleted)) = rows.get(id) else {
+                continue;
+            };
+            let Some(file) = self.rlab_file_size(&row.hash, *deleted) else {
+                continue;
+            };
+            size.files += file;
+            size.originals = size
+                .originals
+                .zip(row.source_size)
+                .map(|(sum, original)| sum + original);
+        }
+        Ok(Some(size))
+    }
+
+    /// Bytes a photo's `.rlab` takes, trying first the side of Recently
+    /// Deleted its row says it is on — on a network share each miss is a
+    /// round trip — and then the other, in case a move landed since.
+    fn rlab_file_size(&self, hash: &str, deleted: bool) -> Option<u64> {
+        let mut sides = [self.rlab_path(hash), self.recently_deleted_path(hash)];
+        if deleted {
+            sides.reverse();
+        }
+        sides
+            .iter()
+            .find_map(|path| std::fs::metadata(path).ok())
+            .map(|meta| meta.len())
+    }
+
+    /// Bytes still held by the photos in Recently Deleted — the space that
+    /// emptying it would give back.
+    ///
+    /// Sized from the index's rows, so the figure is for the same photos the
+    /// Recently Deleted count is.  A row whose file is already gone holds no
+    /// space and adds nothing.  One stat per photo: run it off the UI thread.
+    pub fn recently_deleted_bytes(&self) -> Result<u64> {
+        Ok(self
+            .db
+            .recently_deleted()?
+            .iter()
+            .filter_map(|row| std::fs::metadata(self.recently_deleted_path(&row.photo.hash)).ok())
+            .map(|meta| meta.len())
+            .sum())
     }
 
     fn lock_project_writes(&self) -> Result<MutexGuard<'_, ()>> {

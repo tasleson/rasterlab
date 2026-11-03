@@ -297,13 +297,17 @@ fn row_to_photo(row: &stoolap::api::rows::ResultRow) -> Result<PhotoRow> {
         stack_is_primary: row.get::<i64>(10).context("stack_is_primary")? != 0,
         has_edits: row.get::<i64>(11).unwrap_or(0) != 0,
         protected: row.get::<i64>(12).unwrap_or(0) != 0,
+        source_size: row
+            .get::<Option<i64>>(14)
+            .context("source_size")?
+            .map(|size| size as u64),
     })
 }
 
 const PHOTO_SELECT: &str = "SELECT p.id, p.hash, p.lib_path, p.width, p.height,
             p.import_date, p.import_session, p.capture_date,
             p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits,
-            p.protected, p.deleted_at
+            p.protected, p.deleted_at, p.source_size
      FROM photos p";
 
 fn row_is_active(row: &stoolap::api::rows::ResultRow) -> Result<bool> {
@@ -728,7 +732,7 @@ impl LibraryDb for StoolapDb {
             "SELECT DISTINCT p.id, p.hash, p.lib_path, p.width, p.height,
                     p.import_date, p.import_session, p.capture_date,
                     p.original_filename, p.stack_id, p.stack_is_primary, p.has_edits,
-                    p.protected, p.deleted_at
+                    p.protected, p.deleted_at, p.source_size
              FROM photos p
              LEFT JOIN exif       e  ON e.photo_id  = p.id
              LEFT JOIN ratings    r  ON r.photo_id  = p.id

@@ -50,6 +50,10 @@ pub struct PhotoRow {
     pub has_edits: bool,
     /// True if the user has marked the photo as protected (cannot be deleted).
     pub protected: bool,
+    /// Size in bytes of the original source file at import time, when the
+    /// import recorded it.  The `.rlab` holding it is larger: it carries the
+    /// edits, thumbnail and parity as well.
+    pub source_size: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
