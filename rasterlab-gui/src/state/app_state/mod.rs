@@ -16,6 +16,7 @@ mod library_tasks;
 mod persistence;
 mod prefetch;
 mod render;
+mod sizes;
 mod workers;
 
 use std::{
@@ -85,6 +86,8 @@ enum BgMessage {
         path: std::path::PathBuf,
         rlab: Arc<RlabFile>,
         image: Arc<Image>,
+        /// Bytes the project file took on disk when it was read.
+        file_len: u64,
     },
     /// Result from the background render thread (via `rasterlab-render` crate).
     Render(RenderResult),
@@ -159,6 +162,13 @@ enum BgMessage {
     /// The scrub worker gave up, panicked, or never started. Terminal, so the
     /// cancellation handle that drives the Start/Stop toggle has to be released.
     ScrubFailed(String),
+    /// The on-disk size of a set of library photos. `token` is the one the
+    /// sizing was issued, so an answer for a set since replaced is recognised.
+    SizeMeasured {
+        target: sizes::SizeTarget,
+        token: u64,
+        total: Option<rasterlab_library::DiskSize>,
+    },
 }
 
 impl From<RenderResult> for BgMessage {
@@ -235,6 +245,10 @@ pub struct AppState {
     /// in-place save does not have to reread the entire (possibly remote)
     /// `.rlab` merely to preserve its small LMTA chunk.
     pub(crate) project_lmta: Option<rasterlab_core::library_meta::LibraryMeta>,
+    /// Bytes the open document's file takes on disk: the source image, or the
+    /// `.rlab` once there is a project. Taken when it is opened or saved so
+    /// the metadata panel never stats storage from the UI thread.
+    document_file_size: Option<u64>,
     /// Incremented each time a new file is opened. Canvas uses this to know
     /// when to reset zoom/pan vs. just updating the texture.
     pub image_generation: u64,
@@ -260,6 +274,9 @@ pub struct AppState {
     /// request). A fixed worker count prevents a large grid from spawning one
     /// OS thread per visible photo.
     thumb_req_tx: Option<mpsc::Sender<library_tasks::ThumbLoadRequest>>,
+    /// Sender into the one worker that sizes library photos on disk, started
+    /// on first use.
+    size_req_tx: Option<mpsc::Sender<sizes::SizeJob>>,
     // egui context — needed to wake up the UI after background work completes
     ctx: Context,
     gpu: Option<Arc<GpuContext>>,
@@ -399,6 +416,7 @@ impl AppState {
             clean_edit_state: None,
             project_created_at: None,
             project_lmta: None,
+            document_file_size: None,
             image_generation: 0,
             split_view: false,
             split_mode: SplitMode::VsOriginal,
@@ -408,6 +426,7 @@ impl AppState {
             bg_tx,
             bg_rx,
             thumb_req_tx: None,
+            size_req_tx: None,
             ctx,
             gpu,
             tools,
@@ -461,9 +480,10 @@ impl AppState {
                     path,
                     rlab,
                     image,
+                    file_len,
                 } => {
                     if self.is_current_open(request) {
-                        self.on_project_loaded(path, rlab, image)
+                        self.on_project_loaded(path, rlab, image, file_len)
                     }
                 }
                 BgMessage::Render(result) => self.on_render_result(result),
@@ -538,6 +558,11 @@ impl AppState {
                 }
                 BgMessage::ScrubComplete { outcome } => self.on_scrub_complete(outcome),
                 BgMessage::ScrubFailed(e) => self.on_scrub_failed(e),
+                BgMessage::SizeMeasured {
+                    target,
+                    token,
+                    total,
+                } => self.on_size_measured(target, token, total),
             }
         }
         self.update_processing_status();
@@ -1147,6 +1172,18 @@ impl AppState {
     /// Borrow the source image metadata for the active pipeline, if any.
     pub fn image_metadata(&self) -> Option<&rasterlab_core::image::ImageMetadata> {
         self.pipeline().map(|p| &p.source().metadata)
+    }
+
+    /// On-disk size of the open document, plus the size of the original it
+    /// embeds when it is a project (a standalone file *is* its original).
+    pub(crate) fn document_size(&self) -> Option<(u64, Option<u64>)> {
+        let file = self.document_file_size?;
+        let original = self
+            .project_path
+            .as_ref()
+            .and(self.original_bytes.as_ref())
+            .map(|bytes| bytes.len() as u64);
+        Some((file, original))
     }
 
     /// Mutably borrow the active pipeline, if any image is loaded.

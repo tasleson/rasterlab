@@ -29,6 +29,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
 
+    // The sidebar and the Empty dialog both show it; sized in the background.
+    state.sync_recently_deleted_size();
+
     // Confirmation dialog (modal window)
     confirm_delete_dialog(ui.ctx(), state);
 
@@ -498,6 +501,12 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
         return;
     }
     let n = state.library.recently_deleted_count;
+    let size = state
+        .library
+        .recently_deleted_size
+        .total()
+        .map(|total| format!(" ({})", crate::file_size::mib(total.files)))
+        .unwrap_or_default();
     let idle = !state.delete_running();
     let mut open = true;
     egui::Window::new("Empty Recently Deleted?")
@@ -511,7 +520,7 @@ fn empty_recently_deleted_dialog(ctx: &egui::Context, state: &mut AppState) {
                 "This cannot be undone.",
             );
             ui.label(format!(
-                "Permanently remove all {n} photo(s) from Recently Deleted?"
+                "Permanently remove all {n} photo(s){size} from Recently Deleted?"
             ));
             ui.label(REIMPORT_NOTE);
             ui.add_space(8.0);
@@ -998,14 +1007,22 @@ fn sidebar_ui(ui: &mut egui::Ui, state: &mut AppState) {
         }
 
         let deleted_selected = state.library.view == LibraryView::RecentlyDeleted;
+        // The size is what emptying it would give back: the files are still
+        // on disk until then.
+        let deleted_label = match state.library.recently_deleted_size.total() {
+            Some(total) => format!(
+                "Recently Deleted ({} · {})",
+                state.library.recently_deleted_count,
+                crate::file_size::mib(total.files)
+            ),
+            None => format!(
+                "Recently Deleted ({})",
+                state.library.recently_deleted_count
+            ),
+        };
         if ui
-            .selectable_label(
-                deleted_selected,
-                format!(
-                    "Recently Deleted ({})",
-                    state.library.recently_deleted_count
-                ),
-            )
+            .selectable_label(deleted_selected, deleted_label)
+            .on_hover_text("Photos here still take space on disk until Recently Deleted is emptied")
             .clicked()
         {
             select_view(state, LibraryView::RecentlyDeleted);

@@ -1,15 +1,18 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use rasterlab_library::{
-    BulkProgress, CollectionId, CollectionRow, DateSpan, ImportCollection, ImportProgress,
-    ImportSessionRow, Library, LibraryBusy, LibraryMeta, MembershipChange, NotALibrary, PhotoId,
-    PhotoRow, RebuildProgress, ScrubProgress, SearchFilter, SortOrder, Timeline, import::rlab_path,
-    timeline::apply_unknown,
+    BulkProgress, CollectionId, CollectionRow, DateSpan, DiskSize, ImportCollection,
+    ImportProgress, ImportSessionRow, Library, LibraryBusy, LibraryMeta, MembershipChange,
+    NotALibrary, PhotoId, PhotoRow, RebuildProgress, ScrubProgress, SearchFilter, SortOrder,
+    Timeline, import::rlab_path, timeline::apply_unknown,
 };
 use serde::{Deserialize, Serialize};
 
@@ -412,11 +415,102 @@ pub(crate) struct SelectedPhotoDetail {
     pub hash: String,
     request_revision: u64,
     pub source_path: Option<String>,
+    /// Bytes the photo's `.rlab` takes on disk, from the same read.
+    pub file_size: Option<u64>,
     pub copy_names: Vec<String>,
     pub active_copy_index: usize,
     pub active_copy_saving: bool,
     pub load_error: Option<String>,
     pub loading: bool,
+}
+
+/// A [`DiskSize`] worked out in the background for one set of photos.
+///
+/// Sizing a photo is a stat, and on a library kept on a network share every
+/// stat is a round trip, so the figure is never computed on the UI thread or
+/// recomputed while the set is unchanged.  Each sizing is issued a token, and
+/// only the answer carrying the current one is taken: photo ids repeat across
+/// libraries and a set can come back after a detour, so the set itself cannot
+/// tell a stale answer from the one still coming.  A failed sizing is kept
+/// like a successful one, so an unreachable share is not retried every frame.
+///
+/// Keyed by photo, not by file contents: an edit saved to a photo in the set
+/// leaves the figure a little behind until the set itself changes.
+#[derive(Debug, Default)]
+pub(crate) struct DiskUsage {
+    /// Sorted, so the same photos in another order are the same set.
+    photos: Vec<PhotoId>,
+    total: Option<DiskSize>,
+    /// Stop flag of the sizing in flight for `photos`, if any.
+    running: Option<Arc<AtomicBool>>,
+    /// Token of the current sizing; bumped whenever the set is replaced or
+    /// forgotten, which is what turns every older answer stale.
+    token: u64,
+}
+
+/// What a background sizing needs from [`DiskUsage::retarget`].
+pub(crate) struct SizeTicket {
+    /// Hand back to [`DiskUsage::finish`] with the answer.
+    pub token: u64,
+    /// Raised once the answer is no longer wanted.
+    pub stop: Arc<AtomicBool>,
+}
+
+impl DiskUsage {
+    /// Aim at `photos` (sorted). When that is a different set, forget the old
+    /// figure and return a ticket for sizing the new one; an empty set needs
+    /// no sizing and has no figure to show.
+    pub(crate) fn retarget(&mut self, photos: &[PhotoId]) -> Option<SizeTicket> {
+        debug_assert!(photos.is_sorted(), "DiskUsage keys are sorted");
+        if photos == self.photos.as_slice() {
+            return None;
+        }
+        self.reset();
+        if photos.is_empty() {
+            return None;
+        }
+        self.photos = photos.to_vec();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.running = Some(Arc::clone(&stop));
+        Some(SizeTicket {
+            token: self.token,
+            stop,
+        })
+    }
+
+    /// Take the answer to the sizing issued `token`, if it is still current.
+    pub(crate) fn finish(&mut self, token: u64, total: Option<DiskSize>) {
+        if token != self.token || self.running.is_none() {
+            return;
+        }
+        self.running = None;
+        self.total = total;
+    }
+
+    /// The figure for the current set, once it is in.
+    pub(crate) fn total(&self) -> Option<DiskSize> {
+        self.total
+    }
+
+    /// Whether the current set is still being sized.
+    pub(crate) fn running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// Stop any sizing in flight and forget the set: for another library, or
+    /// a selection no longer shown.  Cheap when there is nothing to forget, so
+    /// it can be called every frame.
+    pub(crate) fn reset(&mut self) {
+        if self.photos.is_empty() && self.running.is_none() && self.total.is_none() {
+            return;
+        }
+        if let Some(stop) = self.running.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        self.photos.clear();
+        self.total = None;
+        self.token = self.token.wrapping_add(1);
+    }
 }
 
 pub(crate) struct MetadataDraft {
@@ -649,6 +743,13 @@ pub struct LibraryState {
     pub folder_import_prompt: Option<FolderImportPrompt>,
     pub all_photo_count: usize,
     pub recently_deleted_count: usize,
+    /// The photos in Recently Deleted, sorted: the key for
+    /// `recently_deleted_size`, kept so it is not rebuilt every frame.
+    pub(crate) recently_deleted_ids: Vec<PhotoId>,
+    /// What the files in Recently Deleted still take on disk.
+    pub(crate) recently_deleted_size: DiskUsage,
+    /// What the photos in a multi-photo selection take on disk.
+    pub(crate) selection_size: DiskUsage,
 
     /// Error message to show in a status bar or dialog.
     pub last_error: Option<String>,
@@ -808,6 +909,9 @@ impl Default for LibraryState {
             folder_import_prompt: None,
             all_photo_count: 0,
             recently_deleted_count: 0,
+            recently_deleted_ids: Vec::new(),
+            recently_deleted_size: DiskUsage::default(),
+            selection_size: DiskUsage::default(),
             last_error: None,
             retry_library: None,
             last_import_errors: Vec::new(),
@@ -881,6 +985,7 @@ impl LibraryState {
             hash: hash.to_owned(),
             request_revision,
             source_path: None,
+            file_size: None,
             copy_names: Vec::new(),
             active_copy_index: 0,
             active_copy_saving: self.active_copy_saves.contains(hash),
@@ -941,6 +1046,7 @@ impl LibraryState {
                     hash: hash.to_owned(),
                     request_revision,
                     source_path,
+                    file_size: Some(summary.file_len),
                     copy_names: summary.copy_names,
                     active_copy_index: summary.active_copy_index,
                     active_copy_saving: self.active_copy_saves.contains(hash),
@@ -955,6 +1061,7 @@ impl LibraryState {
                     hash: hash.to_owned(),
                     request_revision,
                     source_path: None,
+                    file_size: None,
                     copy_names: Vec::new(),
                     active_copy_index: 0,
                     active_copy_saving: self.active_copy_saves.contains(hash),
@@ -1129,6 +1236,8 @@ impl LibraryState {
 
         let deleted = lib.recently_deleted().unwrap_or_default();
         self.recently_deleted_count = deleted.len();
+        self.recently_deleted_ids = deleted.iter().map(|row| row.photo.id).collect();
+        self.recently_deleted_ids.sort_unstable();
 
         let photos = if self.view == LibraryView::RecentlyDeleted {
             Ok(deleted.into_iter().map(|row| row.photo).collect())
@@ -1251,6 +1360,10 @@ impl LibraryState {
                 self.metadata_drafts.clear();
                 self.active_copy_saves.clear();
                 self.thumbs.clear();
+                // Photo ids are per library, so the old sets would collide
+                // with unrelated photos in this one.
+                self.recently_deleted_size.reset();
+                self.selection_size.reset();
                 // The ids it names belong to the library being left.
                 self.undoable_delete = None;
                 self.last_error = None;
@@ -1887,6 +2000,76 @@ mod tests {
             message.contains("index is corrupt"),
             "other failures keep their own text: {message}"
         );
+    }
+
+    /// A size is worked out once per set of photos, and only the answer to
+    /// the latest sizing is taken: ids repeat across libraries, and a set the
+    /// user leaves and comes back to is sized afresh, so an answer for the
+    /// same ids can still be a stale one.
+    #[test]
+    fn disk_usage_takes_only_the_answer_to_the_latest_sizing() {
+        let size = |files| DiskSize {
+            files,
+            originals: None,
+        };
+        let mut usage = DiskUsage::default();
+        assert!(usage.retarget(&[]).is_none(), "nothing to size");
+
+        let a1 = usage.retarget(&[1, 2]).expect("a new set is sized");
+        assert!(usage.running());
+        assert!(
+            usage.retarget(&[1, 2]).is_none(),
+            "the same set is not resized"
+        );
+
+        let b = usage.retarget(&[3]).expect("a changed set is sized");
+        assert!(
+            a1.stop.load(Ordering::Relaxed),
+            "the old sizing is told to stop"
+        );
+        let a2 = usage.retarget(&[1, 2]).expect("coming back sizes it again");
+        assert!(b.stop.load(Ordering::Relaxed));
+
+        // Answers that arrive late, in any order, for sets since replaced —
+        // including the stopped first sizing of this very set.
+        for (stale, files) in [(&a1, 10), (&b, 30)] {
+            usage.finish(stale.token, Some(size(files)));
+            assert_eq!(usage.total(), None, "token {} is stale", stale.token);
+            assert!(usage.running());
+        }
+        usage.finish(a1.token, None);
+        assert!(
+            usage.running(),
+            "a stopped sizing's empty answer is stale too"
+        );
+
+        usage.finish(a2.token, Some(size(12)));
+        assert_eq!(usage.total(), Some(size(12)));
+        assert!(!usage.running());
+
+        // Another library: the same ids, but nothing in flight before the
+        // switch may answer for them.
+        let before_switch = usage.retarget(&[7]).unwrap();
+        usage.reset();
+        let after_switch = usage.retarget(&[7]).expect("a reset forgets the set");
+        usage.finish(before_switch.token, Some(size(70)));
+        assert_eq!(usage.total(), None, "an answer from the old library");
+        usage.finish(after_switch.token, Some(size(71)));
+        assert_eq!(usage.total(), Some(size(71)));
+
+        // A failed sizing settles too, rather than spinning or retrying each
+        // frame against a share that is not answering.
+        let failing = usage.retarget(&[4]).unwrap();
+        usage.finish(failing.token, None);
+        assert!(!usage.running());
+        assert_eq!(usage.total(), None);
+        assert!(usage.retarget(&[4]).is_none());
+
+        // Leaving multi-select stops the sizing still in flight.
+        let leaving = usage.retarget(&[5, 6]).unwrap();
+        usage.reset();
+        assert!(leaving.stop.load(Ordering::Relaxed));
+        assert!(!usage.running());
     }
 
     /// The bug this guards: opening a library that is no longer there left

@@ -59,6 +59,7 @@ impl AppState {
         let h = image.height;
         self.reset_tools_for_new_image(w, h);
         self.last_path = Some(path.clone());
+        self.document_file_size = Some(original_bytes.len() as u64);
         self.original_bytes = Some(original_bytes);
         self.project_path = None;
         self.is_dirty = false;
@@ -112,6 +113,7 @@ impl AppState {
         path: std::path::PathBuf,
         rlab: Arc<RlabFile>,
         source: Arc<Image>,
+        file_len: u64,
     ) {
         // The navigation cache usually holds the same file, so this is where
         // the embedded original is copied — once, as it always was.
@@ -129,6 +131,7 @@ impl AppState {
         self.project_created_at = Some(rlab.meta.created_at);
         self.project_lmta = rlab.lmta.clone();
         self.original_bytes = Some(std::mem::take(&mut rlab.original_bytes));
+        self.document_file_size = Some(file_len);
         self.project_path = Some(path.clone());
         self.is_dirty = false;
         self.clean_edit_state = None;
@@ -231,11 +234,16 @@ impl AppState {
                     // on an unresponsive network mount can hang.
                     let is_current = || latest_request.load(Ordering::Relaxed) == request;
                     match cache.load(&path, is_current, prefetch::read_project) {
-                        Ok(LoadedProject { rlab, image }) => BgMessage::ProjectLoaded {
+                        Ok(LoadedProject {
+                            rlab,
+                            image,
+                            file_len,
+                        }) => BgMessage::ProjectLoaded {
                             request,
                             path,
                             rlab,
                             image,
+                            file_len,
                         },
                         Err(message) => BgMessage::Error { request, message },
                     }
@@ -587,6 +595,9 @@ impl AppState {
                 self.project_lmta = saved_lmta;
                 self.project_created_at = Some(created_at);
                 self.project_path = Some(path.clone());
+                // The save ran on this thread already; one more stat of the
+                // file it just wrote is noise beside it.
+                self.document_file_size = std::fs::metadata(&path).ok().map(|meta| meta.len());
                 self.capture_clean_edit_state();
                 // Clean up the autosave file now that the work is safely saved.
                 if let Some(session_id) = self.autosave_session_id.take() {
@@ -1045,6 +1056,7 @@ mod tests {
                     Ok(LoadedProject {
                         rlab: Arc::new(RlabFile::read(path).map_err(|e| e.to_string())?),
                         image: Arc::new(Image::new(8, 8)),
+                        file_len: 0,
                     })
                 },
             )
@@ -1082,6 +1094,7 @@ mod tests {
                                     None,
                                 )),
                                 image: Arc::new(Image::new(1, 1)),
+                                file_len: 0,
                             })
                         },
                     )

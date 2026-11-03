@@ -8,6 +8,7 @@ mod app;
 mod autosave;
 #[cfg(not(target_arch = "wasm32"))]
 mod file_chooser;
+mod file_size;
 mod panels;
 mod prefs;
 mod state;

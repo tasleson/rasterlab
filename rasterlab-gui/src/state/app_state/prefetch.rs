@@ -32,7 +32,7 @@ use std::{
     time::SystemTime,
 };
 
-use rasterlab_core::{Image, formats::FormatRegistry, project::RlabFile};
+use rasterlab_core::{Image, RasterError, formats::FormatRegistry, project::RlabFile};
 
 use super::workers;
 
@@ -50,6 +50,9 @@ const PREFETCH_THREAD: &str = "rasterlab-prefetch";
 pub(super) struct LoadedProject {
     pub rlab: Arc<RlabFile>,
     pub image: Arc<Image>,
+    /// Bytes the `.rlab` took on disk when it was read, for the editor's
+    /// metadata panel.
+    pub file_len: u64,
 }
 
 /// What a loader produces: the project, or a message fit for the status bar.
@@ -63,7 +66,16 @@ pub(super) const SUPERSEDED: &str = "superseded by a newer open";
 /// opens and for read-ahead, so a prefetched entry is exactly what an open
 /// would have produced.
 pub(super) fn read_project(path: &Path) -> LoadResult {
-    let rlab = RlabFile::read(path).map_err(|e| e.to_string())?;
+    // Read here rather than through `RlabFile::read` so the size comes from
+    // the bytes already in hand instead of another stat of the share.
+    // The I/O error goes through `RasterError` so it reads exactly as one
+    // from `RlabFile::read` would.
+    let bytes = std::fs::read(path).map_err(|e| RasterError::from(e).to_string())?;
+    let file_len = bytes.len() as u64;
+    let rlab = RlabFile::read_bytes(&bytes).map_err(|e| e.to_string())?;
+    // The whole file is held once more in `rlab` by now; free this copy
+    // before the decode, which is the peak of the open.
+    drop(bytes);
     let hint = rlab.meta.source_path.as_deref().map(Path::new);
     let image = FormatRegistry::with_builtins()
         .decode_bytes(&rlab.original_bytes, hint)
@@ -71,6 +83,7 @@ pub(super) fn read_project(path: &Path) -> LoadResult {
     Ok(LoadedProject {
         rlab: Arc::new(rlab),
         image: Arc::new(image),
+        file_len,
     })
 }
 
@@ -431,6 +444,7 @@ mod tests {
                 None,
             )),
             image: Arc::new(Image::new(width, 1)),
+            file_len: 0,
         }
     }
 

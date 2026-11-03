@@ -24,6 +24,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             .map(|(id, hash)| (*id, hash.as_str())),
     );
 
+    // Only a multi-photo selection shows a total; any other stops the sizing
+    // of one that is no longer on screen.
+    if selected.len() < 2 {
+        state.library.selection_size.reset();
+    }
+
     match selected.len() {
         0 => {
             ui.centered_and_justified(|ui| {
@@ -70,6 +76,26 @@ fn single_photo_ui(ui: &mut egui::Ui, state: &mut AppState, id: PhotoId) {
         ui.label(format!("{}×{}", photo.width, photo.height));
         if let Some(ref date) = photo.capture_date {
             ui.label(format!("Captured: {}", &date[..date.len().min(19)]));
+        }
+        // The `.rlab` is what the photo costs in storage — it carries the
+        // original plus edits, thumbnail and parity — so that is the size;
+        // the original's follows for comparison.
+        if let Some(file_size) = state
+            .library
+            .selected_detail
+            .as_ref()
+            .and_then(|detail| detail.file_size)
+        {
+            let original = photo.source_size.or_else(|| {
+                state
+                    .library
+                    .selected_detail_metadata()
+                    .and_then(|lmta| lmta.source_size)
+            });
+            ui.label(format!(
+                "Size: {}",
+                crate::file_size::with_original(file_size, original)
+            ));
         }
 
         ui.separator();
@@ -366,7 +392,20 @@ fn exif_table(ui: &mut egui::Ui, exif: &rasterlab_library::LibraryExif) {
 // ── Multi-photo batch edit ────────────────────────────────────────────────────
 
 fn multi_photo_ui(ui: &mut egui::Ui, state: &mut AppState, ids: &[PhotoId], count: usize) {
+    state.sync_selection_size();
     ui.strong(format!("{} photos selected", count));
+    let usage = &state.library.selection_size;
+    if let Some(total) = usage.total() {
+        ui.label(format!(
+            "Total size: {}",
+            crate::file_size::with_originals(total.files, total.originals)
+        ));
+    } else if usage.running() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Total size…");
+        });
+    }
     ui.separator();
 
     ui.label("Apply to all selected:");

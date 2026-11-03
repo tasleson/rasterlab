@@ -14,7 +14,7 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, _has_image: bool) {
                 ui.label(egui::RichText::new("No image loaded.").small().italics());
             }
             Some(meta) => {
-                metadata_ui(ui, meta);
+                metadata_ui(ui, meta, state.document_size());
             }
         });
     if resp.header_response.clicked() {
@@ -25,7 +25,13 @@ pub(super) fn ui(ui: &mut Ui, state: &mut AppState, _has_image: bool) {
     }
 }
 
-fn metadata_ui(ui: &mut egui::Ui, meta: &rasterlab_core::image::ImageMetadata) {
+/// `size` is the open document's on-disk size and, for a project, that of the
+/// original it embeds.
+fn metadata_ui(
+    ui: &mut egui::Ui,
+    meta: &rasterlab_core::image::ImageMetadata,
+    size: Option<(u64, Option<u64>)>,
+) {
     let row = |ui: &mut egui::Ui, label: &str, value: &str| {
         ui.label(
             egui::RichText::new(label)
@@ -37,16 +43,25 @@ fn metadata_ui(ui: &mut egui::Ui, meta: &rasterlab_core::image::ImageMetadata) {
     };
 
     // ── File ──────────────────────────────────────────────────────────────
-    if let Some(ref path) = meta.original_path {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    if meta.original_path.is_some() || size.is_some() {
         egui::Grid::new("meta_file")
             .num_columns(2)
             .spacing([8.0, 2.0])
             .show(ui, |ui| {
-                row(ui, "File", &name);
+                if let Some(ref path) = meta.original_path {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                    row(ui, "File", &name);
+                }
+                if let Some((bytes, original)) = size {
+                    row(
+                        ui,
+                        "Size",
+                        &crate::file_size::with_original(bytes, original),
+                    );
+                }
             });
         ui.add_space(2.0);
     }
@@ -160,7 +175,12 @@ fn metadata_ui(ui: &mut egui::Ui, meta: &rasterlab_core::image::ImageMetadata) {
         ui.add_space(2.0);
     }
 
-    if !has_camera && !has_exposure && meta.gps_lat.is_none() && meta.original_path.is_none() {
+    if !has_camera
+        && !has_exposure
+        && meta.gps_lat.is_none()
+        && meta.original_path.is_none()
+        && size.is_none()
+    {
         ui.label(
             egui::RichText::new("No EXIF metadata found.")
                 .small()
