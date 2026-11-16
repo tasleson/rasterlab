@@ -81,6 +81,8 @@ enum BgMessage {
         image: Box<Image>,
         /// Verbatim bytes of the source file, kept for future `.rlab` saves.
         original_bytes: Vec<u8>,
+        /// Blake3 of `original_bytes`, taken once as they were read.
+        original_hash: [u8; 32],
     },
     /// A `.rlab` project file was successfully decoded. Both halves may also
     /// be held by the navigation cache, hence shared rather than owned.
@@ -236,7 +238,15 @@ pub struct AppState {
     pub status: String,
     pub last_path: Option<std::path::PathBuf>,
     /// Verbatim bytes of the currently loaded source file (for `.rlab` saves).
+    /// Set only together with [`original_hash`](Self::original_hash), through
+    /// `set_original`.
     pub original_bytes: Option<Vec<u8>>,
+    /// Blake3 of [`original_bytes`](Self::original_bytes) as it was when they
+    /// were loaded: for a `.rlab`, the hash verified against the file; for an
+    /// image, the hash of the bytes as first read.  Every save and export
+    /// checks the bytes against it, so a fault that corrupts them while the
+    /// document is open is caught before it can replace the user's file.
+    pub original_hash: Option<[u8; 32]>,
     /// Path of the open `.rlab` project file.  `None` when an image was opened
     /// directly and has not yet been saved as a project.
     pub project_path: Option<std::path::PathBuf>,
@@ -423,6 +433,7 @@ impl AppState {
             status: "Welcome to RasterLab — open an image to begin.".into(),
             last_path: None,
             original_bytes: None,
+            original_hash: None,
             project_path: None,
             is_dirty: false,
             clean_edit_state: None,
@@ -483,9 +494,10 @@ impl AppState {
                     path,
                     image,
                     original_bytes,
+                    original_hash,
                 } => {
                     if self.is_current_open(request) {
-                        self.on_image_loaded(path, *image, original_bytes)
+                        self.on_image_loaded(path, *image, original_bytes, original_hash)
                     }
                 }
                 BgMessage::ProjectLoaded {

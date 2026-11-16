@@ -1280,11 +1280,23 @@ impl Library {
     /// reader transfers only small metadata chunks, and the lock keeps that
     /// refresh and the following authoritative rewrite indivisible relative to
     /// other in-process project mutations.
+    ///
+    /// The project must be the photograph `hash` names.  This replaces that
+    /// photo's only copy of its original, so a caller holding some other
+    /// photo's project is refused before the file is touched, not discovered
+    /// by a later scrub.
     pub fn save_edited_project(
         &self,
         hash: &str,
         mut project: RlabFile,
     ) -> Result<Option<LibraryMeta>> {
+        let held = blake3::Hash::from(project.original_hash).to_hex();
+        if !held.as_str().eq_ignore_ascii_case(hash) {
+            bail!(
+                "refusing to save: this project's original is photo {held}, not {hash}; \
+                 saving it would replace that photo's original with a different one"
+            );
+        }
         let _write_guard = self.lock_project_writes()?;
         let rlab_path = self.rlab_path(hash);
         let current_lmta = read_library_summary(&rlab_path)?.lmta;

@@ -16,7 +16,8 @@ use rasterlab_core::{
     pipeline::PipelineState,
     project::{
         FORMAT_VERSION_V4, FORMAT_VERSION_V5, Integrity, RlabFile, RlabMeta, SavedCopy,
-        read_original_filename, read_original_hash, verify_and_repair, verify_and_repair_degraded,
+        hash_original_bytes, read_original_filename, read_original_hash, verify_and_repair,
+        verify_and_repair_degraded,
     },
 };
 use tempfile::NamedTempFile;
@@ -863,4 +864,75 @@ fn a_truncation_on_a_chunk_boundary_is_not_salvaged() {
         );
     }
     assert_eq!(boundaries, 5, "META ORIG VCPS PREV LMTA");
+}
+
+// ── The original must still be the one that was verified ──────────────────────
+
+/// Bytes that changed after they were hashed (a memory fault, a stray write)
+/// must never be written out under a hash that was recomputed to match them:
+/// every writer replaces a file that may hold the only good copy.
+#[test]
+fn every_writer_refuses_an_original_that_no_longer_matches_its_hash() {
+    type Writer = fn(&RlabFile, &std::path::Path) -> rasterlab_core::RasterResult<()>;
+    let writers: [(&str, Writer); 4] = [
+        ("write (v3)", |p, path| p.write(path)),
+        ("write_v4", |p, path| p.write_v4(path)),
+        ("write_v5", |p, path| p.write_v5(path)),
+        ("encode_v5", |p, _| p.encode_v5().map(drop)),
+    ];
+
+    for (case, write) in writers {
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("photo.rlab");
+        const PREVIOUS: &[u8] = b"the previous, good, file";
+        std::fs::write(&dst, PREVIOUS).unwrap();
+
+        let mut project = fixture();
+        project.original_bytes[ORIG_LEN / 2] ^= 0x01;
+
+        let error = write(&project, &dst).expect_err(case).to_string();
+        assert!(
+            error.contains("no longer matches") && error.contains("refusing to save"),
+            "{case}: unhelpful error: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            PREVIOUS,
+            "{case}: the destination was touched"
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{case}: left a staging file: {names:?}");
+    }
+}
+
+/// A hash carried from the load is what the bytes are held to, not one derived
+/// from them at write time: that is the whole point of `with_known_original`.
+#[test]
+fn a_known_hash_is_what_the_original_is_checked_against() {
+    let base = fixture();
+    let build = |bytes: Vec<u8>, hash: [u8; 32]| {
+        RlabFile::with_known_original(base.meta.clone(), bytes, hash, base.copies.clone(), 0, None)
+    };
+
+    let good = vec![ORIG_FILL; 4096];
+    let hash = hash_original_bytes(&good);
+    let roundtrip = RlabFile::read_bytes(&build(good.clone(), hash).encode_v5().unwrap()).unwrap();
+    assert_eq!(roundtrip.original_bytes, good);
+    assert_eq!(roundtrip.original_hash, hash);
+
+    let mut bad = good;
+    bad[0] ^= 0xFF;
+    assert!(build(bad, hash).encode_v5().is_err());
+}
+
+/// The check must not cost a second pass over the original: its digest is the
+/// one stored in the `ORIG` chunk.
+#[test]
+fn the_stored_orig_hash_is_the_recorded_original_hash() {
+    let project = fixture();
+    let read = RlabFile::read_bytes(&project.encode_v5().unwrap()).unwrap();
+    assert_eq!(read.original_hash, project.original_hash);
 }

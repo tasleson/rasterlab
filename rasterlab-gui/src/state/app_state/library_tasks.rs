@@ -1292,7 +1292,7 @@ mod tests {
         Image,
         ops::{SaturationOp, SepiaOp},
         pipeline::EditPipeline,
-        project::{RlabFile, RlabMeta},
+        project::{RlabFile, RlabMeta, hash_original_bytes},
     };
     use rasterlab_library::BulkOutcome;
 
@@ -1739,7 +1739,12 @@ mod tests {
                         false,
                     );
                 } else {
-                    state.on_image_loaded("next.png".into(), Image::new(4, 4), Vec::new());
+                    state.on_image_loaded(
+                        "next.png".into(),
+                        Image::new(4, 4),
+                        Vec::new(),
+                        hash_original_bytes(&[]),
+                    );
                 }
 
                 let what = format!("project {project}, autosave restored {restore_autosave}");
