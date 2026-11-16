@@ -327,8 +327,17 @@ fn upgrade_to_v5(path: &Path) -> Result<()> {
 }
 
 /// Copy the (corrupted) original to `recovered/`, preserving its relative
-/// `ab/cd/{hash}.rlab` layout. A timestamp suffix avoids clobbering a backup
-/// from an earlier scrub of the same file.
+/// `ab/cd/{hash}.rlab` layout, and return where it went.
+///
+/// A backup is the only remaining copy of whatever the caller is about to
+/// replace, so it must never overwrite an earlier one.  The active and the
+/// Recently Deleted file of one photo strip to the same relative path, and two
+/// repairs of one file can land in the same second, so a timestamp alone is
+/// not enough.  The first free name among the plain path and
+/// `{stem}.{side}.{unix-seconds}.{n}.{ext}` is *reserved* by creating it
+/// exclusively (atomic across threads and processes), and the verified write
+/// then renames over our own placeholder.  `side` says which tree the file came
+/// from, so two backups of one hash stay distinguishable.
 ///
 /// Uses the degraded reader rather than `std::fs::copy`: the file being backed
 /// up may have unreadable sectors — that is one of the reasons it is being
@@ -338,25 +347,55 @@ pub(crate) fn backup_to_recovered(
     base_dir: &Path,
     recovered_dir: &Path,
     path: &Path,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let rel = path.strip_prefix(base_dir).unwrap_or(path);
-    let mut dest = recovered_dir.join(rel);
-    if dest.exists() {
-        let ts = unix_now();
-        let stem = dest.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-        let ext = dest.extension().and_then(|s| s.to_str()).unwrap_or("rlab");
-        dest.set_file_name(format!("{stem}.{ts}.{ext}"));
-    }
-    if let Some(parent) = dest.parent() {
+    let plain = recovered_dir.join(rel);
+    if let Some(parent) = plain.parent() {
         create_dir_all_synced(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let degraded = read_degraded_file(path).with_context(|| format!("read {}", path.display()))?;
+
+    let side = if base_dir.parent().and_then(|p| p.file_name())
+        == Some(std::ffi::OsStr::new("recently_deleted"))
+    {
+        "deleted"
+    } else {
+        "active"
+    };
+    let dest = reserve_backup_name(&plain, side)?;
+
     // The original is about to be renamed over, so this backup is the only
     // remaining copy of whatever the repair could not use.  It has to be on the
     // device before the replace, not merely handed to the page cache.
-    write_verified_atomic(&dest, &degraded.data)
-        .with_context(|| format!("back up corrupted file to {}", dest.display()))?;
-    Ok(())
+    if let Err(e) = write_verified_atomic(&dest, &degraded.data) {
+        // Only the empty placeholder we made; never a finished backup.
+        let _ = std::fs::remove_file(&dest);
+        return Err(e).with_context(|| format!("back up corrupted file to {}", dest.display()));
+    }
+    Ok(dest)
+}
+
+/// Claim a name in `recovered/` that nothing else holds, by creating it.
+fn reserve_backup_name(plain: &Path, side: &str) -> Result<PathBuf> {
+    let stem = plain.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = plain.extension().and_then(|s| s.to_str()).unwrap_or("rlab");
+    let ts = unix_now();
+    let candidates = std::iter::once(plain.to_path_buf())
+        .chain((0u32..).map(|n| plain.with_file_name(format!("{stem}.{side}.{ts}.{n}.{ext}"))));
+    for candidate in candidates {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("reserve {}", candidate.display()));
+            }
+        }
+    }
+    unreachable!("the candidate sequence is unbounded")
 }
 
 /// Rename `tmp` over `dst`. Both live in the same directory (hence the same
@@ -371,4 +410,44 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Backups are the only copy of what a repair replaces, so however many
+    /// land in one second, from either tree, none may overwrite another.
+    #[test]
+    fn backups_of_one_photo_never_overwrite_each_other() {
+        let root = tempfile::tempdir().unwrap();
+        let files = root.path().join("files");
+        let deleted = root.path().join("recently_deleted/files");
+        let recovered = root.path().join("recovered");
+        let rel = Path::new("ab/cd/abcd.rlab");
+
+        let sources: Vec<(&Path, &[u8])> = vec![
+            (&files, b"first"),
+            (&deleted, b"second"),
+            (&files, b"third"),
+            (&deleted, b"fourth"),
+        ];
+        let mut dests = Vec::new();
+        for (base, bytes) in &sources {
+            let src = base.join(rel);
+            std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+            std::fs::write(&src, bytes).unwrap();
+            dests.push(backup_to_recovered(base, &recovered, &src).unwrap());
+        }
+
+        let unique: std::collections::HashSet<_> = dests.iter().collect();
+        assert_eq!(unique.len(), dests.len(), "{dests:?}");
+        for (dest, (_, bytes)) in dests.iter().zip(&sources) {
+            assert_eq!(&std::fs::read(dest).unwrap(), bytes, "{}", dest.display());
+        }
+        // The side a backup came from survives in its name once the plain
+        // name is taken.
+        assert!(dests[1].to_string_lossy().contains(".deleted."));
+        assert!(dests[2].to_string_lossy().contains(".active."));
+    }
 }

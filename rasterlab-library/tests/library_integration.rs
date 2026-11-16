@@ -4498,3 +4498,70 @@ fn saving_a_project_whose_original_bytes_changed_leaves_the_file_untouched() {
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+/// Every file under `dir`, with its bytes.
+fn files_under(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(files_under(&path));
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                out.push((path, bytes));
+            }
+        }
+    }
+    out
+}
+
+/// The active and the Recently Deleted file of one photo strip to the same
+/// path under `recovered/`, and an earlier backup may already hold it.  All
+/// three byte images are the only copies of what they are, so none may
+/// overwrite another.
+#[test]
+fn reimport_keeps_every_backup_when_both_sides_and_recovered_collide() {
+    use rasterlab_library::import::{relative_lib_path, rlab_path};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    let active = rlab_path(tmp.path(), &hash);
+    let deleted = rlab_path(&tmp.path().join("recently_deleted"), &hash);
+    std::fs::create_dir_all(deleted.parent().unwrap()).unwrap();
+    let earlier = tmp.path().join("recovered").join(relative_lib_path(&hash));
+    std::fs::create_dir_all(earlier.parent().unwrap()).unwrap();
+
+    let (earlier_bytes, active_bytes, deleted_bytes) = (
+        b"an earlier backup".to_vec(),
+        b"unverifiable active".to_vec(),
+        b"unverifiable deleted".to_vec(),
+    );
+    std::fs::write(&earlier, &earlier_bytes).unwrap();
+    std::fs::write(&active, &active_bytes).unwrap();
+    std::fs::write(&deleted, &deleted_bytes).unwrap();
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let session = lib
+        .import_files(&[copy_of_the_jpeg(src.path())], |_| {})
+        .unwrap();
+    assert!(session.errors.is_empty(), "{:?}", session.errors);
+
+    let kept: Vec<Vec<u8>> = files_under(&tmp.path().join("recovered"))
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect();
+    for (what, bytes) in [
+        ("the earlier backup", &earlier_bytes),
+        ("the active file", &active_bytes),
+        ("the Recently Deleted file", &deleted_bytes),
+    ] {
+        assert!(kept.contains(bytes), "{what} was lost: {} kept", kept.len());
+    }
+    assert!(
+        earlier.is_file() && std::fs::read(&earlier).unwrap() == earlier_bytes,
+        "the earlier backup was overwritten in place"
+    );
+}
