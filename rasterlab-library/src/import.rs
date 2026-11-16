@@ -21,8 +21,21 @@ use uuid::Uuid;
 use crate::{
     db_trait::{CollectionId, LibraryDb, NewPhoto},
     library::ImportProgress,
+    reconstruct::{
+        CollectionsFromFiles, note_memberships, note_session, photo_row_for, restore_collections,
+        restore_sessions,
+    },
+    scrub::backup_to_recovered,
     thumbnail::{generate_thumbnail, write_thumbnail},
 };
+
+/// Where files that could not be trusted are copied before anything replaces
+/// them, relative to the library root.
+const RECOVERED_DIR: &str = "recovered";
+
+/// The library-owned recycle bin, relative to the library root.  It mirrors
+/// `files/` beneath its own `files/`.
+const RECENTLY_DELETED_DIR: &str = "recently_deleted";
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -1015,22 +1028,144 @@ fn prepare_one(
     })))
 }
 
+/// What committing one prepared photo did to the library.
+enum Committed {
+    /// The prepared project was written and indexed.
+    Written,
+    /// A complete, verified project for this photograph was already in
+    /// `files/`, so it was indexed as it stands rather than rewritten.
+    Adopted,
+    /// The photograph's verified project was found in Recently Deleted with no
+    /// row to say so; it was indexed there, still deleted.
+    AdoptedDeleted,
+}
+
+/// What stands at a photo's place in the library before an import writes it.
+enum Standing {
+    /// Nothing: the prepared project is simply written.
+    Vacant,
+    /// A project that reads back whole and embeds exactly this photograph.
+    Verified(Box<RlabFile>),
+}
+
+/// Look at the file already at `path`, if any, and say whether it is this
+/// photograph, whole.
+///
+/// "Whole" is [`RlabFile::read`] succeeding, which checks every digest in the
+/// file, *and* the embedded original hashing to `hash`: a file can be intact
+/// and still hold some other photo if it was misfiled.  A file that is neither
+/// is backed up into `recovered/` before this returns, which is what lets the
+/// caller overwrite it without that being a loss: the import's own bytes are
+/// good, but the unreadable file may carry the only surviving record of a
+/// rating, keywords or edits.
+///
+/// An error finding out whether the file exists is returned rather than read
+/// as "absent" — overwriting on a guess is the one thing this must not do.
+fn inspect_standing(
+    base_dir: &Path,
+    recovered_dir: &Path,
+    path: &Path,
+    hash: &str,
+) -> Result<Standing> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Standing::Vacant),
+        Err(e) => return Err(e).with_context(|| format!("inspect {}", path.display())),
+    }
+    if let Ok(existing) = RlabFile::read(path)
+        && blake3::Hash::from(existing.original_hash).to_hex().as_str() == hash
+    {
+        return Ok(Standing::Verified(Box::new(existing)));
+    }
+    backup_to_recovered(base_dir, recovered_dir, path).with_context(|| {
+        format!(
+            "preserve the unverified file at {} before importing over it",
+            path.display()
+        )
+    })?;
+    // The caller decides whether the file itself goes; reporting `Vacant`
+    // here means "nothing usable", and the backup above is what makes that
+    // safe to act on.
+    Ok(Standing::Vacant)
+}
+
+/// Index a project that was already in the library, from what it carries.
+///
+/// The row is derived from the file ([`photo_row_for`], the same derivation a
+/// rebuild uses), not from the import that found it: the file's `LMTA` holds
+/// the user's rating and keywords and its virtual copies hold their edits, and
+/// the import in hand knows none of that.  Its collections and session are
+/// restored the way a rebuild restores them.  The thumbnail cache is refreshed
+/// from the file's own `PREV` when it has one, so an edited photo does not
+/// show its unedited original.
+fn adopt(
+    library_root: &Path,
+    db: &dyn LibraryDb,
+    hash: &str,
+    existing: &RlabFile,
+    fallback_thumb: &[u8],
+    deleted_at: Option<u64>,
+) -> Result<()> {
+    let lmta = existing.lmta.clone().unwrap_or_default();
+
+    write_thumbnail(
+        &thumb_path(library_root, hash),
+        existing.thumbnail.as_deref().unwrap_or(fallback_thumb),
+    )?;
+
+    let mut sessions = HashMap::new();
+    let mut collections = CollectionsFromFiles::default();
+    note_session(&mut sessions, &lmta);
+    note_memberships(&mut collections, &lmta, existing.meta.modified_at, hash);
+
+    let lib_path = relative_lib_path(hash);
+    let id = db.insert_photo(photo_row_for(hash, &lib_path, existing, &lmta))?;
+    if let Some(when) = deleted_at {
+        db.mark_photo_deleted(id, when)?;
+    }
+    restore_sessions(db, &sessions)?;
+    restore_collections(db, collections)?;
+    Ok(())
+}
+
 /// Make one prepared photo durable and record it in the index.
 ///
 /// The steps are ordered storage-first: the `.rlab` holds the only copy of the
 /// original, the index can be rebuilt from it, so the file is written and
 /// verified before anything is recorded about it.  An import that stops between
 /// them leaves a complete `.rlab` that no row mentions — invisible until the
-/// next rebuild, and recovered by it.  Re-running the same import also heals
-/// it: with no row to find, the file is simply rewritten (same hash, same path)
-/// and inserted.  Nothing is deleted on failure for the same reason: the
-/// photograph outranks the bookkeeping.
+/// next rebuild, and recovered by it.  Nothing is deleted on failure for the
+/// same reason: the photograph outranks the bookkeeping.
+///
+/// The index is only a cache of the files, so "no row" does not mean "no
+/// file": a lost or partly rebuilt index leaves projects in place carrying
+/// ratings, keywords, edits and virtual copies that the prepared (pristine)
+/// project knows nothing of.  Writing over such a file would replace the user's
+/// work with a blank one, so the destination is looked at first:
+///
+/// * A file there that fully verifies and embeds this photograph is **adopted**:
+///   left exactly as it is and indexed from what it carries.  This is also how
+///   an import killed between its two steps heals — the file it managed to
+///   write is verified and indexed on the next run instead of being rewritten.
+/// * A file there that does not verify, or holds a different original, is
+///   copied into `recovered/` first and then replaced by the prepared project:
+///   the bytes in hand are known-good, and nothing is lost by importing.
+/// * The same file found in Recently Deleted (with no row) is adopted *there*,
+///   still deleted — a second active copy would put one photograph in two
+///   places and have a rebuild pick between them.  That counts as a duplicate,
+///   not an import, so it is restorable from Recently Deleted like any other
+///   deleted photo.  An unverified file there is backed up and removed so the
+///   prepared project is not shadowed by it.
+///
+/// Every adopted file has just been read whole and matched against the hash
+/// the source was judged by, which is what lets `delete_sources` treat it as
+/// proof the library holds the photograph.
 fn commit_prepared(
     library_root: &Path,
     db: &dyn LibraryDb,
     assigner: &Mutex<CollectionAssigner<'_>>,
     prepared: Prepared,
-) -> Result<()> {
+) -> Result<Committed> {
     let Prepared {
         hash,
         thumb_bytes,
@@ -1043,6 +1178,47 @@ fn commit_prepared(
         collection,
     } = prepared;
 
+    let deleted_root = library_root.join(RECENTLY_DELETED_DIR);
+    let deleted_path = rlab_path(&deleted_root, &hash);
+    let rlab_path = rlab_path(library_root, &hash);
+    let recovered_dir = library_root.join(RECOVERED_DIR);
+    let files_dir = library_root.join("files");
+    let deleted_files = deleted_root.join("files");
+
+    let active = import_phase!(
+        "existing_file_check",
+        inspect_standing(&files_dir, &recovered_dir, &rlab_path, &hash)
+    )?;
+    if let Standing::Verified(existing) = &active {
+        adopt(library_root, db, &hash, existing, &thumb_bytes, None)?;
+        return Ok(Committed::Adopted);
+    }
+
+    let deleted = import_phase!(
+        "existing_file_check",
+        inspect_standing(&deleted_files, &recovered_dir, &deleted_path, &hash)
+    )?;
+    match deleted {
+        Standing::Verified(existing) => {
+            adopt(
+                library_root,
+                db,
+                &hash,
+                &existing,
+                &thumb_bytes,
+                Some(unix_now()),
+            )?;
+            return Ok(Committed::AdoptedDeleted);
+        }
+        // Backed up by `inspect_standing`; leaving it would shadow the file
+        // about to be written, since a rebuild walks both sides.
+        Standing::Vacant if deleted_path.exists() => {
+            std::fs::remove_file(&deleted_path)
+                .with_context(|| format!("remove backed-up {}", deleted_path.display()))?;
+        }
+        Standing::Vacant => {}
+    }
+
     // 9. Write thumbnail.
     let thumb_path = thumb_path(library_root, &hash);
     import_phase!(
@@ -1051,7 +1227,6 @@ fn commit_prepared(
     )?;
 
     // 10. Write .rlab.
-    let rlab_path = rlab_path(library_root, &hash);
     if let Some(parent) = rlab_path.parent() {
         import_phase!("destination_directory", create_dir_all_synced(parent))?;
     }
@@ -1094,7 +1269,7 @@ fn commit_prepared(
         )
     )?;
 
-    Ok(())
+    Ok(Committed::Written)
 }
 
 /// Decode source bytes already loaded by the importer, retaining the source
@@ -1387,7 +1562,7 @@ fn run_import_pipeline(
                 Ok(Preparation::Ready(prepared)) => {
                     let hash = prepared.hash.clone();
                     match commit_prepared(library_root, db, assigner, *prepared) {
-                        Ok(()) => {
+                        Ok(committed) => {
                             // Back in the library, so no longer erased.  Best
                             // effort: a record left behind is harmless while
                             // the photo is held, since an import finds it as a
@@ -1395,8 +1570,14 @@ fn run_import_pipeline(
                             if options.include_erased {
                                 let _ = db.forget_purged(&hash);
                             }
-                            batch_hashes.insert(hash);
-                            ImportOutcome::Imported
+                            batch_hashes.insert(hash.clone());
+                            match committed {
+                                Committed::Written | Committed::Adopted => ImportOutcome::Imported,
+                                // Held, but in Recently Deleted: a duplicate
+                                // of a photo the user can restore, not a new
+                                // arrival.
+                                Committed::AdoptedDeleted => ImportOutcome::Duplicate(hash),
+                            }
                         }
                         Err(e) => {
                             tally.errors.push((job.path.clone(), format!("{:#}", e)));
@@ -1517,7 +1698,7 @@ fn verify_library_copy(library_root: &Path, hash: &str) -> Result<()> {
     let stored = if active.is_file() {
         active
     } else {
-        let deleted = rlab_path(&library_root.join("recently_deleted"), hash);
+        let deleted = rlab_path(&library_root.join(RECENTLY_DELETED_DIR), hash);
         if !deleted.is_file() {
             anyhow::bail!(
                 "kept source: the library has no file at {}",

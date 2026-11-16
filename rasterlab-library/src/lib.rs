@@ -43,7 +43,12 @@
 //!
 //! * **Multi-step operations are idempotent.**  Imports are keyed by content
 //!   hash and skip what is already there, so a cancelled or crashed import
-//!   resumes by simply being run again.  Session photo counts are recomputed
+//!   resumes by simply being run again.  The index is not the test of whether
+//!   a photo is present, though: an import that finds a `.rlab` already at the
+//!   photo's place — its row lost, say — adopts it if it verifies, indexing
+//!   the rating, keywords and edits the file carries instead of overwriting
+//!   them with a pristine project, and copies an unverifiable one into
+//!   `recovered/` before replacing it.  Session photo counts are recomputed
 //!   from the rows rather than incremented, so an interrupted run leaves a
 //!   correct number behind.  The bulk Recently Deleted operations are the same
 //!   shape: each photo is moved, restored or erased on its own, so a run that

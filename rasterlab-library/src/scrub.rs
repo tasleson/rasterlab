@@ -334,7 +334,11 @@ fn upgrade_to_v5(path: &Path) -> Result<()> {
 /// up may have unreadable sectors — that is one of the reasons it is being
 /// repaired — and a plain copy would fail on the first `EIO`, taking the repair
 /// down with it. Unreadable regions appear in the backup as zeros.
-fn backup_to_recovered(base_dir: &Path, recovered_dir: &Path, path: &Path) -> Result<()> {
+pub(crate) fn backup_to_recovered(
+    base_dir: &Path,
+    recovered_dir: &Path,
+    path: &Path,
+) -> Result<()> {
     let rel = path.strip_prefix(base_dir).unwrap_or(path);
     let mut dest = recovered_dir.join(rel);
     if dest.exists() {

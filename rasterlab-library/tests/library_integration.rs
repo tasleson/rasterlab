@@ -4145,3 +4145,230 @@ fn a_delete_run_takes_a_source_whose_photo_is_in_recently_deleted() {
     assert_eq!(lib.recently_deleted().unwrap().len(), 1);
     assert!(lib.recently_deleted_path(&photo.hash).is_file());
 }
+
+// ── Importing over files the index does not know ─────────────────────────────
+
+/// Remove the index the way a lost or half-rebuilt one disappears: everything
+/// named `library.db*`, whether stoolap left a file or a directory.
+fn lose_the_index(root: &std::path::Path) {
+    for entry in std::fs::read_dir(root).unwrap().flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("library.db")
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+    }
+}
+
+/// A second copy of the test JPEG under a different path, which is what makes
+/// it a re-import of the same photograph rather than of the same file.
+fn copy_of_the_jpeg(dir: &std::path::Path) -> PathBuf {
+    let copy = dir.join("elsewhere.jpg");
+    std::fs::copy(jpeg_path(), &copy).unwrap();
+    copy
+}
+
+/// Import the JPEG into a fresh library and give it a rating, a keyword and a
+/// second virtual copy: everything an import of the pristine photo knows
+/// nothing about.  Returns the photo's hash with the library closed again.
+fn import_and_customise(root: &std::path::Path) -> String {
+    use rasterlab_core::project::{RlabFile, SavedCopy};
+
+    let lib = open_library(root);
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap().remove(0);
+
+    let mut lmta = RlabFile::read(&lib.rlab_path(&photo.hash))
+        .unwrap()
+        .lmta
+        .unwrap();
+    lmta.rating = 5;
+    lmta.keywords = vec!["precious".to_owned()];
+    lib.update_metadata(photo.id, lmta).unwrap();
+
+    let mut project = RlabFile::read(&lib.rlab_path(&photo.hash)).unwrap();
+    project.copies.push(SavedCopy {
+        name: "Second look".into(),
+        pipeline_state: project.copies[0].pipeline_state.clone(),
+    });
+    lib.save_edited_project(&photo.hash, project).unwrap();
+    photo.hash
+}
+
+/// The index only caches the files, so a photo can be on disk with no row.
+/// Re-importing it must index what is there — the user's rating, keywords and
+/// copies — and not replace it with the pristine project the import carries.
+#[test]
+fn reimport_after_index_loss_adopts_the_existing_project() {
+    use rasterlab_core::project::RlabFile;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    let before = std::fs::read(rasterlab_library::import::rlab_path(tmp.path(), &hash)).unwrap();
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    let session = lib
+        .import_files(&[copy_of_the_jpeg(src.path())], |_| {})
+        .unwrap();
+    assert!(session.errors.is_empty(), "{:?}", session.errors);
+
+    assert_eq!(
+        std::fs::read(lib.rlab_path(&hash)).unwrap(),
+        before,
+        "the existing project was rewritten"
+    );
+    let project = RlabFile::read(&lib.rlab_path(&hash)).unwrap();
+    let lmta = project.lmta.unwrap();
+    assert_eq!(lmta.rating, 5);
+    assert_eq!(lmta.keywords, ["precious"]);
+    assert_eq!(project.copies.len(), 2);
+
+    // And the index describes the file, not the import: it finds the photo by
+    // the rating only the file carried.
+    let rated = lib
+        .search(
+            &SearchFilter {
+                rating_min: Some(5),
+                ..Default::default()
+            },
+            SortOrder::default(),
+        )
+        .unwrap();
+    assert_eq!(rated.len(), 1);
+    assert_eq!(rated[0].hash, hash);
+    assert_eq!(lib.photo_count().unwrap(), 1);
+    assert!(lib.thumb_path(&hash).is_file());
+}
+
+/// An adopted file has just been read whole and matched against the source's
+/// hash, so it is as good a reason to unlink the source as a fresh write is.
+#[test]
+fn a_delete_run_takes_a_source_whose_unindexed_photo_was_adopted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let source = copy_of_the_jpeg(src.path());
+    let lib = open_library(tmp.path());
+    lib.import_paths(
+        std::slice::from_ref(&source),
+        delete_sources(),
+        no_cancel(),
+        |_| {},
+    )
+    .unwrap();
+
+    assert!(
+        !source.exists(),
+        "an adopted photo is verified; keep nothing"
+    );
+    assert!(lib.rlab_path(&hash).is_file());
+    assert_eq!(lib.photo_count().unwrap(), 1);
+}
+
+/// A file at the photo's place that cannot be trusted is not the import's to
+/// destroy: it may hold the only record of the user's metadata.  It goes to
+/// `recovered/` first, and the good bytes in hand replace it.
+#[test]
+fn reimport_backs_up_an_unverified_file_before_replacing_it() {
+    use rasterlab_core::project::RlabFile;
+    use rasterlab_library::import::{relative_lib_path, rlab_path};
+
+    type Damage = fn(&std::path::Path, &[u8]);
+    let cases: [(&str, Damage); 3] = [
+        ("garbage", |path, _| {
+            std::fs::write(path, b"not a project").unwrap()
+        }),
+        ("damage beyond parity", |path, good| {
+            let mut bytes = good.to_vec();
+            let (from, to) = (bytes.len() / 4, bytes.len() * 3 / 4);
+            bytes[from..to].fill(0);
+            std::fs::write(path, bytes).unwrap();
+        }),
+        ("a different photograph", |path, _| {
+            let other = tempfile::tempdir().unwrap();
+            let lib = open_library(other.path());
+            lib.import_files(&[png_path()], |_| {}).unwrap();
+            let hash = lib.all_photos(SortOrder::default()).unwrap().remove(0).hash;
+            std::fs::copy(lib.rlab_path(&hash), path).unwrap();
+        }),
+    ];
+
+    for (name, damage) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        let hash = import_and_customise(tmp.path());
+        let path = rlab_path(tmp.path(), &hash);
+        let good = std::fs::read(&path).unwrap();
+        damage(&path, &good);
+        let damaged = std::fs::read(&path).unwrap();
+        lose_the_index(tmp.path());
+
+        let src = tempfile::tempdir().unwrap();
+        let lib = open_library(tmp.path());
+        let session = lib
+            .import_files(&[copy_of_the_jpeg(src.path())], |_| {})
+            .unwrap();
+        assert!(session.errors.is_empty(), "{name}: {:?}", session.errors);
+
+        let backup = tmp.path().join("recovered").join(relative_lib_path(&hash));
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            damaged,
+            "{name}: the unverified file was not preserved verbatim"
+        );
+        let replaced = RlabFile::read(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(
+            blake3::Hash::from(replaced.original_hash).to_hex().as_str(),
+            hash,
+            "{name}"
+        );
+        assert_eq!(lib.photo_count().unwrap(), 1, "{name}");
+    }
+}
+
+/// A photo in Recently Deleted with no row must not get a second, active copy
+/// written beside it: it is indexed where it is, still deleted, and the import
+/// counts it as a duplicate.
+#[test]
+fn reimport_after_index_loss_leaves_a_recently_deleted_photo_there() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    {
+        let lib = open_library(tmp.path());
+        let photo = lib.all_photos(SortOrder::default()).unwrap().remove(0);
+        lib.delete_photo(photo.id).unwrap();
+    }
+    let deleted = rasterlab_library::import::rlab_path(&tmp.path().join("recently_deleted"), &hash);
+    let before = std::fs::read(&deleted).unwrap();
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let session = lib
+        .import_files(&[copy_of_the_jpeg(src.path())], |_| {})
+        .unwrap();
+    assert!(session.errors.is_empty(), "{:?}", session.errors);
+    assert_eq!(
+        session.photo_count, 0,
+        "a deleted photo is not a new import"
+    );
+
+    assert!(
+        !lib.rlab_path(&hash).exists(),
+        "a second active copy appeared"
+    );
+    assert_eq!(std::fs::read(&deleted).unwrap(), before);
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+}
