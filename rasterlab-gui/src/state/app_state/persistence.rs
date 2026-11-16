@@ -60,6 +60,7 @@ impl AppState {
         self.reset_tools_for_new_image(w, h);
         self.last_path = Some(path.clone());
         self.document_file_size = Some(original_bytes.len() as u64);
+        self.document_damaged = false;
         self.original_bytes = Some(original_bytes);
         self.project_path = None;
         self.is_dirty = false;
@@ -114,6 +115,7 @@ impl AppState {
         rlab: Arc<RlabFile>,
         source: Arc<Image>,
         file_len: u64,
+        salvaged: bool,
     ) {
         // The navigation cache usually holds the same file, so this is where
         // the embedded original is copied — once, as it always was.
@@ -132,11 +134,18 @@ impl AppState {
         self.project_lmta = rlab.lmta.clone();
         self.original_bytes = Some(std::mem::take(&mut rlab.original_bytes));
         self.document_file_size = Some(file_len);
+        self.document_damaged = salvaged;
         self.project_path = Some(path.clone());
         self.is_dirty = false;
         self.clean_edit_state = None;
         self.copies = None;
         self.status = format!("Opened {}  ({}×{})", path.display(), w, h);
+        // The photo and its edits verified, so editing is safe; what is damaged
+        // is the redundancy that would repair the file later.  A save rewrites
+        // the file with fresh parity, but until then the photo is only as
+        // protected as its parity, so say so.  The render that follows replaces
+        // this line at once, which is why the note rides on `document_damaged`
+        // and is added to the render statuses rather than appended here.
         self.rename_pending = None;
 
         self.begin_autosave_session();
@@ -238,12 +247,14 @@ impl AppState {
                             rlab,
                             image,
                             file_len,
+                            salvaged,
                         }) => BgMessage::ProjectLoaded {
                             request,
                             path,
                             rlab,
                             image,
                             file_len,
+                            salvaged,
                         },
                         Err(message) => BgMessage::Error { request, message },
                     }
@@ -598,6 +609,9 @@ impl AppState {
                 // The save ran on this thread already; one more stat of the
                 // file it just wrote is noise beside it.
                 self.document_file_size = std::fs::metadata(&path).ok().map(|meta| meta.len());
+                // Whatever the document was opened from, it is now a freshly
+                // written file with fresh parity.
+                self.document_damaged = false;
                 self.capture_clean_edit_state();
                 // Clean up the autosave file now that the work is safely saved.
                 if let Some(session_id) = self.autosave_session_id.take() {
@@ -778,6 +792,36 @@ mod tests {
             .pipeline_state
             .entries[0]
             .clone()
+    }
+
+    /// The "Opened …" line is replaced as soon as the render that follows an
+    /// open starts, so the warning has to outlive it: it rides on the
+    /// render-ready status until the document is saved.
+    #[test]
+    fn a_salvaged_open_warns_on_the_render_ready_status() {
+        let mut state = AppState::new(egui::Context::default(), None);
+        let (copies, active) =
+            VirtualCopyStore::new("Copy 1".into(), EditPipeline::new(Image::new(4, 4)))
+                .save_states()
+                .unwrap();
+        let rlab = RlabFile::new(
+            RlabMeta::new("test", None::<String>, 4, 4),
+            Vec::new(),
+            copies,
+            active,
+            None,
+        );
+        state.on_project_loaded(
+            "damaged.rlab".into(),
+            Arc::new(rlab),
+            Arc::new(Image::new(4, 4)),
+            0,
+            true,
+        );
+        assert!(state.render_ready_status("Ready", 5).contains("damaged"));
+
+        state.document_damaged = false;
+        assert!(!state.render_ready_status("Ready", 5).contains("damaged"));
     }
 
     #[test]
@@ -1057,6 +1101,7 @@ mod tests {
                         rlab: Arc::new(RlabFile::read(path).map_err(|e| e.to_string())?),
                         image: Arc::new(Image::new(8, 8)),
                         file_len: 0,
+                        salvaged: false,
                     })
                 },
             )
@@ -1095,6 +1140,7 @@ mod tests {
                                 )),
                                 image: Arc::new(Image::new(1, 1)),
                                 file_len: 0,
+                                salvaged: false,
                             })
                         },
                     )

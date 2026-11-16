@@ -4372,3 +4372,71 @@ fn reimport_after_index_loss_leaves_a_recently_deleted_photo_there() {
     assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
     assert_eq!(lib.recently_deleted().unwrap().len(), 1);
 }
+
+// ── Parity-only damage ───────────────────────────────────────────────────────
+
+/// Flip one bit in the leading parity copy, which sits right after the 10-byte
+/// file header, leaving every content chunk untouched.
+fn damage_the_parity(path: &std::path::Path) {
+    const IN_LEADING_PARITY: usize = 10 + 12 + 40;
+    let mut bytes = std::fs::read(path).unwrap();
+    bytes[IN_LEADING_PARITY] ^= 1;
+    std::fs::write(path, bytes).unwrap();
+    assert!(
+        rasterlab_core::project::RlabFile::read(path).is_err(),
+        "the damage must be visible to the strict reader"
+    );
+}
+
+/// A project whose parity rotted still holds the photograph and the user's
+/// metadata intact; re-importing over it must keep them and heal the file, not
+/// swap in a pristine project because the strict reader balked.
+#[test]
+fn reimport_after_index_loss_keeps_a_project_whose_parity_rotted() {
+    use rasterlab_core::project::RlabFile;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    let path = rasterlab_library::import::rlab_path(tmp.path(), &hash);
+    damage_the_parity(&path);
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let session = lib
+        .import_files(&[copy_of_the_jpeg(src.path())], |_| {})
+        .unwrap();
+    assert!(session.errors.is_empty(), "{:?}", session.errors);
+
+    let project = RlabFile::read(&path).expect("the adopted file was healed");
+    assert_eq!(project.lmta.unwrap().rating, 5);
+    assert_eq!(project.copies.len(), 2);
+    assert!(
+        !tmp.path().join("recovered").exists(),
+        "a project that was intact apart from its parity needs no backup"
+    );
+}
+
+/// Rating a photo rewrites its whole file, which regenerates the parity, so a
+/// photo with rotted parity can still be rated and comes out healed.
+#[test]
+fn metadata_edit_on_a_project_whose_parity_rotted_heals_it() {
+    use rasterlab_core::project::RlabFile;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap().remove(0);
+    let path = lib.rlab_path(&photo.hash);
+    damage_the_parity(&path);
+
+    let mut lmta = RlabFile::read_salvaging(&path)
+        .unwrap()
+        .project
+        .lmta
+        .unwrap();
+    lmta.rating = 3;
+    lib.update_metadata(photo.id, lmta).unwrap();
+
+    assert_eq!(RlabFile::read(&path).unwrap().lmta.unwrap().rating, 3);
+}

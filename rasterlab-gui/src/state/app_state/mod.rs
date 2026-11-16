@@ -53,6 +53,10 @@ use self::render::{NrPreviewSignature, ProcessingBackend, ReusableNrPreview};
 use super::virtual_copies::EditStateSnapshot;
 use super::{EditSession, EditingTool, ToolState, load_op_into_tools};
 
+/// What the status line adds when the open `.rlab` was readable only through
+/// the salvaging read (see `AppState::document_damaged`).
+const DAMAGED_FILE_NOTE: &str = "opened, but the file is damaged; run Verify/scrub to repair it";
+
 // ---------------------------------------------------------------------------
 // App mode
 // ---------------------------------------------------------------------------
@@ -88,6 +92,9 @@ enum BgMessage {
         image: Arc<Image>,
         /// Bytes the project file took on disk when it was read.
         file_len: u64,
+        /// The file's parity or trailing hash is damaged; see
+        /// [`prefetch::LoadedProject::salvaged`].
+        salvaged: bool,
     },
     /// Result from the background render thread (via `rasterlab-render` crate).
     Render(RenderResult),
@@ -249,6 +256,11 @@ pub struct AppState {
     /// `.rlab` once there is a project. Taken when it is opened or saved so
     /// the metadata panel never stats storage from the UI thread.
     document_file_size: Option<u64>,
+    /// The open `.rlab` opened only through the salvaging read: its photo and
+    /// edits verified, but its parity or trailing hash is damaged.  Kept for as
+    /// long as that file is the document, because the status line that says
+    /// so is overwritten by the render that follows the open.
+    document_damaged: bool,
     /// Incremented each time a new file is opened. Canvas uses this to know
     /// when to reset zoom/pan vs. just updating the texture.
     pub image_generation: u64,
@@ -417,6 +429,7 @@ impl AppState {
             project_created_at: None,
             project_lmta: None,
             document_file_size: None,
+            document_damaged: false,
             image_generation: 0,
             split_view: false,
             split_mode: SplitMode::VsOriginal,
@@ -481,9 +494,10 @@ impl AppState {
                     rlab,
                     image,
                     file_len,
+                    salvaged,
                 } => {
                     if self.is_current_open(request) {
-                        self.on_project_loaded(path, rlab, image, file_len)
+                        self.on_project_loaded(path, rlab, image, file_len, salvaged)
                     }
                 }
                 BgMessage::Render(result) => self.on_render_result(result),

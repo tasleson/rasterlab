@@ -13,7 +13,7 @@ use rasterlab_core::import_phase;
 use rasterlab_core::{
     formats::{FormatRegistry, exif_util::read_capture_date_from_prefix},
     library_meta::{CollectionRef, FileTimeStamp, LibraryExif, LibraryMeta},
-    project::{RlabFile, is_rlab_path, read_library_summary, read_original_hash},
+    project::{Integrity, RlabFile, is_rlab_path, read_library_summary, read_original_hash},
     verified_write::{create_dir_all_synced, write_verified_atomic},
 };
 use uuid::Uuid;
@@ -1051,10 +1051,12 @@ enum Standing {
 /// Look at the file already at `path`, if any, and say whether it is this
 /// photograph, whole.
 ///
-/// "Whole" is [`RlabFile::read`] succeeding, which checks every digest in the
-/// file, *and* the embedded original hashing to `hash`: a file can be intact
-/// and still hold some other photo if it was misfiled.  A file that is neither
-/// is backed up into `recovered/` before this returns, which is what lets the
+/// "Whole" is a salvaging read succeeding, which proves every content chunk
+/// against its own digest (a file whose only damage is its parity is healed by
+/// rewriting it, so what is adopted always reads back strictly), *and* the
+/// embedded original hashing to `hash`: a file can be intact and still hold
+/// some other photo if it was misfiled.  A file that is neither is backed up
+/// into `recovered/` before this returns, which is what lets the
 /// caller overwrite it without that being a loss: the import's own bytes are
 /// good, but the unreadable file may carry the only surviving record of a
 /// rating, keywords or edits.
@@ -1072,10 +1074,22 @@ fn inspect_standing(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Standing::Vacant),
         Err(e) => return Err(e).with_context(|| format!("inspect {}", path.display())),
     }
-    if let Ok(existing) = RlabFile::read(path)
-        && blake3::Hash::from(existing.original_hash).to_hex().as_str() == hash
+    if let Ok(read) = RlabFile::read_salvaging(path)
+        && blake3::Hash::from(read.project.original_hash)
+            .to_hex()
+            .as_str()
+            == hash
     {
-        return Ok(Standing::Verified(Box::new(existing)));
+        // Damage confined to the parity or trailing hash leaves every chunk
+        // proven by its own digest, so the project (and the user's metadata in
+        // it) is kept; rewriting it is what regenerates the redundancy, and
+        // `write_v5` reads the result back before it replaces anything.
+        if read.integrity == Integrity::Salvaged {
+            read.project
+                .write_v5(path)
+                .with_context(|| format!("heal {} before adopting it", path.display()))?;
+        }
+        return Ok(Standing::Verified(Box::new(read.project)));
     }
     backup_to_recovered(base_dir, recovered_dir, path).with_context(|| {
         format!(

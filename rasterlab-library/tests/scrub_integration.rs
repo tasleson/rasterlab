@@ -240,6 +240,53 @@ fn scrub_reports_uncorrectable_corruption() {
     assert!(!tmp.path().join("recovered").exists());
 }
 
+/// A bit flipped in each parity copy leaves no valid parity to repair from, but
+/// the photograph itself is untouched: the scrub must regenerate the parity
+/// rather than call a fully intact photo uncorrectable.
+#[test]
+fn scrub_regenerates_parity_when_only_the_parity_is_damaged() {
+    const FILE_HEADER_LEN: usize = 10;
+    const CHUNK_HEADER_LEN: usize = 12;
+    const HASH_LEN: usize = 32;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open_or_create(tmp.path()).unwrap();
+    let (hash, path) = import_one(&lib);
+    let original = RlabFile::read(&path).unwrap().original_bytes;
+
+    // v5 brackets the content with a parity copy at each end.
+    let mut damaged = std::fs::read(&path).unwrap();
+    let recc_len = u64::from_le_bytes(
+        damaged[FILE_HEADER_LEN + 4..FILE_HEADER_LEN + CHUNK_HEADER_LEN]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let chunk_len = CHUNK_HEADER_LEN + recc_len + HASH_LEN;
+    let trailing = damaged.len() - HASH_LEN - chunk_len;
+    assert_eq!(&damaged[trailing..trailing + 4], b"RECC");
+    for copy in [FILE_HEADER_LEN, trailing] {
+        damaged[copy + CHUNK_HEADER_LEN + 40] ^= 1;
+    }
+    std::fs::write(&path, &damaged).unwrap();
+    assert!(RlabFile::read(&path).is_err());
+
+    let out = run_scrub(&lib);
+    assert_eq!(out.repaired, 1, "{out:?}");
+    assert!(out.errors.is_empty(), "{out:?}");
+
+    let healed = RlabFile::read(&path).expect("the scrub left a file the strict reader accepts");
+    assert_eq!(healed.original_bytes, original);
+    let post = verify_and_repair(&path, None).unwrap();
+    assert!(
+        post.file_hash_ok && post.damaged_chunks.is_empty(),
+        "{post:?}"
+    );
+
+    // The file it replaced is kept, as for any other repair.
+    let backup = tmp.path().join("recovered").join(relative_lib_path(&hash));
+    assert_eq!(std::fs::read(&backup).unwrap(), damaged);
+}
+
 #[test]
 fn scrub_honours_cancellation() {
     let tmp = tempfile::tempdir().unwrap();

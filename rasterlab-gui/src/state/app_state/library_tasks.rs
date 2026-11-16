@@ -1736,6 +1736,7 @@ mod tests {
                         Arc::new(rlab),
                         Arc::new(Image::new(4, 4)),
                         0,
+                        false,
                     );
                 } else {
                     state.on_image_loaded("next.png".into(), Image::new(4, 4), Vec::new());

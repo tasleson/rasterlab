@@ -32,7 +32,11 @@ use std::{
     time::SystemTime,
 };
 
-use rasterlab_core::{Image, RasterError, formats::FormatRegistry, project::RlabFile};
+use rasterlab_core::{
+    Image, RasterError,
+    formats::FormatRegistry,
+    project::{Integrity, RlabFile, SalvagedRead},
+};
 
 use super::workers;
 
@@ -53,6 +57,10 @@ pub(super) struct LoadedProject {
     /// Bytes the `.rlab` took on disk when it was read, for the editor's
     /// metadata panel.
     pub file_len: u64,
+    /// The file opened only because its content chunks verified on their own:
+    /// its parity or trailing hash is damaged.  Carried with the project so a
+    /// cached open warns exactly as a fresh one does.
+    pub salvaged: bool,
 }
 
 /// What a loader produces: the project, or a message fit for the status bar.
@@ -72,7 +80,14 @@ pub(super) fn read_project(path: &Path) -> LoadResult {
     // from `RlabFile::read` would.
     let bytes = std::fs::read(path).map_err(|e| RasterError::from(e).to_string())?;
     let file_len = bytes.len() as u64;
-    let rlab = RlabFile::read_bytes(&bytes).map_err(|e| e.to_string())?;
+    // The salvaging read, because this is the one place where refusing a file
+    // helps nobody: a flipped bit in a parity copy says nothing against the
+    // photograph, and the strict reader would make it unopenable.  Anything
+    // that gates a deletion on "this file is intact" keeps the strict one.
+    let SalvagedRead {
+        project: rlab,
+        integrity,
+    } = RlabFile::read_bytes_salvaging(&bytes).map_err(|e| e.to_string())?;
     // The whole file is held once more in `rlab` by now; free this copy
     // before the decode, which is the peak of the open.
     drop(bytes);
@@ -84,6 +99,7 @@ pub(super) fn read_project(path: &Path) -> LoadResult {
         rlab: Arc::new(rlab),
         image: Arc::new(image),
         file_len,
+        salvaged: integrity == Integrity::Salvaged,
     })
 }
 
@@ -445,6 +461,7 @@ mod tests {
             )),
             image: Arc::new(Image::new(width, 1)),
             file_len: 0,
+            salvaged: false,
         }
     }
 
@@ -816,6 +833,48 @@ mod tests {
         cache.set_enabled(true);
         assert_eq!(width(cache.load(path, current, |_| Ok(project(4)))), 4);
         assert_eq!(cache.len(), 1);
+    }
+
+    /// The editor must open a photo whose only damage is to its parity, and
+    /// say so; an undamaged one must not carry the warning.
+    #[test]
+    fn read_project_opens_a_parity_damaged_file_and_flags_it() {
+        use rasterlab_core::project::{RlabMeta, SavedCopy};
+
+        const PNG: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test_images/color_patches.png"
+        );
+        // The leading RECC copy starts right after the 10-byte file header; a
+        // byte well inside its payload is parity, not content.
+        const IN_LEADING_PARITY: usize = 10 + 12 + 40;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.rlab");
+        let copies = vec![SavedCopy {
+            name: "Copy 1".into(),
+            pipeline_state: rasterlab_core::pipeline::PipelineState {
+                entries: vec![],
+                cursor: 0,
+            },
+        }];
+        RlabFile::new(
+            RlabMeta::new("test", Some(PNG), 1, 1),
+            std::fs::read(PNG).unwrap(),
+            copies,
+            0,
+            None,
+        )
+        .write_v5(&path)
+        .unwrap();
+
+        assert!(!read_project(&path).unwrap().salvaged);
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[IN_LEADING_PARITY] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(RlabFile::read(&path).is_err(), "damage must be real");
+        assert!(read_project(&path).unwrap().salvaged);
     }
 
     #[test]
