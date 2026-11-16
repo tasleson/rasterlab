@@ -4440,3 +4440,61 @@ fn metadata_edit_on_a_project_whose_parity_rotted_heals_it() {
 
     assert_eq!(RlabFile::read(&path).unwrap().lmta.unwrap().rating, 3);
 }
+
+// ── Saving an edited project over the right photo ────────────────────────────
+
+/// `save_edited_project(hash, …)` replaces that photo's only original, so a
+/// project that holds some other photograph is refused, and the file stays
+/// exactly as it was.
+#[test]
+fn saving_a_project_holding_a_different_original_leaves_the_file_untouched() {
+    use rasterlab_core::project::RlabFile;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path(), png_path()], |_| {})
+        .unwrap();
+    let photos = lib.all_photos(SortOrder::default()).unwrap();
+    assert_eq!(photos.len(), 2);
+    let (target, other) = (&photos[0], &photos[1]);
+
+    let target_path = lib.rlab_path(&target.hash);
+    let before = std::fs::read(&target_path).unwrap();
+    let other_project = RlabFile::read(&lib.rlab_path(&other.hash)).unwrap();
+
+    let error = lib
+        .save_edited_project(&target.hash, other_project)
+        .expect_err("a project for another photo must be refused");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains(&other.hash) && message.contains(&target.hash),
+        "the error should name both photos: {message}"
+    );
+    assert_eq!(std::fs::read(&target_path).unwrap(), before);
+}
+
+/// The matching project but with original bytes that no longer hash to the
+/// recorded value (a fault while the editor held them) is refused by the
+/// encode, again without touching the file.
+#[test]
+fn saving_a_project_whose_original_bytes_changed_leaves_the_file_untouched() {
+    use rasterlab_core::project::RlabFile;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let photo = lib.all_photos(SortOrder::default()).unwrap().remove(0);
+    let path = lib.rlab_path(&photo.hash);
+    let before = std::fs::read(&path).unwrap();
+
+    let mut project = RlabFile::read(&path).unwrap();
+    project.original_bytes[0] ^= 0xFF;
+    let error = lib
+        .save_edited_project(&photo.hash, project)
+        .expect_err("changed bytes must not be saved");
+    assert!(
+        format!("{error:#}").contains("no longer matches"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

@@ -5,7 +5,7 @@ use egui::ScrollArea;
 use rasterlab_core::{
     formats::FormatRegistry,
     library_meta::{FileTimeStamp, LibraryMeta},
-    project::RlabFile,
+    project::{RlabFile, hash_original_bytes},
     traits::format_handler::EncodeOptions,
     verified_write::{write_atomic, write_verified_atomic},
 };
@@ -653,6 +653,14 @@ fn export_current_original(
         .original_bytes
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("the original source bytes are unavailable"))?;
+    // The export is the user's only other copy of the original, so it gets the
+    // same check a save does: the bytes must still be the ones that were loaded.
+    if state.original_hash != Some(hash_original_bytes(original_bytes)) {
+        anyhow::bail!(
+            "the original image in memory no longer matches the hash recorded when it was \
+             loaded; refusing to export it"
+        );
+    }
     let dest = unique_dest_path(dest_dir, source_name);
     write_atomic(&dest, original_bytes)?;
     if let Some(source) = source_path {
@@ -900,7 +908,7 @@ mod tests {
         let mut state = AppState::new(egui::Context::default(), None);
         state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
         state.last_path = Some(source_name.to_path_buf());
-        state.original_bytes = Some(vec![1, 2, 3, 4]);
+        state.set_original(vec![1, 2, 3, 4], hash_original_bytes(&[1, 2, 3, 4]));
         state
     }
 
@@ -929,7 +937,7 @@ mod tests {
             EditPipeline::new(Image::new(2, 2)),
         ));
         state.last_path = Some(temp.path().join("dead".repeat(16) + ".rlab"));
-        state.original_bytes = Some(original_bytes.clone());
+        state.set_original(original_bytes.clone(), hash_original_bytes(&original_bytes));
         state.project_lmta = Some(rasterlab_core::library_meta::LibraryMeta {
             original_filename: Some("DSC_0001.JPG".into()),
             ..Default::default()
@@ -963,7 +971,7 @@ mod tests {
             EditPipeline::new(Image::new(2, 2)),
         ));
         state.last_path = Some(source_path);
-        state.original_bytes = Some(original_bytes.clone());
+        state.set_original(original_bytes.clone(), hash_original_bytes(&original_bytes));
         state.tools.export_dialog.scope = ExportScope::CurrentPhoto;
         state.tools.export_dialog.format = ExportFormat::Original;
         state.tools.export_dialog.dest_dir = dest_dir.clone();
@@ -978,6 +986,27 @@ mod tests {
         assert_eq!(progress.done, 1);
         assert!(progress.finished);
         assert!(progress.errors.is_empty());
+    }
+
+    #[test]
+    fn original_export_refuses_bytes_that_no_longer_match_their_load_time_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let dest_dir = temp.path().join("destination");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+
+        let mut state = AppState::new(egui::Context::default(), None);
+        state.copies = Some(VirtualCopyStore::new(
+            "Copy 1".into(),
+            EditPipeline::new(Image::new(2, 2)),
+        ));
+        state.last_path = Some(temp.path().join("photo.raw"));
+        state.set_original(vec![7, 11, 13, 17], hash_original_bytes(&[7, 11, 13, 17]));
+        state.original_bytes.as_mut().unwrap()[0] ^= 0xFF;
+
+        let error = export_current_original(&mut state, &dest_dir, "photo.raw", None)
+            .expect_err("changed bytes must not be exported");
+        assert!(error.to_string().contains("no longer matches"), "{error}");
+        assert_eq!(std::fs::read_dir(&dest_dir).unwrap().count(), 0);
     }
 
     #[test]

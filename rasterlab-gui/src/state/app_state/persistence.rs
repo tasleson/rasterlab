@@ -9,7 +9,7 @@ use rasterlab_core::{
     formats::FormatRegistry,
     ops::ResizeOp,
     pipeline::EditPipeline,
-    project::{RlabFile, RlabMeta},
+    project::{RlabFile, RlabMeta, hash_original_bytes},
     traits::format_handler::EncodeOptions,
     traits::operation::Operation,
     verified_write::write_atomic,
@@ -48,12 +48,27 @@ impl AppState {
     // Load results
     // -----------------------------------------------------------------------
 
+    /// Keep the open document's original bytes together with the hash they
+    /// had when they were loaded.
+    ///
+    /// The one place either is assigned: a hash recomputed from the bytes at
+    /// save time would vouch for whatever they had become, which is the very
+    /// thing the check exists to catch.
+    pub(crate) fn set_original(&mut self, bytes: Vec<u8>, hash: [u8; 32]) {
+        self.original_bytes = Some(bytes);
+        self.original_hash = Some(hash);
+    }
+
     /// Adopt a freshly decoded source image as the open document.
+    ///
+    /// `original_hash` is the Blake3 of `original_bytes` taken when they were
+    /// read, on the loading thread rather than here.
     pub(super) fn on_image_loaded(
         &mut self,
         path: std::path::PathBuf,
         image: Image,
         original_bytes: Vec<u8>,
+        original_hash: [u8; 32],
     ) {
         let w = image.width;
         let h = image.height;
@@ -61,7 +76,7 @@ impl AppState {
         self.last_path = Some(path.clone());
         self.document_file_size = Some(original_bytes.len() as u64);
         self.document_damaged = false;
-        self.original_bytes = Some(original_bytes);
+        self.set_original(original_bytes, original_hash);
         self.project_path = None;
         self.is_dirty = false;
         self.clean_edit_state = None;
@@ -132,7 +147,10 @@ impl AppState {
             .or_else(|| Some(path.clone()));
         self.project_created_at = Some(rlab.meta.created_at);
         self.project_lmta = rlab.lmta.clone();
-        self.original_bytes = Some(std::mem::take(&mut rlab.original_bytes));
+        // The hash `read_bytes` verified against the file, not one derived
+        // from the bytes later: saves compare the bytes against it.
+        let original_hash = rlab.original_hash;
+        self.set_original(std::mem::take(&mut rlab.original_bytes), original_hash);
         self.document_file_size = Some(file_len);
         self.document_damaged = salvaged;
         self.project_path = Some(path.clone());
@@ -265,12 +283,16 @@ impl AppState {
                     // rawler gains an in-memory source API.
                     match std::fs::read(&path) {
                         Ok(original_bytes) => {
+                            // Hashed once, as read: this is the hash every
+                            // later save holds the bytes to.
+                            let original_hash = hash_original_bytes(&original_bytes);
                             match decode_standalone_bytes(&original_bytes, &path) {
                                 Ok(image) => BgMessage::ImageLoaded {
                                     request,
                                     path,
                                     image: Box::new(image),
                                     original_bytes,
+                                    original_hash,
                                 },
                                 Err(e) => BgMessage::Error {
                                     request,
@@ -525,6 +547,13 @@ impl AppState {
         let Some(original_bytes) = self.original_bytes.clone() else {
             return Err("Nothing to save — open an image first".into());
         };
+        // The hash from the load, not one taken now: see `set_original`.
+        let Some(original_hash) = self.original_hash else {
+            return Err(
+                "Refusing to save — the original image has no recorded hash to check it against"
+                    .into(),
+            );
+        };
         let Some(store) = &mut self.copies else {
             return Err("Nothing to save — no active pipeline".into());
         };
@@ -558,9 +587,10 @@ impl AppState {
         }
         meta = meta.touch();
 
-        let mut rlab = RlabFile::new(
+        let mut rlab = RlabFile::with_known_original(
             meta,
             original_bytes,
+            original_hash,
             copies_saved,
             active_idx,
             Some(thumbnail.clone()),
@@ -783,7 +813,7 @@ mod tests {
         pipeline.push_op(Box::new(SaturationOp::new(strength)));
         let mut state = AppState::new(egui::Context::default(), None);
         state.copies = Some(VirtualCopyStore::new("Copy 1".into(), pipeline));
-        state.original_bytes = Some(vec![1, 2, 3, 4]);
+        state.set_original(vec![1, 2, 3, 4], hash_original_bytes(&[1, 2, 3, 4]));
         state
     }
 
@@ -837,6 +867,7 @@ mod tests {
                 path: "stale.png".into(),
                 image: Box::new(Image::new(4, 4)),
                 original_bytes: Vec::new(),
+                original_hash: hash_original_bytes(&[]),
             },
             BgMessage::Error {
                 request: 1,
@@ -857,6 +888,7 @@ mod tests {
                 path: "current.png".into(),
                 image: Box::new(Image::new(4, 4)),
                 original_bytes: Vec::new(),
+                original_hash: hash_original_bytes(&[]),
             })
             .unwrap();
         state.poll_background();
@@ -1079,6 +1111,91 @@ mod tests {
         assert_eq!(
             std::fs::read(&thumb_path).unwrap(),
             b"the thumbnail this photo already had"
+        );
+    }
+
+    /// The original is held in memory for the whole editing session, so a save
+    /// compares it with the hash taken when it was loaded rather than hashing
+    /// whatever it has become.  A fault in those bytes must fail the save and
+    /// leave the previous file alone.
+    #[test]
+    fn a_save_refuses_original_bytes_that_changed_since_they_were_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.rlab");
+        let mut state = state_with_saturation(0.5);
+        state.save_project(path.clone());
+        assert!(state.status.starts_with("Saved"), "{}", state.status);
+        let saved = std::fs::read(&path).unwrap();
+
+        state.original_bytes.as_mut().unwrap()[0] ^= 0xFF;
+        state.save_project(path.clone());
+
+        assert!(
+            state.status.contains("no longer matches"),
+            "the failure should say why: {}",
+            state.status
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+    }
+
+    #[test]
+    fn a_save_refuses_to_proceed_without_a_recorded_original_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.rlab");
+        let mut state = state_with_saturation(0.5);
+        state.original_hash = None;
+        state.save_project(path.clone());
+
+        assert!(
+            state.status.contains("no recorded hash"),
+            "{}",
+            state.status
+        );
+        assert!(!path.exists());
+    }
+
+    /// An opened `.rlab` is held to the hash verified against the file, and the
+    /// load of a plain image to the hash taken as it was read.
+    #[test]
+    fn opening_records_the_hash_the_original_is_held_to() {
+        let mut state = AppState::new(egui::Context::default(), None);
+        let bytes = vec![9u8, 8, 7];
+        state.on_image_loaded(
+            "photo.png".into(),
+            Image::new(4, 4),
+            bytes.clone(),
+            hash_original_bytes(&bytes),
+        );
+        assert_eq!(state.original_hash, Some(hash_original_bytes(&bytes)));
+
+        let (copies, active) =
+            VirtualCopyStore::new("Copy 1".into(), EditPipeline::new(Image::new(4, 4)))
+                .save_states()
+                .unwrap();
+        // A hash that deliberately differs from blake3 of the bytes, so the
+        // test fails if the load recomputes it instead of keeping the one the
+        // file was verified against.
+        let verified = [0xAB; 32];
+        assert_ne!(verified, hash_original_bytes(&[1, 2, 3]));
+        let rlab = RlabFile::with_known_original(
+            RlabMeta::new("test", None::<String>, 4, 4),
+            vec![1, 2, 3],
+            verified,
+            copies,
+            active,
+            None,
+        );
+        state.on_project_loaded(
+            "photo.rlab".into(),
+            Arc::new(rlab),
+            Arc::new(Image::new(4, 4)),
+            0,
+            false,
+        );
+        assert_eq!(state.original_hash, Some(verified));
+        assert_eq!(
+            state.original_bytes.as_deref(),
+            Some([1u8, 2, 3].as_slice())
         );
     }
 

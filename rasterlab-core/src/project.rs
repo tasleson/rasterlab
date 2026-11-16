@@ -85,6 +85,16 @@
 //! and writes a fresh v5 file.  A content chunk that fails its own hash is never
 //! accepted, whatever else is true of the file.
 
+//! ## The original is checked on every write
+//!
+//! `ORIG` is the only copy of the photograph, and an editor holds its bytes in
+//! memory for as long as a document is open.  Every encode therefore compares
+//! `blake3(original_bytes)` with [`RlabFile::original_hash`] and refuses to
+//! write on a mismatch, so a fault in those bytes cannot be written out under a
+//! hash recomputed to match.  The hash has to be the one verified at load:
+//! [`RlabFile::with_known_original`] carries it, and [`RlabFile::new`] — which
+//! derives it from the bytes it is given — is for bytes that were just read.
+
 use std::{
     borrow::Cow,
     io::Read,
@@ -110,6 +120,15 @@ const MAGIC: &[u8; 8] = b"RLAB\x00\x01\r\n";
 
 /// File extension of a project / managed-library container.
 pub const RLAB_EXTENSION: &str = "rlab";
+
+/// Blake3 of a photo's original bytes, the form [`RlabFile::original_hash`]
+/// records and [`RlabFile::with_known_original`] takes.
+///
+/// For a caller that holds the original across an editing session and wants to
+/// hash it exactly once, when it is loaded.
+pub fn hash_original_bytes(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
+}
 
 /// Format version written by [`RlabFile::write`] (v3, no ECC).
 pub const FORMAT_VERSION: u16 = 3;
@@ -246,7 +265,13 @@ pub struct RlabFile {
     pub meta: RlabMeta,
     /// Verbatim bytes of the original source image — never re-encoded.
     pub original_bytes: Vec<u8>,
-    /// Blake3 hash of [`original_bytes`](Self::original_bytes), verified on load.
+    /// Blake3 hash of [`original_bytes`](Self::original_bytes).
+    ///
+    /// Verified against the bytes when a file is read, and checked against them
+    /// again by every encode: the bytes are the only copy of the user's photo,
+    /// and may sit in memory for a whole editing session before they are
+    /// written back.  A project holding bytes that no longer hash to this
+    /// refuses to be written, rather than blessing them with a fresh hash.
     pub original_hash: [u8; 32],
     /// All virtual copies, in tab order.  Always non-empty.
     pub copies: Vec<SavedCopy>,
@@ -328,6 +353,36 @@ impl RlabFile {
         }
     }
 
+    /// Construct a new [`RlabFile`] around original bytes whose hash is already
+    /// known, without hashing them again.
+    ///
+    /// [`new`](Self::new) derives the hash from the bytes it is given, which is
+    /// right for a file just read from disk but defeats the check for bytes
+    /// that have been held in memory since a verified load: whatever they have
+    /// become is hashed and then written as though it were the photo.  A caller
+    /// that has kept the hash from the load passes it here, so every write
+    /// compares the bytes in hand with it and refuses on a mismatch (see
+    /// [`encode_v5`](Self::encode_v5)).
+    pub fn with_known_original(
+        meta: RlabMeta,
+        original_bytes: Vec<u8>,
+        original_hash: [u8; 32],
+        copies: Vec<SavedCopy>,
+        active_copy_index: usize,
+        thumbnail: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            meta,
+            original_bytes,
+            original_hash,
+            copies,
+            active_copy_index,
+            thumbnail,
+            lmta: None,
+        }
+    }
+
     /// Whether any virtual copy carries edits the user would recognise as
     /// such. An operation stack undone back to the start is not an edit, so a
     /// library that badges edited photos stops badging this one.
@@ -391,6 +446,9 @@ impl RlabFile {
     /// mis-stored save leaves the previous file intact rather than a truncated
     /// one — which for a library photo would be the only copy of the original.
     ///
+    /// Like every writer here, it errors without touching `path` if the original
+    /// bytes no longer hash to [`original_hash`](Self::original_hash).
+    ///
     /// The resulting file can be verified and repaired with [`verify_and_repair`].
     pub fn write_v5(&self, path: &Path) -> RasterResult<()> {
         let buf = self.encode_v5()?;
@@ -405,7 +463,8 @@ impl RlabFile {
     /// projects can build the bytes — serialisation and Reed-Solomon parity,
     /// which are pure CPU — away from the thread doing the `fsync`s.  The
     /// result is exactly what `write_v5` stages, so both paths produce
-    /// byte-identical files.
+    /// byte-identical files.  Errors, as `write_v5` does, when the original
+    /// bytes no longer hash to [`original_hash`](Self::original_hash).
     pub fn encode_v5(&self) -> RasterResult<Vec<u8>> {
         let mut content: Vec<u8> = Vec::new();
         crate::import_phase!("serialization", self.write_content_chunks(&mut content))?;
@@ -445,13 +504,37 @@ impl RlabFile {
         Ok(())
     }
 
-    /// Write META, ORIG, VCPS, PREV, LMTA chunks into `buf` (shared by v3 and v4 write paths).
+    /// Write META, ORIG, VCPS, PREV, LMTA chunks into `buf` (shared by every
+    /// write and encode path).
+    ///
+    /// Fails, before anything is written anywhere, if the original bytes no
+    /// longer hash to [`original_hash`](Self::original_hash).  Every writer
+    /// replaces the previous file, which may hold the only good copy of the
+    /// photograph, so bytes that have changed since they were verified (a
+    /// memory fault, a stray write) must not be allowed to become a
+    /// perfectly valid-looking file over it.  The digest computed for the check
+    /// is the one the `ORIG` chunk stores, so the original is hashed once per
+    /// save, as it was before the check existed.
     fn write_content_chunks(&self, buf: &mut Vec<u8>) -> RasterResult<()> {
+        let original_digest = blake3::hash(&self.original_bytes);
+        if original_digest.as_bytes() != &self.original_hash {
+            return Err(RasterError::encode(
+                "rlab",
+                format!(
+                    "the original image in memory no longer matches its recorded hash \
+                     (recorded {}, found {}); refusing to save so a damaged copy \
+                     cannot replace the file on disk",
+                    blake3::Hash::from(self.original_hash).to_hex(),
+                    original_digest.to_hex(),
+                ),
+            ));
+        }
+
         let meta_json = serde_json::to_vec(&self.meta)
             .map_err(|e| RasterError::Serialization(e.to_string()))?;
         write_chunk(buf, TAG_META, &meta_json);
 
-        write_chunk(buf, TAG_ORIG, &self.original_bytes);
+        write_chunk_with_hash(buf, TAG_ORIG, &self.original_bytes, original_digest);
 
         let vcps = VcpsChunk {
             active: self.active_copy_index,
@@ -1834,7 +1917,12 @@ fn round_up(n: usize, align: usize) -> usize {
 
 /// Append a chunk (`tag` + `u64 LE length` + `data` + `blake3(data)`) to `buf`.
 fn write_chunk(buf: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
-    let hash = blake3::hash(data);
+    write_chunk_with_hash(buf, tag, data, blake3::hash(data));
+}
+
+/// [`write_chunk`] for a caller that already holds `hash` = `blake3(data)`, so a
+/// payload as large as `ORIG` is not hashed twice.
+fn write_chunk_with_hash(buf: &mut Vec<u8>, tag: &[u8; 4], data: &[u8], hash: blake3::Hash) {
     buf.extend_from_slice(tag);
     buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
     buf.extend_from_slice(data);

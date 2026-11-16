@@ -860,10 +860,8 @@ fn prepare_one(
     // the common import path.
 
     // 2. Compute hash
-    let hash = import_phase!(
-        "content_hash",
-        blake3::hash(&original_bytes).to_hex().to_string()
-    );
+    let digest = import_phase!("content_hash", blake3::hash(&original_bytes));
+    let hash = digest.to_hex().to_string();
 
     // 3. Duplicate check.  A file that only duplicates another file of the same
     //    batch cannot be seen here — that pair may be in flight at the same
@@ -1012,7 +1010,7 @@ fn prepare_one(
         project.set_lmta(Some(lmta.clone()));
         project.encode_v5().context("serialise imported .rlab")?
     } else {
-        encode_rlab(original_bytes, &lmta, &thumb_bytes, width, height)?
+        encode_rlab(original_bytes, digest, &lmta, &thumb_bytes, width, height)?
     };
 
     Ok(Preparation::Ready(Box::new(Prepared {
@@ -1633,8 +1631,14 @@ fn run_import_pipeline(
 // ── Write .rlab ───────────────────────────────────────────────────────────────
 
 /// Serialise a freshly imported original as a v5 project, ready to be written.
+///
+/// `original_hash` is the digest the photo was named and judged a new arrival
+/// by.  The project is built around that rather than a hash of the bytes as they
+/// are now, so bytes that changed between hashing and encoding fail the encode
+/// instead of being filed under a name they do not match.
 fn encode_rlab(
     original_bytes: Vec<u8>,
+    original_hash: blake3::Hash,
     lmta: &LibraryMeta,
     thumb_bytes: &[u8],
     width: u32,
@@ -1660,7 +1664,14 @@ fn encode_rlab(
             name: "Copy 1".into(),
             pipeline_state: empty_pipeline,
         }];
-        let mut rlab = RlabFile::new(meta, original_bytes, copies, 0, Some(thumb_bytes.to_vec()));
+        let mut rlab = RlabFile::with_known_original(
+            meta,
+            original_bytes,
+            *original_hash.as_bytes(),
+            copies,
+            0,
+            Some(thumb_bytes.to_vec()),
+        );
         rlab.set_lmta(Some(lmta.clone()));
         // v5 carries two Reed-Solomon `RECC` parity copies (about 40% total
         // overhead for large projects) so a later integrity scrub can repair
