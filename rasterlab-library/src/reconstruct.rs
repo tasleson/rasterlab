@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::Result;
-use rasterlab_core::{formats::FormatRegistry, project::RlabFile};
+use rasterlab_core::{formats::FormatRegistry, library_meta::LibraryMeta, project::RlabFile};
 use uuid::Uuid;
 
 use crate::{
@@ -41,7 +41,7 @@ pub struct RebuildOutcome {
 /// restore the `import_sessions` rows. Only the session id and each photo's
 /// `import_date` survive in the LMTA chunks, so `started_at` and the display
 /// name are both rebuilt from the import-date range.
-struct SessionAgg {
+pub(crate) struct SessionAgg {
     min_date: u64,
     max_date: u64,
 }
@@ -78,7 +78,7 @@ impl CollectionAgg {
 /// Membership as gathered from the files: by uuid, plus whatever pre-uuid
 /// files listed by name alone.
 #[derive(Debug, Default)]
-struct CollectionsFromFiles {
+pub(crate) struct CollectionsFromFiles {
     by_uuid: HashMap<String, CollectionAgg>,
     by_legacy_name: HashMap<String, Vec<String>>,
 }
@@ -264,15 +264,7 @@ pub fn rebuild(
     // still exists, which is what preserves a user's rename; the count comes
     // from the rows rather than from this run's tally, so a photo that kept its
     // row after failing to re-index is still counted.
-    for (id, agg) in &sessions {
-        db.insert_session(
-            id,
-            &format_session_name(agg.min_date, agg.max_date),
-            agg.min_date,
-            None,
-        )?;
-        db.update_session_count(id, db.session_photo_count(id)?)?;
-    }
+    restore_sessions(db, &sessions)?;
     db.delete_empty_sessions()?;
 
     restore_collections(db, collections)?;
@@ -298,7 +290,7 @@ pub fn rebuild(
 /// undo a rename by restoring the stale hints its member files still carry.
 /// Hints name only the collections that have to be created from scratch, which
 /// is the case this is really for: an index that was lost outright.
-fn restore_collections(db: &dyn LibraryDb, found: CollectionsFromFiles) -> Result<()> {
+pub(crate) fn restore_collections(db: &dyn LibraryDb, found: CollectionsFromFiles) -> Result<()> {
     let mut known = db.all_collections()?;
     let photo_id =
         |hash: &str| -> Result<Option<PhotoId>> { Ok(db.photo_by_hash(hash)?.map(|row| row.id)) };
@@ -384,6 +376,92 @@ fn unique_name(hint: &str, uuid: &str, known: &[CollectionRow]) -> String {
         .unwrap_or(base)
 }
 
+/// Recreate the session rows a set of re-read photos belonged to.
+///
+/// `insert_session` leaves an existing session alone, which is what preserves
+/// a user's rename; the count comes from the rows rather than from the caller's
+/// tally, so a photo that kept its row is still counted.
+pub(crate) fn restore_sessions(
+    db: &dyn LibraryDb,
+    sessions: &HashMap<String, SessionAgg>,
+) -> Result<()> {
+    for (id, agg) in sessions {
+        db.insert_session(
+            id,
+            &format_session_name(agg.min_date, agg.max_date),
+            agg.min_date,
+            None,
+        )?;
+        db.update_session_count(id, db.session_photo_count(id)?)?;
+    }
+    Ok(())
+}
+
+/// Record which session a photo's `LMTA` says it was imported in.
+pub(crate) fn note_session(sessions: &mut HashMap<String, SessionAgg>, lmta: &LibraryMeta) {
+    if lmta.import_session_id.is_empty() {
+        return;
+    }
+    let agg = sessions
+        .entry(lmta.import_session_id.clone())
+        .or_insert(SessionAgg {
+            min_date: lmta.import_date,
+            max_date: lmta.import_date,
+        });
+    agg.min_date = agg.min_date.min(lmta.import_date);
+    agg.max_date = agg.max_date.max(lmta.import_date);
+}
+
+/// Record the collections a photo's `LMTA` says it belongs to, for the pass
+/// that settles them (see [`restore_collections`]).
+pub(crate) fn note_memberships(
+    collections: &mut CollectionsFromFiles,
+    lmta: &LibraryMeta,
+    written_at: u64,
+    hash: &str,
+) {
+    for held in &lmta.collection_refs {
+        let agg = collections.by_uuid.entry(held.id.clone()).or_default();
+        agg.offer_name(&held.name, written_at, hash);
+        agg.members.push(hash.to_owned());
+    }
+    for name in &lmta.legacy_collections {
+        collections
+            .by_legacy_name
+            .entry(name.clone())
+            .or_default()
+            .push(hash.to_owned());
+    }
+}
+
+/// The index row describing `rlab`, derived from what the file itself carries.
+///
+/// The file is the record and the index follows it, so a rebuild and an import
+/// that finds a file already in place must agree on every field; sharing the
+/// derivation is what keeps them from drifting apart.
+pub(crate) fn photo_row_for<'a>(
+    hash: &'a str,
+    lib_path: &'a str,
+    rlab: &RlabFile,
+    lmta: &'a LibraryMeta,
+) -> NewPhoto<'a> {
+    NewPhoto {
+        hash,
+        lib_path,
+        lmta,
+        width: rlab.meta.width,
+        height: rlab.meta.height,
+        // The stack id is the photo's own hash when it has a peer, the same
+        // rule the importer applies.
+        stack_id: lmta.stack_peer_hash.as_deref().map(|_| hash),
+        // Whether a photo carries edits lives in its virtual copies rather
+        // than in the LMTA chunk, so it has to be read back off the file like
+        // everything else here.  Left to the column default, a rebuild would
+        // quietly empty the edited-only filter for the whole library.
+        has_edits: rlab.has_edits(),
+    }
+}
+
 /// Index one `.rlab`, replacing any row that already describes it.  Returns the
 /// photo's hash, or `None` for a path the hash cannot be read from.
 fn reindex_one(
@@ -432,27 +510,7 @@ fn reindex_one(
     // place instead of being deleted and re-inserted, which keeps its id — what
     // collection membership is keyed by — and leaves no window in which a photo
     // that is on disk has no row at all.
-    let photo = NewPhoto {
-        hash: &hash,
-        lib_path: &lib_path,
-        lmta: &lmta,
-        width: rlab.meta.width,
-        height: rlab.meta.height,
-        stack_id: lmta
-            .stack_peer_hash
-            .as_deref()
-            .map(|_| hash.as_str())
-            .map(|_| {
-                // Generate a stable stack_id from the sorted pair of hashes
-                // (same logic used during import)
-                hash.as_str()
-            }),
-        // Whether a photo carries edits lives in its virtual copies rather
-        // than in the LMTA chunk, so it has to be read back off the file like
-        // everything else here.  Left to the column default, a rebuild would
-        // quietly empty the edited-only filter for the whole library.
-        has_edits: rlab.has_edits(),
-    };
+    let photo = photo_row_for(&hash, &lib_path, &rlab, &lmta);
     let photo_id = match db.photo_by_hash(&hash)? {
         Some(existing) => {
             db.replace_photo(existing.id, photo)?;
@@ -474,31 +532,11 @@ fn reindex_one(
     // by comparing files with each other, and a name-only membership from a
     // pre-uuid file can only be matched to a collection once every file that
     // might name it has been read.
-    for held in &lmta.collection_refs {
-        let agg = collections.by_uuid.entry(held.id.clone()).or_default();
-        agg.offer_name(&held.name, rlab.meta.modified_at, &hash);
-        agg.members.push(hash.clone());
-    }
-    for name in &lmta.legacy_collections {
-        collections
-            .by_legacy_name
-            .entry(name.clone())
-            .or_default()
-            .push(hash.clone());
-    }
+    note_memberships(collections, &lmta, rlab.meta.modified_at, &hash);
 
     // Record session membership; the session rows themselves are restored in
     // one pass after all photos are indexed (see `rebuild`).
-    if !lmta.import_session_id.is_empty() {
-        let agg = sessions
-            .entry(lmta.import_session_id.clone())
-            .or_insert(SessionAgg {
-                min_date: lmta.import_date,
-                max_date: lmta.import_date,
-            });
-        agg.min_date = agg.min_date.min(lmta.import_date);
-        agg.max_date = agg.max_date.max(lmta.import_date);
-    }
+    note_session(sessions, &lmta);
 
     Ok(Some(hash))
 }
