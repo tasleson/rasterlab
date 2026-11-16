@@ -12,9 +12,10 @@
 
 use rasterlab_core::{
     degraded_read::DegradedRead,
+    library_meta::LibraryMeta,
     pipeline::PipelineState,
     project::{
-        FORMAT_VERSION_V4, FORMAT_VERSION_V5, RlabFile, RlabMeta, SavedCopy,
+        FORMAT_VERSION_V4, FORMAT_VERSION_V5, Integrity, RlabFile, RlabMeta, SavedCopy,
         read_original_filename, read_original_hash, verify_and_repair, verify_and_repair_degraded,
     },
 };
@@ -609,4 +610,257 @@ fn a_v5_save_replaces_the_file_rather_than_overwriting_it() {
         .collect();
     names.sort();
     assert_eq!(names, ["photo.rlab", "witness.rlab"]);
+}
+
+// ── Damage that spares the content ────────────────────────────────────────────
+
+/// A fixture whose every chunk carries something distinguishable, so a salvage
+/// that dropped or mangled one would show.
+fn rich_fixture() -> RlabFile {
+    let mut project = fixture();
+    project.copies.push(SavedCopy {
+        name: "Second look".into(),
+        pipeline_state: PipelineState {
+            entries: vec![],
+            cursor: 0,
+        },
+    });
+    project.active_copy_index = 1;
+    project.thumbnail = Some(vec![0xAB; 2048]);
+    project.set_lmta(Some(LibraryMeta {
+        rating: 4,
+        keywords: vec!["harbour".into()],
+        ..LibraryMeta::default()
+    }));
+    project
+}
+
+fn assert_same_project(got: &RlabFile, want: &RlabFile, case: &str) {
+    assert_eq!(got.original_bytes, want.original_bytes, "{case}: original");
+    assert_eq!(got.original_hash, want.original_hash, "{case}: hash");
+    let names = |p: &RlabFile| p.copies.iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(got), names(want), "{case}: copies");
+    assert_eq!(got.active_copy_index, want.active_copy_index, "{case}");
+    assert_eq!(got.thumbnail, want.thumbnail, "{case}: preview");
+    let (g, w) = (got.lmta.as_ref().unwrap(), want.lmta.as_ref().unwrap());
+    assert_eq!((g.rating, &g.keywords), (w.rating, &w.keywords), "{case}");
+}
+
+/// For a file whose damage is confined to parity and the trailing hash: the
+/// strict reader still refuses it (callers take its success as proof that
+/// everything verified), the salvaging reader opens it and says so, and
+/// `verify_and_repair` writes a file that passes the strict reader.
+fn assert_salvageable(bytes: &[u8], want: &RlabFile, case: &str) {
+    assert!(
+        RlabFile::read_bytes(bytes).is_err(),
+        "{case}: the strict reader must keep rejecting a damaged file"
+    );
+
+    let salvaged = RlabFile::read_bytes_salvaging(bytes)
+        .unwrap_or_else(|e| panic!("{case}: salvaging read failed: {e}"));
+    assert_eq!(salvaged.integrity, Integrity::Salvaged, "{case}");
+    assert_same_project(&salvaged.project, want, case);
+
+    let damaged = NamedTempFile::new().unwrap();
+    std::fs::write(damaged.path(), bytes).unwrap();
+    let out = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(damaged.path(), Some(out.path())).unwrap();
+    assert!(report.repaired, "{case}: not repaired: {report:?}");
+    assert!(!report.file_hash_ok, "{case}: the report hid the damage");
+
+    let repaired = RlabFile::read(out.path())
+        .unwrap_or_else(|e| panic!("{case}: repaired file fails the strict read: {e}"));
+    assert_eq!(repaired.format_version, FORMAT_VERSION_V5, "{case}");
+    assert_same_project(&repaired, want, case);
+}
+
+#[test]
+fn an_intact_file_is_not_reported_as_salvaged() {
+    let tmp = NamedTempFile::new().unwrap();
+    rich_fixture().write_v5(tmp.path()).unwrap();
+    let read = RlabFile::read_salvaging(tmp.path()).unwrap();
+    assert_eq!(read.integrity, Integrity::Intact);
+}
+
+#[test]
+fn v5_damage_to_parity_alone_leaves_the_photo_openable_and_repairable() {
+    type Damage = fn(&mut Vec<u8>, &Layout);
+    // A single bit, which is what rot actually does.
+    let cases: [(&str, Damage); 6] = [
+        ("leading RECC", |b, l| b[l.recc_a + 40] ^= 1),
+        ("trailing RECC", |b, l| b[l.recc_b + 40] ^= 1),
+        // Neither copy is left valid, so there is no parity to repair from; the
+        // photograph is whole and must not be called uncorrectable.
+        ("both RECC copies", |b, l| {
+            b[l.recc_a + 40] ^= 1;
+            b[l.recc_b + 40] ^= 1;
+        }),
+        ("leading RECC length field", |b, l| b[l.recc_a + 4] ^= 1),
+        ("trailing RECC length field", |b, l| b[l.recc_b + 4] ^= 1),
+        ("trailing file hash", |b, _| {
+            let last = b.len() - 1;
+            b[last] ^= 1;
+        }),
+    ];
+
+    let want = rich_fixture();
+    let tmp = NamedTempFile::new().unwrap();
+    want.write_v5(tmp.path()).unwrap();
+    let pristine = std::fs::read(tmp.path()).unwrap();
+    let l = layout(&pristine);
+
+    for (case, damage) in cases {
+        let mut bytes = pristine.clone();
+        damage(&mut bytes, &l);
+        assert_salvageable(&bytes, &want, case);
+    }
+}
+
+#[test]
+fn older_formats_with_only_the_trailing_hash_damaged_are_repaired_to_v5() {
+    let want = rich_fixture();
+    let tmp = NamedTempFile::new().unwrap();
+
+    type Writer = fn(&RlabFile, &std::path::Path);
+    let writers: [(&str, Writer); 3] = [
+        ("v3", |p, path| p.write(path).unwrap()),
+        ("v4", |p, path| p.write_v4(path).unwrap()),
+        ("v5", |p, path| p.write_v5(path).unwrap()),
+    ];
+    for (case, write) in writers {
+        write(&want, tmp.path());
+        let mut bytes = std::fs::read(tmp.path()).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        assert_salvageable(&bytes, &want, case);
+    }
+}
+
+/// The salvage proof is only as good as its refusal: a content chunk that fails
+/// its own hash is damage to the photograph or its edits, and no amount of
+/// intact-looking structure around it changes that.
+#[test]
+fn damaged_content_is_never_salvaged_even_with_the_parity_gone() {
+    let want = rich_fixture();
+    let tmp = NamedTempFile::new().unwrap();
+    want.write_v5(tmp.path()).unwrap();
+    let pristine = std::fs::read(tmp.path()).unwrap();
+    let l = layout(&pristine);
+
+    // A payload byte in each content chunk, found by walking the chain: the
+    // tags can also occur by chance inside parity or image data.
+    let mut cases = Vec::new();
+    let mut pos = l.protected_start;
+    while pos < l.recc_b {
+        let tag = String::from_utf8_lossy(&pristine[pos..pos + 4]).into_owned();
+        let len = u64::from_le_bytes(pristine[pos + 4..pos + 12].try_into().unwrap()) as usize;
+        cases.push((tag, pos + 12 + len / 2));
+        pos += 12 + len + 32;
+    }
+    assert_eq!(cases.len(), 5, "META ORIG VCPS PREV LMTA");
+    for (case, at) in cases {
+        let mut bytes = pristine.clone();
+        bytes[at] ^= 1;
+        // Both parity copies rotted as well, so nothing can repair the content.
+        bytes[l.recc_a + 40] ^= 1;
+        bytes[l.recc_b + 40] ^= 1;
+
+        assert!(
+            RlabFile::read_bytes_salvaging(&bytes).is_err(),
+            "{case}: damaged content was accepted"
+        );
+
+        let damaged = NamedTempFile::new().unwrap();
+        std::fs::write(damaged.path(), &bytes).unwrap();
+        let out_dir = tempfile::tempdir().unwrap();
+        let out = out_dir.path().join("out.rlab");
+        let report = verify_and_repair(damaged.path(), Some(&out)).unwrap();
+        assert!(!report.repaired, "{case}: {report:?}");
+        assert!(!out.exists(), "{case}: wrote a file it could not vouch for");
+    }
+}
+
+/// A chunk's digest covers its payload and not its tag, so a flipped bit in a
+/// tag leaves a chunk that still verifies but reads as unknown.  Accepting it
+/// would open the photo without that chunk — for `LMTA`, without its rating and
+/// keywords — and the next save would make the loss permanent.  With parity to
+/// hand the tag is simply repaired; without it the file is refused.
+#[test]
+fn a_damaged_chunk_tag_is_never_salvaged_as_an_unknown_chunk() {
+    let want = rich_fixture();
+    let tmp = NamedTempFile::new().unwrap();
+    want.write_v5(tmp.path()).unwrap();
+    let pristine = std::fs::read(tmp.path()).unwrap();
+    let l = layout(&pristine);
+
+    let mut tags = Vec::new();
+    let mut pos = l.protected_start;
+    while pos < l.recc_b {
+        let tag = String::from_utf8_lossy(&pristine[pos..pos + 4]).into_owned();
+        let len = u64::from_le_bytes(pristine[pos + 4..pos + 12].try_into().unwrap()) as usize;
+        tags.push((tag, pos));
+        pos += 12 + len + 32;
+    }
+    assert_eq!(tags.len(), 5, "META ORIG VCPS PREV LMTA");
+
+    for (case, at) in tags {
+        let mut bytes = pristine.clone();
+        bytes[at + 3] ^= 1;
+        assert!(
+            RlabFile::read_bytes_salvaging(&bytes).is_err(),
+            "{case}: a chunk with a damaged tag was skipped as unknown"
+        );
+        // Parity covers the tag, so an ordinary repair puts it back.
+        let repaired = repair(&bytes).unwrap_or_else(|| panic!("{case}: not repaired"));
+        assert_same_project(&repaired, &want, &case);
+
+        // With both parity copies rotted nothing can restore the tag, and the
+        // file must not be rewritten around a chunk nobody can read any more.
+        bytes[l.recc_a + 40] ^= 1;
+        bytes[l.recc_b + 40] ^= 1;
+        assert!(RlabFile::read_bytes_salvaging(&bytes).is_err(), "{case}");
+        assert!(repair(&bytes).is_none(), "{case}: rewritten without {case}");
+    }
+}
+
+/// A truncated file's chain does not end where the trailing digest begins; the
+/// bytes that are missing could be anything, so it is not salvaged.
+#[test]
+fn a_truncated_file_is_not_salvaged() {
+    let want = rich_fixture();
+    let tmp = NamedTempFile::new().unwrap();
+    want.write_v5(tmp.path()).unwrap();
+    let mut bytes = std::fs::read(tmp.path()).unwrap();
+    cut_tail(&mut bytes, 100);
+    assert!(RlabFile::read_bytes_salvaging(&bytes).is_err());
+}
+
+/// The one truncation that leaves a clean chain: a cut exactly one digest's
+/// length past a content-chunk boundary.  The 32 bytes left over pass for the
+/// (wrong) file digest and every chunk before them verifies, so only the missing
+/// trailing parity chunk says the rating and keywords that followed are gone.
+#[test]
+fn a_truncation_on_a_chunk_boundary_is_not_salvaged() {
+    let want = rich_fixture();
+    let tmp = NamedTempFile::new().unwrap();
+    want.write_v5(tmp.path()).unwrap();
+    let pristine = std::fs::read(tmp.path()).unwrap();
+    let l = layout(&pristine);
+
+    let mut pos = l.protected_start;
+    let mut boundaries = 0;
+    while pos < l.recc_b {
+        let tag = String::from_utf8_lossy(&pristine[pos..pos + 4]).into_owned();
+        let len = u64::from_le_bytes(pristine[pos + 4..pos + 12].try_into().unwrap()) as usize;
+        pos += 12 + len + 32;
+        boundaries += 1;
+
+        let mut bytes = pristine.clone();
+        bytes.truncate(pos + 32);
+        assert!(
+            RlabFile::read_bytes_salvaging(&bytes).is_err(),
+            "cut after {tag}: a truncated file was opened as a shorter one"
+        );
+    }
+    assert_eq!(boundaries, 5, "META ORIG VCPS PREV LMTA");
 }

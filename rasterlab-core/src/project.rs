@@ -70,6 +70,20 @@
 //! validating candidates against the parity plan and Blake3 — never by walking
 //! the chunk chain, since a corrupt length field would otherwise sever access to
 //! the very parity that could have repaired it.
+//!
+//! ## Damage that spares the content
+//!
+//! The whole-file hash and the `RECC` chunks guard the same bytes the content
+//! chunks' own hashes do, so a flipped bit in a parity copy (or in the trailing
+//! hash) says nothing against the photograph.  [`RlabFile::read`] still refuses
+//! such a file — callers use its success as proof that *everything* verified —
+//! but [`RlabFile::read_salvaging`] accepts one whose chunk chain walks cleanly
+//! to the end with every non-`RECC` chunk matching its own hash, and reports
+//! [`Integrity::Salvaged`] so the user can be told.  [`verify_and_repair`]
+//! applies the same proof when parity cannot help (no valid copy survives, say,
+//! because both were hit): it regenerates the parity around the verified content
+//! and writes a fresh v5 file.  A content chunk that fails its own hash is never
+//! accepted, whatever else is true of the file.
 
 use std::{
     borrow::Cow,
@@ -470,6 +484,12 @@ impl RlabFile {
     /// - A required chunk (`META`, `ORIG`, `EDIT`) is missing.
     /// - The magic bytes do not match.
     /// - The format version is newer than [`FORMAT_VERSION_V5`].
+    ///
+    /// Success is a proof that *every* digest in the file matched, parity
+    /// included.  Callers rely on that — the importer will not delete a user's
+    /// source file on the strength of a library copy that merely mostly reads —
+    /// so it is not relaxed for convenience; see
+    /// [`read_salvaging`](Self::read_salvaging) for the open path that is.
     pub fn read(path: &Path) -> RasterResult<Self> {
         Self::read_bytes(&std::fs::read(path)?)
     }
@@ -492,31 +512,56 @@ impl RlabFile {
             ));
         }
 
-        // ── Magic ─────────────────────────────────────────────────────────
-        if !payload.starts_with(MAGIC) {
-            return Err(RasterError::decode(
-                "rlab",
-                "invalid magic bytes — not a .rlab project file",
-            ));
-        }
+        let format_version = check_header(payload)?;
+        Self::from_chunks(format_version, verified_chunks(payload))
+    }
 
-        // ── Format version ────────────────────────────────────────────────
-        let format_version = u16::from_le_bytes(
-            payload[MAGIC.len()..FILE_HEADER_LEN]
-                .try_into()
-                .expect("2-byte version"),
-        );
-        if format_version > FORMAT_VERSION_V5 {
-            return Err(RasterError::decode(
-                "rlab",
-                format!(
-                    "unsupported format version {format_version} \
-                     (this build supports up to {FORMAT_VERSION_V5})"
-                ),
-            ));
-        }
+    /// Read a `.rlab` for opening in the editor, tolerating damage that does
+    /// not touch the photograph or its edits.
+    ///
+    /// [`read`](Self::read) rejects a file on any failed digest, including a
+    /// flipped bit in a `RECC` parity copy — damage to the very redundancy that
+    /// exists to protect the content, which would otherwise make an intact photo
+    /// unopenable.  This takes the strict path first and, only if that fails,
+    /// walks the chunk chain and accepts the file when every non-`RECC` chunk
+    /// verifies against its own Blake3 and the required chunks are all present
+    /// (see [`salvage_chain`]).  The result says which happened, so a caller can
+    /// tell the user the file wants repairing.
+    ///
+    /// Strictly an open-path entry point: nothing that gates the deletion of a
+    /// user's data on "this file is intact" may use it.
+    pub fn read_salvaging(path: &Path) -> RasterResult<SalvagedRead> {
+        Self::read_bytes_salvaging(&std::fs::read(path)?)
+    }
 
-        // ── Chunks ────────────────────────────────────────────────────────
+    /// [`read_salvaging`](Self::read_salvaging) over an in-memory image.
+    ///
+    /// When salvage is not possible the strict error is returned, since that is
+    /// the message the user already knows how to act on.
+    pub fn read_bytes_salvaging(data: &[u8]) -> RasterResult<SalvagedRead> {
+        match Self::read_bytes(data) {
+            Ok(project) => Ok(SalvagedRead {
+                project,
+                integrity: Integrity::Intact,
+            }),
+            Err(strict) => salvage_project(data)
+                .map(|project| SalvagedRead {
+                    project,
+                    integrity: Integrity::Salvaged,
+                })
+                .map_err(|_| strict),
+        }
+    }
+
+    /// Build a project out of already-located chunks.
+    ///
+    /// Each chunk is expected to have passed whatever hash policy its caller
+    /// applies; this only interprets them.  Taking them lazily lets the strict
+    /// reader report a failed digest at the point the walk reaches it.
+    fn from_chunks<'a>(
+        format_version: u16,
+        chunks: impl IntoIterator<Item = RasterResult<RawChunk<'a>>>,
+    ) -> RasterResult<Self> {
         let mut meta: Option<RlabMeta> = None;
         let mut original_bytes: Option<Vec<u8>> = None;
         let mut original_hash: Option<[u8; 32]> = None;
@@ -525,21 +570,8 @@ impl RlabFile {
         let mut thumbnail: Option<Vec<u8>> = None;
         let mut lmta: Option<LibraryMeta> = None;
 
-        let mut pos = FILE_HEADER_LEN;
-        while pos < payload.len() {
-            let chunk = chunk_at(payload, pos)?;
-            pos = chunk.end;
-
-            if blake3::hash(chunk.data).as_bytes() != chunk.hash {
-                return Err(RasterError::decode(
-                    "rlab",
-                    format!(
-                        "chunk '{}' integrity check failed",
-                        String::from_utf8_lossy(&chunk.tag)
-                    ),
-                ));
-            }
-
+        for chunk in chunks {
+            let chunk = chunk?;
             match &chunk.tag {
                 b"META" => {
                     let m: RlabMeta = serde_json::from_slice(chunk.data)
@@ -610,6 +642,223 @@ impl RlabFile {
     }
 }
 
+/// How intact a file was when a salvaging read opened it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Integrity {
+    /// Every digest matched: exactly what [`RlabFile::read`] accepts.
+    Intact,
+    /// The whole-file digest or a `RECC` parity chunk failed, but every content
+    /// chunk verified against its own digest.  The project is good; the file
+    /// should be repaired (which regenerates the parity) before it is relied on.
+    Salvaged,
+}
+
+/// A project read by [`RlabFile::read_salvaging`], with how it was found.
+#[derive(Debug)]
+pub struct SalvagedRead {
+    pub project: RlabFile,
+    pub integrity: Integrity,
+}
+
+/// Validate the magic and version at the head of `payload`, returning the
+/// version.
+fn check_header(payload: &[u8]) -> RasterResult<u16> {
+    // ── Magic ─────────────────────────────────────────────────────────
+    if !payload.starts_with(MAGIC) {
+        return Err(RasterError::decode(
+            "rlab",
+            "invalid magic bytes — not a .rlab project file",
+        ));
+    }
+
+    // ── Format version ────────────────────────────────────────────────
+    let format_version = u16::from_le_bytes(
+        payload[MAGIC.len()..FILE_HEADER_LEN]
+            .try_into()
+            .expect("2-byte version"),
+    );
+    if format_version > FORMAT_VERSION_V5 {
+        return Err(RasterError::decode(
+            "rlab",
+            format!(
+                "unsupported format version {format_version} \
+                 (this build supports up to {FORMAT_VERSION_V5})"
+            ),
+        ));
+    }
+    Ok(format_version)
+}
+
+/// Walk `payload`'s chunks, failing at the first whose digest does not match.
+fn verified_chunks(payload: &[u8]) -> impl Iterator<Item = RasterResult<RawChunk<'_>>> {
+    let mut pos = FILE_HEADER_LEN;
+    std::iter::from_fn(move || {
+        if pos >= payload.len() {
+            return None;
+        }
+        let chunk = match chunk_at(payload, pos) {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                pos = payload.len();
+                return Some(Err(e));
+            }
+        };
+        pos = chunk.end;
+
+        if !chunk.hash_ok() {
+            pos = payload.len();
+            return Some(Err(RasterError::decode(
+                "rlab",
+                format!(
+                    "chunk '{}' integrity check failed",
+                    String::from_utf8_lossy(&chunk.tag)
+                ),
+            )));
+        }
+        Some(Ok(chunk))
+    })
+}
+
+/// The non-`RECC` chunks of a file whose whole-file digest and parity cannot be
+/// trusted, each proven by its own digest.
+struct SalvagedChain<'a> {
+    format_version: u16,
+    content: Vec<RawChunk<'a>>,
+}
+
+/// Prove a file's content from its per-chunk digests alone.
+///
+/// The whole-file digest and the `RECC` chunks guard the same bytes the content
+/// chunks' own digests do, so when the first fails or a parity chunk rots,
+/// that is not evidence the photograph or its edits are wrong.  It is evidence
+/// only if a *content* chunk fails.  So this accepts a file exactly when:
+///
+/// * the magic is right and the version is one this build reads;
+/// * the chunk chain parses from the header to the byte where the trailing
+///   file digest begins, with no gap and no unparsed tail — a chain that stops
+///   short could be hiding a content chunk behind the break;
+/// * a v4 or v5 file ends on a `RECC` chunk, as every such file is written —
+///   otherwise a truncation that happens to land on a chunk boundary would
+///   pass for a shorter file with its trailing optional chunks never written;
+/// * every chunk that is not `RECC` carries a tag this build knows and verifies
+///   against its own Blake3.  A chunk's digest covers its payload, not its tag,
+///   so a flipped bit in the tag of `LMTA` or `PREV` leaves a chunk that still
+///   verifies and that an ordinary read would skip as unknown — opening the
+///   photo without its rating and keywords, and losing them for good on the
+///   next save.  The whole-file digest is what vouches for an unknown chunk
+///   in a strict read; without it, an unrecognised tag is damage.
+///
+/// `RECC` chunks are the one thing allowed to fail.  Their digest may not
+/// match, and the walk steps over them: by the size of an intact copy found
+/// elsewhere in the file when there is one (v4 and v5 write identical copies),
+/// otherwise by the declared length, but only if the payload's own recorded
+/// geometry agrees with it.  That matters because a parity chunk with a damaged
+/// *length* could otherwise swallow the content chunks behind it.  The tag is
+/// what identifies a chunk as parity, and wherever the step lands the walk must
+/// continue to verify real chunks all the way to the end, so a wrong guess ends
+/// in an error and never in accepted content.
+///
+/// The caller still has to check that the required chunks are present; that is
+/// done by building a project from the result.
+fn salvage_chain(data: &[u8]) -> RasterResult<SalvagedChain<'_>> {
+    if data.len() < FILE_HEADER_LEN + HASH_LEN {
+        return Err(RasterError::decode("rlab", "file too short"));
+    }
+    let payload = &data[..data.len() - HASH_LEN];
+    let format_version = check_header(payload)?;
+
+    // Only scanned for once a parity chunk turns out to be damaged.
+    let intact_copies = std::cell::OnceCell::new();
+
+    let mut content = Vec::new();
+    let mut ends_with_parity = false;
+    let mut pos = FILE_HEADER_LEN;
+    while pos < payload.len() {
+        let parsed = chunk_at(payload, pos);
+        let is_recc = payload[pos..].starts_with(TAG_RECC);
+        ends_with_parity = is_recc;
+
+        if !is_recc {
+            let chunk = parsed?;
+            if !is_content_tag(&chunk.tag) {
+                return Err(RasterError::decode(
+                    "rlab",
+                    format!(
+                        "unrecognised chunk '{}' at offset {pos} in a file whose \
+                         whole-file digest does not vouch for it",
+                        String::from_utf8_lossy(&chunk.tag)
+                    ),
+                ));
+            }
+            if !chunk.hash_ok() {
+                return Err(RasterError::decode(
+                    "rlab",
+                    format!(
+                        "chunk '{}' integrity check failed",
+                        String::from_utf8_lossy(&chunk.tag)
+                    ),
+                ));
+            }
+            pos = chunk.end;
+            content.push(chunk);
+            continue;
+        }
+
+        if let Ok(chunk) = &parsed
+            && chunk.hash_ok()
+        {
+            pos = chunk.end;
+            continue;
+        }
+
+        // A damaged parity chunk: find where it ends.
+        let intact_len = intact_copies
+            .get_or_init(|| find_recc_copies(data))
+            .iter()
+            .find(|copy| copy.offset != pos)
+            .map(|copy| copy.chunk_len);
+        let self_consistent_len = parsed
+            .as_ref()
+            .ok()
+            .filter(|chunk| parse_recc_plan(chunk.data).is_some())
+            .map(|chunk| chunk.end - pos);
+        match intact_len
+            .or(self_consistent_len)
+            .filter(|len| pos + len <= payload.len())
+        {
+            Some(len) => pos += len,
+            None => {
+                return Err(parsed.err().unwrap_or_else(|| {
+                    RasterError::decode("rlab", format!("damaged parity chunk at offset {pos}"))
+                }));
+            }
+        }
+    }
+
+    // v4 and v5 both finish on a parity chunk.  A file cut off exactly one
+    // digest's length past a content-chunk boundary otherwise walks cleanly to
+    // its new end, with the optional chunks that followed — `PREV`, `LMTA` —
+    // simply absent, and nothing left to say they were ever there.  v3 has no
+    // such marker, which is a limit of that layout rather than of this check.
+    if format_version >= FORMAT_VERSION_V4 && !ends_with_parity {
+        return Err(RasterError::decode(
+            "rlab",
+            "chunk chain does not end on its parity chunk — the file is truncated",
+        ));
+    }
+
+    Ok(SalvagedChain {
+        format_version,
+        content,
+    })
+}
+
+/// The project a file holds, proven by [`salvage_chain`].
+fn salvage_project(data: &[u8]) -> RasterResult<RlabFile> {
+    let chain = salvage_chain(data)?;
+    RlabFile::from_chunks(chain.format_version, chain.content.into_iter().map(Ok))
+}
+
 // ── Verify / repair ───────────────────────────────────────────────────────────
 
 /// Verify the integrity of a `.rlab` file and optionally repair it.
@@ -625,6 +874,12 @@ impl RlabFile {
 /// pin where the protected region began.
 ///
 /// Repaired output is always written in the v5 layout, whatever the input was.
+///
+/// When parity cannot repair the file but its content is proven whole by the
+/// chunks' own hashes — damage confined to the `RECC` copies or the trailing
+/// file hash, including a v3 or v4 file with nothing else wrong — a fresh v5
+/// file is written around that content and `repaired` is `true`.  Content that
+/// fails its own hash is never salvaged this way.
 ///
 /// Sectors the media cannot return are zero-filled rather than aborting the
 /// read (see [`crate::degraded_read`]), so a latent sector error costs the
@@ -701,8 +956,15 @@ pub fn verify_and_repair_degraded(
         });
     }
 
+    // Parity first, since it is the only thing that can fix damaged content.
+    // When it cannot — no parity copy survived, or both are themselves damaged —
+    // the content may still be provably whole, and then only the redundancy
+    // needs regenerating.  Leaving that file alone would report "uncorrectable"
+    // for a photograph that is 100% intact.
     let repaired = match repair_to {
-        Some(repair_path) => attempt_repair(data, &recc_copies, repair_path)?,
+        Some(repair_path) => {
+            attempt_repair(data, &recc_copies, repair_path)? || attempt_salvage(data, repair_path)?
+        }
         None => false,
     };
 
@@ -1003,13 +1265,23 @@ fn read_format_version(data: &[u8]) -> Option<u16> {
 
 /// One chunk borrowed out of a file image, its declared length already checked
 /// against the bytes actually present.
+#[derive(Clone, Copy)]
 struct RawChunk<'a> {
+    /// Offset of the chunk's tag, where the chunk begins.
+    start: usize,
     tag: [u8; 4],
     data: &'a [u8],
     /// The stored Blake3 of `data`, exactly [`HASH_LEN`] bytes.
     hash: &'a [u8],
     /// Offset just past this chunk, where the next one begins.
     end: usize,
+}
+
+impl RawChunk<'_> {
+    /// Whether the stored Blake3 matches the payload.
+    fn hash_ok(&self) -> bool {
+        blake3::hash(self.data).as_bytes() == self.hash
+    }
 }
 
 /// Slice the chunk starting at `pos`, trusting nothing in its header.
@@ -1056,11 +1328,17 @@ fn chunk_at(payload: &[u8], pos: usize) -> RasterResult<RawChunk<'_>> {
 
     let (data, tail) = body.split_at(len);
     Ok(RawChunk {
+        start: pos,
         tag,
         data,
         hash: &tail[..HASH_LEN],
         end: pos + CHUNK_HEADER_LEN + len + HASH_LEN,
     })
+}
+
+/// Whether `tag` names a content chunk this build writes or reads.
+fn is_content_tag(tag: &[u8; 4]) -> bool {
+    [TAG_META, TAG_ORIG, TAG_EDIT, TAG_VCPS, TAG_PREV, TAG_LMTA].contains(&tag)
 }
 
 /// Ceiling on a chunk's payload, by tag.
@@ -1362,7 +1640,11 @@ fn attempt_repair(data: &[u8], copies: &[ReccCopy], repair_to: &Path) -> RasterR
 
             // v4 protects the file header along with the content chunks; v5
             // protects the content alone. The magic tells the two apart.
-            let content = repair_content(&protected)?;
+            // A candidate that parses as neither is a wrong guess (or a
+            // damaged copy), not a reason to give up on the others.
+            let Ok(content) = repair_content(&protected) else {
+                continue;
+            };
 
             // Parity is recomputed rather than reused: a v4 payload describes a
             // protected region that included the header, so it would not
@@ -1380,6 +1662,38 @@ fn attempt_repair(data: &[u8], copies: &[ReccCopy], repair_to: &Path) -> RasterR
         }
     }
     Ok(false)
+}
+
+/// Rewrite a file whose content is proven by its own chunk digests but whose
+/// whole-file digest or parity cannot be relied on.
+///
+/// The raw bytes of each verified content chunk are carried over as they are —
+/// not parsed and re-serialised, which would drop any field a newer version
+/// added to `META` or `LMTA` — and only the parity is regenerated, in the v5
+/// layout.  As with [`attempt_repair`], the result is read back strictly before
+/// it is committed.
+///
+/// Returns `false`, writing nothing, when the content cannot be proven.
+fn attempt_salvage(data: &[u8], repair_to: &Path) -> RasterResult<bool> {
+    let Ok(chain) = salvage_chain(data) else {
+        return Ok(false);
+    };
+    // Required chunks present and parseable, exactly as an open would demand.
+    if RlabFile::from_chunks(chain.format_version, chain.content.iter().copied().map(Ok)).is_err() {
+        return Ok(false);
+    }
+
+    let mut content = Vec::with_capacity(chain.content.iter().map(|c| c.end - c.start).sum());
+    for chunk in &chain.content {
+        content.extend_from_slice(&data[chunk.start..chunk.end]);
+    }
+
+    let rebuilt = assemble_v5(&content)?;
+    if RlabFile::read_bytes(&rebuilt).is_err() {
+        return Ok(false);
+    }
+    write_verified_atomic(repair_to, &rebuilt)?;
+    Ok(true)
 }
 
 /// Strip the header from a reconstructed v4 protected region.
@@ -1675,7 +1989,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_recc_payload_with_magic_only_returns_decode_error() {
+    fn malformed_recc_payload_with_magic_only_is_not_repairable() {
         let payload = build_recc_payload(MAGIC).unwrap();
         let mut data = MAGIC.to_vec();
         write_chunk(&mut data, TAG_RECC, &payload);
@@ -1686,13 +2000,12 @@ mod tests {
         };
         let output = tempfile::NamedTempFile::new().unwrap();
 
-        let error = verify_and_repair_degraded(&read, Some(output.path())).unwrap_err();
+        // One unusable candidate is a reason to try the next, not to abort the
+        // whole repair with an error: the report simply says nothing was fixed.
+        let report = verify_and_repair_degraded(&read, Some(output.path())).unwrap();
 
-        assert!(matches!(
-            error,
-            RasterError::Decode { ref format, ref message }
-                if format == "rlab" && message.contains("truncated project header")
-        ));
+        assert!(!report.repaired);
+        assert_eq!(std::fs::metadata(output.path()).unwrap().len(), 0);
     }
 
     #[test]

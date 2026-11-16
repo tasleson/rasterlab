@@ -315,8 +315,12 @@ fn v4_redundancy_pays_off_when_data_and_first_recc_copy_are_both_damaged() {
     assert_eq!(loaded.original_bytes, rlab.original_bytes);
 }
 
+/// Both parity copies hit leaves nothing to repair *from*, but if the content
+/// is untouched there is nothing to repair either: the photograph is whole and
+/// only the redundancy needs regenerating.  This used to be reported as
+/// unrepairable, which told the user their intact photo was lost.
 #[test]
-fn v4_unrepairable_when_both_recc_copies_damaged() {
+fn v4_both_recc_copies_damaged_with_intact_content_is_rewritten() {
     let rlab = make_rlab();
     let orig_tmp = NamedTempFile::new().unwrap();
     rlab.write_v4(orig_tmp.path()).unwrap();
@@ -331,10 +335,37 @@ fn v4_unrepairable_when_both_recc_copies_damaged() {
     let report = verify_and_repair(orig_tmp.path(), Some(repaired_tmp.path())).unwrap();
     assert!(!report.file_hash_ok);
     assert!(report.recc_present);
+    assert!(report.repaired, "content is intact; only parity is damaged");
+
+    let repaired = RlabFile::read(repaired_tmp.path()).expect("repair must pass the strict read");
+    assert_eq!(repaired.original_bytes, rlab.original_bytes);
+}
+
+/// The counterpart: with both parity copies gone *and* content damaged there
+/// is nothing to repair from and no proof the content is whole.
+#[test]
+fn v4_unrepairable_when_both_recc_copies_and_content_damaged() {
+    let rlab = make_rlab();
+    let orig_tmp = NamedTempFile::new().unwrap();
+    rlab.write_v4(orig_tmp.path()).unwrap();
+
+    let mut bytes = std::fs::read(orig_tmp.path()).unwrap();
+    let recc_offsets = find_recc_tag_offsets(&bytes);
+    flip_inside_recc_copy(&mut bytes, recc_offsets[0]);
+    flip_inside_recc_copy(&mut bytes, recc_offsets[1]);
+    // Inside ORIG, well past the header and META.
+    bytes[5000] ^= 0xFF;
+    std::fs::write(orig_tmp.path(), &bytes).unwrap();
+
+    let repaired_tmp = NamedTempFile::new().unwrap();
+    let report = verify_and_repair(orig_tmp.path(), Some(repaired_tmp.path())).unwrap();
+    assert!(!report.file_hash_ok);
+    assert!(report.recc_present);
     assert!(
         !report.repaired,
-        "both RECC copies damaged: must report unrepairable, not panic"
+        "both RECC copies and content damaged: must report unrepairable, not panic"
     );
+    assert_eq!(std::fs::metadata(repaired_tmp.path()).unwrap().len(), 0);
 }
 
 // ── Adaptive parity ratio (small vs. large files) ─────────────────────────────

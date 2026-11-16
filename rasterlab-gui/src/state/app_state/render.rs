@@ -11,7 +11,7 @@ use rasterlab_core::{
 };
 use rasterlab_render::{PREVIEW_SCALE, RenderMeta, RenderRequest, RenderResult};
 
-use super::AppState;
+use super::{AppState, DAMAGED_FILE_NOTE};
 
 /// A full-resolution non-local-means preview kept so that pressing Apply can
 /// reuse the pixels the user is already looking at instead of recomputing them.
@@ -278,10 +278,15 @@ impl AppState {
         self.ctx.request_repaint_after(Duration::from_millis(250));
     }
 
-    fn render_ready_status(&self, label: &str, elapsed_ms: u128) -> String {
-        match self.render_backend {
+    pub(super) fn render_ready_status(&self, label: &str, elapsed_ms: u128) -> String {
+        let status = match self.render_backend {
             Some(backend) => format!("{label}  ({}, {elapsed_ms} ms)", backend.label()),
             None => format!("{label}  ({elapsed_ms} ms)"),
+        };
+        if self.document_damaged {
+            format!("{status} — {DAMAGED_FILE_NOTE}")
+        } else {
+            status
         }
     }
 

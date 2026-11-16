@@ -542,7 +542,7 @@ impl Library {
 
     /// Walk every `.rlab` file, verify its integrity, and repair correctable
     /// corruption in place (backing the damaged original up under
-    /// `recovered/`). Clean pre-ECC files are upgraded to v4. `cancel` is
+    /// `recovered/`). Clean pre-v5 files are upgraded to v5. `cancel` is
     /// polled between files so the caller can stop the scrub early.
     pub fn scrub(
         &self,
@@ -870,7 +870,7 @@ impl Library {
         let rlab_path = self.rlab_path(&row.hash);
         let _write_guard = self.lock_project_writes()?;
         if rlab_path.exists() {
-            let mut rlab = RlabFile::read(&rlab_path)?;
+            let mut rlab = read_for_rewrite(&rlab_path)?;
             if let Some(ref mut lmta) = rlab.lmta {
                 lmta.protected = protected;
             }
@@ -1195,7 +1195,7 @@ impl Library {
     pub fn regenerate_thumbnail(&self, hash: &str) -> Result<()> {
         let _write_guard = self.lock_project_writes()?;
         let rlab_path = self.rlab_path(hash);
-        let rlab = RlabFile::read(&rlab_path)?;
+        let rlab = read_for_rewrite(&rlab_path)?;
         let hint = rlab.meta.source_path.as_deref().map(Path::new);
         let source = self
             .registry
@@ -1242,7 +1242,7 @@ impl Library {
     ) -> Result<Vec<u8>> {
         let _write_guard = self.lock_project_writes()?;
         let rlab_path = self.rlab_path(hash);
-        let mut rlab = RlabFile::read(&rlab_path)?;
+        let mut rlab = read_for_rewrite(&rlab_path)?;
         rlab.active_copy_index = copy_idx.min(rlab.copies.len().saturating_sub(1));
 
         let hint = rlab.meta.source_path.as_deref().map(Path::new);
@@ -1347,7 +1347,7 @@ impl Library {
         if !rlab_path.exists() {
             return Ok(());
         }
-        let mut rlab = RlabFile::read(&rlab_path)?;
+        let mut rlab = read_for_rewrite(&rlab_path)?;
         let mut lmta = lmta.clone();
         // Collection membership is not the caller's to write: it belongs to
         // add/remove_from_collection, which puts it in the file and the index
@@ -1386,7 +1386,7 @@ impl Library {
         if !rlab_path.exists() {
             return Ok(());
         }
-        let mut rlab = RlabFile::read(&rlab_path)?;
+        let mut rlab = read_for_rewrite(&rlab_path)?;
         let Some(ref mut lmta) = rlab.lmta else {
             // Nothing in the file records membership, so there is nothing to
             // write; the index still gets the change.
@@ -1484,6 +1484,23 @@ fn photo_label(row: &PhotoRow) -> String {
 /// Index rows by id so a bulk operation reads the photo table once rather than
 /// once per photo — the difference between a selection of five hundred costing
 /// one query and costing five hundred full scans of the library.
+/// Read a project that the caller is about to rewrite whole.
+///
+/// Every caller changes something small (a rating, a membership, a thumbnail)
+/// and saves with [`RlabFile::write_v5`], which serialises the project afresh
+/// and regenerates the parity.  So a file whose only damage is to its parity or
+/// trailing hash, which the strict reader refuses, is healed by the very write
+/// the caller was going to do, and refusing it would just make an intact
+/// photo's rating uneditable.  The salvaging read accepts a file only when each
+/// of its content chunks verifies against its own digest, so nothing the
+/// rewrite carries forward is unproven.
+///
+/// Not used where a read is an assertion of integrity (see
+/// `import::verify_library_copy`), only where the next step is a rewrite.
+fn read_for_rewrite(path: &Path) -> Result<RlabFile> {
+    Ok(RlabFile::read_salvaging(path)?.project)
+}
+
 fn photo_index(rows: Vec<PhotoRow>) -> HashMap<PhotoId, PhotoRow> {
     rows.into_iter().map(|row| (row.id, row)).collect()
 }
