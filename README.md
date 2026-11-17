@@ -351,12 +351,14 @@ repaired is kept under `recovered/`.
 rasterlab-core/       Image type, formats, operations, pipeline, .rlab format
 rasterlab-render/     Background rendering, preview scheduling, GPU/CPU routing
 rasterlab-gpu/        wgpu compute kernels for supported operations
-rasterlab-gui/        egui/eframe desktop application
+rasterlab-gui/        egui/eframe desktop application: a library plus a thin binary
 rasterlab-library/    Managed library, Stoolap index, import/export, integrity scrub
 rasterlab-cli/        Headless single-image, batch, inspection, and library management
 rasterlab-plugin-api/ Stable C-ABI types for external operations
 plugins/              Example plugin
 ```
+
+`rasterlab-gui` is a library as well as a binary. The stock binary only parses its argument and calls `rasterlab_gui::run`, so a binary in another repository can depend on the crate and build the same application with tools of its own: implement the exported `Tool` trait and pass the tools in `AppOptions::extra_tools`. They appear in the tools panel in alphabetical order with the built-in ones, and a tool that names its operation in `Tool::edits_op` can re-edit it from the edit stack like any built-in tool. Unlike a [plugin](#plugins), such a tool is ordinary Rust compiled into the application, with its own panel and an operation that saves and loads with the project. A workspace that builds this way does not inherit this one's `[patch.crates-io]` or `[profile.*]` sections and has to repeat them.
 
 The render path serializes operation parameters for background execution. Intermediate images are cached by pipeline step, and generation counters prevent an older render from replacing a newer request. Supported adjacent operations may remain on the GPU as a batch; unsupported operations fall back to the CPU pipeline.
 
