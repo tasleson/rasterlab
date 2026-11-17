@@ -358,7 +358,7 @@ pub(crate) fn restore_collections(db: &dyn LibraryDb, found: CollectionsFromFile
 /// index was lost, whose user made a second collection under a name the files
 /// still remember. Suffixing keeps both, which is recoverable; failing the
 /// rebuild is not.
-fn unique_name(hint: &str, uuid: &str, known: &[CollectionRow]) -> String {
+pub(crate) fn unique_name(hint: &str, uuid: &str, known: &[CollectionRow]) -> String {
     let base = if hint.trim().is_empty() {
         // Nothing in any member file named it. The uuid at least tells the
         // user which collections are distinct, and can be renamed.

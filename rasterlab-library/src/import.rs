@@ -19,12 +19,9 @@ use rasterlab_core::{
 use uuid::Uuid;
 
 use crate::{
-    db_trait::{CollectionId, LibraryDb, NewPhoto},
+    db_trait::{CollectionId, CollectionRow, LibraryDb, NewPhoto},
     library::ImportProgress,
-    reconstruct::{
-        CollectionsFromFiles, note_memberships, note_session, photo_row_for, restore_collections,
-        restore_sessions,
-    },
+    reconstruct::{note_session, photo_row_for, restore_sessions, unique_name},
     scrub::backup_to_recovered,
     thumbnail::{generate_thumbnail, write_thumbnail},
 };
@@ -54,7 +51,10 @@ pub struct ImportSession {
 /// Only *newly* imported photos join: a file already in the library is skipped
 /// as a duplicate and its memberships are left as the user last set them.  That
 /// is what makes re-running an import over a folder cheap and predictable —
-/// the second run adds whatever is new and touches nothing else.
+/// the second run adds whatever is new and touches nothing else.  A photo whose
+/// project the import finds already in the library (its index row lost) counts
+/// as one of those: it is indexed as its file records it, in the collections
+/// that file names, and is not filed into this run's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ImportCollection {
     /// Leave collections alone.
@@ -212,6 +212,20 @@ impl<'a> CollectionAssigner<'a> {
         Ok(Some(self.resolved.entry(name).or_insert(assigned).clone()))
     }
 
+    /// A collection this run has minted a uuid for but not yet created, whose
+    /// name is `name` (ignoring case).
+    ///
+    /// For a project found already in the library that names the same
+    /// collection under another uuid: it has to join the collection this run's
+    /// other photos are written with, not mint a rival (see
+    /// [`settle_collections`]).
+    fn pending_named(&self, name: &str) -> Option<AssignedCollection> {
+        self.resolved
+            .values()
+            .find(|held| held.id.is_none() && held.name.eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
     /// The index row id for an already-resolved collection, creating the row on
     /// first use.  The uuid is the one already written into the member's
     /// `.rlab`, so the file and the index agree however the run ends.
@@ -244,6 +258,7 @@ pub fn import_files(
     registry: &FormatRegistry,
     paths: &[PathBuf],
     cancelled: Arc<AtomicBool>,
+    project_write_lock: &Mutex<()>,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Result<ImportSession> {
     let now = unix_now();
@@ -308,6 +323,7 @@ pub fn import_files(
         &assigner,
         &mut batch_hashes,
         &cancelled,
+        project_write_lock,
         paths.len(),
         // Importing a hand-picked list of files says nothing about wanting
         // them gone; only the folder import offers that.
@@ -366,6 +382,7 @@ pub fn import_folder_grouped(
     cancelled: Arc<AtomicBool>,
     source_dir: Option<&Path>,
     options: ImportOptions,
+    project_write_lock: &Mutex<()>,
     progress_cb: &dyn Fn(ImportProgress),
 ) -> Result<Vec<ImportSession>> {
     let assigner = Mutex::new(CollectionAssigner::new(db, options.collection.clone()));
@@ -470,6 +487,7 @@ pub fn import_folder_grouped(
             &assigner,
             &mut batch_hashes,
             &cancelled,
+            project_write_lock,
             total,
             &options,
             &mut tally,
@@ -700,6 +718,9 @@ struct Prepared {
     /// Whether the imported project arrived with edits already in it.
     has_edits: bool,
     collection: Option<AssignedCollection>,
+    /// The source was itself a `.rlab`, so it may carry edits, virtual copies
+    /// and metadata the library's copy of the photograph does not.
+    from_project: bool,
 }
 
 impl Prepared {
@@ -999,6 +1020,7 @@ fn prepare_one(
 
     // 9. Serialise the `.rlab`, parity and all.  This is the last of the work
     //    that does not need the writer thread.
+    let imported_project_present = imported_project.is_some();
     let has_edits = imported_project
         .as_ref()
         .is_some_and(|project| project.has_edits());
@@ -1023,6 +1045,7 @@ fn prepare_one(
         stack_id,
         has_edits,
         collection,
+        from_project: imported_project_present,
     })))
 }
 
@@ -1030,20 +1053,21 @@ fn prepare_one(
 enum Committed {
     /// The prepared project was written and indexed.
     Written,
-    /// A complete, verified project for this photograph was already in
-    /// `files/`, so it was indexed as it stands rather than rewritten.
+    /// A complete, verified project for this photograph was already in the
+    /// library (in `files/`, or in Recently Deleted with no row to say so) and
+    /// was indexed as it stands.  Nothing of the import's own was written.
     Adopted,
-    /// The photograph's verified project was found in Recently Deleted with no
-    /// row to say so; it was indexed there, still deleted.
-    AdoptedDeleted,
 }
 
 /// What stands at a photo's place in the library before an import writes it.
 enum Standing {
-    /// Nothing: the prepared project is simply written.
+    /// Nothing there.
     Vacant,
     /// A project that reads back whole and embeds exactly this photograph.
     Verified(Box<RlabFile>),
+    /// A file that cannot be trusted as this photograph.  It has been copied
+    /// into `recovered/` (the copy is durable), so removing it loses nothing.
+    BackedUp,
 }
 
 /// Look at the file already at `path`, if any, and say whether it is this
@@ -1054,10 +1078,10 @@ enum Standing {
 /// rewriting it, so what is adopted always reads back strictly), *and* the
 /// embedded original hashing to `hash`: a file can be intact and still hold
 /// some other photo if it was misfiled.  A file that is neither is backed up
-/// into `recovered/` before this returns, which is what lets the
-/// caller overwrite it without that being a loss: the import's own bytes are
-/// good, but the unreadable file may carry the only surviving record of a
-/// rating, keywords or edits.
+/// into `recovered/` before this returns, which is what lets the caller replace
+/// or remove it without that being a loss: the import's own bytes are good, but
+/// the unreadable file may carry the only surviving record of a rating,
+/// keywords or edits.
 ///
 /// An error finding out whether the file exists is returned rather than read
 /// as "absent" — overwriting on a guess is the one thing this must not do.
@@ -1095,10 +1119,104 @@ fn inspect_standing(
             path.display()
         )
     })?;
-    // The caller decides whether the file itself goes; reporting `Vacant`
-    // here means "nothing usable", and the backup above is what makes that
-    // safe to act on.
-    Ok(Standing::Vacant)
+    Ok(Standing::BackedUp)
+}
+
+/// Remove a file whose backup `inspect_standing` has already made durable.
+fn remove_backed_up(path: &Path) -> Result<()> {
+    std::fs::remove_file(path).with_context(|| format!("remove backed-up {}", path.display()))
+}
+
+/// Settle which collections an adopted project belongs to, in the index and in
+/// the project itself, and return their row ids.
+///
+/// The file is the record, so a collection it names is put back as it names
+/// it — except where the library (or this very run) already has a collection
+/// of that name, case-insensitively, under another uuid.  That happens when
+/// the index was lost: the run minted a fresh uuid for the folder's collection
+/// while the standing file still carries the old one, and keeping both would
+/// split one collection in two (or, worse, fail on the unique name).  The
+/// standing file's reference is then repointed at the collection that exists —
+/// the one this run's other photos are written with — and the file rewritten,
+/// so a later rebuild reproduces the single collection the index ends up with.
+///
+/// Rows are created here, before the photo row, because they depend on no
+/// photo: a failure afterwards leaves at worst an empty collection, and the
+/// retry (the photo still has no row, so the import tries again) finds them.
+/// Returns whether the project was changed and needs rewriting.
+fn settle_collections(
+    db: &dyn LibraryDb,
+    assigner: &Mutex<CollectionAssigner<'_>>,
+    project: &mut RlabFile,
+) -> Result<(Vec<CollectionId>, bool)> {
+    let Some(lmta) = project.lmta.as_mut() else {
+        return Ok((Vec::new(), false));
+    };
+    let mut known = db.all_collections()?;
+    let mut ids: Vec<CollectionId> = Vec::new();
+    let mut changed = false;
+
+    let mut assigner = assigner.lock().expect("collection assigner poisoned");
+    // Finds the row for a name this run or the library already holds, creating
+    // the one this run has only minted so far.
+    let mut by_name = |name: &str,
+                       known: &mut Vec<CollectionRow>|
+     -> Result<Option<(CollectionId, String, String)>> {
+        if let Some(row) = known.iter().find(|r| r.name.eq_ignore_ascii_case(name)) {
+            return Ok(Some((row.id, row.uuid.clone(), row.name.clone())));
+        }
+        if let Some(pending) = assigner.pending_named(name) {
+            let id = assigner.realise(&pending)?;
+            known.push(CollectionRow {
+                id,
+                uuid: pending.uuid.clone(),
+                name: pending.name.clone(),
+                created_at: unix_now(),
+            });
+            return Ok(Some((id, pending.uuid, pending.name)));
+        }
+        Ok(None)
+    };
+
+    for held in lmta.collection_refs.iter_mut() {
+        if let Some(row) = known.iter().find(|r| r.uuid == held.id) {
+            ids.push(row.id);
+        } else if let Some((id, uuid, name)) = by_name(&held.name, &mut known)? {
+            held.id = uuid;
+            held.name = name;
+            changed = true;
+            ids.push(id);
+        } else {
+            let name = unique_name(&held.name, &held.id, &known);
+            let id = db.create_collection(&held.id, &name, unix_now())?;
+            known.push(CollectionRow {
+                id,
+                uuid: held.id.clone(),
+                name,
+                created_at: unix_now(),
+            });
+            ids.push(id);
+        }
+    }
+    // Pre-uuid files name their collections and nothing else.
+    for name in &lmta.legacy_collections {
+        if let Some((id, ..)) = by_name(name, &mut known)? {
+            ids.push(id);
+        } else {
+            let uuid = Uuid::new_v4().to_string();
+            let id = db.create_collection(&uuid, name, unix_now())?;
+            known.push(CollectionRow {
+                id,
+                uuid,
+                name: name.clone(),
+                created_at: unix_now(),
+            });
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok((ids, changed))
 }
 
 /// Index a project that was already in the library, from what it carries.
@@ -1106,18 +1224,34 @@ fn inspect_standing(
 /// The row is derived from the file ([`photo_row_for`], the same derivation a
 /// rebuild uses), not from the import that found it: the file's `LMTA` holds
 /// the user's rating and keywords and its virtual copies hold their edits, and
-/// the import in hand knows none of that.  Its collections and session are
-/// restored the way a rebuild restores them.  The thumbnail cache is refreshed
+/// the import in hand knows none of that.  The thumbnail cache is refreshed
 /// from the file's own `PREV` when it has one, so an edited photo does not
 /// show its unedited original.
+///
+/// Everything that does not depend on the photo row (session, collections, a
+/// repointed collection reference) is settled first and is safe to repeat; the
+/// row, its memberships and its deleted state then land in one index
+/// transaction.  A failure therefore leaves the photo with *no* row, so the
+/// import is simply retried, rather than a row that is missing its
+/// memberships or is active when its only file is in Recently Deleted — states
+/// a retry would mistake for a finished duplicate.
+#[allow(clippy::too_many_arguments)]
 fn adopt(
     library_root: &Path,
     db: &dyn LibraryDb,
+    assigner: &Mutex<CollectionAssigner<'_>>,
     hash: &str,
-    existing: &RlabFile,
+    mut existing: RlabFile,
+    standing: &Path,
     fallback_thumb: &[u8],
     deleted_at: Option<u64>,
 ) -> Result<()> {
+    let (collection_ids, repointed) = settle_collections(db, assigner, &mut existing)?;
+    if repointed {
+        existing
+            .write_v5(standing)
+            .with_context(|| format!("update collections in {}", standing.display()))?;
+    }
     let lmta = existing.lmta.clone().unwrap_or_default();
 
     write_thumbnail(
@@ -1126,17 +1260,15 @@ fn adopt(
     )?;
 
     let mut sessions = HashMap::new();
-    let mut collections = CollectionsFromFiles::default();
     note_session(&mut sessions, &lmta);
-    note_memberships(&mut collections, &lmta, existing.meta.modified_at, hash);
+    restore_sessions(db, &sessions)?;
 
     let lib_path = relative_lib_path(hash);
-    let id = db.insert_photo(photo_row_for(hash, &lib_path, existing, &lmta))?;
-    if let Some(when) = deleted_at {
-        db.mark_photo_deleted(id, when)?;
-    }
-    restore_sessions(db, &sessions)?;
-    restore_collections(db, collections)?;
+    db.insert_adopted_photo(
+        photo_row_for(hash, &lib_path, &existing, &lmta),
+        &collection_ids,
+        deleted_at,
+    )?;
     Ok(())
 }
 
@@ -1153,29 +1285,38 @@ fn adopt(
 /// file": a lost or partly rebuilt index leaves projects in place carrying
 /// ratings, keywords, edits and virtual copies that the prepared (pristine)
 /// project knows nothing of.  Writing over such a file would replace the user's
-/// work with a blank one, so the destination is looked at first:
+/// work with a blank one, so both places the photo can live are looked at
+/// first, and the answer agrees with [`crate::reconstruct::rebuild`]'s rule —
+/// a copy in Recently Deleted wins over one in `files/`, since a file on both
+/// sides is an interrupted move and the move's destination is what counts:
 ///
-/// * A file there that fully verifies and embeds this photograph is **adopted**:
-///   left exactly as it is and indexed from what it carries.  This is also how
-///   an import killed between its two steps heals — the file it managed to
+/// * A copy in Recently Deleted that fully verifies is **adopted** there,
+///   still deleted.  An active copy beside it (the stale half of the move) is
+///   left alone.
+/// * Otherwise a copy in `files/` that fully verifies is adopted.  This is also
+///   how an import killed between its two steps heals: the file it managed to
 ///   write is verified and indexed on the next run instead of being rewritten.
-/// * A file there that does not verify, or holds a different original, is
-///   copied into `recovered/` first and then replaced by the prepared project:
-///   the bytes in hand are known-good, and nothing is lost by importing.
-/// * The same file found in Recently Deleted (with no row) is adopted *there*,
-///   still deleted — a second active copy would put one photograph in two
-///   places and have a rebuild pick between them.  That counts as a duplicate,
-///   not an import, so it is restorable from Recently Deleted like any other
-///   deleted photo.  An unverified file there is backed up and removed so the
-///   prepared project is not shadowed by it.
+/// * An adopted file is left exactly as it is and indexed from what it carries;
+///   see [`adopt`].  It counts as a duplicate, not an import, and the photo is
+///   *not* filed into the collection this import asked for — as with any other
+///   duplicate, memberships stay as the file records them.
+/// * A file that does not verify, or holds a different original, is copied into
+///   `recovered/` first.  If a verified copy is adopted from the other side it
+///   is then removed from where it stood (so a scrub stops flagging it and a
+///   later restore does not move over it); otherwise the prepared project
+///   replaces it.  Nothing is ever removed whose backup is not durable.
 ///
 /// Every adopted file has just been read whole and matched against the hash
-/// the source was judged by, which is what lets `delete_sources` treat it as
-/// proof the library holds the photograph.
+/// the source was judged by.
+///
+/// The project write lock is held throughout, the guard every other
+/// read-modify-write of a library file takes, so a metadata edit, a rebuild or
+/// a scrub cannot interleave with the inspect, heal and adopt.
 fn commit_prepared(
     library_root: &Path,
     db: &dyn LibraryDb,
     assigner: &Mutex<CollectionAssigner<'_>>,
+    write_lock: &Mutex<()>,
     prepared: Prepared,
 ) -> Result<Committed> {
     let Prepared {
@@ -1188,7 +1329,12 @@ fn commit_prepared(
         stack_id,
         has_edits,
         collection,
+        from_project: _,
     } = prepared;
+
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("project write lock is poisoned"))?;
 
     let deleted_root = library_root.join(RECENTLY_DELETED_DIR);
     let deleted_path = rlab_path(&deleted_root, &hash);
@@ -1201,34 +1347,53 @@ fn commit_prepared(
         "existing_file_check",
         inspect_standing(&files_dir, &recovered_dir, &rlab_path, &hash)
     )?;
-    if let Standing::Verified(existing) = &active {
-        adopt(library_root, db, &hash, existing, &thumb_bytes, None)?;
-        return Ok(Committed::Adopted);
-    }
-
     let deleted = import_phase!(
         "existing_file_check",
         inspect_standing(&deleted_files, &recovered_dir, &deleted_path, &hash)
     )?;
-    match deleted {
-        Standing::Verified(existing) => {
+
+    match (active, deleted) {
+        // Recently Deleted wins, as in a rebuild.
+        (active, Standing::Verified(existing)) => {
+            if matches!(active, Standing::BackedUp) {
+                remove_backed_up(&rlab_path)?;
+            }
             adopt(
                 library_root,
                 db,
+                assigner,
                 &hash,
-                &existing,
+                *existing,
+                &deleted_path,
                 &thumb_bytes,
                 Some(unix_now()),
             )?;
-            return Ok(Committed::AdoptedDeleted);
+            return Ok(Committed::Adopted);
         }
-        // Backed up by `inspect_standing`; leaving it would shadow the file
-        // about to be written, since a rebuild walks both sides.
-        Standing::Vacant if deleted_path.exists() => {
-            std::fs::remove_file(&deleted_path)
-                .with_context(|| format!("remove backed-up {}", deleted_path.display()))?;
+        (Standing::Verified(existing), deleted) => {
+            if matches!(deleted, Standing::BackedUp) {
+                remove_backed_up(&deleted_path)?;
+            }
+            adopt(
+                library_root,
+                db,
+                assigner,
+                &hash,
+                *existing,
+                &rlab_path,
+                &thumb_bytes,
+                None,
+            )?;
+            return Ok(Committed::Adopted);
         }
-        Standing::Vacant => {}
+        // Neither is this photograph, whole.  Whatever was unverifiable is
+        // backed up; the one in `files/` is replaced by the write below, the
+        // one in Recently Deleted would otherwise shadow it.
+        (_, deleted) => {
+            if matches!(deleted, Standing::BackedUp) {
+                remove_backed_up(&deleted_path)?;
+            }
+        }
     }
 
     // 9. Write thumbnail.
@@ -1348,6 +1513,11 @@ enum ImportOutcome {
     /// Already in the library, or a duplicate of an earlier file in this
     /// batch, under this content hash.
     Duplicate(String),
+    /// The library already held this photograph as a project of its own, which
+    /// was indexed as it stood.  The source was itself a project, with state
+    /// (edits, copies, metadata) that was *not* carried over, so it must not be
+    /// deleted on the strength of the library's copy.
+    DuplicateKeepingSourceState(String),
     /// Erased from the library by the user before, so left out.
     Purged,
     Failed,
@@ -1431,6 +1601,7 @@ fn run_import_pipeline(
     assigner: &Mutex<CollectionAssigner<'_>>,
     batch_hashes: &mut HashSet<String>,
     cancelled: &AtomicBool,
+    project_write_lock: &Mutex<()>,
     total: usize,
     options: &ImportOptions,
     tally: &mut ImportTally,
@@ -1573,7 +1744,9 @@ fn run_import_pipeline(
                 }
                 Ok(Preparation::Ready(prepared)) => {
                     let hash = prepared.hash.clone();
-                    match commit_prepared(library_root, db, assigner, *prepared) {
+                    let from_project = prepared.from_project;
+                    match commit_prepared(library_root, db, assigner, project_write_lock, *prepared)
+                    {
                         Ok(committed) => {
                             // Back in the library, so no longer erased.  Best
                             // effort: a record left behind is harmless while
@@ -1584,11 +1757,17 @@ fn run_import_pipeline(
                             }
                             batch_hashes.insert(hash.clone());
                             match committed {
-                                Committed::Written | Committed::Adopted => ImportOutcome::Imported,
-                                // Held, but in Recently Deleted: a duplicate
-                                // of a photo the user can restore, not a new
-                                // arrival.
-                                Committed::AdoptedDeleted => ImportOutcome::Duplicate(hash),
+                                Committed::Written => ImportOutcome::Imported,
+                                // The library already had this photograph and
+                                // indexed it as it stood, so it is a duplicate
+                                // of one the user can find, not a new arrival:
+                                // counting it as imported would claim it for
+                                // this run's session, while its row is filed
+                                // under the session its file names.
+                                Committed::Adopted if from_project => {
+                                    ImportOutcome::DuplicateKeepingSourceState(hash)
+                                }
+                                Committed::Adopted => ImportOutcome::Duplicate(hash),
                             }
                         }
                         Err(e) => {
@@ -1606,7 +1785,9 @@ fn run_import_pipeline(
             };
             match &outcome {
                 ImportOutcome::Imported => tally.imported += 1,
-                ImportOutcome::Duplicate(_) => tally.skipped_duplicates += 1,
+                ImportOutcome::Duplicate(_) | ImportOutcome::DuplicateKeepingSourceState(_) => {
+                    tally.skipped_duplicates += 1
+                }
                 ImportOutcome::Purged => tally.skipped_purged += 1,
                 ImportOutcome::Failed => {}
             }
@@ -1700,6 +1881,13 @@ fn delete_verified_source(
         ImportOutcome::Failed | ImportOutcome::Purged => return None,
         ImportOutcome::Imported => Ok(()),
         ImportOutcome::Duplicate(hash) => verify_library_copy(library_root, hash),
+        ImportOutcome::DuplicateKeepingSourceState(hash) => verify_library_copy(library_root, hash)
+            .and_then(|()| {
+                anyhow::bail!(
+                    "kept source: the library already holds this photograph with its own edits \
+                     and metadata, and this project's were not imported"
+                )
+            }),
     };
     Some(held.and_then(|()| {
         std::fs::remove_file(source).with_context(|| format!("delete source {}", source.display()))
