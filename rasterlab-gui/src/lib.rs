@@ -50,7 +50,8 @@ pub struct AppOptions {
     /// into the same binary, which is all it takes for projects containing it
     /// to save and load.
     ///
-    /// [`run`] panics if a tool's [`Tool::id`] is already taken.
+    /// [`run`] panics if a tool's [`Tool::id`] is already taken, or if the tool
+    /// overrides [`Tool::editing_tool`] to pass for a different one.
     pub extra_tools: Vec<Box<dyn Tool>>,
 }
 

@@ -69,6 +69,7 @@ pub trait Tool: Any {
     /// registered through [`AppOptions::extra_tools`](crate::AppOptions) should
     /// leave this alone and implement [`edits_op`](Tool::edits_op) instead:
     /// the default then identifies it as [`EditingTool::Extension`] by its id.
+    /// Registration refuses an extra tool that claims any other identity.
     fn editing_tool(&self) -> Option<EditingTool> {
         self.edits_op().map(|_| EditingTool::Extension(self.id()))
     }

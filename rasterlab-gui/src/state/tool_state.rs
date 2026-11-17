@@ -64,15 +64,23 @@ pub struct ToolState {
     pub reveal_tool: Option<&'static str>,
 }
 
+/// Ids of the panel sections that are drawn outside [`ToolState::tools`] but
+/// key their remembered open/closed state and reveal requests the same way,
+/// so no registered tool may use them.
+const RESERVED_TOOL_IDS: [&str; 3] = ["looks", "masking", "metadata"];
+
 /// The part of a display name the tools panel is ordered by.
 ///
-/// Display names follow the convention `"<icon>  Name"` — one icon codepoint
-/// followed by two ASCII spaces. Leading non-ASCII characters and the
-/// whitespace after them are dropped so only the human-readable label is
-/// compared.
+/// Display names follow the convention `"<icon>  Name"`: an icon, two ASCII
+/// spaces, then the name. Everything up to that separator is dropped when it
+/// holds no letters or digits, so a name written without an icon is compared
+/// whole, whatever script it starts in.
 fn label(display_name: &str) -> &str {
-    let s = display_name.trim_start_matches(|c: char| !c.is_ascii());
-    s.trim_start()
+    const ICON_SEPARATOR: &str = "  ";
+    match display_name.split_once(ICON_SEPARATOR) {
+        Some((icon, name)) if !icon.chars().any(char::is_alphanumeric) => name.trim_start(),
+        _ => display_name.trim_start(),
+    }
 }
 
 /// Case-insensitive ordering key for a tool's display name.
@@ -156,16 +164,28 @@ impl ToolState {
     ///
     /// # Panics
     ///
-    /// If a tool's id is already in use. Ids key the remembered open/closed
-    /// state and identify the tool in an edit session, so two tools sharing
-    /// one would silently answer for each other.
+    /// If a tool's id is already in use, by another tool or by one of the
+    /// fixed sections in [`RESERVED_TOOL_IDS`]. Ids key the remembered
+    /// open/closed state and identify the tool in an edit session, so two
+    /// sections sharing one would silently answer for each other.
+    ///
+    /// Also if a tool overrides [`Tool::editing_tool`] to claim an identity
+    /// other than its own [`EditingTool::Extension`]: it would then be
+    /// unlocked, and could be previewed, in place of the tool that identity
+    /// belongs to.
     pub fn add_extra_tools(&mut self, extra: Vec<Box<dyn Tool>>) {
         for tool in extra {
             let id = tool.id();
             assert!(
-                self.tools.iter().all(|t| t.id() != id),
+                !RESERVED_TOOL_IDS.contains(&id) && self.tools.iter().all(|t| t.id() != id),
                 "duplicate tool id {id:?}: an extra tool must not reuse the id of \
                  a built-in tool or of another extra tool",
+            );
+            let identity = tool.editing_tool();
+            assert!(
+                identity.is_none_or(|identity| identity == EditingTool::Extension(id)),
+                "extra tool {id:?} claims the edit-session identity {identity:?}: \
+                 implement `Tool::edits_op` and leave `Tool::editing_tool` alone",
             );
             let key = sort_key(tool.display_name());
             let at = self
@@ -182,8 +202,8 @@ impl ToolState {
     pub fn editing_tool_claiming(&self, op_name: &str) -> Option<EditingTool> {
         self.tools
             .iter()
-            .filter(|t| t.edits_op() == Some(op_name))
-            .find_map(|t| t.editing_tool())
+            .find(|t| t.edits_op() == Some(op_name))
+            .map(|t| EditingTool::Extension(t.id()))
     }
 
     pub fn find<T: 'static>(&self) -> Option<&T> {
@@ -338,7 +358,9 @@ pub(super) mod extension_fixture {
     use rasterlab_core::{Image, error::RasterResult};
     use serde::{Deserialize, Serialize};
 
-    use crate::{Operation, ParamTool, Tool, ToolAction, ToolUiCtx, param_tool_actions};
+    use crate::{
+        EditingTool, Operation, ParamTool, Tool, ToolAction, ToolUiCtx, param_tool_actions,
+    };
 
     pub const EXTENSION_TOOL_ID: &str = "test_extension";
     pub const EXTENSION_OP_NAME: &str = "test_extension_op";
@@ -380,6 +402,9 @@ pub(super) mod extension_fixture {
         pub edits: &'static str,
         pub amount: f32,
         pub preview_active: bool,
+        /// When set, overrides `editing_tool`, which a well-behaved tool
+        /// leaves at its default.
+        pub identity: Option<EditingTool>,
     }
 
     impl ExtensionTool {
@@ -390,6 +415,7 @@ pub(super) mod extension_fixture {
                 edits: EXTENSION_OP_NAME,
                 amount: 0.0,
                 preview_active: false,
+                identity: None,
             }
         }
     }
@@ -420,6 +446,10 @@ pub(super) mod extension_fixture {
         }
         fn edits_op(&self) -> Option<&'static str> {
             Some(self.edits)
+        }
+        fn editing_tool(&self) -> Option<EditingTool> {
+            self.identity
+                .or_else(|| self.edits_op().map(|_| EditingTool::Extension(self.id())))
         }
         fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
             let changed = ui
@@ -630,10 +660,59 @@ mod tests {
         }
     }
 
+    /// Registration refuses a tool that would answer for another section.
     #[test]
-    #[should_panic(expected = "duplicate tool id \"sepia\"")]
-    fn an_extra_tool_reusing_a_built_in_id_is_refused() {
-        ToolState::new().add_extra_tools(vec![extra("sepia", "🧪  Anything")]);
+    fn an_extra_tool_impersonating_another_section_is_refused() {
+        // (what is wrong, tools registered together, text the panic must carry)
+        type Case = (&'static str, fn() -> Vec<Box<dyn Tool>>, &'static str);
+        let cases: [Case; 4] = [
+            (
+                "built-in id",
+                || vec![extra("sepia", "🧪  Anything")],
+                "duplicate tool id \"sepia\"",
+            ),
+            (
+                "fixed section id",
+                || vec![extra("masking", "🧪  Anything")],
+                "duplicate tool id \"masking\"",
+            ),
+            (
+                "id of another extra",
+                || vec![extra("twin", "🧪  One"), extra("twin", "🧪  Two")],
+                "duplicate tool id \"twin\"",
+            ),
+            (
+                "built-in edit-session identity",
+                || {
+                    vec![Box::new(ExtensionTool {
+                        identity: Some(EditingTool::Sepia),
+                        ..ExtensionTool::new()
+                    })]
+                },
+                "claims the edit-session identity",
+            ),
+        ];
+
+        for (what, tools, expected) in cases {
+            let panic = std::panic::catch_unwind(|| ToolState::new().add_extra_tools(tools()))
+                .expect_err(what);
+            let message = panic.downcast_ref::<String>().expect(what);
+            assert!(message.contains(expected), "{what}: {message}");
+        }
+    }
+
+    /// Only an icon is dropped from the front of a name, never part of it.
+    #[test]
+    fn label_keeps_everything_but_the_icon() {
+        let cases = [
+            ("🧪  Test Extension", "Test Extension"),
+            ("zebra", "zebra"),
+            ("Écran", "Écran"),
+            ("Two  Words", "Two  Words"),
+        ];
+        for (display_name, expected) in cases {
+            assert_eq!(label(display_name), expected);
+        }
     }
 
     #[test]
