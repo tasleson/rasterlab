@@ -1067,6 +1067,7 @@ impl AppState {
             total,
             done,
             errors,
+            needs_repair,
             cancelled,
         } = outcome;
         self.rebuild_cancel = None;
@@ -1087,6 +1088,12 @@ impl AppState {
             }
         } else if errors.is_empty() {
             self.status = format!("Index rebuild complete: {total} photos");
+            if !needs_repair.is_empty() {
+                self.status.push_str(&format!(
+                    "; {} damaged — run the integrity scrub",
+                    needs_repair.len()
+                ));
+            }
         } else {
             // Dump details to the terminal for quick diagnosis, the same way
             // import failures are reported.
@@ -1209,9 +1216,9 @@ impl AppState {
                             // Primary source: separate JPEG in thumbs/.
                             // Fallback: thumbnail embedded in the PREV chunk of the .rlab.
                             std::fs::read(&req.thumb_path).ok().or_else(|| {
-                                rasterlab_core::project::RlabFile::read(&req.rlab_path)
+                                rasterlab_core::project::RlabFile::read_salvaging(&req.rlab_path)
                                     .ok()
-                                    .and_then(|r| r.thumbnail)
+                                    .and_then(|r| r.project.thumbnail)
                             })
                         });
                         match bytes {

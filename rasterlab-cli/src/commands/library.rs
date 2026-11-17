@@ -505,6 +505,12 @@ fn report_rebuild(root: &Path, outcome: &RebuildOutcome) -> Result<()> {
         outcome.total,
         count(outcome.errors.len(), "error")
     );
+    if !outcome.needs_repair.is_empty() {
+        println!(
+            "  {} indexed although damaged (parity or trailing hash); run `library scrub` to repair",
+            count(outcome.needs_repair.len(), "file")
+        );
+    }
     if outcome.cancelled {
         // Worth saying, because the pass declines to prune rows for missing
         // files when it did not see the whole library — a stopped run
