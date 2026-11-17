@@ -403,6 +403,28 @@ impl LibraryDb for StoolapDb {
         })
     }
 
+    fn insert_adopted_photo(
+        &self,
+        photo: NewPhoto<'_>,
+        collection_ids: &[CollectionId],
+        deleted_at: Option<u64>,
+    ) -> Result<PhotoId> {
+        self.in_transaction(|tx| {
+            let photo_id = insert_photo_tx(tx, photo)?;
+            for collection_id in collection_ids {
+                tx.execute(
+                    "INSERT INTO collection_photos
+                     (collection_id, photo_id, added_at) VALUES ($1,$2,$3)",
+                    (*collection_id, photo_id, unix_now() as i64),
+                )?;
+            }
+            if let Some(deleted_at) = deleted_at {
+                set_photo_deleted_tx(tx, photo_id, Some(deleted_at))?;
+            }
+            Ok(photo_id)
+        })
+    }
+
     fn replace_photo(&self, photo_id: PhotoId, photo: NewPhoto<'_>) -> Result<()> {
         self.in_transaction(|tx| replace_photo_tx(tx, photo_id, photo))
     }
@@ -1558,6 +1580,44 @@ mod tests {
 
         assert_eq!(count(&db, "SELECT COUNT(*) FROM photos"), 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM collection_photos"), 1);
+    }
+
+    /// An adopted photo's row, memberships and deleted state are one step: an
+    /// import that finds the row treats the photo as done, so a row that landed
+    /// without the rest could never be completed by retrying.
+    #[test]
+    fn an_adopted_photo_lands_with_its_memberships_and_deleted_state_or_not_at_all() {
+        let db = db();
+        let trip = db.create_collection("uuid-1", "Trip", 1).unwrap();
+        let lmta = lmta("s1");
+
+        let id = db
+            .insert_adopted_photo(
+                new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta),
+                &[trip],
+                Some(1_700_000_000),
+            )
+            .unwrap();
+        assert_eq!(
+            db.collection_photos(trip).unwrap().len(),
+            0,
+            "deleted photos are hidden"
+        );
+        let deleted = db.recently_deleted().unwrap();
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].photo.id, id);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM collection_photos"), 1);
+
+        // A step that fails part-way leaves the index as it was.
+        db.insert_adopted_photo(
+            new_photo("aabbcc", "aa/bb/aabbcc.rlab", &lmta),
+            &[trip],
+            None,
+        )
+        .expect_err("a second row for one hash must fail the whole step");
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM photos"), 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM collection_photos"), 1);
+        assert_eq!(db.recently_deleted().unwrap().len(), 1);
     }
 
     #[test]

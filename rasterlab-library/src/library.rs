@@ -421,6 +421,7 @@ impl Library {
             &self.registry,
             paths,
             cancelled,
+            &self.project_write_lock,
             &progress_cb,
         )
     }
@@ -534,6 +535,7 @@ impl Library {
             cancel,
             source_dir,
             options,
+            &self.project_write_lock,
             progress_cb,
         )
     }

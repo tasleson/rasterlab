@@ -4565,3 +4565,347 @@ fn reimport_keeps_every_backup_when_both_sides_and_recovered_collide() {
         "the earlier backup was overwritten in place"
     );
 }
+
+// ── Adoption: collections, both sides, source state, accounting, locking ─────
+
+/// The lost index no longer knows the folder's collection, so the run mints a
+/// fresh uuid for it while the standing file still carries the old one.  Both
+/// photos must end in ONE collection, and the new photo's file must carry the
+/// uuid the index ends up with — the file is the record, and a rebuild has to
+/// reproduce the same single collection.  Either photo may be reached first.
+#[test]
+fn adopting_a_photo_joins_the_collection_this_run_creates_not_a_rival() {
+    use rasterlab_core::project::RlabFile;
+
+    const BASE: i64 = 1_600_000_000;
+    // (existing photo's mtime, new photo's mtime): the older one is reached first.
+    let cases = [
+        ("adopted first", BASE, BASE + 10),
+        ("new first", BASE + 10, BASE),
+    ];
+
+    for (case, existing_mtime, new_mtime) in cases {
+        let src = tempfile::tempdir().unwrap();
+        let folder = src.path().join("Harbour");
+        std::fs::create_dir_all(&folder).unwrap();
+        write_png_with_mtime(&folder.join("old.png"), 1, existing_mtime);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = open_library(tmp.path());
+        lib.import_folder_into_collection(src.path(), ImportCollection::PerFolder, |_| {})
+            .unwrap();
+        drop(lib);
+        lose_the_index(tmp.path());
+
+        write_png_with_mtime(&folder.join("new.png"), 2, new_mtime);
+        let lib = open_library(tmp.path());
+        let sessions = lib
+            .import_folder_into_collection(src.path(), ImportCollection::PerFolder, |_| {})
+            .unwrap();
+        for session in &sessions {
+            assert!(session.errors.is_empty(), "{case}: {:?}", session.errors);
+        }
+
+        let check = |when: &str| {
+            let collections = lib.all_collections().unwrap();
+            assert_eq!(collections.len(), 1, "{case} {when}: {collections:?}");
+            let members = lib.collection_photos(collections[0].id).unwrap();
+            assert_eq!(members.len(), 2, "{case} {when}");
+            for photo in members {
+                let refs = RlabFile::read(&lib.rlab_path(&photo.hash))
+                    .unwrap()
+                    .lmta
+                    .unwrap()
+                    .collection_refs;
+                assert_eq!(
+                    refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+                    [collections[0].uuid.as_str()],
+                    "{case} {when}: a file names a collection the index does not have"
+                );
+            }
+        };
+        check("after the import");
+
+        lib.rebuild_index(no_cancel(), |_| {}).unwrap();
+        check("after a rebuild");
+    }
+}
+
+/// Copy the project at the photo's active place to its Recently Deleted place.
+fn copy_to_recently_deleted(root: &std::path::Path, hash: &str) -> PathBuf {
+    use rasterlab_library::import::rlab_path;
+    let deleted = rlab_path(&root.join("recently_deleted"), hash);
+    std::fs::create_dir_all(deleted.parent().unwrap()).unwrap();
+    std::fs::copy(rlab_path(root, hash), &deleted).unwrap();
+    deleted
+}
+
+/// A photo on both sides is an interrupted move, and a rebuild says the
+/// Recently Deleted copy wins.  The import must not decide the other way and
+/// have the next rebuild flip the photo.
+#[test]
+fn a_photo_on_both_sides_is_adopted_as_deleted_like_a_rebuild_would() {
+    use rasterlab_library::import::rlab_path;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    copy_to_recently_deleted(tmp.path(), &hash);
+    let active_before = std::fs::read(rlab_path(tmp.path(), &hash)).unwrap();
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[copy_of_the_jpeg(src.path())], |_| {})
+        .unwrap();
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read(lib.rlab_path(&hash)).unwrap(),
+        active_before,
+        "a verified copy is never removed"
+    );
+
+    // And a rebuild agrees with what the import did.
+    lib.rebuild_index(no_cancel(), |_| {}).unwrap();
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+}
+
+/// A corrupt file in `files/` beside a good Recently Deleted copy is backed up
+/// and then removed, so a scrub stops flagging it and a restore does not have
+/// to move over it.
+#[test]
+fn a_corrupt_active_file_beside_a_good_deleted_one_is_backed_up_and_removed() {
+    use rasterlab_library::import::{relative_lib_path, rlab_path};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    let deleted = copy_to_recently_deleted(tmp.path(), &hash);
+    let active = rlab_path(tmp.path(), &hash);
+    std::fs::write(&active, b"corrupt active file").unwrap();
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[copy_of_the_jpeg(src.path())], |_| {})
+        .unwrap();
+
+    assert!(!active.exists(), "the corrupt file was left in files/");
+    let backup = tmp.path().join("recovered").join(relative_lib_path(&hash));
+    assert_eq!(std::fs::read(backup).unwrap(), b"corrupt active file");
+    assert!(deleted.is_file());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+
+    // Restoring puts the good copy back without anything in the way.
+    let id = lib.recently_deleted().unwrap()[0].photo.id;
+    lib.restore_photo(id).unwrap();
+    assert_eq!(
+        rasterlab_core::project::RlabFile::read(&active)
+            .unwrap()
+            .lmta
+            .unwrap()
+            .rating,
+        5
+    );
+}
+
+/// An unverifiable file in Recently Deleted and nothing in `files/`: it is
+/// backed up, removed so it cannot shadow the new file, and the good import
+/// takes its place.
+#[test]
+fn an_unverifiable_deleted_file_is_backed_up_and_the_import_written_fresh() {
+    use rasterlab_library::import::{relative_lib_path, rlab_path};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    let deleted = copy_to_recently_deleted(tmp.path(), &hash);
+    std::fs::remove_file(rlab_path(tmp.path(), &hash)).unwrap();
+    std::fs::write(&deleted, b"corrupt deleted file").unwrap();
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let session = lib
+        .import_files(&[copy_of_the_jpeg(src.path())], |_| {})
+        .unwrap();
+    assert!(session.errors.is_empty(), "{:?}", session.errors);
+    assert_eq!(session.photo_count, 1);
+
+    assert!(!deleted.exists());
+    let backup = tmp.path().join("recovered").join(relative_lib_path(&hash));
+    assert_eq!(std::fs::read(backup).unwrap(), b"corrupt deleted file");
+    assert!(
+        rasterlab_core::project::RlabFile::read(&lib.rlab_path(&hash)).is_ok(),
+        "the import was not written"
+    );
+    assert_eq!(lib.all_photos(SortOrder::default()).unwrap().len(), 1);
+    assert!(lib.recently_deleted().unwrap().is_empty());
+}
+
+/// Adopting a Recently Deleted photo is as good a reason to take the source as
+/// any other duplicate: the library holds the photograph, and can restore it.
+#[test]
+fn a_delete_run_takes_a_source_whose_adopted_photo_is_in_recently_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    let deleted = copy_to_recently_deleted(tmp.path(), &hash);
+    std::fs::remove_file(rasterlab_library::import::rlab_path(tmp.path(), &hash)).unwrap();
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let source = copy_of_the_jpeg(src.path());
+    let lib = open_library(tmp.path());
+    lib.import_paths(
+        std::slice::from_ref(&source),
+        delete_sources(),
+        no_cancel(),
+        |_| {},
+    )
+    .unwrap();
+
+    assert!(!source.exists());
+    assert!(deleted.is_file());
+    assert_eq!(lib.recently_deleted().unwrap().len(), 1);
+    assert!(lib.all_photos(SortOrder::default()).unwrap().is_empty());
+}
+
+/// The library's standing copy is pristine, the source is an edited project of
+/// the same photograph.  Adoption keeps the library's file, so the source's
+/// edits exist nowhere else: it must not be unlinked, and the user is told why.
+#[test]
+fn a_source_project_with_edits_is_kept_when_the_library_copy_lacks_them() {
+    use rasterlab_core::project::{RlabFile, RlabMeta, SavedCopy};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    lib.import_files(&[jpeg_path()], |_| {}).unwrap();
+    let hash = lib.all_photos(SortOrder::default()).unwrap().remove(0).hash;
+    drop(lib);
+    lose_the_index(tmp.path());
+    let standing = std::fs::read(rasterlab_library::import::rlab_path(tmp.path(), &hash)).unwrap();
+
+    let src = tempfile::tempdir().unwrap();
+    let source = src.path().join("edited.rlab");
+    RlabFile::new(
+        RlabMeta::new("test", Some("meta_test.jpg"), 1, 1),
+        std::fs::read(jpeg_path()).unwrap(),
+        vec![SavedCopy {
+            name: "Edited".into(),
+            pipeline_state: edited_pipeline_state(&jpeg_path()),
+        }],
+        0,
+        None,
+    )
+    .write_v5(&source)
+    .unwrap();
+
+    let lib = open_library(tmp.path());
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    lib.import_paths(
+        std::slice::from_ref(&source),
+        delete_sources(),
+        no_cancel(),
+        |p| {
+            if !p.scanning {
+                *last.borrow_mut() = p;
+            }
+        },
+    )
+    .unwrap();
+
+    let last = last.into_inner();
+    assert!(source.is_file(), "the only copy of the edits was deleted");
+    assert_eq!(last.deleted_sources, 0);
+    assert_eq!(last.errors.len(), 1, "{:?}", last.errors);
+    assert!(
+        last.errors[0].1.contains("kept source"),
+        "{:?}",
+        last.errors
+    );
+    assert_eq!(
+        std::fs::read(lib.rlab_path(&hash)).unwrap(),
+        standing,
+        "the library's file was changed"
+    );
+    assert_eq!(lib.photo_count().unwrap(), 1);
+}
+
+/// An adopted photo was already in the library, so it is reported as a
+/// duplicate, not claimed for the new import's session.
+#[test]
+fn an_adopted_photo_is_counted_as_a_duplicate_not_an_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    import_and_customise(tmp.path());
+    lose_the_index(tmp.path());
+
+    let src = tempfile::tempdir().unwrap();
+    let lib = open_library(tmp.path());
+    let last = std::cell::RefCell::new(rasterlab_library::ImportProgress::default());
+    let sessions = lib
+        .import_paths(
+            &[copy_of_the_jpeg(src.path())],
+            rasterlab_library::ImportOptions::default(),
+            no_cancel(),
+            |p| {
+                if !p.scanning {
+                    *last.borrow_mut() = p;
+                }
+            },
+        )
+        .unwrap();
+
+    let last = last.into_inner();
+    assert_eq!((last.imported, last.skipped_duplicates), (0, 1), "{last:?}");
+    assert!(sessions.iter().all(|s| s.photo_count == 0), "{sessions:?}");
+    assert_eq!(lib.photo_count().unwrap(), 1);
+}
+
+/// Inspecting, healing and adopting a standing file is a read-modify-write of a
+/// library file, so it takes the project write lock like every other: held
+/// elsewhere, the import waits.
+#[test]
+fn adopting_waits_for_the_project_write_lock() {
+    use std::sync::{Mutex, atomic::AtomicBool};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    lose_the_index(tmp.path());
+    let src = tempfile::tempdir().unwrap();
+    let source = copy_of_the_jpeg(src.path());
+
+    let db = rasterlab_library::StoolapDb::open(tmp.path()).unwrap();
+    rasterlab_library::LibraryDb::init(&db).unwrap();
+    let registry = rasterlab_core::formats::FormatRegistry::with_builtins();
+    let lock = Mutex::new(());
+    let done = AtomicBool::new(false);
+
+    std::thread::scope(|scope| {
+        let guard = lock.lock().unwrap();
+        let importer = scope.spawn(|| {
+            rasterlab_library::import::import_files(
+                tmp.path(),
+                &db,
+                &registry,
+                std::slice::from_ref(&source),
+                no_cancel(),
+                &lock,
+                &|_| {},
+            )
+            .unwrap();
+            done.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "the import ran while the project write lock was held"
+        );
+        drop(guard);
+        importer.join().unwrap();
+    });
+
+    assert!(
+        rasterlab_library::LibraryDb::photo_by_hash(&db, &hash)
+            .unwrap()
+            .is_some()
+    );
+}

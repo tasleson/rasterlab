@@ -145,6 +145,21 @@ pub trait LibraryDb: Send + Sync {
         collection_id: Option<CollectionId>,
     ) -> anyhow::Result<PhotoId>;
 
+    /// Index a photo whose `.rlab` was already in the library, together with
+    /// its collection memberships and, if its only file is in Recently Deleted,
+    /// its deleted state, in one index transaction.
+    ///
+    /// One step because anything less leaves a row that a retry cannot fix: an
+    /// import that finds the row treats the photo as done, so a row inserted
+    /// active and then not marked deleted (or not given its memberships) would
+    /// stay that way until a rebuild.
+    fn insert_adopted_photo(
+        &self,
+        photo: NewPhoto<'_>,
+        collection_ids: &[CollectionId],
+        deleted_at: Option<u64>,
+    ) -> anyhow::Result<PhotoId>;
+
     /// Rewrite an existing photo's row, and every row that hangs off it, from
     /// what its `.rlab` now says — keeping the row's id.
     ///
