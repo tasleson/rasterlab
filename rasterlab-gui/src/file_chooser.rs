@@ -89,6 +89,11 @@ fn native_filter_exts(exts: &[&'static str]) -> Vec<String> {
 // DialogKind + spec
 // ---------------------------------------------------------------------------
 
+/// Which of the application's file dialogs to open.
+///
+/// Each kind is answered by one fixed part of the application, so a tool
+/// defined outside this crate has no result to collect from one. It is public
+/// because [`ToolAction::RequestFileDialog`](crate::ToolAction) carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DialogKind {
     OpenFile,

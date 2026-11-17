@@ -1,6 +1,11 @@
 //! The RasterLab desktop application as a library.
 //!
 //! The `rasterlab-gui` binary is a thin wrapper around [`run`].
+//!
+//! The rest of the public surface is what it takes to write a tools-panel
+//! section: the [`Tool`] trait with the types its methods exchange, and the
+//! [`ParamTool`] helpers that cover the common case of a few widgets over a
+//! single operation.
 
 use std::path::PathBuf;
 
@@ -15,7 +20,16 @@ mod state;
 
 /// The `eframe` this crate is built against, re-exported so a binary calling
 /// [`run`] can name [`eframe::Result`] without tracking the version itself.
+/// A [`Tool`] draws with `eframe::egui`, which must be this same version.
 pub use eframe;
+
+pub use file_chooser::DialogKind;
+pub use panels::tools::shared::{ParamTool, param_tool_actions};
+pub use panels::tools::tool_trait::{Tool, ToolAction, ToolUiCtx};
+/// The operation trait from `rasterlab-core`, re-exported because
+/// [`impl_param_tool!`] names it through this crate.
+pub use rasterlab_core::traits::operation::Operation;
+pub use state::{EditSession, EditingTool};
 
 /// What [`run`] needs to know before the window opens.
 #[derive(Debug, Default)]

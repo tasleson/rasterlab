@@ -13,7 +13,12 @@ use crate::state::{EditSession, EditingTool};
 /// Apply/Cancel/Reset match by hand, which is how a preview drifts from what
 /// Apply commits — they were built from two separate copies of the same
 /// expression. Building both from [`ParamTool::op`] keeps them one thing.
-pub(super) trait ParamTool {
+///
+/// Implement this, call [`param_tool_actions`] at the end of
+/// [`Tool::render_ui`](super::tool_trait::Tool::render_ui), and put
+/// [`impl_param_tool!`](crate::impl_param_tool) in the `Tool` impl to get the
+/// preview, load-for-editing and downcast methods.
+pub trait ParamTool {
     /// The operation this tool builds, and the only one it loads back.
     type Op: Operation + 'static;
 
@@ -33,6 +38,7 @@ pub(super) trait ParamTool {
     /// Copy a committed op's parameters back in, for editing from the stack.
     fn load(&mut self, op: &Self::Op);
 
+    /// The flag that says this tool's preview is on screen.
     fn preview_active(&mut self) -> &mut bool;
 }
 
@@ -42,7 +48,7 @@ pub(super) trait ParamTool {
 /// `changed` is whether any of the tool's widgets moved this frame. A button
 /// click wins over the slider that may have moved with it, matching the old
 /// hand-written order.
-pub(super) fn param_tool_actions<T: ParamTool>(
+pub fn param_tool_actions<T: ParamTool>(
     ui: &mut Ui,
     ctx: &ToolUiCtx<'_>,
     tool: &mut T,
@@ -79,6 +85,11 @@ pub(super) fn param_tool_actions<T: ParamTool>(
 /// These are the trait-object side of the same tool — downcasting and boxing
 /// that no blanket impl can supply, because each tool still writes its own
 /// `render_ui`.
+///
+/// Invoke it with no arguments inside the `impl Tool for …` block. The type
+/// must have a `preview_active: bool` field, the same one
+/// [`ParamTool::preview_active`] hands out.
+#[macro_export]
 macro_rules! impl_param_tool {
     () => {
         fn is_preview_active(&self) -> bool {
@@ -90,20 +101,18 @@ macro_rules! impl_param_tool {
         fn activate_preview(&mut self) {
             self.preview_active = true;
         }
-        fn preview_op(&self) -> Option<Box<dyn rasterlab_core::traits::operation::Operation>> {
-            self.preview_active.then(|| {
-                Box::new(super::shared::ParamTool::op(self))
-                    as Box<dyn rasterlab_core::traits::operation::Operation>
-            })
+        fn preview_op(&self) -> Option<Box<dyn $crate::Operation>> {
+            self.preview_active
+                .then(|| Box::new($crate::ParamTool::op(self)) as Box<dyn $crate::Operation>)
         }
-        fn load_from_op(&mut self, op: &dyn rasterlab_core::traits::operation::Operation) -> bool {
+        fn load_from_op(&mut self, op: &dyn $crate::Operation) -> bool {
             let Some(op) = op
                 .as_any()
-                .and_then(|op| op.downcast_ref::<<Self as super::shared::ParamTool>::Op>())
+                .and_then(|op| op.downcast_ref::<<Self as $crate::ParamTool>::Op>())
             else {
                 return false;
             };
-            super::shared::ParamTool::load(self, op);
+            $crate::ParamTool::load(self, op);
             true
         }
         fn as_any(&self) -> &dyn std::any::Any {
