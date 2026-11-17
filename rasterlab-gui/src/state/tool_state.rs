@@ -3,6 +3,7 @@ use rasterlab_core::{
     traits::operation::Operation,
 };
 
+use super::edit_session::EditingTool;
 use crate::file_chooser::DialogKind;
 use crate::panels::tools::{
     airplane_window::AirplaneWindowTool, blur::BlurTool,
@@ -61,6 +62,22 @@ pub struct ToolState {
     /// input (e.g. the library's Focus Stack action) and the user has to be
     /// shown where that landed.
     pub reveal_tool: Option<&'static str>,
+}
+
+/// The part of a display name the tools panel is ordered by.
+///
+/// Display names follow the convention `"<icon>  Name"` — one icon codepoint
+/// followed by two ASCII spaces. Leading non-ASCII characters and the
+/// whitespace after them are dropped so only the human-readable label is
+/// compared.
+fn label(display_name: &str) -> &str {
+    let s = display_name.trim_start_matches(|c: char| !c.is_ascii());
+    s.trim_start()
+}
+
+/// Case-insensitive ordering key for a tool's display name.
+fn sort_key(display_name: &str) -> String {
+    label(display_name).to_lowercase()
 }
 
 impl ToolState {
@@ -129,6 +146,44 @@ impl ToolState {
             Box::new(VignetteTool::new()),
             Box::new(WhiteBalanceTool::new()),
         ]
+    }
+
+    /// Add tools supplied from outside this crate, each at its alphabetical
+    /// position by display name.
+    ///
+    /// The tools already present are never moved: a new tool goes in front of
+    /// the first one that sorts after it, and after any whose label is equal.
+    ///
+    /// # Panics
+    ///
+    /// If a tool's id is already in use. Ids key the remembered open/closed
+    /// state and identify the tool in an edit session, so two tools sharing
+    /// one would silently answer for each other.
+    pub fn add_extra_tools(&mut self, extra: Vec<Box<dyn Tool>>) {
+        for tool in extra {
+            let id = tool.id();
+            assert!(
+                self.tools.iter().all(|t| t.id() != id),
+                "duplicate tool id {id:?}: an extra tool must not reuse the id of \
+                 a built-in tool or of another extra tool",
+            );
+            let key = sort_key(tool.display_name());
+            let at = self
+                .tools
+                .iter()
+                .position(|t| sort_key(t.display_name()) > key)
+                .unwrap_or(self.tools.len());
+            self.tools.insert(at, tool);
+        }
+    }
+
+    /// The edit-session identity of the tool that claims the operation called
+    /// `op_name` through [`Tool::edits_op`], if any does.
+    pub fn editing_tool_claiming(&self, op_name: &str) -> Option<EditingTool> {
+        self.tools
+            .iter()
+            .filter(|t| t.edits_op() == Some(op_name))
+            .find_map(|t| t.editing_tool())
     }
 
     pub fn find<T: 'static>(&self) -> Option<&T> {
@@ -276,8 +331,110 @@ impl ToolState {
     }
 }
 
+/// A stand-in for a tool and operation defined outside this crate, written
+/// against the exported API only (`crate::…` here is `rasterlab_gui::…` there).
+#[cfg(test)]
+pub(super) mod extension_fixture {
+    use rasterlab_core::{Image, error::RasterResult};
+    use serde::{Deserialize, Serialize};
+
+    use crate::{Operation, ParamTool, Tool, ToolAction, ToolUiCtx, param_tool_actions};
+
+    pub const EXTENSION_TOOL_ID: &str = "test_extension";
+    pub const EXTENSION_OP_NAME: &str = "test_extension_op";
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ExtensionOp {
+        pub amount: f32,
+    }
+
+    impl ExtensionOp {
+        pub fn new(amount: f32) -> Self {
+            Self { amount }
+        }
+    }
+
+    #[typetag::serde]
+    impl Operation for ExtensionOp {
+        fn name(&self) -> &'static str {
+            EXTENSION_OP_NAME
+        }
+        fn clone_box(&self) -> Box<dyn Operation> {
+            Box::new(self.clone())
+        }
+        fn as_any(&self) -> Option<&dyn std::any::Any> {
+            Some(self)
+        }
+        fn apply(&self, image: Image) -> RasterResult<Image> {
+            Ok(image)
+        }
+        fn describe(&self) -> String {
+            format!("Test extension {}", self.amount)
+        }
+    }
+
+    pub struct ExtensionTool {
+        pub id: &'static str,
+        pub display_name: &'static str,
+        /// The operation name reported by `edits_op`.
+        pub edits: &'static str,
+        pub amount: f32,
+        pub preview_active: bool,
+    }
+
+    impl ExtensionTool {
+        pub fn new() -> Self {
+            Self {
+                id: EXTENSION_TOOL_ID,
+                display_name: "🧪  Test Extension",
+                edits: EXTENSION_OP_NAME,
+                amount: 0.0,
+                preview_active: false,
+            }
+        }
+    }
+
+    impl ParamTool for ExtensionTool {
+        type Op = ExtensionOp;
+
+        fn op(&self) -> ExtensionOp {
+            ExtensionOp::new(self.amount)
+        }
+        fn reset(&mut self) {
+            self.amount = 0.0;
+        }
+        fn load(&mut self, op: &ExtensionOp) {
+            self.amount = op.amount;
+        }
+        fn preview_active(&mut self) -> &mut bool {
+            &mut self.preview_active
+        }
+    }
+
+    impl Tool for ExtensionTool {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+        fn display_name(&self) -> &'static str {
+            self.display_name
+        }
+        fn edits_op(&self) -> Option<&'static str> {
+            Some(self.edits)
+        }
+        fn render_ui(&mut self, ui: &mut egui::Ui, ctx: &ToolUiCtx<'_>) -> ToolAction {
+            let changed = ui
+                .add(egui::Slider::new(&mut self.amount, 0.0..=1.0))
+                .changed();
+            param_tool_actions(ui, ctx, self, changed)
+        }
+
+        crate::impl_param_tool!();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::extension_fixture::ExtensionTool;
     use super::*;
 
     #[test]
@@ -306,17 +463,6 @@ mod tests {
         assert!(!state.tools[first].is_preview_active());
         assert!(state.tools[hsl].is_preview_active());
         assert_eq!(state.preview_op().unwrap().name(), "hsl_panel");
-    }
-
-    /// Strip the leading icon/emoji prefix from a display name so the
-    /// alphabetical-ordering check compares only the human-readable label.
-    ///
-    /// Display names follow the convention `"<icon>  Name"` — one icon
-    /// codepoint followed by two ASCII spaces. We trim leading non-ASCII
-    /// characters and any whitespace that follows.
-    fn label(display_name: &str) -> &str {
-        let s = display_name.trim_start_matches(|c: char| !c.is_ascii());
-        s.trim_start()
     }
 
     /// CLAUDE.md mandates:
@@ -413,6 +559,81 @@ mod tests {
         let resize = state.find::<ResizeTool>().unwrap();
         assert_eq!((resize.w, resize.h), (800, 600));
         assert_eq!(state.find::<RotateTool>().unwrap().deg, 0.0);
+    }
+
+    fn ids(tools: &[Box<dyn Tool>]) -> Vec<&'static str> {
+        tools.iter().map(|t| t.id()).collect()
+    }
+
+    fn extra(id: &'static str, display_name: &'static str) -> Box<dyn Tool> {
+        Box::new(ExtensionTool {
+            id,
+            display_name,
+            ..ExtensionTool::new()
+        })
+    }
+
+    /// An extra tool is found where its name says it should be, wherever that
+    /// is, and the built-in tools around it stay exactly as they were.
+    #[test]
+    fn extra_tools_land_at_their_alphabetical_position() {
+        let builtin = ids(&ToolState::build_tools());
+        // (display names registered together, expected neighbours of each:
+        //  the id before it and the id after it)
+        type Neighbours = (Option<&'static str>, Option<&'static str>);
+        let cases: &[(&[&'static str], &[Neighbours])] = &[
+            (&[], &[]),
+            (&["🧪  Aardvark"], &[(None, Some("airplane_window"))]),
+            (
+                &["🧪  B&W Extension"],
+                &[(Some("airplane_window"), Some("bw"))],
+            ),
+            // Case and a missing icon change nothing about where a name sorts.
+            (&["zebra"], &[(Some("white_balance"), None)]),
+            // A label equal to a built-in one goes after it.
+            (&["🧪  SEPIA"], &[(Some("sepia"), Some("shadow_exposure"))]),
+            // Registration order is irrelevant, also between two extras.
+            (
+                &["🧪  Vignette Plus", "🧪  Vignette Extra"],
+                &[
+                    (Some("extra_1"), Some("white_balance")),
+                    (Some("vignette"), Some("extra_0")),
+                ],
+            ),
+        ];
+        const EXTRA_IDS: [&str; 2] = ["extra_0", "extra_1"];
+
+        for (names, expected) in cases {
+            let mut state = ToolState::new();
+            state.add_extra_tools(
+                names
+                    .iter()
+                    .zip(EXTRA_IDS)
+                    .map(|(name, id)| extra(id, name))
+                    .collect(),
+            );
+            let all = ids(&state.tools);
+
+            let without_extras: Vec<_> = all
+                .iter()
+                .copied()
+                .filter(|id| !EXTRA_IDS.contains(id))
+                .collect();
+            assert_eq!(without_extras, builtin, "{names:?} moved a built-in tool");
+            assert_eq!(all.len(), builtin.len() + names.len(), "{names:?}");
+
+            for (id, (before, after)) in EXTRA_IDS.iter().zip(expected.iter()) {
+                let at = all.iter().position(|t| t == id).unwrap();
+                let neighbours = (at.checked_sub(1).map(|i| all[i]), all.get(at + 1).copied());
+                assert_eq!(neighbours, (*before, *after), "{names:?}: {id}");
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate tool id \"sepia\"")]
+    fn an_extra_tool_reusing_a_built_in_id_is_refused() {
+        ToolState::new().add_extra_tools(vec![extra("sepia", "🧪  Anything")]);
     }
 
     #[test]

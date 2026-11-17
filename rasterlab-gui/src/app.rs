@@ -80,7 +80,11 @@ pub struct RasterLabApp {
 }
 
 impl RasterLabApp {
-    pub fn new(cc: &eframe::CreationContext, initial_file: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext, options: crate::AppOptions) -> Self {
+        let crate::AppOptions {
+            initial_file,
+            extra_tools,
+        } = options;
         let gpu = cc.wgpu_render_state.as_ref().map(|render_state| {
             Arc::new(rasterlab_gpu::GpuContext::new(
                 render_state.device.clone(),
@@ -100,6 +104,7 @@ impl RasterLabApp {
             }
         }
         let mut state = AppState::new(cc.egui_ctx.clone(), gpu);
+        state.tools.add_extra_tools(extra_tools);
 
         // Apply the stored theme preference.  For ThemePreference::System the fallback
         // is set to Light so the app looks correct on platforms where winit cannot

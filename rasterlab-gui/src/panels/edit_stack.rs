@@ -82,7 +82,8 @@ pub fn ui(ui: &mut Ui, state: &mut AppState) {
         let (name, details) = split_description(&desc);
         let is_editing_this =
             editing.is_some_and(|s| s.op_index == i && s.tool != EditingTool::Masking);
-        let editable = crate::state::editing_tool_for_op(entry.operation.as_ref()).is_some();
+        let editable =
+            crate::state::editing_tool_for_op(entry.operation.as_ref(), &state.tools).is_some();
         // The pipeline entry is temporarily disabled while its tool preview
         // substitutes for it.  Keep showing the committed enabled state so
         // this implementation detail does not look like a user toggle.

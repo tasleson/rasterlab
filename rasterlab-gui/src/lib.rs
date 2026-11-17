@@ -32,20 +32,43 @@ pub use rasterlab_core::traits::operation::Operation;
 pub use state::{EditSession, EditingTool};
 
 /// What [`run`] needs to know before the window opens.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AppOptions {
     /// Image or project to open on startup, typically the first positional
     /// command-line argument.
     pub initial_file: Option<PathBuf>,
+    /// Tools to show in the tools panel alongside the built-in ones.
+    ///
+    /// This is the extension point for a binary that lives outside this
+    /// repository: implement [`Tool`], box it, and list it here. Each tool is
+    /// slotted into the panel alphabetically by display name, the same rule
+    /// the built-in tools follow, so the order given here does not matter.
+    ///
+    /// A tool that should also re-edit its operation from the edit stack
+    /// names that operation in [`Tool::edits_op`]. The operation itself is an
+    /// ordinary `#[typetag::serde]` implementation of [`Operation`] linked
+    /// into the same binary, which is all it takes for projects containing it
+    /// to save and load.
+    ///
+    /// [`run`] panics if a tool's [`Tool::id`] is already taken.
+    pub extra_tools: Vec<Box<dyn Tool>>,
 }
 
 /// Open the RasterLab window and run the application until it is closed.
 ///
 /// This sets up everything the application needs — the shared rayon pool, the
 /// wgpu renderer and the window icon — so a binary only has to build its
-/// [`AppOptions`] and call it from `main`.
+/// [`AppOptions`] and call it from `main`:
+///
+/// ```no_run
+/// fn main() -> rasterlab_gui::eframe::Result<()> {
+///     rasterlab_gui::run(rasterlab_gui::AppOptions {
+///         initial_file: std::env::args_os().nth(1).map(Into::into),
+///         extra_tools: Vec::new(),
+///     })
+/// }
+/// ```
 pub fn run(options: AppOptions) -> eframe::Result<()> {
-    let AppOptions { initial_file } = options;
     let icon =
         eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon/rasterlab_icon.png"))
             .expect("embedded app icon must be a valid PNG");
@@ -92,6 +115,6 @@ pub fn run(options: AppOptions) -> eframe::Result<()> {
     eframe::run_native(
         "RasterLab",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::RasterLabApp::new(cc, initial_file)))),
+        Box::new(move |cc| Ok(Box::new(app::RasterLabApp::new(cc, options)))),
     )
 }

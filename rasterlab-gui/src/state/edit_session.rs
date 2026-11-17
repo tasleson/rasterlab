@@ -11,6 +11,7 @@ use super::tool_state::ToolState;
 /// Which tool panel section is bound to the current edit session.  Also acts
 /// as the classifier that decides whether a given op type is editable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EditingTool {
     Masking,
     AirplaneWindow,
@@ -50,25 +51,41 @@ pub enum EditingTool {
     Resize,
     Rotate,
     SprocketFilm,
+    /// A tool registered through [`AppOptions::extra_tools`](crate::AppOptions),
+    /// identified by its [`Tool::id`](crate::Tool::id).
+    Extension(&'static str),
 }
 
 /// Bookkeeping for an active edit session.
 #[derive(Debug, Clone, Copy)]
 pub struct EditSession {
+    /// Index in the edit stack of the operation being edited.
     pub op_index: usize,
+    /// The tool the operation was loaded into.
     pub tool: EditingTool,
+    /// Whether the operation was enabled before the session hid it.
     pub was_enabled: bool,
 }
 
 /// Return the tool responsible for editing `op` without mutating any widget
 /// state. This is the single source of truth used by both the stack's pencil
 /// button and the loader that starts an edit session.
-pub fn editing_tool_for_op(op: &dyn Operation) -> Option<EditingTool> {
+///
+/// Built-in operations map to their tool by name. Any other name is offered
+/// to `tools`, where a tool registered from outside this crate may have
+/// claimed it through [`Tool::edits_op`](crate::Tool::edits_op).
+pub fn editing_tool_for_op(op: &dyn Operation, tools: &ToolState) -> Option<EditingTool> {
     if let Some(masked) = op.as_any().and_then(|any| any.downcast_ref::<MaskedOp>()) {
-        return editing_tool_for_op(masked.inner.as_ref());
+        return editing_tool_for_op(masked.inner.as_ref(), tools);
     }
     op.as_any()?;
-    Some(match op.name() {
+    let name = op.name();
+    builtin_editing_tool(name).or_else(|| tools.editing_tool_claiming(name))
+}
+
+/// The built-in tool that edits the operation called `name`.
+fn builtin_editing_tool(name: &str) -> Option<EditingTool> {
+    Some(match name {
         "airplane_window" => EditingTool::AirplaneWindow,
         "channel_levels" => EditingTool::ChannelLevels,
         "levels" => EditingTool::Levels,
@@ -113,13 +130,13 @@ pub fn editing_tool_for_op(op: &dyn Operation) -> Option<EditingTool> {
 /// Inspect `op` and, if it is one of the editable types, copy its parameters
 /// into the matching tool and return the corresponding tool kind.  Returns
 /// `None` when the op is not a type we support editing (for example a plugin
-/// operation without a matching built-in tool).
+/// operation that no tool claims).
 pub fn load_op_into_tools(op: &dyn Operation, tools: &mut ToolState) -> Option<EditingTool> {
     let op = op
         .as_any()
         .and_then(|any| any.downcast_ref::<MaskedOp>())
         .map_or(op, |masked| masked.inner.as_ref());
-    let expected = editing_tool_for_op(op)?;
+    let expected = editing_tool_for_op(op, tools)?;
     if expected == EditingTool::SprocketFilm {
         let sprocket = op
             .as_any()
@@ -144,11 +161,14 @@ mod tests {
     use rasterlab_core::ops::{
         ChannelLevelsOp, ChannelRange, CropOp, FlipOp, FocusStackOp, HdrMergeOp, HealOp,
         LinearMask, LutOp, MaskShape, MaskedOp, PanoramaOp, PerspectiveOp, ResampleMode, ResizeOp,
-        RotateOp, SprocketFilmOp,
+        RotateOp, SepiaOp, SprocketFilmOp,
     };
 
     use super::*;
     use crate::panels::tools::channel_levels::ChannelLevelsTool;
+    use crate::state::tool_state::extension_fixture::{
+        EXTENSION_TOOL_ID, ExtensionOp, ExtensionTool,
+    };
 
     #[test]
     fn channel_levels_is_routed_to_its_editor() {
@@ -215,8 +235,8 @@ mod tests {
                 "{} would not show an edit control in the stack",
                 op.name()
             );
-            assert_eq!(editing_tool_for_op(op.as_ref()), Some(expected));
             let mut tools = ToolState::new();
+            assert_eq!(editing_tool_for_op(op.as_ref(), &tools), Some(expected));
             assert_eq!(
                 load_op_into_tools(op.as_ref(), &mut tools),
                 Some(expected),
@@ -241,6 +261,70 @@ mod tests {
         let mut tools = ToolState::new();
 
         assert_eq!(load_op_into_tools(&op, &mut tools), Some(EditingTool::Crop));
-        assert_eq!(editing_tool_for_op(&op), Some(EditingTool::Crop));
+        assert_eq!(editing_tool_for_op(&op, &tools), Some(EditingTool::Crop));
+    }
+
+    fn masked(inner: Box<dyn Operation>) -> Box<dyn Operation> {
+        Box::new(MaskedOp {
+            inner,
+            mask: MaskShape::Linear(LinearMask {
+                cx: 0.5,
+                cy: 0.5,
+                angle_deg: 90.0,
+                feather: 0.5,
+                invert: false,
+            }),
+        })
+    }
+
+    /// An operation the host has never heard of is editable exactly when a
+    /// registered tool claims it — bare or under a mask, like a built-in one.
+    #[test]
+    fn extension_operation_is_routed_to_the_tool_that_claims_it() {
+        const AMOUNT: f32 = 0.375;
+        let op = || Box::new(ExtensionOp::new(AMOUNT)) as Box<dyn Operation>;
+        let cases: [(&str, Box<dyn Operation>, bool); 4] = [
+            ("bare", op(), true),
+            ("masked", masked(op()), true),
+            ("unregistered", op(), false),
+            ("unregistered and masked", masked(op()), false),
+        ];
+
+        for (what, op, registered) in cases {
+            let expected = registered.then_some(EditingTool::Extension(EXTENSION_TOOL_ID));
+            let mut tools = ToolState::new();
+            if registered {
+                tools.add_extra_tools(vec![Box::new(ExtensionTool::new())]);
+            }
+
+            assert_eq!(editing_tool_for_op(op.as_ref(), &tools), expected, "{what}");
+            assert_eq!(
+                load_op_into_tools(op.as_ref(), &mut tools),
+                expected,
+                "{what}"
+            );
+            if registered {
+                let tool = tools.find::<ExtensionTool>().unwrap();
+                assert_eq!(tool.amount, AMOUNT, "{what}: parameters were not loaded");
+            }
+        }
+    }
+
+    /// The pencil button on a built-in operation's row must keep opening the
+    /// built-in tool, whatever an extension says about itself.
+    #[test]
+    fn extension_tool_cannot_claim_a_built_in_operation() {
+        let mut tools = ToolState::new();
+        tools.add_extra_tools(vec![Box::new(ExtensionTool {
+            edits: "sepia",
+            ..ExtensionTool::new()
+        })]);
+        let op = SepiaOp::new(0.5);
+
+        assert_eq!(editing_tool_for_op(&op, &tools), Some(EditingTool::Sepia));
+        assert_eq!(
+            load_op_into_tools(&op, &mut tools),
+            Some(EditingTool::Sepia)
+        );
     }
 }

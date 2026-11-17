@@ -64,7 +64,23 @@ pub trait Tool: Any {
     fn display_name(&self) -> &'static str;
     /// The edit-session identity of this tool, for tools that can re-edit an
     /// operation already on the stack. `None` means the tool only adds.
+    ///
+    /// Built-in tools return their own [`EditingTool`] variant. A tool
+    /// registered through [`AppOptions::extra_tools`](crate::AppOptions) should
+    /// leave this alone and implement [`edits_op`](Tool::edits_op) instead:
+    /// the default then identifies it as [`EditingTool::Extension`] by its id.
     fn editing_tool(&self) -> Option<EditingTool> {
+        self.edits_op().map(|_| EditingTool::Extension(self.id()))
+    }
+    /// The [`Operation::name`] of the operation this tool re-edits, for a tool
+    /// the host has no built-in mapping for.
+    ///
+    /// Naming an operation here is what puts the pencil button on its
+    /// edit-stack rows; clicking it hands the operation to
+    /// [`load_from_op`](Tool::load_from_op). The operation must also return
+    /// `Some` from [`Operation::as_any`], or it cannot be loaded back. Built-in
+    /// operation names are resolved first and cannot be claimed.
+    fn edits_op(&self) -> Option<&'static str> {
         None
     }
     /// Short "how to use this" text shown when hovering the tool's header.
