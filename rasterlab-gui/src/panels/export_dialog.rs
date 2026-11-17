@@ -694,7 +694,10 @@ fn export_one(
         return export_rlab(rlab_path, dest_dir, hash);
     }
 
-    let mut rlab = RlabFile::read(rlab_path)?;
+    // Salvaging read: an export writes a copy and deletes nothing on the
+    // strength of what it read, so a photo that opens in the editor despite
+    // damaged parity must export too, rather than wait for a scrub.
+    let mut rlab = RlabFile::read_salvaging(rlab_path)?.project;
     rlab.resolve_relative_paths(
         rlab_path
             .parent()
@@ -952,6 +955,51 @@ mod tests {
             std::fs::read(dest_dir.join("DSC_0001.JPG")).unwrap(),
             original_bytes
         );
+    }
+
+    /// A photo whose parity rotted opens in the editor, so it must export too:
+    /// an export deletes nothing on the strength of what it read.
+    #[test]
+    fn a_library_photo_with_damaged_parity_still_exports_its_original() {
+        use rasterlab_core::project::{RlabFile, RlabMeta};
+        // Inside the leading parity copy, right after the 10-byte header.
+        const IN_LEADING_PARITY: usize = 10 + 12 + 40;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dest_dir = temp.path().join("destination");
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let hash = "dead".repeat(16);
+        let path = temp.path().join(format!("{hash}.rlab"));
+        let original_bytes = vec![5, 6, 7, 8, 9];
+        let copy = VirtualCopyStore::new("Copy 1".into(), EditPipeline::new(Image::new(2, 2)))
+            .save_states()
+            .unwrap();
+        RlabFile::new(
+            RlabMeta::new("test", None::<String>, 2, 2),
+            original_bytes.clone(),
+            copy.0,
+            copy.1,
+            None,
+        )
+        .write_v5(&path)
+        .unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[IN_LEADING_PARITY] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+        assert!(RlabFile::read(&path).is_err(), "the damage must be real");
+
+        export_one(
+            &path,
+            &dest_dir,
+            &FormatRegistry::with_builtins(),
+            &settings_for(ExportFormat::Original),
+            &hash,
+        )
+        .expect("a salvageable photo must export");
+
+        let exported: Vec<_> = std::fs::read_dir(&dest_dir).unwrap().flatten().collect();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(std::fs::read(exported[0].path()).unwrap(), original_bytes);
     }
 
     #[test]

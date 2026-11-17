@@ -4417,6 +4417,31 @@ fn reimport_after_index_loss_keeps_a_project_whose_parity_rotted() {
     );
 }
 
+/// After index loss a photo whose parity rotted is still fully readable, so a
+/// rebuild indexes it -- and says it wants repair -- instead of leaving it out
+/// as an error.  It reads; it does not rewrite originals.
+#[test]
+fn rebuild_indexes_a_project_whose_parity_rotted_and_flags_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hash = import_and_customise(tmp.path());
+    let path = rasterlab_library::import::rlab_path(tmp.path(), &hash);
+    damage_the_parity(&path);
+    let damaged = std::fs::read(&path).unwrap();
+    lose_the_index(tmp.path());
+
+    let lib = open_library(tmp.path());
+    let outcome = lib.rebuild_index(no_cancel(), |_| {}).unwrap();
+
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert_eq!(outcome.needs_repair, std::slice::from_ref(&path));
+    assert_eq!(lib.photo_count().unwrap(), 1);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        damaged,
+        "rebuild rewrote a file"
+    );
+}
+
 /// Rating a photo rewrites its whole file, which regenerates the parity, so a
 /// photo with rotted parity can still be rated and comes out healed.
 #[test]

@@ -8,7 +8,11 @@ use std::{
 };
 
 use anyhow::Result;
-use rasterlab_core::{formats::FormatRegistry, library_meta::LibraryMeta, project::RlabFile};
+use rasterlab_core::{
+    formats::FormatRegistry,
+    library_meta::LibraryMeta,
+    project::{Integrity, RlabFile, SalvagedRead},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -34,6 +38,11 @@ pub struct RebuildOutcome {
     pub done: usize,
     /// Per-file failures: `(path, message)`.
     pub errors: Vec<(std::path::PathBuf, String)>,
+    /// Files that were indexed although their parity or trailing hash is
+    /// damaged: every content chunk verified, so the photo is intact, but the
+    /// file wants an integrity scrub.  A rebuild reads; it does not rewrite
+    /// originals, so repairing these is left to that scrub.
+    pub needs_repair: Vec<std::path::PathBuf>,
     pub cancelled: bool,
 }
 
@@ -187,6 +196,7 @@ pub fn rebuild(
 
     let total = rlab_paths.len();
     let mut errors: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut needs_repair: Vec<std::path::PathBuf> = Vec::new();
     let mut sessions: HashMap<String, SessionAgg> = HashMap::new();
     let mut collections = CollectionsFromFiles::default();
     let mut indexed: HashSet<String> = HashSet::with_capacity(total);
@@ -213,6 +223,7 @@ pub fn rebuild(
             found,
             &mut sessions,
             &mut collections,
+            &mut needs_repair,
         ) {
             Ok(Some(hash)) => {
                 indexed.insert(hash);
@@ -279,6 +290,7 @@ pub fn rebuild(
         total,
         done,
         errors,
+        needs_repair,
         cancelled,
     })
 }
@@ -471,9 +483,19 @@ fn reindex_one(
     found: &FoundPhoto,
     sessions: &mut HashMap<String, SessionAgg>,
     collections: &mut CollectionsFromFiles,
+    needs_repair: &mut Vec<std::path::PathBuf>,
 ) -> Result<Option<String>> {
     let rlab_file_path = found.path.as_path();
-    let rlab = RlabFile::read(rlab_file_path)?;
+    // The salvaging read: a photo whose content verifies chunk by chunk is
+    // fully readable, so leaving it out of the index because its parity rotted
+    // would hide an intact photo.  It is indexed and flagged, not rewritten.
+    let SalvagedRead {
+        project: rlab,
+        integrity,
+    } = RlabFile::read_salvaging(rlab_file_path)?;
+    if integrity == Integrity::Salvaged {
+        needs_repair.push(rlab_file_path.to_path_buf());
+    }
 
     // Derive hash from the path stem (files/ab/cd/{hash}.rlab)
     let hash = found.hash().unwrap_or("").to_owned();
